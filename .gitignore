@@ -1,0 +1,13 @@
+build/
+artifacts/
+outputs/
+交付_DEV_*/
+*.zip
+*.user
+~$*
+__pycache__/
+*.pyc
+
+# 客户样表及从中提取的型号库种子：含真实型号与工位编号，不进入公开仓库
+lineup-sample.tsv
+lineup-models-seed.xml

@@ -1,0 +1,516 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:tiangong:drawing-training:0.2.0",
+  "title": "TianGong native model and drawing training sample 0.2",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "exporter_version",
+    "capabilities",
+    "privacy",
+    "source_sha256",
+    "document_type",
+    "length_unit",
+    "angle_unit",
+    "training_ready",
+    "extraction_status",
+    "issues",
+    "source_integrity_verified",
+    "models",
+    "files"
+  ],
+  "properties": {
+    "schema": {
+      "const": "tiangong.drawing-training"
+    },
+    "schema_version": {
+      "const": "0.2.0"
+    },
+    "exporter_version": {
+      "type": "string"
+    },
+    "source_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "source_name": {
+      "type": "null"
+    },
+    "document_type": {
+      "enum": [
+        "PAR",
+        "PSM",
+        "ASM",
+        "DFT"
+      ]
+    },
+    "length_unit": {
+      "const": "m"
+    },
+    "angle_unit": {
+      "const": "rad"
+    },
+    "training_ready": {
+      "type": "boolean"
+    },
+    "capabilities": {
+      "type": "object",
+      "required": [
+        "native_brep",
+        "mesh_face_mapping",
+        "feature_tree",
+        "drawing_3d_reference",
+        "assembly_reference",
+        "gdt",
+        "datum"
+      ],
+      "properties": {
+        "native_brep": {
+          "type": "boolean"
+        },
+        "mesh_face_mapping": {
+          "type": "boolean"
+        },
+        "feature_tree": {
+          "type": "boolean"
+        },
+        "drawing_3d_reference": {
+          "type": "boolean"
+        },
+        "assembly_reference": {
+          "type": "boolean"
+        },
+        "gdt": {
+          "type": "boolean"
+        },
+        "datum": {
+          "type": "boolean"
+        }
+      }
+    },
+    "privacy": {
+      "type": "object",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "const": "training"
+        }
+      }
+    },
+    "extraction_status": {
+      "enum": [
+        "extracted_requires_review",
+        "partial",
+        "failed"
+      ]
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "location",
+          "error"
+        ],
+        "properties": {}
+      }
+    },
+    "source_integrity_verified": {
+      "type": "boolean"
+    },
+    "models": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/model"
+      }
+    },
+    "drawing": {
+      "type": "object",
+      "required": [
+        "native_file",
+        "sheets"
+      ],
+      "properties": {
+        "sheets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "views"
+            ],
+            "properties": {
+              "views": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/view"
+                }
+              },
+              "dimensions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/dimension"
+                }
+              },
+              "annotations": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "kind",
+                    "source",
+                    "status"
+                  ],
+                  "properties": {}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "sha256",
+          "bytes"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "pattern": "^(?![A-Za-z]:)(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "point3": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "number"
+      }
+    },
+    "matrix": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "type": "array",
+        "minItems": 4,
+        "maxItems": 4,
+        "items": {
+          "type": "number"
+        }
+      }
+    },
+    "face": {
+      "type": "object",
+      "required": [
+        "id",
+        "native_id",
+        "reference_key",
+        "geometry",
+        "geometry_status",
+        "edge_ids",
+        "adjacent_face_ids"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "centroid_m": {
+          "$ref": "#/$defs/point3"
+        },
+        "native_center_m": {
+          "$ref": "#/$defs/point3"
+        },
+        "edge_ids": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "adjacent_face_ids": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "geometry": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      }
+    },
+    "edge": {
+      "type": "object",
+      "required": [
+        "id",
+        "native_id",
+        "reference_key",
+        "geometry",
+        "geometry_status",
+        "vertex_ids",
+        "adjacent_face_ids"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "length_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "start_m": {
+          "$ref": "#/$defs/point3"
+        },
+        "end_m": {
+          "$ref": "#/$defs/point3"
+        },
+        "adjacent_face_ids": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "body": {
+      "type": "object",
+      "required": [
+        "id",
+        "faces",
+        "edges",
+        "topology",
+        "mesh",
+        "status"
+      ],
+      "properties": {
+        "faces": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/face"
+          }
+        },
+        "edges": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/edge"
+          }
+        },
+        "topology": {
+          "type": "object",
+          "required": [
+            "vertices",
+            "loops",
+            "face_adjacency",
+            "edge_face_relations"
+          ],
+          "properties": {}
+        },
+        "mesh": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "required": [
+            "file",
+            "triangle_count",
+            "triangle_face_ids",
+            "mapping_source"
+          ],
+          "properties": {
+            "triangle_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "triangle_face_ids": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "mapping_source": {
+              "const": "native_per_face_tessellation"
+            }
+          }
+        }
+      }
+    },
+    "model": {
+      "type": "object",
+      "required": [
+        "id",
+        "source_sha256",
+        "kind",
+        "native_file",
+        "dataset_metadata"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "part",
+            "sheet_metal",
+            "assembly"
+          ]
+        },
+        "source_name": {
+          "type": "null"
+        },
+        "source_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "bodies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/body"
+          }
+        },
+        "feature_tree": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "required": [
+            "feature_source",
+            "features",
+            "status"
+          ],
+          "properties": {
+            "feature_source": {
+              "const": "native"
+            },
+            "features": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "type",
+                  "feature_source",
+                  "parameters",
+                  "status"
+                ],
+                "properties": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "view": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "model_to_sheet_affine": {
+          "$ref": "#/$defs/matrix"
+        },
+        "model_to_view_affine": {
+          "$ref": "#/$defs/matrix"
+        },
+        "scale": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "exclusiveMinimum": 0
+        }
+      }
+    },
+    "dimension": {
+      "type": "object",
+      "required": [
+        "id",
+        "related_geometry",
+        "layout"
+      ],
+      "properties": {
+        "value_m": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "value_rad": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "related_geometry": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "index"
+            ],
+            "properties": {}
+          }
+        },
+        "references": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "layout": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

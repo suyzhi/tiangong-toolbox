@@ -1,0 +1,16 @@
+﻿<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <Configuration Condition="'$(Configuration)'==''">Debug</Configuration>
+    <OutputType>Library</OutputType><TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <PlatformTarget>x64</PlatformTarget><AssemblyName>TianGongPanelAuto</AssemblyName><RootNamespace>TianGongPanelAuto</RootNamespace>
+    <OutputPath>build\</OutputPath><DebugSymbols>true</DebugSymbols>
+    <CadHome Condition="'$(CadHome)'==''">C:\Program Files\NDS\TianGong 2025</CadHome>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System"/><Reference Include="System.Core"/><Reference Include="Microsoft.CSharp"/>
+    <Reference Include="System.Drawing"/><Reference Include="System.Windows.Forms"/>
+    <Reference Include="Interop.TG"><HintPath>$(CadHome)\Program\TGAiHelper\Interop.TG.dll</HintPath><Private>true</Private><EmbedInteropTypes>false</EmbedInteropTypes></Reference>
+    <Compile Include="src\*.cs"/>
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets"/>
+</Project>
