@@ -2,6 +2,9 @@ param([Parameter(Mandatory=$true)][string]$OutputPath,[string]$ExpectedLibrary,[
 $ErrorActionPreference='Stop'
 $output=[IO.Path]::GetFullPath($OutputPath)
 New-Item -Path $output -ItemType Directory -Force | Out-Null
+$dll=if($ExpectedLibrary){[IO.Path]::GetFullPath($ExpectedLibrary)}else{([uri](Get-ItemProperty 'HKCU:\Software\Classes\CLSID\{8C05165C-65A4-4EF2-A138-508589D82004}\InprocServer32').CodeBase).LocalPath}
+[Reflection.Assembly]::LoadFrom($dll) | Out-Null
+$filter=New-Object TianGongCadSuite.OleFilter
 $app=New-Object -ComObject SolidEdge.Application
 if($app.Documents.Count -ne 0){throw 'Instance not empty; leaving it untouched.'}
 try {
@@ -28,4 +31,5 @@ try {
 } finally {
     # Only this newly created empty instance and its generated fixtures are owned by this script.
     try{$app.Quit()}catch{Write-Warning ('Test CAD teardown: '+$_.Exception.Message)}
+    $filter.Dispose()
 }
