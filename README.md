@@ -6,6 +6,7 @@
 
 这里已经接入内嵌板和 Lineup 模型标记两个模块，共三个 CAD 命令。后续插件功能都应加入该框架，通过模块注册扩展，不再新建互相独立的 AddIn 宿主。
 
+- **SolidWorks 批量转换（DEV 0.5 新增）**：[使用说明](DEV_0.4_插件框架/FORMAT-CONVERT.md) · 独立程序 `TianGongConverter.exe` + 插件命令 ID 5
 - 项目约定：[PROJECT.md](PROJECT.md)
 - 当前框架：[DEV_0.4_插件框架](DEV_0.4_插件框架)
 - 当前框架说明：[DEV_0.4_插件框架/README.md](DEV_0.4_插件框架/README.md)

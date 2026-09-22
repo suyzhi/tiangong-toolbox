@@ -1,4 +1,4 @@
-﻿param([string]$CadHome='C:\Program Files\NDS\TianGong 2025',[string]$OutputDirectory)
+param([string]$CadHome='C:\Program Files\NDS\TianGong 2025',[string]$OutputDirectory)
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 $bin=if($OutputDirectory){[IO.Path]::GetFullPath($OutputDirectory)}else{Join-Path $root 'build'}
@@ -14,6 +14,8 @@ if($LASTEXITCODE -ne 0){throw '插件编译失败'}
 if($LASTEXITCODE -ne 0){throw 'Launcher build failed'}
 & $csc /nologo /target:exe /platform:x64 /out:"$bin\TrainingExportRunner.exe" /reference:"$interop" /reference:"$bin\TianGongCadSuite.dll" /reference:System.Windows.Forms.dll /reference:Microsoft.CSharp.dll (Join-Path $PSScriptRoot 'TrainingExportRunner.cs')
 if($LASTEXITCODE -ne 0){throw 'Training export runner build failed'}
+& $csc /nologo /target:winexe /platform:x64 /out:"$bin\TianGongConverter.exe" /reference:"$interop" /reference:"$bin\TianGongCadSuite.dll" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:Microsoft.CSharp.dll (Join-Path $PSScriptRoot 'ConverterMain.cs')
+if($LASTEXITCODE -ne 0){throw 'TianGongConverter build failed'}
 $tests=@(Get-ChildItem (Join-Path $root 'tests') -Filter '*.cs' -ErrorAction SilentlyContinue | ForEach-Object FullName)
 if($tests.Count){& $csc /nologo /target:exe /platform:x64 /out:"$bin\PanelTests.exe" /reference:"$interop" /reference:"$bin\TianGongCadSuite.dll" /reference:Microsoft.CSharp.dll /reference:System.Data.dll /reference:System.Windows.Forms.dll $tests;if($LASTEXITCODE -ne 0){throw '测试程序编译失败'}}
 

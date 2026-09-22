@@ -78,12 +78,13 @@ static class LineupNativeTests {
         Check(Hash(file)==before,"restart validation leaves assembly unchanged");
         Diagnostics diagnostic=null;
         foreach(F.AddIn addin in app.AddIns)if(string.Equals(addin.GUID,"{8C05165C-65A4-4EF2-A138-508589D82004}",StringComparison.OrdinalIgnoreCase))diagnostic=addin.Object as Diagnostics;
-        Check(diagnostic!=null&&diagnostic.MenuStatus=="Registered 3 commands","actual registered native host exposes Lineup command");
+        Check(diagnostic!=null&&diagnostic.MenuStatus.StartsWith("Registered ")&&diagnostic.CommandFlags(3)==1&&diagnostic.NativeCommandId(3)>0,"actual registered native host exposes enabled Lineup command");
         diagnostic.OpenLineupPanel();Application.DoEvents();
         var hosted=Application.OpenForms.Cast<Form>().OfType<LineupTableForm>().Single();
         Check(hosted.Visible&&hosted.RecordCount==2,"native host command opens owned Lineup window with saved records");
         hosted.SetCategory("全部");hosted.Grid.CurrentCell=hosted.Grid.Rows[1].Cells[1];hosted.Locate();
         using(var bmp=new Bitmap(hosted.Width,hosted.Height)){hosted.DrawToBitmap(bmp,new Rectangle(0,0,hosted.Width,hosted.Height));bmp.Save(Path.Combine(dir,"native-host-lineup-form.png"));}
         // Leave only this generated fixture open for visible native-menu acceptance.
+        Application.ThreadException+=(sender,error)=>File.AppendAllText(Path.Combine(dir,"shutdown-exception.log"),error.Exception.ToString()+Environment.NewLine);
     }
 }

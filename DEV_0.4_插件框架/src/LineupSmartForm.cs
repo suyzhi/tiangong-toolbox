@@ -114,7 +114,7 @@ namespace TianGongCadSuite {
         void SetupModelEditing(){
             grid.EditingControlShowing+=(s,e)=>{var box=e.Control as TextBox;if(box==null)return;box.AutoCompleteMode=AutoCompleteMode.None;box.AutoCompleteSource=AutoCompleteSource.None;if(grid.CurrentCell!=null&&grid.CurrentCell.ColumnIndex==5){var source=new AutoCompleteStringCollection();string kind=Convert.ToString(grid.CurrentRow.Cells[0].Value);source.AddRange(catalog.Entries.Where(m=>m.Category==kind).Select(m=>m.Model).Distinct().ToArray());box.AutoCompleteCustomSource=source;box.AutoCompleteSource=AutoCompleteSource.CustomSource;box.AutoCompleteMode=AutoCompleteMode.SuggestAppend;}};
             grid.CellDoubleClick+=(s,e)=>{if(e.RowIndex>=0&&e.ColumnIndex==5)Try(()=>PickModel(false));};
-            KeyPreview=true;KeyDown+=(s,e)=>{if(e.KeyCode==Keys.F4){e.SuppressKeyPress=true;Try(()=>PickModel(false));}if(e.Control&&e.Shift&&e.KeyCode==Keys.P){e.SuppressKeyPress=true;Try(()=>SetPickingMode(!pickingMode));}};
+            KeyPreview=true;KeyDown+=(s,e)=>{if(e.KeyCode==Keys.F4){e.SuppressKeyPress=true;Try(()=>{if(entryPanel!=null&&entryPanel.ContainsFocus)PickEntryModel();else PickModel(false);});}if(e.Control&&e.Shift&&e.KeyCode==Keys.P){e.SuppressKeyPress=true;Try(()=>SetPickingMode(!pickingMode));}};
         }
         void CompleteKnownModel(int row){
             string kind=Convert.ToString(grid.Rows[row].Cells[0].Value),model=Convert.ToString(grid.Rows[row].Cells[5].Value);

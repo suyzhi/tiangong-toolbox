@@ -14,6 +14,10 @@
 
 `inset-panel` 是第一个正式模块，包含“四面生成内嵌板”和“型材自动填充”两个命令。
 
+`format-convert` 是 DEV 0.5 新增模块，命令 ID 5“SolidWorks 批量转换”，把 SolidWorks 装配/零件
+批量转换成天工 asm/par 并落盘；同时构建独立程序 `TianGongConverter.exe`。算法、实测耗时和安全
+设计见 [FORMAT-CONVERT.md](DEV_0.4_插件框架/FORMAT-CONVERT.md)。
+
 `lineup` 为第二个正式模块，命令 ID 为 3，包含字段录入、装配级项目保存、顶层实例 ReferenceKey 关联、定位和 CSV 导出。实测范围及未完成项见 `DEV_0.4_插件框架/LINEUP-VALIDATION-20260909.md`。
 
 ## 目录约定

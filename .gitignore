@@ -2,6 +2,9 @@ build/
 artifacts/
 outputs/
 交付_DEV_*/
+
+# 临时试验目录：转换器压测输出、探针程序、SWDataMigration 试验残留，不入库
+tmp_recon/
 *.zip
 *.user
 ~$*

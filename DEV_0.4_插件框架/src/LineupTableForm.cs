@@ -45,7 +45,7 @@ namespace TianGongCadSuite {
             grid.DataError+=(s,e)=>{e.ThrowException=false;status.Text="请选择有效类目。";};
             grid.KeyDown+=(s,e)=>{if(e.Control&&e.KeyCode==Keys.V){e.SuppressKeyPress=true;Try(()=>PasteCells(Clipboard.GetText()));}if(e.Control&&e.KeyCode==Keys.Z){e.SuppressKeyPress=true;Try(Undo);}};
             saver.Tick+=(s,e)=>{saver.Stop();Try(SaveDraft);};
-            FormClosing+=(s,e)=>{saver.Stop();if(dirty){try{SaveDraft();}catch(Exception ex){if(MessageBox.Show(this,ex.Message+"\n是否放弃尚未保存的修改并关闭？","Lineup",MessageBoxButtons.YesNo,MessageBoxIcon.Warning)!=DialogResult.Yes)e.Cancel=true;}}};
+            FormClosing+=(s,e)=>{saver.Stop();grid.EndEdit();if(dirty){try{SaveDraft();}catch(Exception ex){if(MessageBox.Show(this,ex.Message+"\n是否放弃尚未保存的修改并关闭？","Lineup",MessageBoxButtons.YesNo,MessageBoxIcon.Warning)!=DialogResult.Yes)e.Cancel=true;}}};
             FormClosed+=(s,e)=>{saver.Dispose();ClearHighlight();};
             SetupModelEditing();InitializeHierarchy();Reload(null);InitializeEntry();UpdateStatus("已加载");
         }
@@ -138,6 +138,6 @@ namespace TianGongCadSuite {
             ClearHighlight();object resolved=LineupCad.ResolveTarget(assembly,r);dynamic target=resolved;highlight=assembly.HighlightSets.Add();highlight.Color=0x00FFFF;highlight.AddItem(LineupCad.HighlightTarget(resolved));highlight.Draw();
             double x,y,z,u,v,w;target.Range(out x,out y,out z,out u,out v,out w);double p=Math.Max(Math.Max(u-x,v-y),w-z)*.15+.001;dynamic view=((dynamic)app.ActiveWindow).View;view.RangeZoomCamera(x-p,y-p,z-p,u+p,v+p,w+p);view.Update();status.Text="已定位："+target.Name;
         }
-        void ClearHighlight(){if(highlight!=null){try{highlight.Delete();}catch{}highlight=null;}}
+        void ClearHighlight(){object previous=highlight;highlight=null;if(previous!=null){try{((dynamic)previous).Delete();}catch{}}}
     }
 }

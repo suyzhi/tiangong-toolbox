@@ -48,6 +48,10 @@ static class LineupEntryTests {
     static void Pump(int milliseconds){var end=DateTime.UtcNow.AddMilliseconds(milliseconds);while(DateTime.UtcNow<end){Application.DoEvents();Thread.Sleep(20);}}
     static void Wait(Func<bool> condition,string label){var end=DateTime.UtcNow.AddSeconds(12);while(!condition()&&DateTime.UtcNow<end)Pump(60);Check(condition(),label);}
     static void Snapshot(LineupTableForm form,string path){using(var bmp=new Bitmap(form.Width,form.Height)){form.DrawToBitmap(bmp,new Rectangle(0,0,form.Width,form.Height));bmp.Save(path);}}
+    public static void Reopen(F.Application app,string output){
+        string file=Path.Combine(output,"EntryFixture.asm");A.AssemblyDocument doc=null;
+        try{doc=(A.AssemblyDocument)app.Documents.Open(file);using(var form=new LineupTableForm(app,doc,Path.Combine(output,"entry-models.xml"))){form.Show();Pump(100);var p=form.CurrentProject;Check(p.Records.Count==11&&p.EntryPresets.Single(r=>r.Category=="气缸").Model=="CYL-A","fresh CAD process reloads complete entry project and preset");foreach(var r in p.Records.Where(r=>r.ReferenceKey.Length>0))Check(LineupCad.ResolveTarget(doc,r)!=null,"fresh process resolves entry binding "+r.Number);Check(!form.ContinuousActive,"reopened project never starts automatic recording without user action");Snapshot(form,Path.Combine(output,"entry-fresh-process.png"));form.Close();}}finally{if(doc!=null)doc.Close(false);}
+    }
     public static void Native(F.Application app,string output){
         Pure(output);A.AssemblyDocument doc=null;LineupTableForm form=null;
         try{

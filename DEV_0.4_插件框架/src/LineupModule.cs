@@ -85,6 +85,6 @@ namespace TianGongCadSuite {
             if(zoom){double x1,y1,z1,x2,y2,z2;target.Range(out x1,out y1,out z1,out x2,out y2,out z2);double pad=Math.Max(Math.Max(x2-x1,y2-y1),z2-z1)*.15+.001;dynamic view=((dynamic)app.ActiveWindow).View;view.RangeZoomCamera(x1-pad,y1-pad,z1-pad,x2+pad,y2+pad,z2+pad);view.Update();}
             status.Text="已定位："+target.Name;return target;
         }
-        void ClearHighlight(){if(highlight!=null){try{highlight.Delete();}catch{}highlight=null;}}
+        void ClearHighlight(){object previous=highlight;highlight=null;if(previous!=null){try{((dynamic)previous).Delete();}catch{}}}
     }
 }

@@ -16,7 +16,7 @@ try {
     if(!$addin.Object){throw 'No native diagnostic object.'}
     $menu=$addin.Object.MenuStatus
     $library=$addin.Object.LoadedLibrary
-    if($menu -ne 'Registered 3 commands'){throw ('Unexpected menu status: '+$menu)}
+    if($menu -notmatch '^Registered [0-9]+ commands$' -or $addin.Object.CommandFlags(3) -ne 1){throw ('Lineup command unavailable: '+$menu)}
     "MENU $menu"
     "LIBRARY $library"
     $addin.Object.StartLineupTests($output)
