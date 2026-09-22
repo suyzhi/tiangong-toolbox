@@ -84,5 +84,8 @@ Output in the same folder=On 的行为），只要打开一次 SolidWorks 装配
 
 - Documents.SetForeignFileConfigValue(..., 'Import DoNotSave', 'Off')：让转换器直接落盘，
   理论上可以省掉本工具那 12% 的保存阶段，也可能避开上面那个保存失败；本次时间不够没做对照实验。
-- Application.CreateSEDocumentFromForeignFile(..., igSWBulkMigration) 与 SWDataMigration.exe：
-  后者按官方文档的 8 个参数调用在本机直接退出、没有产生任何输出，需要进一步确认参数或授权环境。
+- SWDataMigration.exe（天工 CAD 自带的「SolidWorks 数据迁移」命令行工具）：按官方文档的 8 个参数
+  （输入文件夹、输出文件夹、零件/装配/工程图/钣金模板、SolidWorks2SE.ini、日志路径）调用后，
+  工具**正确解析了全部参数并按模板开始迁移**，但汇总结果是「迁移文件总数 0」。当次测试输入是一个
+  只含子目录的文件夹，所以看起来它不递归子目录（或者要求 .SLDASM 直接放在传入目录下）。
+  日志留档：artifacts/swmigration-cli-test-20260922/。这一条值得以后把文件平铺后再做一次对照实验。
