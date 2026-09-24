@@ -3,7 +3,7 @@ using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using F=SolidEdgeFramework;
 [assembly:ComVisible(false)]
-[assembly:System.Reflection.AssemblyVersion("0.5.0.0")]
+[assembly:System.Reflection.AssemblyVersion("0.5.1.0")]
 [assembly:System.Runtime.CompilerServices.InternalsVisibleTo("PanelTests")]
 namespace TianGongCadSuite {
     [ComVisible(true),Guid("8C05165C-65A4-4EF2-A138-508589D82004"),ProgId("TianGongCadSuite.SuiteDevAddIn"),ClassInterface(ClassInterfaceType.None)]
@@ -12,7 +12,7 @@ namespace TianGongCadSuite {
         F.AddIn addin;Connection events;ToolContext context;ToolRegistry registry;Diagnostics diagnostics;
         public void OnConnection(object application,F.SeConnectMode mode,F.AddIn instance){
             try{addin=instance;context=new ToolContext((F.Application)application);registry=ModuleCatalog.Create(context);
-                addin.Description="天工工具箱 DEV 0.5 — 可扩展功能框架";addin.GuiVersion=42;addin.Visible=true;
+                addin.Description="天工工具箱 DEV 0.5.1 — 可扩展功能框架";addin.GuiVersion=42;addin.Visible=true;
                 events=new Connection(addin.AddInEvents,typeof(F.ISEAddInEvents),this);
                 diagnostics=new Diagnostics(context.Application,()=>Run(registry.Commands[0]),()=>Run(registry.Commands[1]),()=>Run(registry.Commands[2]));addin.Object=diagnostics;
                 diagnostics.QueryCommand=id=>{int flags=0,bitmap=0;string text;OnCommandUpdateUI(id,ref flags,out text,ref bitmap);return flags;};

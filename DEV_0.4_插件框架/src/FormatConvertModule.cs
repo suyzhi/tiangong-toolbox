@@ -39,10 +39,11 @@ namespace TianGongCadSuite {
         public FormatConvertModule(ToolContext value){ context=value; }
         public string Id {get{return "format-convert";}}
         public IEnumerable<ToolCommand> Commands {get{
-            yield return new ToolCommand(5,"SolidWorks 批量转换","批量把 SolidWorks 装配/零件转换成天工 asm/par",
-                "用天工CAD自带的转换器打开 .SLDASM/.SLDPRT，并把转换结果（asm/par/psm）自动保存到指定目录，"
-                +"支持多进程并行与断点续做。转换在独立的隐藏 CAD 进程中进行，不占用当前窗口。"
-                +"同目录下的 "+ConverterHost.ExeName+" 是独立运行版本。",
+            yield return new ToolCommand(5,"批量格式转换","批量把 SolidWorks / STEP 转换成天工 asm/par",
+                "用天工CAD自带的转换器打开 .SLDASM/.SLDPRT/.SLDDRW 和 .stp/.step，把转换结果"
+                +"（asm/par/psm/dft）连同全部子装配和零件自动保存到指定目录，支持断点续做。"
+                +"STEP 文件按导入结果自动决定输出是 .par 还是 .asm。"
+                +"转换在独立的隐藏 CAD 进程中进行，不占用当前窗口；同目录下的 "+ConverterHost.ExeName+" 是独立运行版本。",
                 delegate{ return true; },Execute);
         }}
         void Execute(){

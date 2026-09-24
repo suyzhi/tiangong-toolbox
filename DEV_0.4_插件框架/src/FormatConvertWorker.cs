@@ -37,7 +37,7 @@ namespace TianGongCadSuite {
                         item.Worker=parts.Length>3?int.Parse(parts[3]):0;
                         try{ item.Size=new FileInfo(item.Source).Length; }catch{ item.Size=0; }
                         item.Target=ConvertPlanner.TopTarget(item,options);
-                        if(!options.Force&&File.Exists(item.Target)&&new FileInfo(item.Target).Length>0){
+                        if(!options.Force&&ConvertPlanner.IsAlreadyConverted(item,options)){
                             ConvertLog.Append(statusFile,ConvertProtocol.Line(ConvertProtocol.End,item.Index.ToString(),"skip",item.Source,"0","0","0","0",item.Target,item.Worker.ToString(),"输出已存在"));
                             continue;
                         }

@@ -16,6 +16,7 @@ namespace TianGongCadSuite {
         readonly CheckBox parts=new CheckBox();
         readonly CheckBox assemblies=new CheckBox();
         readonly CheckBox drawings=new CheckBox();
+        readonly CheckBox step=new CheckBox();
         readonly CheckBox recursive=new CheckBox();
         readonly CheckBox force=new CheckBox();
         readonly CheckBox verify=new CheckBox();
@@ -43,7 +44,7 @@ namespace TianGongCadSuite {
         IntPtr jobHandle=IntPtr.Zero;
 
         public FormatConvertForm(){
-            Text="天工CAD SolidWorks 批量格式转换 (DEV 0.5)";
+            Text="天工CAD 批量格式转换 SolidWorks / STEP (DEV 0.5)";
             ClientSize=new Size(900,660);
             MinimumSize=new Size(760,560);
             StartPosition=FormStartPosition.CenterScreen;
@@ -73,7 +74,8 @@ namespace TianGongCadSuite {
             parts.Text="零件 .SLDPRT";parts.Location=new Point(80,212);parts.Size=new Size(120,22);parts.Checked=true;Controls.Add(parts);
             assemblies.Text="装配 .SLDASM";assemblies.Location=new Point(210,212);assemblies.Size=new Size(130,22);assemblies.Checked=true;Controls.Add(assemblies);
             drawings.Text="工程图 .SLDDRW";drawings.Location=new Point(350,212);drawings.Size=new Size(140,22);Controls.Add(drawings);
-            recursive.Text="包含子文件夹";recursive.Location=new Point(500,212);recursive.Size=new Size(130,22);recursive.Checked=true;Controls.Add(recursive);
+            step.Text="STEP .stp/.step";step.Location=new Point(500,212);step.Size=new Size(150,22);step.Checked=true;Controls.Add(step);
+            recursive.Text="包含子文件夹";recursive.Location=new Point(660,212);recursive.Size=new Size(130,22);recursive.Checked=true;Controls.Add(recursive);
 
             Controls.Add(MakeLabel("并行进程",12,244));
             workers.Location=new Point(80,241);workers.Size=new Size(56,25);workers.Minimum=1;workers.Maximum=8;workers.Value=2;Controls.Add(workers);
@@ -84,7 +86,7 @@ namespace TianGongCadSuite {
             estimate.Text="并行>1 为实验特性：实测仅快约 1.2 倍，且个别零件可能保存失败";
             Controls.Add(estimate);
 
-            Controls.Add(MakeLabel("输出格式：装配 .asm、零件 .par、钣金 .psm、工程图 .dft；转换由天工CAD自身的 SolidWorks 转换器完成。",12,272,true));
+            Controls.Add(MakeLabel("输出格式：装配 .asm、零件 .par、钣金 .psm、工程图 .dft；转换由天工CAD自带的 SolidWorks / STEP 转换器完成。",12,272,true));
 
             start.Text="开始转换";start.Location=new Point(12,300);start.Size=new Size(110,30);start.Click+=delegate{ StartConversion(); };Controls.Add(start);
             stop.Text="停止";stop.Location=new Point(130,300);stop.Size=new Size(90,30);stop.Enabled=false;stop.Click+=delegate{ StopConversion(); };Controls.Add(stop);
@@ -117,7 +119,7 @@ namespace TianGongCadSuite {
 
         void AddFiles(){
             using(var dialog=new OpenFileDialog()){
-                dialog.Multiselect=true;dialog.Filter="SolidWorks 文件|*.sldasm;*.SLDASM;*.sldprt;*.SLDPRT;*.slddrw;*.SLDDRW|所有文件|*.*";
+                dialog.Multiselect=true;dialog.Filter="CAD 文件|*.sldasm;*.SLDASM;*.sldprt;*.SLDPRT;*.slddrw;*.SLDDRW;*.stp;*.STP;*.step;*.STEP|SolidWorks|*.sldasm;*.SLDASM;*.sldprt;*.SLDPRT;*.slddrw;*.SLDDRW|STEP|*.stp;*.STP;*.step;*.STEP|所有文件|*.*";
                 if(dialog.ShowDialog(this)!=DialogResult.OK)return;
                 foreach(string file in dialog.FileNames)if(!inputs.Items.Contains(file))inputs.Items.Add(file);
                 if(output.Text.Length==0)output.Text=Path.GetDirectoryName(dialog.FileNames[0]);
@@ -161,6 +163,7 @@ namespace TianGongCadSuite {
             options.IncludeParts=parts.Checked;
             options.IncludeAssemblies=assemblies.Checked;
             options.IncludeDrawings=drawings.Checked;
+            options.IncludeStep=step.Checked;
             foreach(object entry in inputs.Items)options.Inputs.Add(Convert.ToString(entry));
             options.Workers=EffectiveWorkers(options);
             return options;

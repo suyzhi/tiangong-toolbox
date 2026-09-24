@@ -129,7 +129,15 @@ namespace TianGongCadSuite {
                     string finalName=name;
                     if(finalName==null||finalName.Length==0)finalName=Path.GetFileNameWithoutExtension(item.Source)+ext;
                     if(!HasNativeExtension(finalName))finalName=finalName+ext;
-                    string target=node==root?item.Target:ConvertPlanner.ComponentTarget(assigned,finalName,item,options);
+                    // The top-level extension follows the document the CAD actually produced: a .stp can
+                    // import as a part or as an assembly, and a SolidWorks part can arrive as sheet metal.
+                    string target;
+                    if(node==root){
+                        target=ConvertPlanner.TopTargetFor(item,options,ext);
+                        item.Target=target;row.Target=target;
+                    } else {
+                        target=ConvertPlanner.ComponentTarget(assigned,finalName,item,options);
+                    }
                     if(!written.Add(target)){
                         log("同一零件的重复实例，已并入 "+finalName+"。");
                         continue;

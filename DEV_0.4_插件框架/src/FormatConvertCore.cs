@@ -17,26 +17,28 @@ namespace TianGongCadSuite {
         public bool IncludeAssemblies;
         public bool IncludeParts;
         public bool IncludeDrawings;
+        public bool IncludeStep;     // .stp/.step through the STEP translator
         public bool VerifyReopen;    // reopen the produced top document and check for missing references
         public ConvertOptions(){
             Inputs=new List<string>();OutputRoot="";Recursive=true;FlatOutput=false;Force=false;Workers=1;
-            IncludeAssemblies=true;IncludeParts=true;IncludeDrawings=false;VerifyReopen=false;
+            IncludeAssemblies=true;IncludeParts=true;IncludeDrawings=false;IncludeStep=true;VerifyReopen=false;
         }
         public ConvertOptions Clone(){
             var c=new ConvertOptions();
             c.Inputs.AddRange(Inputs);c.OutputRoot=OutputRoot;c.Recursive=Recursive;c.FlatOutput=FlatOutput;
             c.Force=Force;c.Workers=Workers;c.IncludeAssemblies=IncludeAssemblies;c.IncludeParts=IncludeParts;
-            c.IncludeDrawings=IncludeDrawings;c.VerifyReopen=VerifyReopen;return c;
+            c.IncludeDrawings=IncludeDrawings;c.IncludeStep=IncludeStep;c.VerifyReopen=VerifyReopen;return c;
         }
         public List<string> Extensions(){
             var list=new List<string>();
             if(IncludeAssemblies)list.Add(".sldasm");
             if(IncludeParts)list.Add(".sldprt");
             if(IncludeDrawings)list.Add(".slddrw");
+            if(IncludeStep){ list.Add(".stp"); list.Add(".step"); }
             return list;
         }
         public string Validate(){
-            if(Inputs.Count==0)return "请先添加要转换的 SolidWorks 文件或文件夹。";
+            if(Inputs.Count==0)return "请先添加要转换的文件或文件夹。";
             if(OutputRoot==null||OutputRoot.Trim().Length==0)return "请选择输出目录。";
             if(Workers<1||Workers>8)return "并行进程数必须在 1 到 8 之间。";
             if(!Directory.Exists(OutputRoot))return "输出目录不存在："+OutputRoot;
@@ -63,12 +65,24 @@ namespace TianGongCadSuite {
             if(ext==".sldasm")return ".asm";
             if(ext==".sldprt")return ".par";
             if(ext==".slddrw")return ".dft";
+            // STEP: provisional only. A .stp usually imports as a single part (.par) but a STEP file
+            // that carries assembly structure imports as .asm; the CAD decides, so this is corrected
+            // right after the file is opened.
+            if(ext==".stp"||ext==".step")return ".par";
             return ".asm";
         }
         public static bool IsSolidWorks(string path){
             string ext=(Path.GetExtension(path)??"").ToLowerInvariant();
             return ext==".sldasm"||ext==".sldprt"||ext==".slddrw";
         }
+        // STEP carries no hint about the result: the same .stp can import as a single part or as a
+        // whole assembly, so the top-level extension is decided after the CAD has opened the file.
+        public static bool IsStep(string path){
+            string ext=(Path.GetExtension(path)??"").ToLowerInvariant();
+            return ext==".stp"||ext==".step";
+        }
+        public static bool IsSupported(string path){ return IsSolidWorks(path)||IsStep(path); }
+        public static readonly string[] StepNativeExtensions={".par",".asm"};
         public static bool IsLockFile(string name){
             return name.StartsWith("~$",StringComparison.Ordinal)||name.StartsWith(".~",StringComparison.Ordinal);
         }
@@ -113,12 +127,36 @@ namespace TianGongCadSuite {
             try{ item.Size=new FileInfo(file).Length; }catch{ item.Size=0; }
             items.Add(item);
         }
-        // Output path of the converted top-level document.
+        // Output path of the converted top-level document. For STEP the real extension is only known
+        // once the CAD has imported the file, so callers pass it in; the default is the provisional one.
         public static string TopTarget(ConvertItem item,ConvertOptions options){
+            return TopTargetFor(item,options,NativeExtension(item.Source));
+        }
+        public static string TopTargetFor(ConvertItem item,ConvertOptions options,string extension){
             string outRoot=Path.GetFullPath(options.OutputRoot);
-            string name=Path.GetFileNameWithoutExtension(item.Source)+NativeExtension(item.Source);
+            string name=Path.GetFileNameWithoutExtension(item.Source)+extension;
             if(options.FlatOutput)return Path.Combine(outRoot,name);
             return Path.Combine(outRoot,RelativeFolder(Path.GetDirectoryName(item.Source),item.Root),name);
+        }
+        // Every path the top-level document could end up at. Used for the "already converted" check so
+        // a STEP file that turns out to be an assembly is still recognised on the next run.
+        public static List<string> CandidateTargets(ConvertItem item,ConvertOptions options){
+            var list=new List<string>();
+            if(IsStep(item.Source)){
+                foreach(string ext in StepNativeExtensions)list.Add(TopTargetFor(item,options,ext));
+                return list;
+            }
+            list.Add(TopTarget(item,options));
+            // A SolidWorks part can import as a sheet-metal document, so both names are checked.
+            if(string.Equals(Path.GetExtension(item.Source),".sldprt",StringComparison.OrdinalIgnoreCase))
+                list.Add(TopTargetFor(item,options,".psm"));
+            return list;
+        }
+        public static bool IsAlreadyConverted(ConvertItem item,ConvertOptions options){
+            foreach(string candidate in CandidateTargets(item,options)){
+                try{ if(File.Exists(candidate)&&new FileInfo(candidate).Length>0)return true; }catch{}
+            }
+            return false;
         }
         // Output path of a component document. Solid Edge assigns each translated component a source
         // folder plus a native extension; that assignment is preserved so references stay resolvable.

@@ -13,7 +13,11 @@ static class FormatConvertTests {
         Assert(ConvertPlanner.IsLockFile("~$x.SLDASM"),"SolidWorks lock file detected");
         Assert(!ConvertPlanner.IsLockFile("x.SLDASM"),"normal file is not a lock file");
         Assert(ConvertPlanner.IsSolidWorks(@"C:\a\b.SLDPRT"),"sldprt recognised");
-        Assert(!ConvertPlanner.IsSolidWorks(@"C:\a\b.step"),"step not claimed");
+        Assert(!ConvertPlanner.IsSolidWorks(@"C:\a\b.step"),"step is not claimed as SolidWorks");
+        Assert(ConvertPlanner.IsStep(@"C:\a\b.STP"),"stp recognised");
+        Assert(ConvertPlanner.IsStep(@"C:\a\b.step"),"step recognised");
+        Assert(ConvertPlanner.IsSupported(@"C:\a\b.step")&&ConvertPlanner.IsSupported(@"C:\a\b.sldasm"),"step and solidworks both supported");
+        Assert(ConvertPlanner.NativeExtension(@"C:\a\b.stp")==".par","stp provisionally maps to par");
 
         string root=Path.Combine(Path.GetTempPath(),"fmtconvtest-"+Guid.NewGuid().ToString("N"));
         string sub=Path.Combine(root,"子目录");
@@ -29,15 +33,28 @@ static class FormatConvertTests {
             var options=new ConvertOptions();
             options.Inputs.Add(root);options.OutputRoot=Path.Combine(root,"out");
             var items=ConvertPlanner.Scan(options);
-            Assert(items.Count==3,"scan keeps 3 SolidWorks files, dropped lock/step/hidden: got "+items.Count);
+            Assert(items.Count==4,"scan keeps 4 supported files, drops the lock file and the hidden folder: got "+items.Count);
+            options.IncludeStep=false;
+            Assert(ConvertPlanner.Scan(options).Count==3,"step can be switched off");
+            options.IncludeStep=true;
             foreach(ConvertItem item in items)Assert(!ConvertPlanner.IsLockFile(Path.GetFileName(item.Source)),"lock file excluded");
             bool found=false;foreach(ConvertItem item in items)if(Path.GetFileName(item.Source)=="d.SLDASM")found=true;
             Assert(found,"recursive scan found nested assembly");
             options.Recursive=false;
-            Assert(ConvertPlanner.Scan(options).Count==2,"non-recursive scan keeps 2 files");
+            Assert(ConvertPlanner.Scan(options).Count==3,"non-recursive scan keeps 3 files");
             options.Recursive=true;
             options.IncludeParts=false;
-            Assert(ConvertPlanner.Scan(options).Count==2,"parts-only switch respected");
+            Assert(ConvertPlanner.Scan(options).Count==3,"parts-only switch respected");
+            options.IncludeParts=true;
+            var stepItem=new ConvertItem();stepItem.Source=Path.Combine(root,"c.STEP");stepItem.Root=root;
+            var stepTargets=ConvertPlanner.CandidateTargets(stepItem,options);
+            Assert(stepTargets.Count==2,"a STEP input can end up as par or asm");
+            Assert(stepTargets[0].EndsWith("c.par")&&stepTargets[1].EndsWith("c.asm"),"both STEP candidate names are checked");
+            Assert(!ConvertPlanner.IsAlreadyConverted(stepItem,options),"STEP is not converted yet");
+            Directory.CreateDirectory(options.OutputRoot);
+            File.WriteAllText(stepTargets[1],"x");
+            Assert(ConvertPlanner.IsAlreadyConverted(stepItem,options),"an existing asm marks the STEP file as converted");
+            File.Delete(stepTargets[1]);
 
             var target=ConvertPlanner.TopTarget(items[0],options);
             Assert(target.StartsWith(Path.GetFullPath(options.OutputRoot),StringComparison.OrdinalIgnoreCase),"mirror output stays under the output root");
