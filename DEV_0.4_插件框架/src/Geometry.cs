@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Linq;
 namespace TianGongCadSuite {
     public struct V3 {
@@ -25,6 +25,19 @@ namespace TianGongCadSuite {
         public V3 Vector(V3 p){return new V3(M[0]*p.X+M[4]*p.Y+M[8]*p.Z,M[1]*p.X+M[5]*p.Y+M[9]*p.Z,M[2]*p.X+M[6]*p.Y+M[10]*p.Z);}
         public V3 Point(V3 p){return Vector(p)+new V3(M[12],M[13],M[14]);}
         public V3 Normal(V3 n){var x=new V3(M[0],M[1],M[2]);var y=new V3(M[4],M[5],M[6]);var z=new V3(M[8],M[9],M[10]);double d=x.Dot(y.Cross(z));if(Math.Abs(d)<1e-12)throw new ArgumentException("装配变换不可逆。");return (y.Cross(z)*n.X+z.Cross(x)*n.Y+x.Cross(y)*n.Z)*(1/d);}
+        // Assembly -> part coordinates. The placement is rigid, so the inverse rotation is the transpose.
+        // Both use the same basis columns as Point/Normal, so they round-trip exactly.
+        public V3 InversePoint(V3 q){
+            var x=new V3(M[0],M[1],M[2]);var y=new V3(M[4],M[5],M[6]);var z=new V3(M[8],M[9],M[10]);
+            var d=q-new V3(M[12],M[13],M[14]);
+            return new V3(d.Dot(x),d.Dot(y),d.Dot(z));
+        }
+        public V3 InverseLocal(V3 q){ return InversePoint(q); }
+        public V3 InverseNormal(V3 n){
+            var x=new V3(M[0],M[1],M[2]);var y=new V3(M[4],M[5],M[6]);var z=new V3(M[8],M[9],M[10]);
+            return new V3(n.Dot(x),n.Dot(y),n.Dot(z));
+        }
+        public bool Rigid {get{var x=new V3(M[0],M[1],M[2]);var y=new V3(M[4],M[5],M[6]);var z=new V3(M[8],M[9],M[10]);return Math.Abs(x.Length-1)<1e-6&&Math.Abs(y.Length-1)<1e-6&&Math.Abs(z.Length-1)<1e-6&&Math.Abs(x.Dot(y))<1e-6&&Math.Abs(x.Dot(z))<1e-6&&Math.Abs(y.Dot(z))<1e-6;}}
     }
     public sealed class PlaneInput {
         public V3 Point,Normal;

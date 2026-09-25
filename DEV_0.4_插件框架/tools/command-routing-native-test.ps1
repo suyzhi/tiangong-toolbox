@@ -4,6 +4,9 @@ $dir=[IO.Path]::GetFullPath($OutputPath)
 New-Item -Path $dir -ItemType Directory -Force | Out-Null
 $app=New-Object -ComObject SolidEdge.Application
 if($app.Documents.Count -ne 0){throw 'Instance is not empty; leaving it untouched.'}
+# SaveAs 遇到已存在的文件会弹覆盖确认框并永久阻塞脚本，所以先清掉。
+$fixture=Join-Path $dir 'CommandFixture.asm'
+foreach($stale in @($fixture,($fixture+'.cfg'))){ if(Test-Path $stale){ Remove-Item -LiteralPath $stale -Force } }
 $log=New-Object System.Collections.Generic.List[string]
 try {
     $app.Visible=$true

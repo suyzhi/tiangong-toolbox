@@ -67,6 +67,6 @@ namespace TianGongCadSuite {
         public void Dispose(){}
     }
     public static class ModuleCatalog {
-        public static ToolRegistry Create(ToolContext context){var registry=new ToolRegistry();registry.Add(new InsetPanelModule(context));registry.Add(new LineupModule(context));registry.Add(new TrainingExportModule(context));registry.Add(new FormatConvertModule(context));return registry;}
+        public static ToolRegistry Create(ToolContext context){var registry=new ToolRegistry();registry.Add(new InsetPanelModule(context));registry.Add(new LineupModule(context));registry.Add(new TrainingExportModule(context));registry.Add(new FormatConvertModule(context));registry.Add(new AutoHoleModule(context));return registry;}
     }
 }

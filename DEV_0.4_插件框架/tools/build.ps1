@@ -17,7 +17,7 @@ if($LASTEXITCODE -ne 0){throw 'Training export runner build failed'}
 & $csc /nologo /target:winexe /platform:x64 /out:"$bin\TianGongConverter.exe" /reference:"$interop" /reference:"$bin\TianGongCadSuite.dll" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:Microsoft.CSharp.dll (Join-Path $PSScriptRoot 'ConverterMain.cs')
 if($LASTEXITCODE -ne 0){throw 'TianGongConverter build failed'}
 $tests=@(Get-ChildItem (Join-Path $root 'tests') -Filter '*.cs' -ErrorAction SilentlyContinue | ForEach-Object FullName)
-if($tests.Count){& $csc /nologo /target:exe /platform:x64 /out:"$bin\PanelTests.exe" /reference:"$interop" /reference:"$bin\TianGongCadSuite.dll" /reference:Microsoft.CSharp.dll /reference:System.Data.dll /reference:System.Windows.Forms.dll $tests;if($LASTEXITCODE -ne 0){throw '测试程序编译失败'}}
+if($tests.Count){& $csc /nologo /target:exe /platform:x64 /out:"$bin\PanelTests.exe" /reference:"$interop" /reference:"$bin\TianGongCadSuite.dll" /reference:Microsoft.CSharp.dll /reference:System.Data.dll /reference:System.Windows.Forms.dll /reference:System.Drawing.dll $tests;if($LASTEXITCODE -ne 0){throw '测试程序编译失败'}}
 
 $fixture=Join-Path $root "tests\fixtures\lineup-sample.tsv"
 if(Test-Path $fixture){Copy-Item -LiteralPath $fixture -Destination $bin -Force}

@@ -10,6 +10,8 @@
 - 项目约定：[PROJECT.md](PROJECT.md)
 - 当前框架：[DEV_0.4_插件框架](DEV_0.4_插件框架)
 - 当前框架说明：[DEV_0.4_插件框架/README.md](DEV_0.4_插件框架/README.md)
+- 自动打孔（命令 6/7/8）用法与根因分析：[AUTO-HOLE.md](DEV_0.4_插件框架/AUTO-HOLE.md)
+- 自动打孔 2026-09-25 修复与可视化验收：[AUTO-HOLE-VALIDATION-20260925.md](DEV_0.4_插件框架/AUTO-HOLE-VALIDATION-20260925.md)
 - Lineup 实测范围和证据：[LINEUP-VALIDATION-20260909.md](DEV_0.4_插件框架/LINEUP-VALIDATION-20260909.md)
 - Lineup 五类清单、自动编号、型号库及普通零件关联：[新版验证报告](DEV_0.4_插件框架/LINEUP-SMART-VALIDATION-20260909.md)
 - 旧版本：`DEV_0.2_*`、`DEV_0.3_*` 和 `交付_DEV_*`，仅作历史参考

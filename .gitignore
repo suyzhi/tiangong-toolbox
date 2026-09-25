@@ -16,3 +16,9 @@ __pycache__/
 # 客户样表及从中提取的型号库种子：含真实型号与工位编号，不进入公开仓库
 lineup-sample.tsv
 lineup-models-seed.xml
+
+# 竞品调研的原始解包残留（第三方安装包/二进制），不入库
+_ky_research/
+*.rar
+*.msi
+
