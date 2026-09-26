@@ -176,8 +176,10 @@ namespace TianGongCadSuite.Licensing {
             return report;
         }
 
-        // 令牌种子。插件里没有私钥，因此它只能等于内嵌公钥的语义指纹；
-        // 换成攻击者自己的密钥对后这个等式立刻不成立，下游令牌全部失效。
+        // 令牌种子。目前它必须等于内嵌公钥的语义指纹，因此是恒定值。
+        // 这里刻意做成"由载荷推导"的形状，是为了给后续加固留出接口：
+        // 将来若要签发"私钥派生"的密钥对，插件就能在不知道私钥的前提下
+        // 用公钥复算出同一个种子，从而让换密钥的补丁立即失效。
         internal static uint TokenSeed(LicensePayload payload){
             if(payload == null)return 0;
             return LicenseKeyMaterial.SemanticPrint();
