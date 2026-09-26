@@ -22,3 +22,9 @@ _ky_research/
 *.rar
 *.msi
 
+# 授权私钥：泄露等于授权体系失效。只留在管理员离线机器上，绝不入库。
+*.tgkey
+*.public.cs
+# 本地测试用的临时密钥与签发的激活码
+tmp_license_test/
+
