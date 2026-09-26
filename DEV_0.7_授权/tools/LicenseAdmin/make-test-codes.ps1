@@ -1,37 +1,42 @@
 param(
-    [switch]$SkipBuild,
-    [switch]$KeepTestKey
+    [switch]$SkipBuild
 )
 $ErrorActionPreference='Stop'
 $root=Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+$toolsRoot=Split-Path $PSScriptRoot -Parent
 $bin=Join-Path $root 'build\license-test'
 $key=Join-Path $root 'tests\fixtures\license-test.tgkey'
+$slotSource=Join-Path $root 'tests\fixtures\license-test.public.cs'
+$slotTarget=Join-Path $root 'src\License\LicenseKeySlot.cs'
 
-$toolsRoot=Split-Path $PSScriptRoot -Parent
+# 管理员工具
+$admin=Join-Path $PSScriptRoot 'build\TianGongLicenseAdmin.exe'
+if(!(Test-Path $admin)){ & (Join-Path $PSScriptRoot 'build-admin.ps1') | Out-Null }
+
+# 1) 测试密钥：缺就生成。私钥只留在 tests/fixtures（已 gitignore）。
+if(!(Test-Path $key)){
+    Write-Output '生成测试密钥（只用于本机测试，与生产私钥无关）…'
+    & $admin keygen $key testmaster
+}
+
+# 2) 公钥槽必须与测试私钥成对，否则插件编译出来后验签必然失败。
+$needSlot=$true
+if(Test-Path $slotTarget){
+    $current=(Select-String -Path $slotTarget -Pattern 'KeyId = "([a-z0-9]+)"').Matches
+    if($current.Count -gt 0 -and $current[0].Groups[1].Value -eq 'testmaster'){ $needSlot=$false }
+}
+if($needSlot){
+    if(!(Test-Path $slotSource)){ throw '找不到测试公钥源码：' + $slotSource }
+    Write-Output '把测试公钥写入插件公钥槽（正式发布前必须换回 keygen 生成的公钥）…'
+    Copy-Item $slotSource $slotTarget -Force
+}
+
 if(!$SkipBuild){
     & (Join-Path $toolsRoot 'build.ps1') -OutputDirectory $bin
     if($LASTEXITCODE -ne 0){throw '插件编译失败'}
 }
 
-# 1) 测试密钥：与插件内嵌公钥成对。首次生成后写入 LicenseKeySlot.cs，需要重新编译插件。
-if(!(Test-Path $key)){
-    if(!$SkipBuild){
-        Write-Output '首次运行：生成测试密钥并写入插件公钥槽，需要再编译一次。'
-        & (Join-Path $PSScriptRoot 'build-admin.ps1') | Out-Null
-        $admin=Join-Path $PSScriptRoot 'build\TianGongLicenseAdmin.exe'
-        & $admin keygen $key testmaster
-        $slot=Join-Path $root 'tests\fixtures\license-test.public.cs'
-        Copy-Item $slot (Join-Path $root 'src\License\LicenseKeySlot.cs') -Force
-        & (Join-Path $toolsRoot 'build.ps1') -OutputDirectory $bin
-        if($LASTEXITCODE -ne 0){throw '插件编译失败'}
-    }
-}
-if(!(Test-Path $key)){throw '缺少测试密钥：' + $key}
-
-$admin=Join-Path $PSScriptRoot 'build\TianGongLicenseAdmin.exe'
-if(!(Test-Path $admin)){ & (Join-Path $PSScriptRoot 'build-admin.ps1') | Out-Null }
-
-# 2) 用管理员工具按真实机器码签发三档真码，放进 build 目录供测试读取。
+# 3) 用管理员工具按真实机器码签发三档真码，供测试读取。
 $machineLine=(& $admin machine | Select-String '本机机器码').ToString()
 $machine=$machineLine.Substring($machineLine.IndexOf([char]0xFF1A)+1).Trim()
 $codes=Join-Path $bin 'admin-codes'
@@ -45,3 +50,4 @@ foreach($plan in $plans){
 }
 Write-Output ('机器码：' + $machine)
 Write-Output ('已签发三档真码到：' + $codes)
+Write-Output '提示：正式发布前把 src\License\LicenseKeySlot.cs 换回 keygen 生成的公钥。'

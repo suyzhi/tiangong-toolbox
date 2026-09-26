@@ -68,6 +68,9 @@ TianGongLicenseAdmin.exe verify "@D:\code.txt"
   必须同时给所有存量客户重发激活码。所以正式发布前先把密钥定下来。
 - 仓库里 `src/License/LicenseKeySlot.cs` 默认是**占位公钥**（全零）。用占位公钥编译出来的
   插件能装能跑，但**任何激活码都过不了验签**，必须先做上面第 2 步。
+- 本机联调如果只想跑通流程，可以运行 `tools/LicenseAdmin/make-test-codes.ps1`：它会生成一对
+  **测试密钥**写入公钥槽并重新编译，再按本机真实机器码签发三档真码供测试使用。
+  **发布前务必把公钥槽换回生产公钥**（占位或测试公钥发出去等于没有授权）。
 
 ## 3. 有效期与三档
 
@@ -126,12 +129,13 @@ DEV_0.7_授权\build\license-test\PanelTests.exe --license
 DEV_0.7_授权\build\license-test\PanelTests.exe
 ```
 
-`make-test-codes.ps1` 做三件事：首次运行生成一对**测试密钥**并写入插件公钥槽（会重新编译两次）、
-用管理员工具按本机真实机器码签发三档真码、把码写到 `build/license-test/admin-codes`。
-测试私钥是 `tests/fixtures/license-test.tgkey`，**只用于本机测试**，与生产私钥是两回事；
+`make-test-codes.ps1` 做三件事：生成一对**测试密钥**并把公钥写进插件公钥槽（公钥槽不对齐时会
+重新编译）、用管理员工具按本机真实机器码签发三档真码、把码写到 `build/license-test/admin-codes`。
+测试私钥是 `tests/fixtures/license-test.tgkey`（已 gitignore），**只用于本机测试**，与生产私钥是两回事；
 生产环境请按第 2 节重新 keygen 并覆盖公钥槽。
 
-如果没有 `license-test.tgkey`，验签相关用例会跳过并打印一条提示，其余测试照常进行。
+如果测试私钥缺失、或与插件内嵌公钥不成对，验签相关用例会打印 `SKIP` 后跳过，其余测试照常进行，
+退出码仍为 0。
 
 ## 6. 代码结构
 

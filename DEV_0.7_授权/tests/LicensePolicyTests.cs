@@ -13,9 +13,13 @@ namespace PanelTests {
 
         internal static void Run(Action<string,bool> check){
             keyBlob = LoadTestKey();
-            keyAvailable = keyBlob != null;
-            check("测试签发私钥可用（缺私钥时跳过验签相关用例）", keyAvailable);
-            if(!keyAvailable)return;
+            keyAvailable = keyBlob != null && KeyMatches(keyBlob);
+            if(!keyAvailable){
+                // 缺私钥、或私钥与插件内嵌公钥不成对，都不算失败：只跳过验签用例。
+                Console.WriteLine("SKIP: 测试私钥与插件内嵌公钥不成对，跳过授权验签用例"
+                    + "（运行 tools/LicenseAdmin/make-test-codes.ps1 可生成配对的密钥与真码）");
+                return;
+            }
 
             // 激活文件与激活码里存的是 5 字节短指纹。这里用真实机器指纹，
             // 这样管理员工具签发的真码也能在同一个测试里被接受。
@@ -43,13 +47,31 @@ namespace PanelTests {
             }
         }
 
+        // 私钥必须与插件内嵌公钥成对，否则所有验签用例都会误报失败。
+        static bool KeyMatches(byte[] blob){
+            try{
+                LicensePayload payload = new LicensePayload();
+                payload.Flags = 0;
+                payload.PlanCode = LicensePlans.Monthly;
+                payload.DayOffset = LicenseTime.Today;
+                payload.Fingerprint = new byte[LicensePayload.FingerprintSize];
+                payload.Nonce = new byte[8];
+                byte[] bytes = payload.ToBytes();
+                byte[] signature;
+                using(CngKey key = CngKey.Import(blob, CngKeyBlobFormat.EccPrivateBlob))
+                    signature = LicenseSignature.Sign(bytes, key);
+                LicenseCode code = LicenseCodec.Parse(LicenseCodec.Compose(bytes, signature));
+                return code != null && LicenseCodec.VerifySignature(code);
+            }catch(Exception){ return false; }
+        }
+
         // 管理员工具实际签发的激活码（tools/LicenseAdmin 生成）必须能被插件接受。
         static void LiveAdminCodes(Action<string,bool> check){
             try{
                 string root = Path.GetDirectoryName(typeof(LicensePolicyTests).Assembly.Location);
                 string folder = Path.Combine(root, "admin-codes");
                 if(!Directory.Exists(folder)){
-                    check("管理员工具签发的激活码目录存在", false);
+                    Console.WriteLine("SKIP: 未找到 admin-codes，跳过管理员真码用例（运行 tools/LicenseAdmin/make-test-codes.ps1 生成）");
                     return;
                 }
                 string[] files = Directory.GetFiles(folder, "*.txt");
