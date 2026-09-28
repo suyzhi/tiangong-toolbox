@@ -152,7 +152,27 @@ namespace TianGongCadSuite {
                 list.Add(TopTargetFor(item,options,".psm"));
             return list;
         }
+        // Resume marker. Written before an item is converted and removed only once it succeeded, so a
+        // marker that is still there means the last attempt did not finish (a component failed to save,
+        // the worker crashed or was stopped). The top-level file may exist in that case, but it can be
+        // incomplete, so it must not count as "already converted". The name keeps the source extension
+        // (Foo.SLDASM / Foo.SLDPRT in one folder need separate markers) and does not depend on the
+        // output extension, which for STEP is only known after the import.
+        public const string PendingSuffix=".tgconvert-pending";
+        public static string PendingMarker(ConvertItem item,ConvertOptions options){
+            return TopTargetFor(item,options,Path.GetExtension(item.Source))+PendingSuffix;
+        }
+        public static void MarkPending(ConvertItem item,ConvertOptions options){
+            string marker=PendingMarker(item,options);
+            Directory.CreateDirectory(Path.GetDirectoryName(marker));
+            File.WriteAllText(marker,DateTime.Now.ToString("s",CultureInfo.InvariantCulture)+"\t"+item.Source+Environment.NewLine,new UTF8Encoding(false));
+        }
+        public static void ClearPending(ConvertItem item,ConvertOptions options){
+            string marker=PendingMarker(item,options);
+            if(File.Exists(marker))File.Delete(marker);
+        }
         public static bool IsAlreadyConverted(ConvertItem item,ConvertOptions options){
+            try{ if(File.Exists(PendingMarker(item,options)))return false; }catch{}
             foreach(string candidate in CandidateTargets(item,options)){
                 try{ if(File.Exists(candidate)&&new FileInfo(candidate).Length>0)return true; }catch{}
             }
@@ -273,6 +293,33 @@ namespace TianGongCadSuite {
         public static void Append(string path,string line){
             using(var stream=new FileStream(path,FileMode.Append,FileAccess.Write,FileShare.ReadWrite))
             using(var writer=new StreamWriter(stream,new UTF8Encoding(false))){ writer.WriteLine(line); writer.Flush(); stream.Flush(); }
+        }
+    }
+    // Builds a Windows command line that CommandLineToArgvW (and the .NET runtime) splits back into
+    // exactly the given arguments. Wrapping a path as "\""+path+"\"" breaks when the path ends with a
+    // backslash: a drive root D:\ becomes "D:\" whose \" is read as a literal quote, and every
+    // following argument shifts.
+    public static class CommandLine {
+        public static string Quote(string arg){
+            if(arg==null)arg="";
+            if(arg.Length>0&&arg.IndexOfAny(new[]{' ','\t','\n','\v','"'})<0)return arg;
+            var sb=new StringBuilder();sb.Append('"');
+            int i=0;
+            while(true){
+                int slashes=0;
+                while(i<arg.Length&&arg[i]=='\\'){ slashes++; i++; }
+                if(i==arg.Length){ sb.Append('\\',slashes*2); break; }            // before the closing quote
+                if(arg[i]=='"')sb.Append('\\',slashes*2+1).Append('"');           // escaped literal quote
+                else sb.Append('\\',slashes).Append(arg[i]);                      // backslashes stay literal
+                i++;
+            }
+            sb.Append('"');
+            return sb.ToString();
+        }
+        public static string Join(params string[] args){
+            var parts=new string[args.Length];
+            for(int i=0;i<args.Length;i++)parts[i]=Quote(args[i]);
+            return string.Join(" ",parts);
         }
     }
     public sealed class ConvertSummary {

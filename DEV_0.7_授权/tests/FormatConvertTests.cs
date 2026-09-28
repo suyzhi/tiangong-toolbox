@@ -70,7 +70,8 @@ static class FormatConvertTests {
             sample.Source=Path.Combine(root,"a.SLDASM");sample.Root=root;
             var inside=ConvertPlanner.ComponentTarget(Path.Combine(sub,"p.par"),"p.par",sample,options);
             Assert(inside.EndsWith(Path.Combine("子目录","p.par")),"component inside the root mirrors its folder: "+inside);
-            var outside=ConvertPlanner.ComponentTarget(@"D:\elsewhere\q.par","q.par",sample,options);
+            // A rooted folder outside the input root (temp path, so it is rooted on every platform).
+            var outside=ConvertPlanner.ComponentTarget(Path.Combine(Path.GetTempPath(),"elsewhere-"+Guid.NewGuid().ToString("N"),"q.par"),"q.par",sample,options);
             Assert(outside.IndexOf("_外部",StringComparison.Ordinal)>=0,"component outside the root is bucketed: "+outside);
 
             var planItems=new List<ConvertItem>();
@@ -124,5 +125,91 @@ static class FormatConvertTests {
         Assert(csv.IndexOf("\"a,b\"",StringComparison.Ordinal)>=0,"CSV quotes embedded commas");
             Assert(csv.Split('\n').Length>=5,"CSV has a header and one line per row");
         } finally { try{ Directory.Delete(root,true); }catch{} }
+        ResumeMarker();
+        CommandLineQuoting();
+    }
+
+    // A pending marker left by a failed or interrupted run must force a re-conversion even though
+    // the top-level file already exists (it may be incomplete).
+    public static void ResumeMarker(){
+        string root=Path.Combine(Path.GetTempPath(),"fmtresume-"+Guid.NewGuid().ToString("N"));
+        string input=Path.Combine(root,"in"),output=Path.Combine(root,"out");
+        Directory.CreateDirectory(Path.Combine(input,"sub"));Directory.CreateDirectory(output);
+        try{
+            var options=new ConvertOptions();options.Inputs.Add(input);options.OutputRoot=output;
+            var asm=new ConvertItem();asm.Source=Path.Combine(input,"Foo.SLDASM");asm.Root=input;
+            var prt=new ConvertItem();prt.Source=Path.Combine(input,"Foo.SLDPRT");prt.Root=input;
+            string top=ConvertPlanner.TopTarget(asm,options);
+            File.WriteAllText(top,"half written");
+            Assert(ConvertPlanner.IsAlreadyConverted(asm,options),"existing output without a marker still counts as converted (old runs keep resuming)");
+            ConvertPlanner.MarkPending(asm,options);
+            string marker=ConvertPlanner.PendingMarker(asm,options);
+            Assert(File.Exists(marker)&&Path.GetFileName(marker)=="Foo.SLDASM"+ConvertPlanner.PendingSuffix,"marker sits next to the output: "+marker);
+            Assert(!ConvertPlanner.IsAlreadyConverted(asm,options),"a pending marker forces re-conversion although the top file exists");
+            Assert(ConvertPlanner.PendingMarker(prt,options)!=marker,"Foo.SLDASM and Foo.SLDPRT in one folder get separate markers");
+            ConvertPlanner.ClearPending(asm,options);
+            Assert(!File.Exists(marker)&&ConvertPlanner.IsAlreadyConverted(asm,options),"clearing the marker after success restores the skip");
+            ConvertPlanner.ClearPending(asm,options);
+            Assert(true,"clearing a missing marker is harmless");
+
+            var step=new ConvertItem();step.Source=Path.Combine(input,"sub","Bar.step");step.Root=input;
+            ConvertPlanner.MarkPending(step,options);
+            Assert(File.Exists(Path.Combine(output,"sub","Bar.step"+ConvertPlanner.PendingSuffix)),"marker creates the mirrored sub-folder; name does not depend on the STEP result type");
+            File.WriteAllText(ConvertPlanner.TopTargetFor(step,options,".asm"),"x");
+            Assert(!ConvertPlanner.IsAlreadyConverted(step,options),"pending STEP item is re-converted whatever it imported as");
+            options.FlatOutput=true;
+            Assert(Path.GetDirectoryName(ConvertPlanner.PendingMarker(step,options))==Path.GetFullPath(output),"flat output keeps the marker in the output root");
+        } finally { try{ Directory.Delete(root,true); }catch{} }
+    }
+
+    // Worker arguments must survive CommandLineToArgvW. The old "\""+path+"\"" broke on D:\ .
+    public static void CommandLineQuoting(){
+        string naive="--worker \"C:\\job.txt\" \"C:\\status.txt\" \"D:\\\" 1 0 0 \"C:\\work\"";
+        Assert(ParseArgv(naive).Count!=8,"old quoting of a drive root shifts the arguments (the original bug): "+string.Join(" | ",ParseArgv(naive).ToArray()));
+        var cases=new List<string[]>{
+            new[]{"--worker",@"C:\job dir\job-0.txt",@"C:\status.txt",@"D:\","1","0","0",@"C:\work"},
+            new[]{"--input",@"C:\My Files\"},
+            new[]{@"C:\a b\\",@"C:\x",""},
+            new[]{"a\"b",@"back\\""slash","tab\tin",@"\\server\share\dir\"},
+            new[]{@"D:\项目 图纸\装配\","plain"},
+        };
+        foreach(string[] args in cases){
+            string line=CommandLine.Join(args);
+            var parsed=ParseArgv(line);
+            bool same=parsed.Count==args.Length;
+            for(int i=0;same&&i<args.Length;i++)same=parsed[i]==args[i];
+            Assert(same,"round trip ["+string.Join(" | ",args)+"] via "+line+" -> ["+string.Join(" | ",parsed.ToArray())+"]");
+        }
+        Assert(CommandLine.Quote(@"D:\")==@"D:\","a path without spaces is left as is");
+        Assert(CommandLine.Quote(@"C:\My Files\")=="\"C:\\My Files\\\\\"","trailing backslash is doubled before the closing quote");
+    }
+
+    // Reference splitter following the documented CommandLineToArgvW / MSVCRT rules:
+    // 2n backslashes + quote -> n backslashes and a quote delimiter; 2n+1 -> n backslashes and a literal
+    // quote; backslashes not followed by a quote are literal; "" inside quotes is a literal quote.
+    static List<string> ParseArgv(string line){
+        var args=new List<string>();int i=0;
+        while(true){
+            while(i<line.Length&&(line[i]==' '||line[i]=='\t'))i++;
+            if(i>=line.Length)break;
+            var sb=new StringBuilder();bool quoted=false;
+            while(i<line.Length){
+                char c=line[i];
+                if(c=='\\'){
+                    int n=0;while(i<line.Length&&line[i]=='\\'){ n++;i++; }
+                    if(i<line.Length&&line[i]=='"'){ sb.Append('\\',n/2);if(n%2==1){ sb.Append('"');i++; } }
+                    else sb.Append('\\',n);
+                    continue;
+                }
+                if(c=='"'){
+                    if(quoted&&i+1<line.Length&&line[i+1]=='"'){ sb.Append('"');i+=2;continue; }
+                    quoted=!quoted;i++;continue;
+                }
+                if(!quoted&&(c==' '||c=='\t'))break;
+                sb.Append(c);i++;
+            }
+            args.Add(sb.ToString());
+        }
+        return args;
     }
 }

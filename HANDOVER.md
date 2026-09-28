@@ -48,6 +48,9 @@
     DEV_0.7_授权\build\PanelTests.exe --license    # 授权链
     DEV_0.7_授权\build\PanelTests.exe --autohole-ui # 孔型预览 UI 状态
 
+    # 纯逻辑测试，不需要 Windows / CAD（Mac、Linux 也能跑；需 .NET SDK，LangVersion 固定 C# 5）
+    cd DEV_0.7_授权/tests/pure && dotnet run    # 自动打孔纯逻辑 + 转换续做标记 + 命令行转义
+
     # 授权联调（签真码、对齐测试公钥）
     DEV_0.7_授权\tools\LicenseAdmin\make-test-codes.ps1
 

@@ -992,50 +992,47 @@ namespace TianGongCadSuite {
         // 这个函数会被调用 S×P 次（S = 待判的孤孔数，P = 装配零件数）。原来的写法每次都要
         // 重新遍历一遍 assembly.Occurrences 去按名字找零件 —— 每次 occ.Name 都是一次跨进程
         // COM 调用，于是整体变成 O(S×P²) 次 COM 调用，大装配上要跑分钟级。
-        // 改成：按名字一次性建好「零件名 -> 实体」的表，后面查表 O(1)。
-        public sealed class OccurrenceBodies {
-            readonly Dictionary<string, G.Body> byName = new Dictionary<string, G.Body>(StringComparer.Ordinal);
-            public static OccurrenceBodies Build(A.AssemblyDocument assembly, List<string> names){
-                var map = new OccurrenceBodies();
-                if (names != null) foreach (var n in names) if (n != null && !map.byName.ContainsKey(n)) map.byName[n] = null;
-                if (assembly == null) return map;
+        // 改成：按名字一次性建好「零件名 -> 射线目标」的表，后面查表 O(1)。
+        //
+        // 每个实例同时记下自己的装配变换：实体几何在零件坐标系里，孔心/轴线是装配坐标，
+        // 打射线前要换算（见 PartRayTarget）。原来直接拿装配坐标打，零件只要不在原点就会打偏。
+        // 另外原来的 Build 会先把传进来的名字全部占位成 null，随后遍历实例时又因为"名字已存在"
+        // 跳过 —— 配孔检查窗口传的是全部零件名，于是所有实体都是 null，漏打孔一条也报不出来。
+        public static class OccurrenceBodies {
+            // names 仅为兼容旧调用保留，不再使用：实例名直接从装配里读。
+            public static PartRayIndex Build(A.AssemblyDocument assembly, List<string> names){
+                var index = new PartRayIndex();
+                if (assembly == null) return index;
                 foreach (A.Occurrence occ in assembly.Occurrences) {
                     string name; try { name = occ.Name; } catch { continue; }
-                    if (map.byName.ContainsKey(name)) continue;      // 只认第一次出现的同名实例
                     P.PartDocument part = null;
                     try { part = occ.OccurrenceDocument as P.PartDocument; } catch { }
                     G.Body body = null;
                     if (part != null) { try { if (part.Models.Count >= 1) body = (G.Body)((P.Model)part.Models.Item(1)).Body; } catch { } }
-                    map.byName[name] = body;
+                    if (body == null) continue;
+                    Transform placement;
+                    try { Array m = new double[16]; occ.GetMatrix(ref m); placement = new Transform(m); }
+                    catch (Exception e) { Log.Write("AutoHoleCheckMatrix " + name, e); continue; }   // 读不到变换宁可不判，也不按原点瞎判
+                    var b = body;
+                    index.Add(new PartRayTarget(name, placement, (o, d) => CastLocal(b, o, d)));
                 }
-                return map;
+                return index;
             }
-            public G.Body BodyOf(string partName){
-                G.Body b;
-                return (partName != null && byName.TryGetValue(partName, out b)) ? b : null;
-            }
-            public List<string> Names { get { return new List<string>(byName.Keys); } }
         }
 
-        public static bool RayPassesThrough(OccurrenceBodies parts, HoleRecord hole, string partName){
-            if (parts == null || hole == null) return false;
-            var body = parts.BodyOf(partName);
-            if (body == null) return false;
-            // 沿轴线双向各打一条射线；命中面即认为穿过了该零件的材料。
-            foreach (double sign in new double[]{ 1.0, -1.0 }) {
-                try {
-                    var faces = body.get_FacesByRay(hole.Center.X, hole.Center.Y, hole.Center.Z,
-                                                    hole.Axis.X*sign, hole.Axis.Y*sign, hole.Axis.Z*sign);
-                    var coll = faces as System.Collections.IEnumerable;
-                    if (coll != null) foreach (object o in coll) if (o != null) return true;
-                } catch { }
-            }
+        // 在零件坐标里打一条单向射线；命中任何面即认为穿过了该零件的材料。
+        static bool CastLocal(G.Body body, V3 origin, V3 dir){
+            try {
+                var faces = body.get_FacesByRay(origin.X, origin.Y, origin.Z, dir.X, dir.Y, dir.Z);
+                var coll = faces as System.Collections.IEnumerable;
+                if (coll != null) foreach (object o in coll) if (o != null) return true;
+            } catch { }
             return false;
         }
 
         // 兼容旧签名（没有预建表时现建一次，慢但不至于错）
         public static bool RayPassesThrough(A.AssemblyDocument assembly, HoleRecord hole, string partName){
-            return RayPassesThrough(OccurrenceBodies.Build(assembly, null), hole, partName);
+            return OccurrenceBodies.Build(assembly, null).Hits(hole, partName);
         }
     }
 }

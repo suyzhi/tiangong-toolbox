@@ -1,5 +1,8 @@
 build/
 artifacts/
+# tests/pure（dotnet SDK 项目）的编译输出
+**/tests/pure/bin/
+**/tests/pure/obj/
 outputs/
 交付_DEV_*/
 # 安装包解压出来的目录（含 DLL，不入库）

@@ -52,12 +52,20 @@ namespace TianGongCadSuite {
                             continue;
                         }
                         ConvertLog.Append(statusFile,ConvertProtocol.Line(ConvertProtocol.Begin,item.Index.ToString(),item.Source));
+                        // Marker first: if this item fails or the worker dies, the next resume must not
+                        // mistake a partly written output for a finished one.
+                        try{ ConvertPlanner.MarkPending(item,options); }
+                        catch(Exception e){ ConvertLog.Append(statusFile,ConvertProtocol.Line("LOG","无法写入续做标记："+e.Message)); }
                         ConvertRow row=session.Convert(item,options);
                         if(row.Status=="fail"){
                             // One retry: transient translator/save conflicts are recoverable, and a failed
                             // document would otherwise leave a half-converted assembly behind.
                             ConvertLog.Append(statusFile,ConvertProtocol.Line("LOG","重试 "+item.Source));
                             row=session.Convert(item,options);
+                        }
+                        if(row.Status=="ok"){
+                            try{ ConvertPlanner.ClearPending(item,options); }
+                            catch(Exception e){ ConvertLog.Append(statusFile,ConvertProtocol.Line("LOG","无法清除续做标记："+e.Message)); }
                         }
                         if(row.Error==null)row.Error="";
                         ConvertLog.Append(statusFile,ConvertProtocol.Line(ConvertProtocol.End,row.Index.ToString(),row.Status,row.Source,
