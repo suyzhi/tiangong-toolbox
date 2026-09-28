@@ -13,6 +13,16 @@ namespace TianGongCadSuite {
         public static int Run(string[] args){
             // --worker <jobFile> <statusFile> <outputRoot> <flat> <verify> <force> [lockRoot]
             if(args.Length<7)return 2;
+            // 先查授权再启 CAD：未激活时启动一次 CAD 要约 12 秒，白等且报错含糊。
+            if(!TianGongCadSuite.Licensing.LicenseGate.Pass()){
+                try{
+                    ConvertLog.Append(args[2],ConvertProtocol.Line("FATAL",
+                        "未激活或授权已失效，转换器拒绝工作。请先在天工CAD里打开插件任意命令完成激活，"
+                        +"或在本机运行 LicenseActivate.exe 输入激活码。"));
+                    ConvertLog.Append(args[2],ConvertProtocol.Line(ConvertProtocol.Exit,"1"));
+                }catch{}
+                return 1;
+            }
             string jobFile=args[1];string statusFile=args[2];string outputRoot=args[3];
             var options=new ConvertOptions();
             options.OutputRoot=outputRoot;
@@ -57,7 +67,16 @@ namespace TianGongCadSuite {
                 }
             }catch(Exception e){
                 exit=1;
-                try{ if(statusFile!=null)ConvertLog.Append(statusFile,ConvertProtocol.Line("FATAL",e.GetType().Name+": "+e.Message)); }catch{}
+                // 授权栅栏在深层调用点抛的是"模型操作未能完成…"，对用户毫无指向性（看起来像模型坏了）。
+                // 转换器不像插件那样会弹激活窗口，所以这里必须在启动阶段就把话说明白。
+                string detail=e.GetType().Name+": "+e.Message;
+                try{
+                    if(!TianGongCadSuite.Licensing.LicenseGate.Pass())
+                        detail="未激活或授权已失效，转换器拒绝工作。请先在天工CAD里打开插件的任意命令完成激活，"
+                            +"或在本机运行 LicenseActivate.exe 输入激活码。转换器的并行进程不会弹出激活窗口。"
+                            +"（原始信息："+detail+"）";
+                }catch{}
+                try{ if(statusFile!=null)ConvertLog.Append(statusFile,ConvertProtocol.Line("FATAL",detail)); }catch{}
             }finally{
                 if(session!=null)try{ session.Dispose(); }catch{}
             }
