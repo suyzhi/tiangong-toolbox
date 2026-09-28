@@ -29,7 +29,7 @@ namespace TianGongCadSuite {
             if(exe==null){ MessageBox.Show("找不到 "+ExeName+"。请先运行安装脚本编译插件，或直接把该程序放在插件目录下。","天工格式转换",MessageBoxButtons.OK,MessageBoxIcon.Warning); return; }
             try{
                 var info=new ProcessStartInfo(exe);
-                if(initialFolder!=null&&initialFolder.Length>0)info.Arguments="--input \""+initialFolder+"\"";
+                if(initialFolder!=null&&initialFolder.Length>0)info.Arguments=CommandLine.Join("--input",initialFolder);
                 Process.Start(info);
             }catch(Exception e){ MessageBox.Show("无法启动转换器："+e.Message,"天工格式转换",MessageBoxButtons.OK,MessageBoxIcon.Error); }
         }

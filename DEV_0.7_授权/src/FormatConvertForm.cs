@@ -222,7 +222,7 @@ namespace TianGongCadSuite {
                 foreach(ConvertItem item in plan[i])builder.Append(item.Index).Append('\t').Append(item.Source).Append('\t').Append(item.Root).Append('\t').Append(i).AppendLine();
                 string jobFile=Path.Combine(workRoot,"job-"+i+".txt");File.WriteAllText(jobFile,builder.ToString(),new UTF8Encoding(false));
                 string statusFile=Path.Combine(workRoot,"status-"+i+".txt");File.WriteAllText(statusFile,"",new UTF8Encoding(false));
-                var info=new ProcessStartInfo(self,"--worker \""+jobFile+"\" \""+statusFile+"\" \""+options.OutputRoot+"\" "+(options.FlatOutput?"1":"0")+" "+(options.VerifyReopen?"1":"0")+" "+(options.Force?"1":"0")+" \""+workRoot+"\"");
+                var info=new ProcessStartInfo(self,CommandLine.Join("--worker",jobFile,statusFile,options.OutputRoot,options.FlatOutput?"1":"0",options.VerifyReopen?"1":"0",options.Force?"1":"0",workRoot));
                 info.UseShellExecute=false;info.CreateNoWindow=true;info.WindowStyle=ProcessWindowStyle.Hidden;
                 Process process;
                 try{
