@@ -39,6 +39,45 @@ namespace TianGongCadSuite {
         }
     }
 
+    // 射线判据里的一个零件实例。
+    // 零件实体（G.Body）的几何在零件自己的坐标系里，而 HoleRecord 的孔心/轴线是装配坐标：
+    // 必须先用这个实例的装配变换换算回零件坐标再打射线，否则零件只要在装配里有平移/旋转，
+    // 射线就打在错误的位置（同一个 .par 在装配里用了多次时，每个实例的变换也各不相同）。
+    // castLocal(原点, 单位方向) 在零件坐标里打一条单向射线，碰到材料返回 true。
+    public sealed class PartRayTarget {
+        public readonly string Name;
+        public readonly Transform Placement;
+        readonly Func<V3, V3, bool> castLocal;
+        public PartRayTarget(string name, Transform placement, Func<V3, V3, bool> castLocal){
+            if (placement == null) throw new ArgumentNullException("placement");
+            Name = name ?? ""; Placement = placement; this.castLocal = castLocal;
+        }
+        // 沿轴线双向各打一条射线。
+        public bool Hits(V3 centreAssembly, V3 axisAssembly){
+            if (castLocal == null) return false;
+            var origin = Placement.InversePoint(centreAssembly);
+            var dir = Placement.InverseNormal(axisAssembly);   // 刚体变换：方向的逆旋转就是转置
+            if (!origin.Finite || !dir.Finite || dir.Length < 1e-12) return false;
+            dir = dir.Unit();
+            return castLocal(origin, dir) || castLocal(origin, dir * -1);
+        }
+    }
+
+    // 「零件实例名 -> 射线目标」表。实例名（occ.Name）在装配里唯一，重复出现时只认第一个。
+    public sealed class PartRayIndex {
+        readonly Dictionary<string, PartRayTarget> byName = new Dictionary<string, PartRayTarget>(StringComparer.Ordinal);
+        public bool Add(PartRayTarget target){
+            if (target == null || byName.ContainsKey(target.Name)) return false;
+            byName[target.Name] = target; return true;
+        }
+        public int Count { get { return byName.Count; } }
+        public bool Hits(HoleRecord hole, string partName){
+            PartRayTarget t;
+            if (hole == null || partName == null || !byName.TryGetValue(partName, out t)) return false;
+            return t.Hits(hole.Center, hole.Axis);
+        }
+    }
+
     // 配孔检查。规则轻量，对齐 ICAN 的做法：按孔径范围筛选 + 按轴向间距配对。
     public static class HoleCheck {
         public const double MinDiameterMm = 3.0;     // 小于这个直径不当作连接孔
@@ -56,7 +95,10 @@ namespace TianGongCadSuite {
             return SameLine(a, b, Math.Cos(AxisAngleTolDeg * Math.PI / 180.0));
         }
 
-        // 按"同一条轴线"分组。方向相同且横向偏移在容差内算同组。
+        // 按"同一条轴线"分组。方向相同，且横向偏移不超过两孔中较小的半径（一个孔的轴线还落在
+        // 另一个孔里），就算同组 —— 分组容差必须比 AxisOffsetTolMm 宽：两者相同的话，偏了
+        // 0.5mm 的两个孔根本进不了同一组，只会变成两个（默认隐藏的）孤孔，"孔偏了"永远报不出来。
+        // 组内是否真的偏了，由 Run 再用 AxisOffsetTolMm 判。
         //
         // 原来每来一个新孔都要跟"已有的每一组"比一次，最坏 O(n²)（几千个孔时明显）。
         // 轴线方向先按 ±0.5° 量化成一个桶键：方向差超过 2° 的孔一定不同桶，
@@ -82,7 +124,7 @@ namespace TianGongCadSuite {
                         // 两条假轴线 —— 于是沉孔的假阳性又从这里绕回来了。
                         bool same = false;
                         foreach (var refh in g) {
-                            if (!SameLine(refh, h, cosTol)) continue;
+                            if (!SameLine(refh, h, cosTol, GroupOffsetMm(refh, h))) continue;
                             same = true; break;
                         }
                         if (!same) continue;
@@ -109,11 +151,20 @@ namespace TianGongCadSuite {
         // 这两个方向）。按 |dot| 比较即可，否则一条轴线会被拆成两条，沉孔的假阳性
         // 又会从这里绕回来。
         static bool SameLine(HoleRecord a, HoleRecord b, double cosTol){
+            return SameLine(a, b, cosTol, AxisOffsetTolMm);
+        }
+        static bool SameLine(HoleRecord a, HoleRecord b, double cosTol, double offsetTolMm){
             if (a == null || b == null) return false;
             if (Math.Abs(a.Axis.Dot(b.Axis)) < cosTol) return false;
+            return LateralMm(a, b) <= offsetTolMm;
+        }
+        // b 的孔心离 a 的轴线有多远（毫米）
+        static double LateralMm(HoleRecord a, HoleRecord b){
             var d = b.Center - a.Center;
-            var lateral = d - a.Axis * d.Dot(a.Axis);
-            return lateral.Length * 1000.0 <= AxisOffsetTolMm;
+            return (d - a.Axis * d.Dot(a.Axis)).Length * 1000.0;
+        }
+        static double GroupOffsetMm(HoleRecord a, HoleRecord b){
+            return Math.Max(AxisOffsetTolMm, Math.Min(a.DiameterMm, b.DiameterMm) / 2.0);
         }
 
         // 方向量化：单位向量按 ±0.5° 取整（cos/sin 步长 ≈ 0.0087）。
@@ -158,12 +209,12 @@ namespace TianGongCadSuite {
         // 默认不报——真实装配里绝大多数孔本来就是孤孔，全报会淹没有用信息。
         // allParts：装配里所有零件的名字。判"漏打孔"必须知道有哪些零件——
         // 只遍历"有孔的零件"永远发现不了漏孔（漏的那个零件本来就没孔）。
-        // bodies：预建好的「零件名 -> 实体」表（AutoHoleWriter.OccurrenceBodies）。
+        // bodies：预建好的「零件名 -> 射线目标」表（AutoHoleWriter.OccurrenceBodies.Build）。
         // 给了它就直接按名字查零件，不再让 rayHitsPart 每次重新扫装配 —— 漏打孔判定原本是
         // O(孤孔数 × 零件数²) 次 COM 调用，大装配上要跑分钟级。为 null 时退回 rayHitsPart。
         public static List<HoleIssue> Run(IList<HoleRecord> holes, Func<HoleRecord, string, bool> rayHitsPart,
                                           bool reportUnpaired = false, IList<string> allParts = null,
-                                          AutoHoleWriter.OccurrenceBodies bodies = null){
+                                          PartRayIndex bodies = null){
             var issues = new List<HoleIssue>();
             if (holes == null) return issues;
             var relevant = holes.Where(h => h.DiameterMm >= MinDiameterMm && h.DiameterMm <= MaxDiameterMm).ToList();
@@ -172,7 +223,7 @@ namespace TianGongCadSuite {
                 ? allParts
                 : (IList<string>)holes.Select(x => x.PartName).Distinct().ToList();
             Func<HoleRecord, string, bool> hits = rayHitsPart;
-            if (bodies != null) hits = (hh, pn) => AutoHoleWriter.RayPassesThrough(bodies, hh, pn);
+            if (bodies != null) hits = (hh, pn) => bodies.Hits(hh, pn);
 
             foreach (var g in groups) {
                 // 同一零件上重复的孔（同轴同径）先去重，避免同一块板两个面各算一次
@@ -199,13 +250,11 @@ namespace TianGongCadSuite {
                     continue;
                 }
 
-                // 多零件：先查同轴度
+                // 多零件：先查同轴度。只比不同零件之间的孔（同一零件上的沉孔两条边本来就同轴）。
                 double maxLateral = 0;
-                for (int i = 1; i < g.Count; i++) {
-                    var d = g[i].Center - g[0].Center;
-                    var lat = d - g[0].Axis * d.Dot(g[0].Axis);
-                    maxLateral = Math.Max(maxLateral, lat.Length * 1000.0);
-                }
+                for (int i = 0; i < g.Count; i++)
+                    for (int j = i + 1; j < g.Count; j++)
+                        if (g[i].PartName != g[j].PartName) maxLateral = Math.Max(maxLateral, LateralMm(g[i], g[j]));
                 if (maxLateral > AxisOffsetTolMm) {
                     issues.Add(new HoleIssue { Kind = HoleIssueKind.Misaligned, Holes = g,
                         Message = "同组孔最大偏心 " + N(maxLateral) + "mm（容差 " + N(AxisOffsetTolMm) + "mm），涉及 " + string.Join("、", parts.ToArray()) });
