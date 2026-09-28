@@ -74,8 +74,9 @@ namespace TianGongCadSuite.Licensing {
 
         internal static void ResetCache(){ cachedScan = -1; }
 
-        // 解析激活码。开发密钥模式下（%ProgramData% 里放了 license-dev.key）
-        // 本机自带签发权；正式环境永远走内嵌公钥验签。
+        // 解析激活码。开发密钥模式（%ProgramData% 里放了 license-dev.key，本机自带签发权）
+        // 只编译进开发构建（build.ps1 -DevBuild）；正式构建只认内嵌公钥验签。
+        // 以前这段在正式版里也生效：放一个长度对的文件，任何格式合法的码都会被当成已签名。
         internal static LicenseCode Resolve(ActivationRecord record,out bool signed){
             signed = false;
             if(record == null)return null;
@@ -83,12 +84,14 @@ namespace TianGongCadSuite.Licensing {
             LicenseCode code = LicenseCodec.Parse(text);
             if(code == null)return null;
             if(LicenseCodec.VerifySignature(code)){ signed = true; return code; }
+#if TG_DEV_BUILD
             byte[] dev = LicenseTestHooks.DevPrivateKey();
             if(dev != null){
                 LicenseTestHooks.DevKeyMode = true;
                 signed = true;
                 return code;
             }
+#endif
             return code;
         }
 
@@ -101,7 +104,11 @@ namespace TianGongCadSuite.Licensing {
         internal static bool Accept(LicenseCode code){
             if(code == null)return false;
             if(LicenseCodec.VerifySignature(code))return true;
+#if TG_DEV_BUILD
             return LicenseTestHooks.DevPrivateKey() != null;
+#else
+            return false;
+#endif
         }
 
         public static LicenseReport Current(){
@@ -270,11 +277,13 @@ namespace TianGongCadSuite.Licensing {
         // 成功时 message=null，notice 里是给用户看的提示（含码ID）。
         public static LicenseReport Activate(string codeText,out string message,out string notice){
             notice = null;
+#if TG_DEV_BUILD
             if(LicenseTestHooks.CodeOverride != null){
                 message = null;
                 ResetCache();
                 return Current();
             }
+#endif
             LicenseCode code = LicenseCodec.Parse(codeText);
             if(code == null)return Rejected(null,"激活码格式不正确或抄写有误，请整段复制后重试。", out message);
             if(!Accept(code))
@@ -394,8 +403,8 @@ namespace TianGongCadSuite.Licensing {
         }
     }
 
-    // 仅测试与现场排查使用：可以固定"今天"、伪造指纹、注入自检结论。
-    // 仅测试与现场排查使用：可以固定"今天"、伪造指纹、注入自检结论、放行栅栏。
+#if TG_DEV_BUILD
+    // 仅开发构建（build.ps1 -DevBuild）才有：可以固定"今天"、伪造指纹、注入自检结论、放行栅栏。
     public static class LicenseTestHooks {
         public static int TodayOverride = -1;
         public static byte[] FingerprintOverride;
@@ -450,4 +459,15 @@ namespace TianGongCadSuite.Licensing {
             }
         }
     }
+#else
+    // 正式构建：测试开关全部是常量，运行期无法改写（以前是 public static 字段，同进程里的任何
+    // 代码都能把 GateOverride 改成 0 直接放行）；开发密钥模式与测试签发整段不编译进来。
+    internal static class LicenseTestHooks {
+        internal const int TodayOverride = -1;
+        internal const int GuardOverride = -1;
+        internal const int GateOverride = -1;
+        internal const string CodeOverride = null;
+        internal const string[] RevokedOverride = null;
+    }
+#endif
 }

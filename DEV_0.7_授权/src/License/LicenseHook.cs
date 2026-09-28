@@ -18,6 +18,7 @@ namespace TianGongCadSuite.Licensing {
         }
 
         static FieldInfo Field(string name){
+#if TG_DEV_BUILD
             try{
                 Type type = Type.GetType("TianGongCadSuite.Licensing.LicenseTestHooks, TianGongCadSuite", false);
                 if(type == null){
@@ -28,6 +29,11 @@ namespace TianGongCadSuite.Licensing {
                 }
                 return type == null ? null : type.GetField(name);
             }catch(Exception){ return null; }
+#else
+            // 正式构建不认任何测试钩子。尤其不能按名字到别的程序集里去找：
+            // 外部代码只要定义一个同名类型，就能冒充本机指纹 / 机器码。
+            return null;
+#endif
         }
     }
 }

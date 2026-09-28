@@ -5,7 +5,7 @@ $root = Split-Path $PSScriptRoot -Parent
 $out = Join-Path $root 'artifacts\native-regression'
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 $exe = Join-Path $root 'build\PanelTests.exe'
-if(-not (Test-Path $exe)){ Write-Output '先跑 tools\build.ps1'; exit 1 }
+if(-not (Test-Path $exe)){ Write-Output '先跑 tools\build.ps1 -DevBuild（测试程序只在开发构建里生成）'; exit 1 }
 
 $existing = @(Get-Process -Name TianGong -ErrorAction SilentlyContinue)
 Write-Output ('启动前本机 CAD 进程数（用户桌面，保持不动）：' + $existing.Count)

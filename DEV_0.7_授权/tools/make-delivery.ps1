@@ -9,14 +9,16 @@ $name = '交付_DEV_' + $Version + '_' + $stamp
 $dst = Join-Path $repo $name
 if(Test-Path $dst){ Remove-Item $dst -Recurse -Force }
 
-Write-Output '1/6 编译…'
+Write-Output '1/6 编译（正式构建）…'
+# 不加 -DevBuild：交付物里不能有授权测试开关、开发密钥模式和测试入口。
 & (Join-Path $PSScriptRoot 'build.ps1') | Out-Null
 $bin = Join-Path $root 'build'
 
 Write-Output '2/6 拷贝二进制…'
 $payload = Join-Path $dst 'payload'
 New-Item -ItemType Directory -Force -Path $payload | Out-Null
-foreach($f in 'TianGongCadSuite.dll','TianGongCadSuite.pdb','Interop.TG.dll','PanelLauncher.exe','PanelTests.exe','TianGongConverter.exe','TrainingExportRunner.exe'){
+# PanelTests.exe 不再随交付包发出：它只在开发构建里编译，且会被插件加载进 CAD 进程运行。
+foreach($f in 'TianGongCadSuite.dll','TianGongCadSuite.pdb','Interop.TG.dll','PanelLauncher.exe','TianGongConverter.exe','TrainingExportRunner.exe'){
   $src = Join-Path $bin $f
   if(Test-Path $src){ Copy-Item $src $payload -Force } else { Write-Output ('  （缺少 ' + $f + '，跳过）') }
 }
@@ -42,7 +44,6 @@ function Write-Cmd([string]$file, [string]$body){
 Write-Cmd '安装.cmd' 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\install.ps1" -LibraryPath "%~dp0payload\TianGongCadSuite.dll"'
 Write-Cmd '卸载.cmd' 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\install.ps1" -Uninstall'
 Write-Cmd '重新编译安装.cmd' 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\build.ps1"; if($LASTEXITCODE -eq 0){ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\install.ps1" -LibraryPath "%~dp0build\TianGongCadSuite.dll" }'
-Write-Cmd '跑测试.cmd' '$env:TG=1; & "%~dp0payload\PanelTests.exe" --autohole-pure; & "%~dp0payload\PanelTests.exe" --autohole-ui'
 
 Write-Output '6/6 计算清单 + 打包…'
 $rows = New-Object System.Collections.Generic.List[string]

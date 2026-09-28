@@ -71,8 +71,9 @@
 - 私钥文件（*.tgkey）**只在管理员离线机器上**保存，绝不进代码仓库、绝不发给客户。
 - 私钥泄露 = 授权体系失效：任何人都能签发任意时长的激活码。
 - 换私钥会让**已发出的所有激活码作废**，必须给存量客户重发。正式发布前先把密钥定下来。
-- 仓库里 src/License/LicenseKeySlot.cs 默认是**占位公钥**（全零）：这样编译出来的插件能装能跑，
-  但**任何激活码都过不了验签**，必须先做第 2 步。
+- src/License/LicenseKeySlot.cs 的初始内容是**占位公钥**（全零）：这样编译出来的插件能装能跑，
+  但**任何激活码都过不了验签**，必须先做第 2 步。注意：跑过 make-test-codes.ps1 之后槽里是
+  testmaster 测试公钥（当前仓库里提交的就是它），发布前同样要换成生产公钥。
 - 本机联调可以跑 tools/LicenseAdmin/make-test-codes.ps1：它生成一对**测试密钥**写进公钥槽并重新编译，
   再签发三档真码供测试。**发布前务必把公钥槽换回生产公钥**（占位或测试公钥发出去等于没有授权）。
 
@@ -198,6 +199,8 @@
 1. keygen 生成**生产**密钥对，公钥覆盖 LicenseKeySlot.cs，重新编译。
 2. 私钥离线保管，确认没有进仓库（git status 里不应出现 *.tgkey）。
 3. 确认 src/License/LicenseRevoked.cs 是当前台账导出的黑名单（revoke 之后必须 export + 重编译）。
-4. 跑 tools/build.ps1 与 PanelTests.exe（全量 + --license）确认全绿。
+4. 跑 tools/build.ps1 -DevBuild 与 PanelTests.exe（全量 + --license）确认全绿。
+   交付物必须是**正式构建**（make-delivery.ps1 / 不加 -DevBuild 的 build.ps1）：开发构建带授权测试开关、
+   开发密钥模式（%ProgramData%\TianGongCadSuite\license-dev.key 即可免验签）和 COM 测试入口，发出去等于没有授权。
 5. 在干净机器上装一次，点命令走完"弹窗 → 粘贴码 → 激活 → 命令可用"。
 6. 台账 <私钥名>.ledger.tsv 不要随安装包发出去。

@@ -7,8 +7,10 @@ namespace TianGongCadSuite.Licensing {
     internal static class LicenseGate {
         internal static bool Pass(){
             try{
+#if TG_DEV_BUILD
                 if(LicenseTestHooks.GateOverride == 0)return true;
                 if(LicenseTestHooks.GateOverride > 0)return false;
+#endif
                 if(!LicenseLibrary.Gate())return false;
                 if(LicenseStore.GhostDetected())return false;
                 return true;

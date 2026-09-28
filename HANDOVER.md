@@ -29,17 +29,21 @@
 
 ## 2. 怎么构建、测试、安装
 
-    # 编译插件（生成 build\TianGongCadSuite.dll，同时写程序集版本戳）
+    # 编译插件（生成 build\TianGongCadSuite.dll，同时写程序集版本戳）—— 默认是【正式构建】
     DEV_0.7_授权\tools\build.ps1
     # 编译到独立目录（推荐，便于回退）
     DEV_0.7_授权\tools\build.ps1 -OutputDirectory DEV_0.7_授权\build\我的试验
+    # 开发构建：才会编出 PanelTests.exe，并打开授权测试开关 / 开发密钥模式 / Diagnostics 的 COM 测试入口
+    # （native-test.ps1 等脚本要用）。开发构建绝不外发；交付包（make-delivery.ps1）永远是正式构建。
+    DEV_0.7_授权\tools\build.ps1 -DevBuild
+    DEV_0.7_授权\tools\build-install.ps1 -DevBuild   # 编译 + 注册开发构建
 
     # 注册到当前用户（COM 加载项）
     DEV_0.7_授权\tools\install.ps1 -LibraryPath <上面编出来的 DLL>
     # 注销
     DEV_0.7_授权\tools\install.ps1 -Uninstall
 
-    # 单元测试（不需要 CAD）
+    # 单元测试（不需要 CAD；先用 -DevBuild 编译）
     DEV_0.7_授权\build\PanelTests.exe              # 核心：几何/Lineup/转换 + 自动打孔纯逻辑
     DEV_0.7_授权\build\PanelTests.exe --license    # 授权链
     DEV_0.7_授权\build\PanelTests.exe --autohole-ui # 孔型预览 UI 状态

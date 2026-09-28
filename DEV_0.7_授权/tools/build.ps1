@@ -1,7 +1,10 @@
 param(
     [string]$CadHome='C:\Program Files\NDS\TianGong 2025',
     [string]$OutputDirectory,
-    [string]$Version='0.7.0.0'
+    [string]$Version='0.7.0.0',
+    # 开发构建：打开授权测试开关 / 开发密钥模式 / Diagnostics 测试入口，并编译 PanelTests.exe。
+    # 默认（不加）是正式构建，交付包和"重新编译安装.cmd"都用它。开发构建绝不能发给别人。
+    [switch]$DevBuild
 )
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
@@ -40,6 +43,7 @@ $shared=@(
     '/reference:System.Windows.Forms.dll','/reference:System.Drawing.dll',
     '/reference:Microsoft.CSharp.dll','/reference:System.Management.dll'
 )
+if($DevBuild){$shared+='/define:TG_DEV_BUILD'}
 & $csc ($shared + $sources)
 if($LASTEXITCODE -ne 0){throw '插件编译失败'}
 & $csc /nologo /target:winexe /platform:x64 /out:"$bin\PanelLauncher.exe" /reference:"$interop" /reference:"$bin\TianGongCadSuite.dll" /reference:System.Data.dll /reference:System.Windows.Forms.dll (Join-Path $PSScriptRoot 'Launcher.cs')
@@ -52,7 +56,12 @@ if($LASTEXITCODE -ne 0){throw 'TianGongConverter build failed'}
 & $csc /nologo /target:exe /platform:x64 /out:"$bin\TianGongDrillWorker.exe" /reference:"$interop" /reference:"$bin\TianGongCadSuite.dll" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Data.dll /reference:Microsoft.CSharp.dll (Join-Path $PSScriptRoot 'DrillWorker.cs')
 if($LASTEXITCODE -ne 0){throw '打孔工作器编译失败'}
 $tests=@(Get-ChildItem (Join-Path $root 'tests') -Filter '*.cs' -ErrorAction SilentlyContinue | ForEach-Object FullName)
-if($tests.Count){& $csc /nologo /target:exe /platform:x64 /out:"$bin\PanelTests.exe" /reference:"$interop" /reference:"$bin\TianGongCadSuite.dll" /reference:Microsoft.CSharp.dll /reference:System.Data.dll /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Management.dll $tests;if($LASTEXITCODE -ne 0){throw '测试程序编译失败'}}
+# 测试程序依赖开发构建才有的内部成员与测试开关，正式构建不编译它；
+# 同一输出目录里以前开发构建留下的测试程序和测试私钥也一并清掉，免得混进正式版。
+if(-not $DevBuild){
+    foreach($stale in 'PanelTests.exe','PanelTests.pdb','license-test.tgkey'){Remove-Item -LiteralPath (Join-Path $bin $stale) -Force -ErrorAction SilentlyContinue}
+}
+if($DevBuild -and $tests.Count){& $csc /nologo /target:exe /platform:x64 /out:"$bin\PanelTests.exe" /reference:"$interop" /reference:"$bin\TianGongCadSuite.dll" /reference:Microsoft.CSharp.dll /reference:System.Data.dll /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Management.dll $tests;if($LASTEXITCODE -ne 0){throw '测试程序编译失败'}}
 
 $fixture=Join-Path $root "tests\fixtures\lineup-sample.tsv"
 if(Test-Path $fixture){Copy-Item -LiteralPath $fixture -Destination $bin -Force}
@@ -61,6 +70,7 @@ $seed=Join-Path $root "tests\fixtures\lineup-models-seed.xml"
 if(Test-Path $seed){Copy-Item -LiteralPath $seed -Destination $bin -Force}
 
 $key=Join-Path $root "tests\fixtures\license-test.tgkey"
-if(Test-Path $key){Copy-Item -LiteralPath $key -Destination (Join-Path $bin 'license-test.tgkey') -Force}
+if($DevBuild -and (Test-Path $key)){Copy-Item -LiteralPath $key -Destination (Join-Path $bin 'license-test.tgkey') -Force}
 
-Write-Output ('插件已编译：' + (Join-Path $bin 'TianGongCadSuite.dll') + '  版本 ' + $Version)
+$kind=if($DevBuild){'开发构建（含测试开关，勿外发）'}else{'正式构建'}
+Write-Output ('插件已编译：' + (Join-Path $bin 'TianGongCadSuite.dll') + '  版本 ' + $Version + '  ' + $kind)

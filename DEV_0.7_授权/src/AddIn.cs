@@ -4,7 +4,10 @@ using System.Windows.Forms;
 using F=SolidEdgeFramework;
 [assembly:ComVisible(false)]
 // 程序集版本由 tools/build.ps1 生成在 License/LicenseBuild.cs 里（授权自检会比对）。
+// 测试程序访问内部成员、以及 Diagnostics 里加载 PanelTests.exe 的测试入口，只在开发构建（build.ps1 -DevBuild）里存在。
+#if TG_DEV_BUILD
 [assembly:System.Runtime.CompilerServices.InternalsVisibleTo("PanelTests")]
+#endif
 namespace TianGongCadSuite {
     [ComVisible(true),Guid("8C05165C-65A4-4EF2-A138-508589D82004"),ProgId("TianGongCadSuite.SuiteDevAddIn"),ClassInterface(ClassInterfaceType.None)]
     public sealed class PanelAddIn : F.ISolidEdgeAddIn,F.ISEAddInEvents {
@@ -57,18 +60,21 @@ namespace TianGongCadSuite {
         public void Dispose(){dispatcher.Dispose();Host=null;Open=null;OpenAuto=null;OpenLineup=null;}
         public void OpenLineupPanel(){dispatcher.BeginInvoke(OpenLineup);}
         public string LoadedLibrary {get{return typeof(Diagnostics).Assembly.Location;}}
+#if TG_DEV_BUILD
         public void StartSmartTests(string output){Result="";dispatcher.BeginInvoke((Action)(()=>{Result=RunTestsMode(output,"--smart-cad");}));}
         public void StartEntryTests(string output){Result="";dispatcher.BeginInvoke((Action)(()=>{Result=RunTestsMode(output,"--entry-cad");}));}
         public void StartEntryReopenTests(string output){Result="";dispatcher.BeginInvoke((Action)(()=>{Result=RunTestsMode(output,"--entry-reopen");}));}
         public void StartTableTests(string output){Result="";dispatcher.BeginInvoke((Action)(()=>{Result=RunTestsMode(output,"--table-cad");}));}
         public void StartLineupTests(string output){Result="";dispatcher.BeginInvoke((Action)(()=>{Result=RunTestsMode(output,"--lineup");}));}
         public void StartLineupReopenTests(string fixture){Result="";dispatcher.BeginInvoke((Action)(()=>{Result=RunTestsMode(fixture,"--lineup-reopen");}));}
+#endif
         public void OpenPanel(){dispatcher.BeginInvoke(Open);}
         public void OpenActivation(){dispatcher.BeginInvoke((Action)(()=>TianGongCadSuite.Licensing.LicenseActivation.OpenStatus()));}
         public string LicenseState(){return TianGongCadSuite.Licensing.LicenseLibrary.Current().Describe();}
         public string MachineCode(){return TianGongCadSuite.Licensing.LicenseLibrary.MachineCode();}
         public int GateFlags(){return TianGongCadSuite.Licensing.LicenseLibrary.Gate()?1:0;}
         public void OpenAutoPanel(){dispatcher.BeginInvoke(OpenAuto);}
+#if TG_DEV_BUILD
         public void StartTests(string output){Result="";dispatcher.BeginInvoke((Action)(()=>{Result=RunTests(output);}));}
         // DEV-only local integration-test entry point. Only loads the sibling test executable.
         public void StartAutoTests(string output){Result="";dispatcher.BeginInvoke((Action)(()=>{Result=RunTests(output,true);}));}
@@ -79,5 +85,6 @@ namespace TianGongCadSuite {
             try{Console.SetOut(writer);Console.SetError(writer);var path=System.IO.Path.Combine(System.IO.Path.GetDirectoryName(typeof(Diagnostics).Assembly.Location),"PanelTests.exe");var test=System.Reflection.Assembly.LoadFrom(path);test.GetType("Program").GetField("Host").SetValue(null,Host);object result=test.EntryPoint.Invoke(null,new object[]{new[]{mode,output}});writer.WriteLine("EXIT "+result);}
             catch(Exception e){writer.WriteLine(e);}finally{Console.SetOut(previous);Console.SetError(previousError);}return writer.ToString();
         }
+#endif
     }
 }

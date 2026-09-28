@@ -35,7 +35,8 @@ if($needSlot){
 }
 
 if(!$SkipBuild){
-    & (Join-Path $toolsRoot 'build.ps1') -OutputDirectory $bin
+    # 开发构建：随后要跑 PanelTests.exe --license（授权单测依赖测试开关）。这个目录里的 DLL 不要外发。
+    & (Join-Path $toolsRoot 'build.ps1') -OutputDirectory $bin -DevBuild
     if($LASTEXITCODE -ne 0){throw '插件编译失败'}
 }
 
