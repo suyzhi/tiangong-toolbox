@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    脱离天工 CAD 的纯逻辑测试，Mac / Linux / Windows 上都能跑：
+      在本目录执行 dotnet run
+    只编译不引用 CAD / WinForms 类型的源码。LangVersion 固定为 5，与 tools/build.ps1 使用的
+    .NET Framework csc 一致：在这里用了 C# 6 以上的语法会直接编译失败，不会等到 Windows 上才发现。
+    tools/build.ps1 只收 tests/*.cs（不递归），不会把本目录编进 PanelTests.exe。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>5</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/Geometry.cs" />
+    <Compile Include="../../src/AutoHoleData.cs" />
+    <Compile Include="../../src/AutoHolePattern.cs" />
+    <Compile Include="../../src/AutoHoleCheck.cs" />
+    <Compile Include="../../src/HoleProfile.cs" />
+    <Compile Include="../../src/FormatConvertCore.cs" />
+    <Compile Include="../AutoHolePureTests.cs" />
+    <Compile Include="../FormatConvertTests.cs" />
+    <Compile Include="Program.cs" />
+    <Compile Include="Stubs.cs" />
+  </ItemGroup>
+</Project>
