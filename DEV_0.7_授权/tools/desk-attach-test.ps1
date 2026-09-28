@@ -1,4 +1,4 @@
-$ErrorActionPreference='Continue'
+﻿$ErrorActionPreference='Continue'
 $out = 'C:\Users\admin\Documents\ChatGPT\天工CAD型材内嵌玻璃板插件\DEV_0.4_插件框架\artifacts\deskwork\attach-test.log.txt'
 function W($m){ Add-Content -Path $out -Value $m -Encoding UTF8 }
 Set-Content -Path $out -Value ('ATTACH TEST ' + (Get-Date -Format o)) -Encoding UTF8

@@ -1,4 +1,4 @@
-# tools/fix-e2e/calib2.ps1 —— 自动标定：点 -> 读新窗口标题 -> 建立"命令名 -> 屏幕坐标"表。
+﻿# tools/fix-e2e/calib2.ps1 —— 自动标定：点 -> 读新窗口标题 -> 建立"命令名 -> 屏幕坐标"表。
 # 与 calib.ps1 的区别：它自己判断点开的窗口是不是**本次**点出来的（比对 before/after），
 # 并把命中结果写成 JSON，供正式用例复用。
 $ErrorActionPreference='Continue'

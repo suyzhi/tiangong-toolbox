@@ -1,4 +1,4 @@
-# tools/mouse-e2e/act.ps1 —— 在私有桌面上对 CAD 做一次"鼠标动作 + 截图 + 窗口回读"。
+﻿# tools/mouse-e2e/act.ps1 —— 在私有桌面上对 CAD 做一次"鼠标动作 + 截图 + 窗口回读"。
 param(
     [Parameter(Mandatory=$true)][string]$Tag,
     [Parameter(Mandatory=$true)][string]$Actions,

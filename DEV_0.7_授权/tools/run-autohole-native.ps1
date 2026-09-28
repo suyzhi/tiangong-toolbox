@@ -1,4 +1,4 @@
-# tools/run-autohole-native.ps1 —— 在私有桌面上跑完自动打孔的全部原生回归，不打扰用户桌面。
+﻿# tools/run-autohole-native.ps1 —— 在私有桌面上跑完自动打孔的全部原生回归，不打扰用户桌面。
 $ErrorActionPreference='Continue'
 $root = Split-Path $PSScriptRoot -Parent
 . (Join-Path $PSScriptRoot 'desk-lib.ps1')

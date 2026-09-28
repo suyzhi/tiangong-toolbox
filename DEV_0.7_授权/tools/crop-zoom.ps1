@@ -1,4 +1,4 @@
-Add-Type -AssemblyName System.Drawing
+﻿Add-Type -AssemblyName System.Drawing
 $dir = 'C:\Users\admin\Documents\ChatGPT\天工CAD型材内嵌玻璃板插件\DEV_0.4_插件框架\artifacts\visual'
 function CropZoom($src,$dst,$x,$y,$w,$h,$zoom){
   $img = [System.Drawing.Image]::FromFile($src)

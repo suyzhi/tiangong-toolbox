@@ -1,4 +1,4 @@
-# tools/fix-e2e/calib.ps1 —— 用"点一下就知道打开了哪个窗口"的办法标定功能区命令坐标。
+﻿# tools/fix-e2e/calib.ps1 —— 用"点一下就知道打开了哪个窗口"的办法标定功能区命令坐标。
 $ErrorActionPreference='Continue'
 $Root='C:\Users\admin\Documents\ChatGPT\天工CAD型材内嵌玻璃板插件\DEV_0.7_授权'
 . (Join-Path $Root 'tools\mouse-e2e\lib.ps1')

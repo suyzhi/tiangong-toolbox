@@ -1,4 +1,4 @@
-# tools/fix-e2e/probemap.ps1 —— 稀疏网格实测 + 插件标签页自校正。
+﻿# tools/fix-e2e/probemap.ps1 —— 稀疏网格实测 + 插件标签页自校正。
 $ErrorActionPreference='Continue'
 $Root='C:\Users\admin\Documents\ChatGPT\天工CAD型材内嵌玻璃板插件\DEV_0.7_授权'
 . (Join-Path $Root 'tools\mouse-e2e\lib.ps1')

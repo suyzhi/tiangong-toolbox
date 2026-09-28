@@ -1,4 +1,4 @@
-# tools/fix-e2e/probemap2.ps1 —— 稀疏网格实测（第二版：y 范围按实测文字行 76/108/140 的屏幕偏移 +20 重排）。
+﻿# tools/fix-e2e/probemap2.ps1 —— 稀疏网格实测（第二版：y 范围按实测文字行 76/108/140 的屏幕偏移 +20 重排）。
 $ErrorActionPreference='Continue'
 $Root='C:\Users\admin\Documents\ChatGPT\天工CAD型材内嵌玻璃板插件\DEV_0.7_授权'
 . (Join-Path $Root 'tools\mouse-e2e\lib.ps1')

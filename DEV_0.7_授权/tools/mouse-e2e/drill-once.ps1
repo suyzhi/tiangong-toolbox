@@ -1,4 +1,4 @@
-# tools/mouse-e2e/drill-once.ps1 —— 在「自动打孔」面板上：重选 -> 点孔边 -> 点打孔面 -> 点开始打孔，全程真鼠标。
+﻿# tools/mouse-e2e/drill-once.ps1 —— 在「自动打孔」面板上：重选 -> 点孔边 -> 点打孔面 -> 点开始打孔，全程真鼠标。
 param(
     [Parameter(Mandatory=$true)][int[]]$HoleXY,
     [Parameter(Mandatory=$true)][int[]]$FaceXY,

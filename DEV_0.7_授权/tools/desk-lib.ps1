@@ -1,4 +1,4 @@
-# tools/desk-lib.ps1 —— 私有桌面 + 天工CAD 的最小工具集。
+﻿# tools/desk-lib.ps1 —— 私有桌面 + 天工CAD 的最小工具集。
 # 笔记：COM 激活（New-Object -ComObject）会把 CAD 启动到"默认桌面"，无法隔离用户；
 # 必须用 Start-OnDesk 直接启动 TianGong.exe，COM 客户端再从 ROT 连上去。
 $ErrorActionPreference = 'Stop'

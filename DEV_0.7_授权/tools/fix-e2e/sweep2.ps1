@@ -1,4 +1,4 @@
-# tools/fix-e2e/sweep2.ps1 —— 逐个点开插件功能区的命令。
+﻿# tools/fix-e2e/sweep2.ps1 —— 逐个点开插件功能区的命令。
 # 坐标标定：客户区位图与 1500x900 窗口 1:1；位图 -> 屏幕 需 +20（窗口外框），
 # 命令按钮文字中心的位图坐标由 fresh-top.png（2x 裁图，源起点 (0,28)）量得。
 param([switch]$KeepOpen)

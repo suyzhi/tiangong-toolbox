@@ -1,4 +1,4 @@
-# tools/run-chamfer-probe.ps1 —— 在私有桌面上跑"孔口倒角几何"探针，不打扰用户桌面。
+﻿# tools/run-chamfer-probe.ps1 —— 在私有桌面上跑"孔口倒角几何"探针，不打扰用户桌面。
 $ErrorActionPreference='Continue'
 $root = Split-Path $PSScriptRoot -Parent
 . (Join-Path $PSScriptRoot 'desk-lib.ps1')

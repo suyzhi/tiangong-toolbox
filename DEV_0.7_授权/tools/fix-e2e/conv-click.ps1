@@ -1,4 +1,4 @@
-$ErrorActionPreference='Continue'
+﻿$ErrorActionPreference='Continue'
 $Root = 'C:\Users\admin\Documents\ChatGPT\天工CAD型材内嵌玻璃板插件\DEV_0.7_授权'
 . (Join-Path $Root 'tools\mouse-e2e\lib.ps1')
 $Desk = 'TGConv070'

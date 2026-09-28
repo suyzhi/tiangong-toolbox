@@ -1,4 +1,4 @@
-# tools/fix-e2e/ui.ps1 —— 私有桌面/任意桌面通用的 Win32 UI 小工具（每个 pwsh 进程独立，需 dot-source）。
+﻿# tools/fix-e2e/ui.ps1 —— 私有桌面/任意桌面通用的 Win32 UI 小工具（每个 pwsh 进程独立，需 dot-source）。
 $ErrorActionPreference='Continue'
 if (-not ('TgUiApi' -as [type])) {
 Add-Type -TypeDefinition @'

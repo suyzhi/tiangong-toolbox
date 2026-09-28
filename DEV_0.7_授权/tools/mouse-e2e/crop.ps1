@@ -1,4 +1,4 @@
-# tools/mouse-e2e/crop.ps1 —— 裁切放大截图，用来精确量坐标（不要靠肉眼估）。
+﻿# tools/mouse-e2e/crop.ps1 —— 裁切放大截图，用来精确量坐标（不要靠肉眼估）。
 param([Parameter(Mandatory=$true)][string]$Src,[Parameter(Mandatory=$true)][string]$Dst,[int]$X,[int]$Y,[int]$W,[int]$H,[double]$Zoom = 3)
 Add-Type -AssemblyName System.Drawing
 $img = [System.Drawing.Image]::FromFile($Src)

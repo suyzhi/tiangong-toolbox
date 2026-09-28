@@ -1,4 +1,4 @@
-$ErrorActionPreference="Continue"
+﻿$ErrorActionPreference="Continue"
 [Console]::OutputEncoding=[Text.Encoding]::UTF8
 $app=[Runtime.InteropServices.Marshal]::GetActiveObject("SolidEdge.Application")
 "ActiveDoc=" + $app.ActiveDocument.Name

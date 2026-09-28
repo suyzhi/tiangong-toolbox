@@ -1,4 +1,4 @@
-param([string]$LibraryPath)
+﻿param([string]$LibraryPath)
 $ErrorActionPreference='Stop'
 $app=New-Object -ComObject SolidEdge.Application
 $doc=$null

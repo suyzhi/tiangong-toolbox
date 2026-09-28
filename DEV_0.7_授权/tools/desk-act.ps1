@@ -1,4 +1,4 @@
-param(
+﻿param(
   [Parameter(Mandatory=$true)][string]$Tag,
   [Parameter(Mandatory=$true)][string]$Actions,     # JSON 数组，交给私有桌面的 helper 执行
   [int]$WaitMs = 1500,

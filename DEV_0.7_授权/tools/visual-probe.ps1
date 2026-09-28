@@ -1,4 +1,4 @@
-param([string]$OutDir)
+﻿param([string]$OutDir)
 $ErrorActionPreference='Continue'
 Add-Type -AssemblyName System.Drawing
 if (-not ('ShotApi' -as [type])) {

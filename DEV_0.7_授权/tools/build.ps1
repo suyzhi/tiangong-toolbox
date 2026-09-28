@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$CadHome='C:\Program Files\NDS\TianGong 2025',
     [string]$OutputDirectory,
     [string]$Version='0.7.0.0',

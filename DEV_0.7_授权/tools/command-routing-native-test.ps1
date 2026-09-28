@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$OutputPath)
+﻿param([Parameter(Mandatory=$true)][string]$OutputPath)
 $ErrorActionPreference='Stop'
 $dir=[IO.Path]::GetFullPath($OutputPath)
 New-Item -Path $dir -ItemType Directory -Force | Out-Null

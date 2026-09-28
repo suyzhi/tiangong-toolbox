@@ -1,4 +1,4 @@
-# tools/mouse-e2e/activate.ps1 —— 在已经弹出的激活窗口里，用真键盘输入激活码并真鼠标点「激活」。
+﻿# tools/mouse-e2e/activate.ps1 —— 在已经弹出的激活窗口里，用真键盘输入激活码并真鼠标点「激活」。
 param([Parameter(Mandatory=$true)][string]$CodeFile, [string]$Tag = "activate")
 $ErrorActionPreference = 'Continue'
 . (Join-Path $PSScriptRoot 'lib.ps1')

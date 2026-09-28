@@ -1,4 +1,4 @@
-# tools/mouse-e2e/sweep.ps1 —— 逐个点开插件功能区的命令：先清干净 -> 点 -> 记录新增窗口 -> 按标题栏×关闭。
+﻿# tools/mouse-e2e/sweep.ps1 —— 逐个点开插件功能区的命令：先清干净 -> 点 -> 记录新增窗口 -> 按标题栏×关闭。
 $ErrorActionPreference = 'Continue'
 . (Join-Path $PSScriptRoot 'lib.ps1')
 

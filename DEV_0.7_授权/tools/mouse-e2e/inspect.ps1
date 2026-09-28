@@ -1,4 +1,4 @@
-# tools/mouse-e2e/inspect.ps1 —— 截图某个顶层窗口 + 枚举其子控件（由私有桌面内的 helper 完成）。
+﻿# tools/mouse-e2e/inspect.ps1 —— 截图某个顶层窗口 + 枚举其子控件（由私有桌面内的 helper 完成）。
 param([string]$TitleLike = "*", [string]$Tag = "inspect", [switch]$NoEnum)
 $ErrorActionPreference = 'Continue'
 . (Join-Path $PSScriptRoot 'lib.ps1')

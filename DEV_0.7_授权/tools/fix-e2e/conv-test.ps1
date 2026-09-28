@@ -1,4 +1,4 @@
-# tools/fix-e2e/conv-test.ps1 —— 在私有桌面上用"真实鼠标点击"驱动独立版转换器完成一次转换。
+﻿# tools/fix-e2e/conv-test.ps1 —— 在私有桌面上用"真实鼠标点击"驱动独立版转换器完成一次转换。
 # 目的是验证 FormatConvertForm 的真实代码路径（而不是绕过 UI 直接调 worker）。
 param(
     [string]$InputPath = 'H:\桌面\YF25.07\621增值焊接工位\产品\0928最新产品数模',

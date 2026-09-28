@@ -1,4 +1,4 @@
-# tools/run-uishot.ps1 —— 在私有桌面上把"自动打孔"窗口渲染成 PNG，不打扰用户桌面。
+﻿# tools/run-uishot.ps1 —— 在私有桌面上把"自动打孔"窗口渲染成 PNG，不打扰用户桌面。
 $ErrorActionPreference='Continue'
 $root = Split-Path $PSScriptRoot -Parent
 . (Join-Path $PSScriptRoot 'desk-lib.ps1')

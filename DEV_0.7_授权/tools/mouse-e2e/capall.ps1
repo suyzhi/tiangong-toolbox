@@ -1,4 +1,4 @@
-# tools/mouse-e2e/capall.ps1 —— 把 CAD 进程当前所有可见窗口都截一张，方便回读"有没有新弹窗"。
+﻿# tools/mouse-e2e/capall.ps1 —— 把 CAD 进程当前所有可见窗口都截一张，方便回读"有没有新弹窗"。
 param([string]$Tag = "cap")
 $ErrorActionPreference = 'Continue'
 . (Join-Path $PSScriptRoot 'lib.ps1')

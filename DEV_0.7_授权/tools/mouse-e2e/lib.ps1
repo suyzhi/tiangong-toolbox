@@ -1,4 +1,4 @@
-# tools/mouse-e2e/lib.ps1 —— 真鼠标点击实测用的私有桌面驱动（DEV 0.7 树自己的路径）。
+﻿# tools/mouse-e2e/lib.ps1 —— 真鼠标点击实测用的私有桌面驱动（DEV 0.7 树自己的路径）。
 # 关键约束（来自 windows-app-gui-automation 技能）：
 #   * 输入桌面（SendInput）在私有桌面上无效，只能用"移动该桌面的光标 + 发消息"。
 #   * 所有枚举/截图/点击都必须由跑在该桌面上的 helper 完成。

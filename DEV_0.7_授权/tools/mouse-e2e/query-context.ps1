@@ -1,4 +1,4 @@
-$ErrorActionPreference="Continue"
+﻿$ErrorActionPreference="Continue"
 [Console]::OutputEncoding=[Text.Encoding]::UTF8
 $out = Join-Path $PSScriptRoot "context-probe.txt"
 $lines = @()

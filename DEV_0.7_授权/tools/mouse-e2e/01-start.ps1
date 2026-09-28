@@ -1,4 +1,4 @@
-# tools/mouse-e2e/01-start.ps1 —— 把最新构建注册进 CAD，然后在私有桌面上启动天工 CAD 并打开夹具。
+﻿# tools/mouse-e2e/01-start.ps1 —— 把最新构建注册进 CAD，然后在私有桌面上启动天工 CAD 并打开夹具。
 param(
     [string]$LibraryPath,
     [string]$Fixture = 'C:\Users\admin\Documents\ChatGPT\天工CAD型材内嵌玻璃板插件\DEV_0.4_插件框架\artifacts\v6-20260925\autohole-tapped-20260925-105921\TappedFixture.asm'

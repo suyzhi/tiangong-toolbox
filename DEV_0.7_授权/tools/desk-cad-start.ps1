@@ -1,4 +1,4 @@
-$ErrorActionPreference='Stop'
+﻿$ErrorActionPreference='Stop'
 . 'C:\Users\admin\.dsh\skills\windows-app-gui-automation\scripts\desk.ps1'
 $FdWorkDir = 'C:\Users\admin\Documents\ChatGPT\天工CAD型材内嵌玻璃板插件\DEV_0.4_插件框架\artifacts\deskwork'
 New-Item -ItemType Directory -Force -Path $FdWorkDir | Out-Null

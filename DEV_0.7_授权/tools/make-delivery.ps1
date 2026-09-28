@@ -43,7 +43,18 @@ function Write-Cmd([string]$file, [string]$body){
 }
 Write-Cmd '安装.cmd' 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\install.ps1" -LibraryPath "%~dp0payload\TianGongCadSuite.dll"'
 Write-Cmd '卸载.cmd' 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\install.ps1" -Uninstall'
-Write-Cmd '重新编译安装.cmd' 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\build.ps1"; if($LASTEXITCODE -eq 0){ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\install.ps1" -LibraryPath "%~dp0build\TianGongCadSuite.dll" }'
+# 这一份是 .cmd，由 cmd.exe 执行：不能写 PowerShell 的 ';' 和 if(){ } —— 整串会被当成 -File 的实参，
+# 报 "file does not have a .ps1 extension"（实测踩过）。必须写成分行的 cmd 语句。
+$rebuild = @'
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\build.ps1"
+if errorlevel 1 (
+echo.
+echo 编译失败，未安装。
+goto :eof
+)
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\install.ps1" -LibraryPath "%~dp0build\TianGongCadSuite.dll"
+'@
+Write-Cmd '重新编译安装.cmd' $rebuild
 
 Write-Output '6/6 计算清单 + 打包…'
 $rows = New-Object System.Collections.Generic.List[string]

@@ -1,4 +1,4 @@
-# tools/run-form-ab.ps1 —— A/B：未改动的 0.4 基线 vs 0.6 的 --autohole-form，同一个 CAD 会话里各跑一次。
+﻿# tools/run-form-ab.ps1 —— A/B：未改动的 0.4 基线 vs 0.6 的 --autohole-form，同一个 CAD 会话里各跑一次。
 $ErrorActionPreference='Continue'
 $root = Split-Path $PSScriptRoot -Parent
 . (Join-Path $PSScriptRoot 'desk-lib.ps1')

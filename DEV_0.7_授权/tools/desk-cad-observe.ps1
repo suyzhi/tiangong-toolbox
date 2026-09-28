@@ -1,4 +1,4 @@
-$ErrorActionPreference='Continue'
+﻿$ErrorActionPreference='Continue'
 . 'C:\Users\admin\Documents\ChatGPT\天工CAD型材内嵌玻璃板插件\DEV_0.4_插件框架\tools\desk-lib.ps1'
 $work = 'C:\Users\admin\Documents\ChatGPT\天工CAD型材内嵌玻璃板插件\DEV_0.4_插件框架\artifacts\deskwork'
 $shotDir = Join-Path $work 'shots1'

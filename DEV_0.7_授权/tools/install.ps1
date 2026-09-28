@@ -1,4 +1,4 @@
-param([switch]$Uninstall,[string]$LibraryPath)
+﻿param([switch]$Uninstall,[string]$LibraryPath)
 $ErrorActionPreference='Stop'
 if(![Environment]::Is64BitProcess){throw 'Please run 64-bit Windows PowerShell.'}
 $root=Split-Path $PSScriptRoot -Parent

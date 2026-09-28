@@ -1,4 +1,4 @@
-# tools/fix-e2e/conv-e2e.ps1 —— 私有桌面上用真实鼠标消息完成一次"扫描 -> 开始转换 -> 等结果"。
+﻿# tools/fix-e2e/conv-e2e.ps1 —— 私有桌面上用真实鼠标消息完成一次"扫描 -> 开始转换 -> 等结果"。
 # 关键：控件 HWND 必须从 helper 的 enumchild 日志里解析。
 #   helper 的行格式：  HWND=1311186    BUTTON.app.0.34f5582_r8_ad1 Rect=522,501 110x30 Vis=True En=True '开始转换'
 param(
