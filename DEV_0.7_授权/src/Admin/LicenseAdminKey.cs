@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
@@ -102,6 +102,7 @@ namespace TianGongCadSuite.Licensing.Admin {
             if(code == null){ detail = "格式错误或抄写有误。"; return null; }
             bool signature = LicenseCodec.VerifySignature(code);
             StringBuilder text = new StringBuilder();
+            text.Append("码ID      : ").Append(LicenseCodec.Display(code.CodeId)).Append('\n');
             text.Append("档位      : ").Append(code.Plan == null ? "未知" : code.Plan.Name).Append('\n');
             text.Append("签发日期  : ").Append(LicenseTime.Format(code.IssueDate)).Append('\n');
             text.Append("到期日期  : ").Append(LicenseTime.Format(code.ExpiryDate)).Append('\n');

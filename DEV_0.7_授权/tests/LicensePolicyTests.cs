@@ -38,6 +38,9 @@ namespace PanelTests {
                 Expiry(check);
                 Renewal(check);
                 WrongMachine(check);
+                MachineBinding(check);
+                Reuse(check);
+                Revocation(check);
                 ClockRollback(check);
                 Ghost(check);
             }finally{
@@ -206,6 +209,83 @@ namespace PanelTests {
             LicenseStore.SaveForTest(record);
             LicenseLibrary.ResetCache();
             check("伪造激活文件（含他人指纹的码）被识破", LicenseLibrary.Current().Status == LicenseStatus.WrongMachine);
+            LicenseLibrary.Deactivate();
+            LicenseLibrary.ResetCache();
+        }
+
+        // 新方案的两条硬约束：① 码不预绑定机器，用户在目标机激活时绑定该机；
+        // ② 同一个码在本机重复输入不算新激活（"再使用此激活码无效"的同一台机器语义）。
+        static void MachineBinding(Action<string,bool> check){
+            LicenseLibrary.Deactivate();
+            LicenseLibrary.ResetCache();
+            string message;
+            string notice;
+            string code = Sign(LicensePlans.Yearly, null, false, LicenseTime.Today, 41);
+            LicenseReport report = LicenseLibrary.Activate(code, out message, out notice);
+            check("管理员发的通用码（不预绑定机器）可在本机激活", message == null && report.Usable);
+            check("激活提示里带码ID", !string.IsNullOrEmpty(notice) && notice.IndexOf("绑定本机") >= 0);
+
+            // 模拟"把激活文件拷到另一台机器"：指纹变了，DPAPI 熵和记录里的指纹都对不上。
+            byte[] other = new byte[fingerprint.Length];
+            for(int i = 0; i < other.Length; i++)other[i] = (byte)(fingerprint[i] ^ 0x6B);
+            LicenseTestHooks.FingerprintOverride = other;
+            LicenseLibrary.ResetCache();
+            LicenseReport foreign = LicenseLibrary.Current();
+            check("激活文件换机器后不可用（" + foreign.Status + "）", !foreign.Usable);
+            LicenseTestHooks.FingerprintOverride = fingerprint;
+            LicenseLibrary.ResetCache();
+            check("换回本机指纹后恢复可用", LicenseLibrary.Current().Usable);
+            LicenseLibrary.Deactivate();
+            LicenseLibrary.ResetCache();
+        }
+
+        static void Reuse(Action<string,bool> check){
+            LicenseLibrary.Deactivate();
+            LicenseLibrary.ResetCache();
+            string message;
+            string notice;
+            string code = Sign(LicensePlans.Monthly, null, false, LicenseTime.Today, 42);
+            LicenseReport first = LicenseLibrary.Activate(code, out message, out notice);
+            check("首次激活成功", message == null && first.Usable);
+            long counter = LicenseStore.CounterForTest();
+            LicenseReport second = LicenseLibrary.Activate(code, out message, out notice);
+            check("同一个码在本机再输一次不报错", message == null && second.Usable);
+            check("重复输入被提示已在本机激活", !string.IsNullOrEmpty(notice) && notice.IndexOf("已经在本机激活") >= 0);
+            check("重复输入不重复计数", LicenseStore.CounterForTest() == counter);
+            LicenseLibrary.Deactivate();
+            LicenseLibrary.ResetCache();
+        }
+
+        // 作废清单：管理员在台账里 revoke 之后，清单随插件版本下发，
+        // 命中清单的码在任何机器上都不能激活，已激活的机器下次校验也失效。
+        static void Revocation(Action<string,bool> check){
+            LicenseLibrary.Deactivate();
+            LicenseLibrary.ResetCache();
+            string message;
+            string notice;
+            string code = Sign(LicensePlans.Yearly, null, false, LicenseTime.Today, 43);
+            LicenseCode probe = LicenseCodec.Parse(code);
+            check("码可解析并带 8 字符码ID", probe != null && probe.CodeId != null && probe.CodeId.Length == LicenseCodec.GroupChars);
+            if(probe == null)return;
+            check("作废前可正常激活", LicenseLibrary.Activate(code, out message, out notice).Usable && message == null);
+
+            LicenseTestHooks.RevokedOverride = new string[]{ probe.CodeId };
+            LicenseLibrary.ResetCache();
+            LicenseReport revoked = LicenseLibrary.Current();
+            check("已激活的机器上作废码立即失效", revoked.Status == LicenseStatus.Revoked);
+            check("作废后闸门关闭", !LicenseLibrary.Gate());
+            check("作废状态有明确文案", revoked.Describe().IndexOf("作废") >= 0);
+            check("码ID 比对容忍分隔符与大小写", LicenseRevoked.Contains(LicenseCodec.Display(probe.CodeId).ToUpperInvariant()));
+
+            LicenseLibrary.Deactivate();
+            LicenseLibrary.ResetCache();
+            LicenseReport again = LicenseLibrary.Activate(code, out message, out notice);
+            check("作废码不能重新激活", !again.Usable && message != null && message.IndexOf("作废") >= 0);
+            check("激活被拒时回报码ID", again.CodeId == probe.CodeId);
+
+            LicenseTestHooks.RevokedOverride = null;
+            LicenseLibrary.ResetCache();
+            check("移出清单（换新版本）后码恢复可用", LicenseLibrary.Activate(code, out message, out notice).Usable && message == null);
             LicenseLibrary.Deactivate();
             LicenseLibrary.ResetCache();
         }

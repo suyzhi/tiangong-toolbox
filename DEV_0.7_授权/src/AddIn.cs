@@ -11,6 +11,9 @@ namespace TianGongCadSuite {
         const string AssemblyCategory="{26618395-09D6-11D1-BA07-080036230602}";
         F.AddIn addin;Connection events;ToolContext context;ToolRegistry registry;Diagnostics diagnostics;
         public void OnConnection(object application,F.SeConnectMode mode,F.AddIn instance){
+            // 自报家门：把实际加载的 DLL 路径与版本写进 panel.log。
+            // 换版本做 A/B 时先看这一行，避免"注册表换了、CAD 还加载旧 DLL"的误判。
+            try{Log.Write("AddInConnect","dll="+typeof(PanelAddIn).Assembly.Location+" ver="+typeof(PanelAddIn).Assembly.GetName().Version+" cad="+((F.Application)application).Version);}catch{}
             try{addin=instance;context=new ToolContext((F.Application)application);registry=ModuleCatalog.Create(context);
                 addin.Description="天工工具箱 DEV 0.7.0 — 授权管理版";addin.GuiVersion=42;addin.Visible=true;
                 events=new Connection(addin.AddInEvents,typeof(F.ISEAddInEvents),this);

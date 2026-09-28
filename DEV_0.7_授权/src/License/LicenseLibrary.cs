@@ -11,7 +11,8 @@ namespace TianGongCadSuite.Licensing {
         BadCode = 4,
         ClockTampered = 5,
         Environment = 6,
-        ExpiringSoon = 7
+        ExpiringSoon = 7,
+        Revoked = 8
     }
 
     public sealed class LicenseReport {
@@ -21,6 +22,10 @@ namespace TianGongCadSuite.Licensing {
         public DateTime ExpiryDate;
         public int DaysLeft;
         public string MachineCode;
+        // 码ID：这次激活/校验涉及的激活码标识（管理员台账里用的是同一个 ID）。
+        public string CodeId;
+        // 成功路径上的提示语（例如"该码已在本机激活"），失败时走 message。
+        public string Notice;
 
         public bool Usable {
             get { return Status == LicenseStatus.Valid || Status == LicenseStatus.ExpiringSoon; }
@@ -30,12 +35,13 @@ namespace TianGongCadSuite.Licensing {
             switch(Status){
                 case LicenseStatus.Valid: return PlanName + " 授权有效，剩余 " + DaysLeft + " 天（" + LicenseTime.Format(ExpiryDate) + " 到期）";
                 case LicenseStatus.ExpiringSoon: return PlanName + " 授权将在 " + DaysLeft + " 天后到期（" + LicenseTime.Format(ExpiryDate) + "）";
-                case LicenseStatus.Missing: return "未激活。请把机器码发给管理员换取激活码。";
+                case LicenseStatus.Missing: return "未激活。请输入管理员发来的激活码。";
                 case LicenseStatus.Expired: return PlanName + " 授权已于 " + LicenseTime.Format(ExpiryDate) + " 到期，请向管理员续期。";
-                case LicenseStatus.WrongMachine: return "该激活码绑定的是另一台机器，无法在本机使用。";
+                case LicenseStatus.WrongMachine: return "本机激活记录属于另一台机器（或硬件已更换），无法使用。请联系管理员重新签发激活码。";
                 case LicenseStatus.BadCode: return "激活码无效或已损坏，请重新核对（注意区分 0/O、1/I）。";
                 case LicenseStatus.ClockTampered: return "检测到系统时间被回调，授权已暂停。请把系统时间校正后重新激活。";
                 case LicenseStatus.Environment: return "运行环境异常，授权校验被阻止。" + Detail;
+                case LicenseStatus.Revoked: return "该激活码已被管理员停用（作废），请联系管理员重新签发。";
             }
             return "授权状态未知。";
         }
@@ -86,6 +92,12 @@ namespace TianGongCadSuite.Licensing {
             return code;
         }
 
+        // 作废清单命中的码：任何机器都不能用，已激活的机器下次校验也会失效。
+        internal static bool IsRevoked(LicenseCode code){
+            if(code == null || code.Payload == null)return false;
+            return LicenseRevoked.Contains(code.CodeId);
+        }
+
         internal static bool Accept(LicenseCode code){
             if(code == null)return false;
             if(LicenseCodec.VerifySignature(code))return true;
@@ -114,6 +126,12 @@ namespace TianGongCadSuite.Licensing {
                 return report;
             }
 
+            report.CodeId = code.CodeId;
+            if(IsRevoked(code)){
+                // 作废优先于其余判定：已激活的机器也会在下次校验时失效。
+                report.Status = LicenseStatus.Revoked;
+                return report;
+            }
             LicensePlan plan = code.Plan;
             if(plan == null){ report.Status = LicenseStatus.BadCode; return report; }
             report.PlanName = plan.Name;
@@ -233,47 +251,76 @@ namespace TianGongCadSuite.Licensing {
         }
 
         // 激活被拒时返回的结论：状态是"这次尝试"的结果，不会把本机已有的授权状态当成结论。
-        static LicenseReport Rejected(string reason,out string message){
+        static LicenseReport Rejected(LicenseCode code,string reason,out string message){
             message = reason;
             LicenseReport report = new LicenseReport();
             report.Status = LicenseStatus.BadCode;
             report.MachineCode = MachineCodeForDisplay();
+            report.CodeId = code == null ? null : code.CodeId;
             return report;
         }
 
+        // 兼容旧调用：只关心错误消息。
         public static LicenseReport Activate(string codeText,out string message){
+            string notice;
+            return Activate(codeText, out message, out notice);
+        }
+
+        // 激活主流程：管理员发的码在这里与本机指纹绑定。
+        // 成功时 message=null，notice 里是给用户看的提示（含码ID）。
+        public static LicenseReport Activate(string codeText,out string message,out string notice){
+            notice = null;
             if(LicenseTestHooks.CodeOverride != null){
                 message = null;
                 ResetCache();
                 return Current();
             }
             LicenseCode code = LicenseCodec.Parse(codeText);
-            if(code == null)return Rejected("激活码格式不正确或抄写有误，请整段复制后重试。", out message);
+            if(code == null)return Rejected(null,"激活码格式不正确或抄写有误，请整段复制后重试。", out message);
             if(!Accept(code))
-                return Rejected("激活码签名校验失败，该码不是由本插件管理员签发的。" + " [diag " + DiagCode(code) + "]", out message);
+                return Rejected(code,"激活码签名校验失败，该码不是由本插件管理员签发的。" + " [diag " + DiagCode(code) + "]", out message);
+            if(IsRevoked(code))
+                return Rejected(code,"该激活码已被管理员停用（作废），请联系管理员重新签发。", out message);
             LicensePlan plan = code.Plan;
-            if(plan == null)return Rejected("激活码档位无法识别。", out message);
+            if(plan == null)return Rejected(code,"激活码档位无法识别。", out message);
 
             int today = Today;
             if(code.Payload.DayOffset > today + FutureTolerance)
-                return Rejected("激活码签发日期晚于本机时间，请先校正系统时间。", out message);
+                return Rejected(code,"激活码签发日期晚于本机时间，请先校正系统时间。", out message);
             if(today >= code.Payload.DayOffset + plan.Days)
-                return Rejected("该激活码已于 " + LicenseTime.Format(code.ExpiryDate) + " 到期。", out message);
+                return Rejected(code,"该激活码已于 " + LicenseTime.Format(code.ExpiryDate) + " 到期。", out message);
             byte[] fingerprint = MachineShort;
             if(code.MachineBound && !FingerprintMatches(code.Payload.Fingerprint))
-                return Rejected("该激活码是为另一台机器签发的。本机机器码：" + MachineCodeForDisplay(), out message);
+                return Rejected(code,"该激活码是为另一台机器签发的。本机机器码：" + MachineCodeForDisplay(), out message);
+
+            // 同一个码在本机重复输入：算已完成，不重复计数，也不当成失败。
+            // （换一台机器再输同一个码，离线环境下无法察觉——见 LICENSE.md 第 5 节的说明；
+            //   管理员在台账里作废该码后，这份作废清单会随下一个版本让它在所有机器上失效。）
+            string canonical = LicenseCodec.Canonical(code.Payload.ToBytes(), code.Signature);
+            ActivationRecord existing = LicenseStore.Load();
+            if(existing != null && string.Equals(existing.Code, canonical, StringComparison.OrdinalIgnoreCase)
+                && FingerprintMatches(existing.MachineFingerprint)){
+                ResetCache();
+                LicenseReport again = Current();
+                notice = "该激活码已经在本机激活过了，不需要重复输入（码ID " + LicenseCodec.Display(code.CodeId) + "）。";
+                again.Notice = notice;
+                message = null;
+                return again;
+            }
 
             ActivationRecord record = new ActivationRecord();
             record.MachineFingerprint = fingerprint;
             record.ActivatedDay = today;
             record.Counter = Math.Max(LicenseStore.Counter(), 0L) + 1;
-            record.Code = LicenseCodec.Canonical(code.Payload.ToBytes(), code.Signature);
+            record.Code = canonical;
             if(!LicenseStore.Save(record))
-                return Rejected("无法写入激活文件，请用管理员身份运行一次，或检查磁盘权限。", out message);
+                return Rejected(code,"无法写入激活文件，请用管理员身份运行一次，或检查磁盘权限。", out message);
             ResetCache();
             message = null;
             LicenseReport report = Current();
-            if(!report.Usable && report.Status != LicenseStatus.ExpiringSoon)
+            notice = "激活成功，该激活码已绑定本机（码ID " + LicenseCodec.Display(code.CodeId) + "）。";
+            report.Notice = notice;
+            if(!report.Usable)
                 message = "激活文件已写入，但校验未通过：" + report.Describe();
             return report;
         }
@@ -286,7 +333,7 @@ namespace TianGongCadSuite.Licensing {
             for(int i = 0; i < bytes.Length; i++){ hash ^= bytes[i]; hash *= 16777619; }
             uint sigHash = 2166136261;
             for(int i = 0; i < code.Signature.Length; i++){ sigHash ^= code.Signature[i]; sigHash *= 16777619; }
-            return "plan=" + code.Payload.PlanCode + " day=" + code.Payload.DayOffset + " flags=" + code.Payload.Flags
+            return "id=" + code.CodeId + " plan=" + code.Payload.PlanCode + " day=" + code.Payload.DayOffset + " flags=" + code.Payload.Flags
                 + " ph=" + hash.ToString("X8") + " sh=" + sigHash.ToString("X8") + " len=" + code.Text.Length
                 + " codeFp=" + Bytes(code.Payload.Fingerprint) + " machine=" + Bytes(MachineShort)
                 + " recordFp=" + Bytes(RecordFingerprint());
@@ -356,6 +403,8 @@ namespace TianGongCadSuite.Licensing {
         public static int GuardOverride = -1;
         public static int GateOverride = -1;
         public static string CodeOverride;
+        // 注入一份作废清单，用来验证"码被管理员作废后任何机器都不能激活"。
+        public static string[] RevokedOverride;
         public static bool DevKeyMode;
 
         // 开发用私钥：放在 %ProgramData%\TianGongCadSuite\license-dev.key 时，
@@ -380,6 +429,7 @@ namespace TianGongCadSuite.Licensing {
             GuardOverride = -1;
             GateOverride = -1;
             CodeOverride = null;
+            RevokedOverride = null;
             DevKeyMode = false;
             LicenseLibrary.ResetCache();
         }

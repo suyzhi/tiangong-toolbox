@@ -9,6 +9,7 @@ using F=SolidEdgeFramework;
 using P=SolidEdgePart;
 using G=SolidEdgeGeometry;
 using S=SolidEdgeFrameworkSupport;
+using W=System.Windows.Forms;
 
 namespace TianGongCadSuite {
     public static class AutoHoleTests {
@@ -226,7 +227,289 @@ namespace TianGongCadSuite {
             string sum = HoleCheck.Summary(new List<HoleIssue>(), 10, 4);
             Assert(sum.Contains("没有发现"), "无问题时摘要文案，实得 [" + sum + "]");
             Assert(HoleCheck.Summary(new List<HoleIssue>{ new HoleIssue{ Kind = HoleIssueKind.MissingHole } }, 10, 4).Contains("漏打孔 1"), "有漏孔时摘要分类计数");
+            ShapePure();
             Console.WriteLine("AUTO-HOLE PURE ASSERTIONS " + checks);
+        }
+
+        // ---------- 纯逻辑：孔形状（2D 剖面 / 3D 参考都吃这一份定义） ----------
+        // 预览画出来的形状如果不等于 CAD 实际切出来的形状，那这个预览就是在骗人。
+        // 所以这里逐项钉住几何：每一项都注明是"CAD 实测"还是"表值"。
+        static void ShapePure(){
+            // ① 孔口倒角的实测语义：Setback 是径向增量，Angle 是从孔轴量，轴向深 = Setback/tan(Angle)。
+            //    依据 tools/ChamferProbe.cs 的切除体积（Φ6 通孔、10mm 板）：
+            //      2/60° 实测环体积 26.602 mm³，本式 26.602；2/30° 实测 79.807，本式 79.807；
+            //      3/60° 实测 65.297，本式 65.297。另外三种解释分别差 3 倍以上。
+            Assert(Math.Abs(HoleShapeBuilder.ChamferDepthMm(0.5, 45) - 0.5) < 1e-9, "45° 倒角：轴向深 = 径向增量");
+            Assert(Math.Abs(HoleShapeBuilder.ChamferDepthMm(2, 60) - 2 / Math.Tan(Math.PI / 3)) < 1e-9,
+                   "60° 倒角：轴向深 = Setback/tan(60°) = " + (2 / Math.Tan(Math.PI / 3)).ToString("0.####"));
+            Assert(Math.Abs(HoleShapeBuilder.ChamferDepthMm(2, 30) - 2 / Math.Tan(Math.PI / 6)) < 1e-9, "30° 倒角轴向深");
+            Assert(HoleShapeBuilder.ChamferDepthMm(2, 60) < HoleShapeBuilder.ChamferDepthMm(2, 30),
+                   "角度越大倒角越浅（和「角度越大越深」的直觉相反，是实测结论）");
+
+            // ② V 型钻尖：角度是钻尖夹角，高度 = r/tan(角度/2)。CAD 实测 coneH = r/tan(59°)。
+            Assert(Math.Abs(HoleShapeBuilder.TipHeightMm(3, 118) - 3 / Math.Tan(59 * Math.PI / 180)) < 1e-9,
+                   "118° 钻尖高度 = r/tan(59°)");
+            // 与原生测试里那一行逐字对齐（那边用米，这边用毫米，所以要 ×1000）：
+            //   double coneH = 0.0024585 / Math.Tan(59.0 * Math.PI / 180.0);
+            double nativeConeHmm = 0.0024585 / Math.Tan(59.0 * Math.PI / 180.0) * 1000.0;
+            Assert(Math.Abs(HoleShapeBuilder.TipHeightMm(2.4585, 118) - nativeConeHmm) < 1e-9,
+                   "与原生测试里的 coneH 公式一致：" + HoleShapeBuilder.TipHeightMm(2.4585, 118).ToString("0.####")
+                   + " vs " + nativeConeHmm.ToString("0.####"));
+
+            // ③ 锥形沉孔锥座：h = (R - r)/tan(角度/2)。CAD 实测 Φ11/90° 收口到 Φ5 时 h = 3mm。
+            Assert(Math.Abs(HoleShapeBuilder.CountersinkDepthMm(5.5, 2.5, 90) - 3.0) < 1e-9, "Φ11/90° 锥座深 3mm");
+            Assert(Math.Abs(HoleShapeBuilder.CountersinkDepthMm(6.5, 3.0, 90) - 3.5) < 1e-9, "Φ13/90° 锥座深 3.5mm");
+
+            // ④ 通孔剖面：轴线 -> 孔口 -> 孔底 -> 轴线，深度就是板厚
+            var th = new HoleSpec { Kind = HoleKind.Through, HoleDiameter = 6, Depth = 0 };
+            var sh = HoleShapeBuilder.Build(th, 10);
+            Assert(sh.Wall.Count == 4, "通孔轮廓 4 个点，实得 " + sh.Wall.Count);
+            Assert(Math.Abs(sh.Wall[1].R - 3) < 1e-9 && Math.Abs(sh.Wall[1].Z) < 1e-9, "孔口在 (r=3, z=0)");
+            Assert(Math.Abs(sh.Wall[2].R - 3) < 1e-9 && Math.Abs(sh.Wall[2].Z - 10) < 1e-9, "孔底在 (r=3, z=板厚)");
+            Assert(Math.Abs(sh.Wall[3].R) < 1e-9 && Math.Abs(sh.Wall[3].Z - 10) < 1e-9, "轮廓收在轴线上");
+            Assert(sh.VoidDepthMm == 10, "贯通孔的孔深 = 参考板厚");
+
+            // ⑤ 盲孔 + V 型底：圆柱段到 (深-钻尖高)，再收到轴线
+            var blind = new HoleSpec { Kind = HoleKind.Through, HoleDiameter = 6, Depth = 10, Bottom = HoleBottom.VBottom, BottomAngle = 118 };
+            var sb = HoleShapeBuilder.Build(blind, 0);
+            double tip = 3 / Math.Tan(59 * Math.PI / 180);
+            Assert(Math.Abs(sb.TipHeightMm - tip) < 1e-9, "V 底钻尖高 " + tip.ToString("0.###"));
+            Assert(Math.Abs(sb.Wall[sb.Wall.Count - 2].Z - (10 - tip)) < 1e-9, "圆柱段止于 深-钻尖高");
+            Assert(Math.Abs(sb.Wall[sb.Wall.Count - 1].Z - 10) < 1e-9, "钻尖落在名义深度上");
+            Assert(!sb.Through && sb.ThicknessMm > 10, "盲孔参考板厚必须大于孔深，实得 " + sb.ThicknessMm);
+
+            // ⑥ 平底盲孔：轮廓直接走到底，没有钻尖
+            var flat = new HoleSpec { Kind = HoleKind.Through, HoleDiameter = 6, Depth = 10, Bottom = HoleBottom.Flat };
+            var sf = HoleShapeBuilder.Build(flat, 0);
+            Assert(sf.TipHeightMm == 0, "平底没有钻尖高度");
+            Assert(!sf.Through && sf.ThicknessMm >= 12, "平底盲孔板厚留了余料 " + sf.ThicknessMm);
+
+            // ⑦ 圆柱沉孔：孔口是沉孔直径，沉孔底再收到主孔直径
+            var cbSpec = new HoleSpec { Kind = HoleKind.Counterbore, ThreadSize = "M6", HoleDiameter = 6.6,
+                                        CounterboreDiameter = 11, CounterboreDepth = 6.5, Depth = 0 };
+            var sc = HoleShapeBuilder.Build(cbSpec, 12);
+            Assert(Math.Abs(sc.MouthDiameterMm - 11) < 1e-9, "沉孔的孔口直径 = 沉孔直径");
+            Assert(sc.Wall.Count == 6, "沉孔轮廓 6 个点，实得 " + sc.Wall.Count);
+            Assert(Math.Abs(sc.Wall[1].R - 5.5) < 1e-9 && Math.Abs(sc.Wall[2].Z - 6.5) < 1e-9, "沉孔直壁 Φ11 深 6.5");
+            Assert(Math.Abs(sc.Wall[3].R - 3.3) < 1e-9, "沉孔底收到通孔 Φ6.6");
+
+            // ⑧ 锥形沉孔：孔口 Φ，锥座结束后是主孔
+            var csSpec = new HoleSpec { Kind = HoleKind.Countersink, HoleDiameter = 5, CountersinkDiameter = 11, CountersinkAngle = 90, Depth = 0 };
+            var ss = HoleShapeBuilder.Build(csSpec, 10);
+            Assert(Math.Abs(ss.CountersinkDepMm - 3.0) < 1e-9, "Φ11/90° 锥座深 3");
+            Assert(Math.Abs(ss.Wall[2].R - 2.5) < 1e-9 && Math.Abs(ss.Wall[2].Z - 3.0) < 1e-9, "锥座收口到 Φ5、深 3");
+
+            // ⑨ 孔口倒角后孔口变大：径向增量 = Setback
+            var chSpec = new HoleSpec { Kind = HoleKind.Through, HoleDiameter = 6, Depth = 0, Chamfer = true, ChamferSetback = 0.5, ChamferAngle = 45 };
+            var sc2 = HoleShapeBuilder.Build(chSpec, 10);
+            Assert(Math.Abs(sc2.MouthDiameterMm - 7.0) < 1e-9, "Φ6 加 0.5 倒角 -> 孔口 Φ7，实得 " + sc2.MouthDiameterMm);
+            Assert(chSpec.Kind == HoleKind.Through, "（前置）孔型还是通孔");
+            // 锥形沉孔本身就是一个锥座，CAD 那边明确跳过倒角，预览也不能给它叠一个
+            var csCh = csSpec.Clone(); csCh.Chamfer = true;
+            Assert(!HoleShapeBuilder.Build(csCh, 10).Chamfer, "锥形沉孔不叠加孔口倒角（与 CAD 侧一致）");
+
+            // ⑩ 螺纹孔：实体孔是内小径，装饰螺纹用公称直径，所以装饰螺纹一定比孔大
+            var tapSpec = HoleMatcher.FromRow(HoleMatcher.Find("M6").Value, HoleKind.Tapped);
+            var st = HoleShapeBuilder.Build(tapSpec, 0);
+            Assert(st.Tapped && Math.Abs(st.HoleDiameterMm - 4.917) < 1e-9, "M6 螺纹孔实体孔径 = 内小径 4.917");
+            Assert(Math.Abs(st.ThreadMajorMm - 6) < 1e-9, "M6 装饰螺纹公称直径 6");
+            Assert(st.CosmeticThread, "装饰螺纹要比实体孔大，才画得出来");
+
+            // ⑪ 参考板厚：贯通孔按孔径给，盲孔保证孔底有余料，都取到 0.5
+            Assert(HoleShapeBuilder.ReferenceThicknessMm(th) >= 3, "Φ6 通孔的示意板厚不至于薄到看不出");
+            for (int i = 0; i < HoleMatcher.Table.Length; i++) {
+                var r = HoleMatcher.Table[i];
+                var mt = HoleShapeBuilder.Build(new HoleSpec { Kind = HoleKind.Tapped, ThreadSize = r.Size, HoleDiameter = r.MinorDia, Depth = 12, Bottom = HoleBottom.Flat }, 0);
+                Assert(mt.ThicknessMm > mt.DepthMm, r.Size + " 盲孔示意板厚必须厚于孔深 " + mt.ThicknessMm);
+                Assert(Math.Abs(mt.ThicknessMm * 2 - Math.Round(mt.ThicknessMm * 2)) < 1e-9, r.Size + " 示意板厚取到 0.5");
+            }
+
+            // ⑫ 不成立的规格：预览必须拒画，不能画一个看着挺像、其实打不出来的形状
+            var badCb = new HoleSpec { Kind = HoleKind.Counterbore, HoleDiameter = 11, CounterboreDiameter = 6.6, CounterboreDepth = 6.5, Depth = 0 };
+            Assert(HoleShapeBuilder.Build(badCb, 0).Problem.Length > 0,
+                   "沉孔直径小于孔径时要报错，实得 [" + HoleShapeBuilder.Build(badCb, 0).Problem + "]");
+            var badCs = new HoleSpec { Kind = HoleKind.Countersink, HoleDiameter = 12, CountersinkDiameter = 5, CountersinkAngle = 90, Depth = 0 };
+            Assert(HoleShapeBuilder.Build(badCs, 0).Problem.Length > 0, "锥孔直径小于孔径时要报错");
+            Assert(HoleShapeBuilder.Build(cbSpec, 12).Problem.Length == 0, "正常的沉孔不报错");
+            Assert(HoleShapeBuilder.Build(csSpec, 10).Problem.Length == 0, "正常的锥形沉孔不报错");
+            Assert(HoleShapeBuilder.Build(th, 10).Problem.Length == 0, "通孔不报错");
+
+            // ⑬ 轮廓必须单调向下（孔是往下走的），画图才不会自交
+            foreach (var spec in new[]{ th, blind, flat, cbSpec, csSpec, chSpec, tapSpec }) {
+                var s = HoleShapeBuilder.Build(spec, 0);
+                for (int i = 1; i < s.Wall.Count; i++)
+                    Assert(s.Wall[i].Z >= s.Wall[i - 1].Z - 1e-9,
+                           HoleSpec.KindName(spec.Kind) + " 轮廓深度单调不回头 @" + i);
+                Assert(Math.Abs(s.Wall[0].R) < 1e-9 && Math.Abs(s.Wall[s.Wall.Count - 1].R) < 1e-9,
+                       HoleSpec.KindName(spec.Kind) + " 轮廓首尾都落在轴线上");
+            }
+        }
+
+        // ---------- 界面状态回归（不需要 CAD） ----------
+        // "参数面板"这一类问题都能在这里钉死：勾了盲孔深度框还是灰的、选了 M6 孔径不回填、
+        // 换回通孔以后参数卡片里留一条空带 …… 全都不需要 CAD，直接断言控件状态。
+        // 之前这些只能靠人眼看截图，所以漏了整整两个。
+        public static void UiState(){
+            checks = 0;
+            using (var form = new AutoHoleForm(null, null)) {
+                form.CreateControl();
+                var all = new List<W.Control>();
+                Collect(form, all);
+                var through = Chk(all, "贯通");
+                var blind = Chk(all, "盲孔");
+                var chamfer = Chk(all, "孔口倒角");
+                Assert(through != null && blind != null && chamfer != null, "窗口里有贯通/盲孔/孔口倒角三个勾选框");
+                var kind = Combo(all, new string[]{ "通孔", "螺纹孔", "圆柱沉孔", "锥形沉孔" });
+                var bottom = Combo(all, new string[]{ "平底", "V 型底" });
+                var size = Combo(all, new string[]{ "自定义" });
+                Assert(kind != null && bottom != null && size != null, "窗口里有孔型/孔底/规格下拉框");
+                var dia = Num(all, 0.1M, 500M, 6M);
+                var depth = Num(all, 0.1M, 2000M, 10M);
+                var ang = Num(all, 30M, 179M, 118M);
+                Assert(dia != null && depth != null && ang != null, "窗口里有孔径/深度/孔底角度数值框");
+
+                // ① 默认贯通：深度、孔底、孔底角度都不该能改
+                Assert(through.Checked && !blind.Checked, "默认是贯通孔");
+                Assert(!depth.Enabled && !bottom.Enabled && !ang.Enabled, "贯通时深度/孔底/孔底角度都禁用");
+
+                // ② 改盲孔：深度和孔底必须立刻可用。
+                //     原来 WriteBack() 在"没选中参考孔"这条路上直接 return，跳过了 ShowKindFields，
+                //     深度框一直灰着 —— 用户勾了"盲孔"却填不了深度。
+                through.Checked = false;
+                Assert(blind.Checked, "取消贯通会自动勾上盲孔");
+                Assert(depth.Enabled, "改成盲孔后深度框必须可用（曾经是灰的）");
+                Assert(bottom.Enabled, "改成盲孔后孔底下拉必须可用");
+                Assert(!ang.Enabled, "平底时孔底角度仍然禁用");
+                bottom.SelectedIndex = 1;
+                Assert(ang.Enabled, "选 V 型底后孔底角度可用");
+                bottom.SelectedIndex = 0;
+
+                // ③ 孔口倒角能勾上
+                chamfer.Checked = true;
+                Assert(chamfer.Checked, "孔口倒角可以勾上");
+
+                // ④ 换孔型：沉孔那一行出现 + 卡片变高；切回通孔要收回去（中间不留空带）
+                //    注意不能断言 Control.Visible —— 窗口没 Show() 过，Visible 一律是 false。
+                //    改为断言排版结果：倒角行的位置 + 参数卡片高度，这两条正是"留不留空带"的判据。
+                Assert(RowExists(form, "沉孔Φ") && RowExists(form, "锥孔Φ"), "沉孔行和锥沉行都在（只是按孔型显示）");
+                int h0 = CardHeight(form, "孔参数");
+                int y0 = chamfer.Parent.Top;
+                kind.SelectedIndex = 2;
+                Assert(chamfer.Parent.Top > y0, "圆柱沉孔时倒角行被顶下一行（给沉孔行让位）");
+                Assert(CardHeight(form, "孔参数") > h0, "多一行时参数卡片变高");
+                kind.SelectedIndex = 0;
+                Assert(chamfer.Parent.Top == y0, "切回通孔后倒角行顶回原位");
+                Assert(CardHeight(form, "孔参数") == h0, "切回通孔后参数卡片收回原高度，中间不留空带");
+
+                // ⑤ 选标准规格：孔径要按表回填。没选中参考孔（草稿）时也必须一样 ——
+                //    原来 ApplySizeChange 在 g==null 时直接 return，于是"选了 M6 孔径还是 6.00"。
+                kind.SelectedIndex = 1;
+                int mi = IndexOfItem(size, "M6");
+                Assert(mi > 0, "规格下拉里有 M6");
+                size.SelectedIndex = mi;
+                Assert(Math.Abs((double)dia.Value - 4.917) < 0.01, "选 M6 后孔径回填成内小径 4.917，实得 " + dia.Value);
+
+                // ⑥ 换孔型同样按表重填：螺纹孔 M6 切成通孔 -> M6 的中等装配过孔 6.6
+                kind.SelectedIndex = 0;
+                Assert(Math.Abs((double)dia.Value - 6.6) < 0.01, "M6 螺纹孔切成通孔后孔径 = 过孔 6.6，实得 " + dia.Value);
+
+                // ⑦ 三个按钮都在（别被排版挤没了）
+                Assert(FindButton(form, "开始打孔") != null, "有开始打孔按钮");
+                Assert(FindButton(form, "全部重选") != null, "有全部重选按钮");
+                Assert(FindButton(form, "移除选中") != null, "有移除选中按钮");
+
+                // ⑧ 孔形状参考的两个视图都在，而且真的拿到了形状
+                var sec = FindControl<HoleSectionView>(form);
+                var mdl = FindControl<HoleModelView>(form);
+                Assert(sec != null && mdl != null, "窗口里有剖面视图和 3D 参考视图");
+                Assert(sec.Shape != null && mdl.Shape != null, "两个视图都拿到了孔形状");
+                Assert(sec.Shape.Kind == HoleKind.Through && Math.Abs(sec.Shape.HoleDiameterMm - 6.6) < 0.01,
+                       "剖面画的是通孔 Φ6.6，实得 " + sec.Shape.Summary);
+                Assert(sec.Width > 0 && sec.Height > 0, "剖面视图有可画尺寸 " + sec.Width + "x" + sec.Height);
+                Assert(mdl.Width > 0 && mdl.Height > 0, "3D 参考视图有可画尺寸 " + mdl.Width + "x" + mdl.Height);
+
+                // ⑨ 改参数，形状要立刻跟着变
+                kind.SelectedIndex = 2;
+                Assert(sec.Shape.Kind == HoleKind.Counterbore, "换成圆柱沉孔后剖面跟着变");
+                Assert(sec.Shape.MouthDiameterMm > sec.Shape.HoleDiameterMm, "沉孔的孔口比主孔大");
+                dia.Value = 3.2M;
+                Assert(Math.Abs(sec.Shape.HoleDiameterMm - 3.2) < 0.01, "改孔径后剖面立刻跟着变，实得 " + sec.Shape.HoleDiameterMm);
+            }
+            Console.WriteLine("AUTO-HOLE UI ASSERTIONS " + checks);
+        }
+
+        static void Collect(W.Control c, List<W.Control> all){
+            foreach (W.Control k in c.Controls) { all.Add(k); Collect(k, all); }
+        }
+        static W.CheckBox Chk(List<W.Control> all, string text){
+            foreach (var c in all) { var b = c as W.CheckBox; if (b != null && b.Text == text) return b; }
+            return null;
+        }
+        // 按"开头这几项"认下拉框：规格框是「自定义 + 9 个标准规格」，不能要求项数完全相等。
+        static W.ComboBox Combo(List<W.Control> all, string[] items){
+            foreach (var c in all) {
+                var b = c as W.ComboBox;
+                if (b == null || b.Items.Count < items.Length) continue;
+                bool same = true;
+                for (int i = 0; i < items.Length; i++) if ((string)b.Items[i] != items[i]) { same = false; break; }
+                if (same) return b;
+            }
+            return null;
+        }
+        static int IndexOfItem(W.ComboBox c, string item){
+            if (c == null) return -1;
+            for (int i = 0; i < c.Items.Count; i++) if ((string)c.Items[i] == item) return i;
+            return -1;
+        }
+        static W.NumericUpDown Num(List<W.Control> all, decimal min, decimal max, decimal value){
+            foreach (var c in all) {
+                var n = c as W.NumericUpDown;
+                if (n != null && n.Minimum == min && n.Maximum == max && n.Value == value) return n;
+            }
+            return null;
+        }
+        static int CardHeight(W.Control root, string title){
+            var card = FindCard(root, title);
+            return card == null ? -1 : card.Height;
+        }
+        static Card FindCard(W.Control c, string title){
+            foreach (W.Control k in c.Controls) {
+                var card = k as Card;
+                if (card != null && card.Title == title) return card;
+                var deep = FindCard(k, title);
+                if (deep != null) return deep;
+            }
+            return null;
+        }
+        static bool RowExists(W.Control root, string labelText){
+            return FindLabel(root, labelText) != null;
+        }
+        static W.Label FindLabel(W.Control c, string text){
+            foreach (W.Control k in c.Controls) {
+                var l = k as W.Label;
+                if (l != null && l.Text == text) return l;
+                var deep = FindLabel(k, text);
+                if (deep != null) return deep;
+            }
+            return null;
+        }
+        static T FindControl<T>(W.Control c) where T : W.Control {
+            foreach (W.Control k in c.Controls) {
+                var t = k as T;
+                if (t != null) return t;
+                var deep = FindControl<T>(k);
+                if (deep != null) return deep;
+            }
+            return null;
+        }
+        static W.Button FindButton(W.Control c, string text){
+            foreach (W.Control k in c.Controls) {
+                var b = k as W.Button;
+                if (b != null && b.Text == text) return b;
+                var deep = FindButton(k, text);
+                if (deep != null) return deep;
+            }
+            return null;
         }
 
         // ---------- 原生：装配里跨零件照孔打孔 ----------

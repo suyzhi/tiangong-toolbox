@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using A=SolidEdgeAssembly;
@@ -81,6 +81,10 @@ namespace TianGongCadSuite {
     // 在目标零件上实际打孔。
     public sealed class DrillResult {
         public int Requested, Created;
+        // 孔心位置上"本来就有孔"的个数（规格一致=已满足；规格不同=按用户意愿跳过）。
+        // 这类不算失败，也不进 Failures —— 配对打孔时很常见。
+        public int AlreadyOk;
+        public List<string> Notes = new List<string>();
         public string Method = "";
         public string Audit = "";        // 打完孔回读到的异常（例如 CAD 偷偷换了孔型）
         public List<string> Failures = new List<string>();
@@ -301,13 +305,43 @@ namespace TianGongCadSuite {
             if (e == null) return "";
             string m = e.Message;
             int hr = e.HResult;
+            if (hr == unchecked((int)0x800401FB))
+                return "CAD 没能在孔心上建出孔特征。常见原因：这个位置**已经有一个孔**了"
+                     + "（同一根轴线上重复打孔），或者孔心落在材料外面。请检查该位置后再点「开始打孔」。";
             if (hr == unchecked((int)0x80010108) || m.Contains("0x80010108") || m.Contains("断开"))
-                return "目标零件的数据连接已失效（零件可能被重新加载或被其它操作改动过）。请重新点一次打孔面，再点开始打孔。";
-            if (hr == unchecked((int)0x800401FD) || hr == unchecked((int)0x800401FB))
+                return "CAD 没能在孔心上建出孔特征（对象在创建过程中失效了）。"
+                     + "常见原因：这个位置**已经有一个孔**了。请检查该位置后重新点一次「开始打孔」。";
+            if (hr == unchecked((int)0x800401FD))
                 return "目标零件暂时不可用，请再点一次开始打孔。";
             if (hr == unchecked((int)0x80010001) || m.Contains("拒绝"))
                 return "CAD 正忙，请稍后再点一次开始打孔。";
             return m;
+        }
+
+
+        // 该位置是不是"已经有一个孔了"？——同一轴线上重复打孔会被 CAD 拒绝，
+        // 而且它只报一个含糊的 COM 错误（CO_E_OBJNOTREG / RPC_E_DISCONNECTED）。
+        // 这里用"圆边圆心到孔心的径向距离"判断：径向距离≈0 就认为这个位置已经有孔。
+        static bool ExistingHoleAt(P.RefPlane plane,P.PartDocument part,V3 localCentre,out double diameterMm){
+            diameterMm=0;
+            try{
+                V3 normal=new V3(0,0,1);
+                try{Array n=new double[3];plane.GetNormal(ref n);normal=V3.From(n).Unit();}catch{}
+                if(part.Models.Count<1)return false;
+                var body=(G.Body)((P.Model)part.Models.Item(1)).Body;
+                foreach(G.Edge edge in (G.Edges)body.get_Edges(G.FeatureTopologyQueryTypeConstants.igQueryAll)){
+                    var circle=edge.Geometry as G.Circle;
+                    if(circle==null)continue;
+                    Array c=new double[3],ax=new double[3];double r=0;
+                    try{circle.GetCircleData(ref c,ref ax,out r);}catch{continue;}
+                    if(r<=0)continue;
+                    V3 delta=V3.From(c)-localCentre;
+                    double axial=delta.Dot(normal);
+                    double radial=(delta-normal*axial).Length;
+                    if(radial<0.0005){diameterMm=r*2000.0;return true;}
+                }
+            }catch(Exception e){Log.Write("ExistingHoleAt",e);}
+            return false;
         }
 
         // 基准面对象还活着吗？随便读一个轻量属性，死了会抛 COM 异常。
@@ -447,6 +481,12 @@ namespace TianGongCadSuite {
         // depthMm > 0 时打有限深度的盲孔，否则贯通。
         static bool DrillOne(P.PartDocument part, P.Model model, P.RefPlane plane, V3 localCentre, P.HoleData data, double depthMm, out string why, out P.Hole created){
             why = ""; created = null;
+            // 先把"这个位置已经有孔"挡在前头，别让 CAD 报一个含糊的 COM 错误。
+            double existingDiameter;
+            if (ExistingHoleAt(plane, part, localCentre, out existingDiameter)) {
+                why = "这个位置已经有孔了（Φ" + existingDiameter.ToString("0.##") + "），已跳过 —— 同一根轴线上重复打孔 CAD 会拒绝。";
+                return false;
+            }
             P.Profile profile = null;
             try {
                 profile = Attempt("建轮廓", () => part.ProfileSets.Add().Profiles.Add(plane));
@@ -462,7 +502,7 @@ namespace TianGongCadSuite {
                         var sideLocal = side;
                         h = Attempt("打孔", () => blind ? model.Holes.AddFinite(profile, sideLocal, depthMm * MmToM, data)
                                                         : model.Holes.AddThroughAll(profile, sideLocal, data));
-                    } catch (Exception e) { why = "打孔失败：" + e.Message; continue; }
+                    } catch (Exception e) { why = "打孔失败：" + Friendly(e); continue; }
                     if (h == null) { why = "打孔失败：CAD 未返回孔特征"; continue; }
                     object desc = null;
                     var st = h.GetStatusEx(out desc);
@@ -675,9 +715,53 @@ namespace TianGongCadSuite {
         }
 
         // 一批不同规格的孔一次打完。基准面只建一次，每个规格各自建 HoleData。
+
+        // 原位编辑（在装配里双击零件）时，用户点选的面来自"装配里的实例"那份文档对象，
+        // 而天工CAD 只认"正在编辑的那个零件文档"——用它建孔会被拒绝（RPC_E_DISCONNECTED）。
+        // 这里把目标面重新锚定到活动零件文档上的**同一张面**：Part/Face 换成活动文档的，
+        // 装配->局部的坐标映射（Placement）和平面数据（Plane）保持原样，孔心换算因此不受影响。
+        public static TargetFace AnchorToActivePart(TargetFace target){
+            if(target==null||target.Part==null)return target;
+            P.PartDocument active=null;
+            try{active=target.Part.Application.ActiveDocument as P.PartDocument;}catch(Exception e){Log.Write("AnchorFaceApp",e);return target;}
+            if(active==null)return target;                                   // 活动文档不是零件：维持原样（装配上下文）
+            string activeName=Name(active), targetName=Name(target.Part);
+            if(string.IsNullOrEmpty(activeName)||string.IsNullOrEmpty(targetName))return target;
+            if(!string.Equals(activeName,targetName,StringComparison.OrdinalIgnoreCase))return target;
+            try{
+                if(active.Models.Count<1)return target;
+                var model=(P.Model)active.Models.Item(1);
+                V3 localPoint=target.Placement.InversePoint(target.Plane.Point);
+                V3 localNormal=target.Placement.InverseNormal(target.Plane.Normal).Unit();
+                G.Face face=null;double best=double.MaxValue;
+                foreach(G.Face candidate in (G.Faces)((G.Body)model.Body).get_Faces(G.FeatureTopologyQueryTypeConstants.igQueryAll)){
+                    var plane=candidate.Geometry as G.Plane;
+                    if(plane==null)continue;
+                    Array point=new double[3],normal=new double[3];
+                    try{plane.GetPlaneData(ref point,ref normal);}catch{continue;}
+                    V3 candidateNormal=V3.From(normal).Unit();
+                    if(Math.Abs(candidateNormal.Dot(localNormal))<0.999)continue;
+                    double distance=Math.Abs((V3.From(point)-localPoint).Dot(localNormal));
+                    if(distance<best){best=distance;face=candidate;}
+                }
+                if(face==null||best>1e-6)return target;                      // 找不到同一张面：别硬换
+                var anchored=new TargetFace();
+                anchored.Plane=target.Plane;
+                anchored.Face=face;
+                anchored.Part=active;
+                anchored.Placement=target.Placement;
+                anchored.Bounds=target.Bounds;
+                try{anchored.PartName=Name(active);}catch{anchored.PartName=target.PartName;}
+                anchored.Label="平面 "+face.ID;
+                return anchored;
+            }catch(Exception e){Log.Write("AnchorFace",e);return target;}
+        }
+        static string Name(P.PartDocument part){try{return part.FullName;}catch{return null;}}
+
         public static DrillResult DrillRequests(TargetFace target, IList<HoleRequest> requests){
             var result = new DrillResult();
             if (requests == null || requests.Count == 0) return result;
+            target = AnchorToActivePart(target);   // 原位编辑时把面锚定到正在编辑的文档（见上）
             result.Requested = requests.Count;
             var part = target.Part;
             P.Model model = part.Models.Count >= 1 ? part.Models.Item(1) : null;
@@ -685,21 +769,64 @@ namespace TianGongCadSuite {
             P.RefPlane plane = FindOrCreatePlane(part, target);
             if (plane == null) throw new InvalidOperationException("无法在所选面上建立打孔基准面。");
             var methods = new List<string>();
-            foreach (var r in requests) {
-                var local = target.Placement.InversePoint(r.Centre);
-                if (!local.Finite) { result.Failures.Add(r.Source + " 孔心换算失败"); continue; }
-                var one = new DrillResult();
-                P.HoleData data;
-                try { data = BuildHoleData(part, r.Spec, one); }
-                catch (Exception e) { result.Failures.Add(r.Source + " 规格无效：" + e.Message); continue; }
-                if (one.Method.Length > 0 && !methods.Contains(one.Method)) methods.Add(one.Method);
-                string why; P.Hole created;
-                if (DrillOne(part, model, plane, local, data, r.Spec == null ? 0 : r.Spec.Depth, out why, out created)) {
-                    result.Created++;
-                    string note = Audit(created, r.Spec);
-                    if (note.Length > 0 && !result.Audit.Contains(note)) result.Audit = result.Audit.Length == 0 ? note : result.Audit + "；" + note;
-                } else result.Failures.Add((r.Source.Length > 0 ? r.Source + "：" : "") + why);
+            // 整轮重试：实测（原位编辑上下文）第一次、第二次可能被 CAD 拒绝，第三次就成功；
+            // 而"把同一次调用重发 6 遍"（Attempt）救不回来。所以这里按**轮**重来：
+            // 每轮丢掉基准面缓存、重建基准面、重取模型，再打没打上的那些孔。
+            const int Rounds = 3;
+            var done = new bool[requests.Count];
+            var whyByRequest = new string[requests.Count];
+            for (int round = 1; round <= Rounds; round++) {
+                if (round > 1) {
+                    Info("整轮重试第 " + round + " 轮（重建基准面后重来）");
+                    DropCache(part);
+                    try {
+                        plane = FindOrCreatePlane(part, target);
+                        if (part.Models.Count >= 1) model = part.Models.Item(1);
+                    } catch (Exception e) { Info("重建基准面失败：" + Friendly(e)); }
+                }
+                bool anyLeft = false;
+                for (int i = 0; i < requests.Count; i++) {
+                    if (done[i]) continue;
+                    var r = requests[i];
+                    var local = target.Placement.InversePoint(r.Centre);
+                    if (!local.Finite) { whyByRequest[i] = r.Source + " 孔心换算失败"; continue; }
+                    // 孔心位置上已经有孔了？—— CAD 会拒绝重复建孔且只报含糊的 COM 错误，
+                    // 所以我们自己先认出来：规格一致就算"已满足"，规格不同就明说"已跳过"。
+                    double existing;
+                    if (ExistingHoleAt(plane, part, local, out existing) && round == 1) {
+                        double want = r.Spec == null ? 0 : r.Spec.HoleDiameter;
+                        string where = r.Source.Length > 0 ? r.Source + "：" : "";
+                        if (want > 0 && Math.Abs(existing - want) <= 0.05) {
+                            result.AlreadyOk++;
+                            result.Notes.Add(where + "这个位置已经有同规格的孔（Φ" + existing.ToString("0.##") + "），无需再打。");
+                        } else {
+                            result.AlreadyOk++;
+                            result.Notes.Add(where + "这个位置已经有孔（Φ" + existing.ToString("0.##") + "），规格与要打的不同，已跳过。");
+                        }
+                        done[i] = true;
+                        whyByRequest[i] = null;
+                        continue;
+                    }
+                    var one = new DrillResult();
+                    P.HoleData data;
+                    try { data = BuildHoleData(part, r.Spec, one); }
+                    catch (Exception e) { whyByRequest[i] = r.Source + " 规格无效：" + e.Message; continue; }
+                    if (one.Method.Length > 0 && !methods.Contains(one.Method)) methods.Add(one.Method);
+                    string why; P.Hole created;
+                    if (DrillOne(part, model, plane, local, data, r.Spec == null ? 0 : r.Spec.Depth, out why, out created)) {
+                        done[i] = true;
+                        result.Created++;
+                        string note = Audit(created, r.Spec);
+                        if (note.Length > 0 && !result.Audit.Contains(note)) result.Audit = result.Audit.Length == 0 ? note : result.Audit + "；" + note;
+                        whyByRequest[i] = null;
+                        continue;
+                    }
+                    whyByRequest[i] = (r.Source.Length > 0 ? r.Source + "：" : "") + why;
+                    anyLeft = true;
+                }
+                if (!anyLeft) break;
             }
+            for (int i = 0; i < requests.Count; i++) if (!done[i] && whyByRequest[i] != null) result.Failures.Add(whyByRequest[i]);
             result.Method = methods.Count > 0 ? string.Join("／", methods.ToArray()) : "—";
             return result;
         }

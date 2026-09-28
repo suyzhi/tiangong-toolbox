@@ -1,4 +1,4 @@
-﻿param([switch]$Uninstall,[string]$LibraryPath)
+param([switch]$Uninstall,[string]$LibraryPath)
 $ErrorActionPreference='Stop'
 if(![Environment]::Is64BitProcess){throw 'Please run 64-bit Windows PowerShell.'}
 $root=Split-Path $PSScriptRoot -Parent
@@ -17,8 +17,8 @@ if(!(Test-Path $dll)){throw 'Run tools\build.ps1 first.'}
 $assembly=[Reflection.AssemblyName]::GetAssemblyName($dll)
 $key=$reg.CreateSubKey($classPath)
 $key.SetValue('','TianGongCadSuite.SuiteDevAddIn')
-$key.SetValue('409','Rectangle Panel (DEV 0.4.0)')
-$key.SetValue('804',[string]([char]0x77E9)+[char]0x5F62+[char]0x677F+' (DEV 0.4.0)')
+$key.SetValue('409','TianGong Toolbox (DEV 0.7.0)')
+$key.SetValue('804',[string]([char]0x5929)+[char]0x5DE5+[char]0x5DE5+[char]0x5177+[char]0x7BB1+' (DEV 0.7.0)')
 $key.SetValue('AutoConnect',1,[Microsoft.Win32.RegistryValueKind]::DWord)
 $key.CreateSubKey('Implemented Categories\{26B1D2D1-2B03-11D2-B589-080036E8B802}').Dispose()
 $key.CreateSubKey('Implemented Categories\{62C8FE65-4EBB-45e7-B440-6E39B2CDBF29}').Dispose()
@@ -33,5 +33,16 @@ foreach($target in @($server,$server.CreateSubKey($assembly.Version.ToString()))
 $key.CreateSubKey('ProgId').SetValue('',$prog)
 $reg.CreateSubKey('Software\Classes\'+$prog+'\CLSID').SetValue('',$guid)
 $key.Dispose();$server.Dispose()
+
+# 换版本时的坑（实测）：只改 COM 注册、直接重启 CAD，CAD 有时仍加载**上一次**那份 DLL
+# （踩过：注册表已指向 0.6 的 DLL，失败栈里的源码路径却还是 0.7 的），于是"换版本 A/B"会得出
+# 错误结论。正确做法是**先关 CAD 再注册**；装了新版后用下面这条自证命令确认实际加载的 DLL。
+#
+# 注意：**不要**去删 HKCU\Software\NDS\TianGong\*AddIns\{GUID} 那个键（我试过）——
+# 删掉之后 CAD 只把它重建回来、却不再加载这个加载项，插件直接从功能区消失。
+# 这里只做提醒，不动注册表。
+$log=Join-Path $env:LOCALAPPDATA 'TianGongCadSuite\panel.log'
 Write-Output ('Registered for current user: '+$dll)
-Write-Output 'Use the TianGong CAD add-in manager to enable Rectangle Panel (DEV 0.4.0), or restart CAD.'
+Write-Output '换版本自检：启动 CAD 后运行下面这条，最后一行 AddInConnect 会自报实际加载的 DLL：'
+Write-Output ('  Select-String -Path "'+$log+'" -Pattern AddInConnect | Select-Object -Last 1')
+Write-Output 'Use the TianGong CAD add-in manager to enable TianGong Toolbox (DEV 0.7.0), or restart CAD.'

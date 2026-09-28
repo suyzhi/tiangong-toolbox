@@ -13,6 +13,39 @@ namespace PanelTests {
             Alphabet(check);
             IndependentBitPacking(check);
             MachineCode(check);
+            CodeId(check);
+        }
+
+        // 码ID：管理员台账与作废清单共用的短标识，必须稳定、唯一、只用字母表内字符。
+        static void CodeId(Action<string,bool> check){
+            LicensePayload a = new LicensePayload();
+            a.Flags = 0;
+            a.PlanCode = LicensePlans.Monthly;
+            a.DayOffset = LicenseTime.Today;
+            a.Fingerprint = new byte[LicensePayload.FingerprintSize];
+            a.Nonce = new byte[8];
+            for(int i = 0; i < a.Nonce.Length; i++)a.Nonce[i] = (byte)(i + 1);
+            LicensePayload b = new LicensePayload();
+            b.Flags = 0;
+            b.PlanCode = LicensePlans.Monthly;
+            b.DayOffset = a.DayOffset;
+            b.Fingerprint = new byte[LicensePayload.FingerprintSize];
+            b.Nonce = new byte[8];
+            for(int i = 0; i < b.Nonce.Length; i++)b.Nonce[i] = (byte)(i + 9);
+            string idA = LicenseCodec.IdOf(a.ToBytes());
+            string idB = LicenseCodec.IdOf(b.ToBytes());
+            check("码ID 为 8 个字符", idA.Length == LicenseCodec.GroupChars);
+            bool legal = true;
+            for(int i = 0; i < idA.Length; i++)legal &= LicenseCodec.Alphabet.IndexOf(idA[i]) >= 0;
+            check("码ID 只用字母表内的字符", legal);
+            check("码ID 可稳定复算", idA == LicenseCodec.IdOf(a.ToBytes()));
+            check("随机数不同则码ID 不同", idA != idB);
+            check("码ID 显示成 abcd-efgh", LicenseCodec.Display(idA).Length == idA.Length + 1 && LicenseCodec.Display(idA)[4] == '-');
+            check("码ID 宽容归一并列", LicenseCodec.NormalizeId(LicenseCodec.Display(idA).ToUpperInvariant()) == idA);
+            check("空码ID 不误判", !LicenseRevoked.Contains(null) && !LicenseRevoked.Contains(""));
+            byte[] signature = new byte[LicenseCodec.SignatureSize];
+            LicenseCode code = LicenseCodec.Parse(LicenseCodec.Compose(a.ToBytes(), signature));
+            check("解析出来的码带同一个码ID", code != null && code.CodeId == idA);
         }
 
         static void RoundTrip(Action<string,bool> check){

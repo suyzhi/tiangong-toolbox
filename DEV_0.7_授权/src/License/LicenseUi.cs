@@ -1,11 +1,13 @@
-﻿using System;
+using System;
 using System.Drawing;
 using System.IO;
 using System.Text;
 using System.Windows.Forms;
 
 namespace TianGongCadSuite.Licensing {
-    // 激活界面：显示机器码、接收激活码、就地校验并落盘。
+    // 激活界面（DEV 0.7 新方案）：
+    //   管理员只发激活码，不再收集机器码；用户把码粘进来点「激活」，这个码就在本机落盘绑定。
+    //   窗口里仍然显示机器码，但只作售后核对用。
     internal sealed class ActivationForm : Form {
         readonly TextBox machineBox;
         readonly TextBox codeBox;
@@ -18,7 +20,7 @@ namespace TianGongCadSuite.Licensing {
             MaximizeBox = false;
             MinimizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(620, 380);
+            ClientSize = new Size(660, 430);
             Font = new Font("Microsoft YaHei UI", 9f);
             BackColor = Color.FromArgb(246, 247, 249);
 
@@ -30,79 +32,81 @@ namespace TianGongCadSuite.Licensing {
             title.Location = new Point(20, 16);
             Controls.Add(title);
 
-            Label machineTitle = new Label();
-            machineTitle.Text = "第 1 步：把下面这串机器码发给管理员";
-            machineTitle.AutoSize = true;
-            machineTitle.Location = new Point(22, 56);
-            Controls.Add(machineTitle);
-
-            machineBox = new TextBox();
-            machineBox.ReadOnly = true;
-            machineBox.Font = new Font("Consolas", 14f, FontStyle.Bold);
-            machineBox.BackColor = Color.White;
-            machineBox.Location = new Point(24, 78);
-            machineBox.Size = new Size(440, 30);
-            machineBox.Text = LicenseLibrary.MachineCode();
-            Controls.Add(machineBox);
-
-            Button copyButton = new Button();
-            copyButton.Text = "复制机器码";
-            copyButton.Location = new Point(478, 77);
-            copyButton.Size = new Size(118, 30);
-            copyButton.Click += delegate {
-                try{ Clipboard.SetText(machineBox.Text); statusLabel.Text = "机器码已复制。"; }
-                catch(Exception){ statusLabel.Text = "复制失败，请手工抄写。"; }
-            };
-            Controls.Add(copyButton);
-
-            Label codeTitle = new Label();
-            codeTitle.Text = "第 2 步：管理员签发后，把激活码整段粘贴进来（有效期分一个月 / 半年 / 一年三档）";
-            codeTitle.AutoSize = true;
-            codeTitle.Location = new Point(22, 122);
-            Controls.Add(codeTitle);
+            Label hint = new Label();
+            hint.Text = "把管理员发来的激活码整段粘贴到下面的框里，点「激活」。激活后这个码就绑定本机，以后不用再输入。";
+            hint.AutoSize = false;
+            hint.Size = new Size(620, 22);
+            hint.Location = new Point(22, 50);
+            hint.ForeColor = Color.FromArgb(70, 80, 95);
+            Controls.Add(hint);
 
             codeBox = new TextBox();
             codeBox.Multiline = true;
             codeBox.ScrollBars = ScrollBars.Vertical;
             codeBox.Font = new Font("Consolas", 10f);
-            codeBox.Location = new Point(24, 146);
-            codeBox.Size = new Size(572, 116);
+            codeBox.Location = new Point(22, 74);
+            codeBox.Size = new Size(616, 132);
             codeBox.WordWrap = true;
             codeBox.TextChanged += delegate { RefreshPlan(); };
             Controls.Add(codeBox);
 
+            planLabel = new Label();
+            planLabel.AutoSize = false;
+            planLabel.Location = new Point(22, 212);
+            planLabel.Size = new Size(616, 20);
+            planLabel.ForeColor = Color.FromArgb(70, 80, 95);
+            Controls.Add(planLabel);
+
+            Label machineTitle = new Label();
+            machineTitle.Text = "本机机器码（只有售后核对时才需要，管理员发码时不用它）";
+            machineTitle.AutoSize = true;
+            machineTitle.Location = new Point(22, 240);
+            Controls.Add(machineTitle);
+
+            machineBox = new TextBox();
+            machineBox.ReadOnly = true;
+            machineBox.Font = new Font("Consolas", 12f, FontStyle.Bold);
+            machineBox.BackColor = Color.White;
+            machineBox.Location = new Point(22, 262);
+            machineBox.Size = new Size(456, 28);
+            machineBox.Text = LicenseLibrary.MachineCode();
+            Controls.Add(machineBox);
+
+            Button copyButton = new Button();
+            copyButton.Text = "复制机器码";
+            copyButton.Location = new Point(486, 261);
+            copyButton.Size = new Size(152, 30);
+            copyButton.Click += delegate {
+                try{ Clipboard.SetText(machineBox.Text); statusLabel.Text = "机器码已复制（发给管理员时可作为售后凭证）。"; }
+                catch(Exception){ statusLabel.Text = "复制失败，请手工抄写。"; }
+            };
+            Controls.Add(copyButton);
+
             Button importButton = new Button();
             importButton.Text = "从文件导入…";
-            importButton.Location = new Point(24, 272);
-            importButton.Size = new Size(110, 30);
+            importButton.Location = new Point(22, 306);
+            importButton.Size = new Size(122, 32);
             importButton.Click += delegate { ImportFromFile(); };
             Controls.Add(importButton);
 
             Button activateButton = new Button();
             activateButton.Text = "激活";
-            activateButton.Location = new Point(396, 272);
-            activateButton.Size = new Size(96, 30);
-            activateButton.Click += delegate { Activate(); };
+            activateButton.Location = new Point(414, 306);
+            activateButton.Size = new Size(110, 32);
+            activateButton.Click += delegate { DoActivate(); };
             Controls.Add(activateButton);
 
             Button closeButton = new Button();
             closeButton.Text = "关闭";
-            closeButton.Location = new Point(500, 272);
-            closeButton.Size = new Size(96, 30);
+            closeButton.Location = new Point(536, 306);
+            closeButton.Size = new Size(102, 32);
             closeButton.Click += delegate { DialogResult = DialogResult.Cancel; Close(); };
             Controls.Add(closeButton);
 
-            planLabel = new Label();
-            planLabel.AutoSize = false;
-            planLabel.Location = new Point(146, 278);
-            planLabel.Size = new Size(240, 20);
-            planLabel.ForeColor = Color.FromArgb(70, 80, 95);
-            Controls.Add(planLabel);
-
             statusLabel = new Label();
             statusLabel.AutoSize = false;
-            statusLabel.Location = new Point(24, 312);
-            statusLabel.Size = new Size(572, 52);
+            statusLabel.Location = new Point(22, 346);
+            statusLabel.Size = new Size(616, 68);
             statusLabel.ForeColor = Color.FromArgb(60, 70, 85);
             Controls.Add(statusLabel);
 
@@ -110,15 +114,19 @@ namespace TianGongCadSuite.Licensing {
             statusLabel.Text = "当前状态：" + LicenseLibrary.Current().Describe();
         }
 
+        // 粘贴过程中就先把档位、到期日和码ID显示出来，抄错时能立刻看出来。
         void RefreshPlan(){
             string text = codeBox.Text;
             LicenseCode code = LicenseCodec.Parse(text);
             if(code == null){
                 planLabel.Text = string.IsNullOrEmpty(text.Trim()) ? "" : "格式待确认…";
+                planLabel.ForeColor = Color.FromArgb(70, 80, 95);
                 return;
             }
-            planLabel.Text = code.Summary;
-            planLabel.ForeColor = LicenseCodec.VerifySignature(code) ? Color.FromArgb(20, 110, 60) : Color.FromArgb(170, 40, 40);
+            bool signed = LicenseCodec.VerifySignature(code);
+            // 码ID 已经由 Summary 带出来了，这里只补"验签不过"的提醒，避免同一行出现两次码ID。
+            planLabel.Text = code.Summary + (signed ? "" : "（签名校验不通过）");
+            planLabel.ForeColor = signed ? Color.FromArgb(20, 110, 60) : Color.FromArgb(170, 40, 40);
         }
 
         void ImportFromFile(){
@@ -131,18 +139,20 @@ namespace TianGongCadSuite.Licensing {
             }
         }
 
-        void Activate(){
+        void DoActivate(){
             string message;
-            LicenseReport report = LicenseLibrary.Activate(codeBox.Text, out message);
+            string notice;
+            LicenseReport report = LicenseLibrary.Activate(codeBox.Text, out message, out notice);
             if(message != null){
                 statusLabel.ForeColor = Color.FromArgb(170, 40, 40);
                 statusLabel.Text = message;
                 return;
             }
+            string head = string.IsNullOrEmpty(notice) ? "激活成功。" : notice;
             statusLabel.ForeColor = Color.FromArgb(20, 110, 60);
-            statusLabel.Text = "激活成功。" + report.Describe();
+            statusLabel.Text = head + "\r\n" + report.Describe();
             DialogResult = DialogResult.OK;
-            MessageBox.Show(this, "激活成功。\r\n" + report.Describe(), "天工工具箱", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, head + "\r\n" + report.Describe(), "天工工具箱", MessageBoxButtons.OK, MessageBoxIcon.Information);
             Close();
         }
     }

@@ -12,6 +12,9 @@ namespace TianGongCadSuite.Licensing {
         public string Text { get; private set; }
         public bool MachineBound { get { return Payload != null && Payload.MachineBound; } }
         public LicensePlan Plan { get { return Payload == null ? null : Payload.Plan; } }
+        // 码ID：管理员台账与作废清单里的短标识（8 字符，显示成 abcd-efgh）。
+        // 载荷里带 8 字节随机数，所以同档位、同一天、同一台机器签发的码也是不同 ID。
+        public string CodeId { get { return Payload == null ? null : LicenseCodec.IdOf(Payload.ToBytes()); } }
         public DateTime IssueDate { get { return Payload.IssueDate; } }
         public DateTime ExpiryDate { get { return Payload.ExpiryDate; } }
         public string Summary {
@@ -19,7 +22,9 @@ namespace TianGongCadSuite.Licensing {
                 if(Payload == null)return "无效";
                 LicensePlan plan = Plan;
                 string name = plan == null ? ("未知档位" + Payload.PlanCode) : plan.Name;
-                return name + " 授权，有效期至 " + LicenseTime.Format(ExpiryDate) + (MachineBound ? "，已绑定本机" : "，未绑定机器");
+                return name + " 授权，有效期至 " + LicenseTime.Format(ExpiryDate)
+                    + (MachineBound ? "，已绑定指定机器" : "，未绑定机器：激活后绑定本机")
+                    + "（码ID " + LicenseCodec.Display(CodeId) + "）";
             }
         }
     }
@@ -169,6 +174,42 @@ namespace TianGongCadSuite.Licensing {
                 builder.Append(text[i]);
             }
             return builder.ToString();
+        }
+
+        // ---------- 码ID（管理员台账 / 作废清单用） ----------
+
+        // 载荷 SHA-256 的前 5 字节，按同一套字母表编成 8 个字符。够短、可抄写、不泄露签名。
+        public static string IdOf(byte[] payload){
+            if(payload == null || payload.Length != PayloadSize)return null;
+            byte[] digest;
+            using(SHA256 hash = SHA256.Create())digest = hash.ComputeHash(payload);
+            byte[] head = new byte[GroupBytes];
+            Buffer.BlockCopy(digest, 0, head, 0, GroupBytes);
+            char[] text = new char[GroupChars];
+            EncodeGroup(head, 0, text, 0);
+            return new string(text);
+        }
+
+        // 码ID 的宽容处理：去掉分隔符、转小写、纠正 0/O 与 1/I/L 的常见误写。
+        public static string NormalizeId(string text){
+            if(string.IsNullOrEmpty(text))return "";
+            StringBuilder builder = new StringBuilder(text.Length);
+            for(int i = 0; i < text.Length; i++){
+                char c = text[i];
+                if(c == '-' || c == '_' || char.IsWhiteSpace(c))continue;
+                if(c >= 'A' && c <= 'Z')c = (char)(c + 32);
+                if(c == 'o')c = '0';
+                else if(c == 'l' || c == 'i')c = '1';
+                builder.Append(c);
+            }
+            return builder.ToString();
+        }
+
+        // 显示成 abcd-efgh，便于在台账、聊天记录里核对。
+        public static string Display(string codeId){
+            string normalized = NormalizeId(codeId);
+            if(normalized.Length <= 4)return normalized;
+            return normalized.Substring(0, 4) + "-" + normalized.Substring(4);
         }
 
         // ---------- 验签 ----------

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Windows.Forms;
 
 namespace TianGongCadSuite.Licensing {
@@ -30,7 +30,7 @@ namespace TianGongCadSuite.Licensing {
                 MessageBox.Show("该授权已于 " + LicenseTime.Format(report.ExpiryDate) + " 到期，请输入新的激活码。",
                     "天工工具箱", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }else if(report.Status == LicenseStatus.WrongMachine){
-                MessageBox.Show("当前激活文件属于另一台机器，无法在本机使用。\r\n本机机器码：" + report.MachineCode + "\r\n请把机器码发给管理员重新签发。",
+                MessageBox.Show("本机激活记录属于另一台机器（或硬件已更换），无法在本机使用。\r\n请联系管理员重新发一个激活码；本机机器码：" + report.MachineCode + "（仅供售后核对）。",
                     "天工工具箱", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }else if(report.Status == LicenseStatus.ClockTampered || report.Status == LicenseStatus.Environment){
                 MessageBox.Show(report.Describe(), "天工工具箱", MessageBoxButtons.OK, MessageBoxIcon.Warning);

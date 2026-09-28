@@ -1,4 +1,14 @@
-# 天工 CAD 插件平台 DEV 0.4
+# 天工 CAD 插件平台 DEV 0.7（唯一在用宿主）
+
+本目录是**当前唯一在用的宿主**：DEV 0.6 的「孔形状参考面板」与 DEV 0.7 的「授权与防盗版」已合并到这里。
+
+- 授权方案（管理员只发码 → 用户激活即绑定本机 → 台账 + 作废黑名单）：[LICENSE.md](LICENSE.md)
+- 真机鼠标点击实测记录与截图：[MOUSE-E2E-20260926.md](MOUSE-E2E-20260926.md)
+- 自动打孔与孔型预览：[AUTO-HOLE.md](AUTO-HOLE.md)、[../DEV_0.6_打孔预览/AUTO-HOLE-UI.md](../DEV_0.6_打孔预览/AUTO-HOLE-UI.md)
+- 构建产物：tools/build.ps1 → build/；授权联调：tools/LicenseAdmin/make-test-codes.ps1
+
+下面几节是各模块的历史说明（Lineup、训练数据导出等），保留供查阅。
+
 
 新增“导出出图训练数据”（命令 ID 4）：导出模型网格、三维边面、工程图视图、尺寸与公差、PDF 和原始文件副本；配套脚本生成 SVG、PNG、训练索引和验证报告。格式、使用方法和未完成项见 [TRAINING-EXPORT.md](TRAINING-EXPORT.md)。
 

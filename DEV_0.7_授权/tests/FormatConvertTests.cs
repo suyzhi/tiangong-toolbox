@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
@@ -112,7 +112,16 @@ static class FormatConvertTests {
             Assert(summary.Total==4&&summary.Converted==1&&summary.Skipped==1&&summary.Failed==1,"summary buckets statuses");
             Assert(Math.Abs(summary.SpeedupFactor-2)<1e-9,"speedup factor computed");
             string csv=summary.ToCsv(rows);
-            Assert(csv.IndexOf("\"a,b\"",StringComparison.Ordinal)>=0,"CSV quotes embedded commas");
+            // 回归：worker 必须解析到转换器自身。插件模式下当前进程是 TianGong.exe，
+        // 用 Application.ExecutablePath 当 worker 会再拉起一个天工CAD（弹"找不到文件 --worker"）
+        // 或直接拉起插件 DLL 自己，两种情况都转换不了、而且界面完全没有报错。
+        string worker=ConverterHost.Resolve();
+        Assert(worker!=null,"worker host resolves: "+(worker??"(null)"));
+        Assert(Path.GetFileName(worker)=="TianGongConverter.exe","worker host points at the converter exe, got "+Path.GetFileName(worker));
+        Assert(string.Equals(Path.GetDirectoryName(worker),Path.GetDirectoryName(typeof(ConverterHost).Assembly.Location),StringComparison.OrdinalIgnoreCase),
+            "worker host is beside the plug-in assembly (not the hosting CAD exe)");
+        Assert(File.Exists(worker),"resolved worker host actually exists on disk");
+        Assert(csv.IndexOf("\"a,b\"",StringComparison.Ordinal)>=0,"CSV quotes embedded commas");
             Assert(csv.Split('\n').Length>=5,"CSV has a header and one line per row");
         } finally { try{ Directory.Delete(root,true); }catch{} }
     }

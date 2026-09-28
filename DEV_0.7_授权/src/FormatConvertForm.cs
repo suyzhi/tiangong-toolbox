@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -44,7 +44,7 @@ namespace TianGongCadSuite {
         IntPtr jobHandle=IntPtr.Zero;
 
         public FormatConvertForm(){
-            Text="天工CAD 批量格式转换 SolidWorks / STEP (DEV 0.6.0)";
+            Text="天工CAD 批量格式转换 SolidWorks / STEP (DEV 0.7.0)";
             ClientSize=new Size(900,660);
             MinimumSize=new Size(760,560);
             StartPosition=FormStartPosition.CenterScreen;
@@ -210,7 +210,10 @@ namespace TianGongCadSuite {
             totalPlanned=items.Count;
             reportPath=Path.Combine(options.OutputRoot,"转换报告-"+DateTime.Now.ToString("yyyyMMdd-HHmmss")+".csv");
             startedAt=DateTime.Now;
-            string self=Application.ExecutablePath;
+            // 插件模式下当前进程是 TianGong.exe，Application.ExecutablePath 指向 CAD 本体，
+            // 用它当 worker 会再拉起一个天工CAD（"找不到文件 --worker"）。必须解析转换器自身。
+            string self=ConverterHost.Resolve();
+            if(self==null)self=Application.ExecutablePath;
             jobHandle=NativeJob.Create();
             int started=0;
             for(int i=0;i<plan.Count;i++){
@@ -221,7 +224,16 @@ namespace TianGongCadSuite {
                 string statusFile=Path.Combine(workRoot,"status-"+i+".txt");File.WriteAllText(statusFile,"",new UTF8Encoding(false));
                 var info=new ProcessStartInfo(self,"--worker \""+jobFile+"\" \""+statusFile+"\" \""+options.OutputRoot+"\" "+(options.FlatOutput?"1":"0")+" "+(options.VerifyReopen?"1":"0")+" "+(options.Force?"1":"0")+" \""+workRoot+"\"");
                 info.UseShellExecute=false;info.CreateNoWindow=true;info.WindowStyle=ProcessWindowStyle.Hidden;
-                var process=Process.Start(info);
+                Process process;
+                try{
+                    process=Process.Start(info);
+                }catch(Exception e){
+                    // 以前这里异常会直接冒泡成"未处理的异常"，界面什么都不显示、看起来像点了没反应。
+                    Log.Write("Convert","启动 worker 失败 self="+self+"："+e);
+                    ConvertLog.Append(statusFile,ConvertProtocol.Line("FATAL","启动 worker 失败："+e.Message));
+                    AppendLog("启动转换进程失败："+e.Message+"（转换器路径："+self+"）。");
+                    continue;
+                }
                 NativeJob.Add(jobHandle,process);
                 processes.Add(process);statusFiles.Add(statusFile);offsets[statusFile]=0;started++;
             }

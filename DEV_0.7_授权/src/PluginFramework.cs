@@ -1,8 +1,9 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Windows.Forms;
 using F=SolidEdgeFramework;
 using A=SolidEdgeAssembly;
+using P=SolidEdgePart;
 namespace TianGongCadSuite {
     // Stable IDs must never be reused, even after removing a command.
     public sealed class ToolCommand {
@@ -49,6 +50,52 @@ namespace TianGongCadSuite {
         public ToolContext(F.Application application){Application=application;}
         public bool HasAssembly(){try{return Application.ActiveDocument is A.AssemblyDocument;}catch{return false;}}
         public A.AssemblyDocument RequireAssembly(){var document=Application.ActiveDocument as A.AssemblyDocument;if(document==null)throw new InvalidOperationException("请先打开装配文件。");return document;}
+        // 原位编辑（在装配里双击零件）时，活动文档是**零件**而不是装配。
+        // 而天工CAD 只允许往"正在编辑的那个零件文档"里写模型，所以这个上下文恰恰是打孔唯一能成功的地方
+        // —— 插件必须在这里也能用。做法：遍历打开的装配，谁的实例零件就是当前活动零件，就返回谁。
+        public A.AssemblyDocument EditingAssembly(){
+            try{
+                var part=Application.ActiveDocument as P.PartDocument;
+                if(part==null){Log.Write("ContextProbe","活动文档不是零件文档");return null;}
+                string partName=null;try{partName=part.FullName;}catch(Exception e){Log.Write("ContextProbe","读活动零件 FullName 失败:"+e.Message);}
+                if(string.IsNullOrEmpty(partName)){Log.Write("ContextProbe","活动零件 FullName 为空");return null;}
+                int documents=Application.Documents.Count;
+                for(int i=1;i<=documents;i++){
+                    var assembly=Application.Documents.Item(i) as A.AssemblyDocument;
+                    if(assembly==null)continue;
+                    try{
+                        foreach(A.Occurrence occurrence in assembly.Occurrences){
+                            var occurrencePart=occurrence.OccurrenceDocument as P.PartDocument;
+                            if(occurrencePart==null)continue;
+                            string name=null;try{name=occurrencePart.FullName;}catch{}
+                            if(string.Equals(name,partName,StringComparison.OrdinalIgnoreCase))return assembly;
+                        }
+                    }catch{}
+                }
+            }catch(Exception e){Log.Write("EditingAssembly",e);}
+            Log.Write("ContextProbe","打开的装配里没有匹配该零件的实例：" + SafeName(Application.ActiveDocument));
+            return null;
+        }
+        // 可用上下文 = 活动文档是装配，或者正在原位编辑装配里的某个零件。
+        // 判定结果变化时写一行日志：命令禁用（按钮变灰）时用户看不到任何提示，
+        // 这行日志是唯一能自证"为什么灰"的地方。
+        static string lastContextProbe;
+        public bool HasEditableContext(){
+            bool hasAssembly=HasAssembly();
+            var editing=hasAssembly?null:EditingAssembly();
+            bool result=hasAssembly||editing!=null;
+            string summary="activeIsAssembly="+hasAssembly+" editingAssembly="+(editing==null?"null":SafeName(editing))+" => "+result;
+            if(summary!=lastContextProbe){lastContextProbe=summary;Log.Write("ContextProbe",summary);}
+            return result;
+        }
+        static string SafeName(object document){try{dynamic d=document;return Convert.ToString(d.Name);}catch(Exception e){return "读名字失败:"+e.Message;}}
+        public A.AssemblyDocument RequireEditableAssembly(){
+            var assembly=Application.ActiveDocument as A.AssemblyDocument;
+            if(assembly!=null)return assembly;
+            assembly=EditingAssembly();
+            if(assembly==null)throw new InvalidOperationException("请先打开装配文件，或在装配里双击要打孔的零件进入原位编辑。");
+            return assembly;
+        }
         // All modeless tools share one selection session; switching tools closes the previous form.
         public void Show(Func<Form> create,Action<Form> start){
             TianGongCadSuite.Licensing.LicenseGate.Require();

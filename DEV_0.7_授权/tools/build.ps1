@@ -48,6 +48,9 @@ if($LASTEXITCODE -ne 0){throw 'Launcher build failed'}
 if($LASTEXITCODE -ne 0){throw 'Training export runner build failed'}
 & $csc /nologo /target:winexe /platform:x64 /out:"$bin\TianGongConverter.exe" /reference:"$interop" /reference:"$bin\TianGongCadSuite.dll" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:Microsoft.CSharp.dll (Join-Path $PSScriptRoot 'ConverterMain.cs')
 if($LASTEXITCODE -ne 0){throw 'TianGongConverter build failed'}
+# 打孔工作器：插件在独立进程里调它完成写模型（进程内写会被 CAD 拒绝，见 HANDOVER 第 5 节）
+& $csc /nologo /target:exe /platform:x64 /out:"$bin\TianGongDrillWorker.exe" /reference:"$interop" /reference:"$bin\TianGongCadSuite.dll" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Data.dll /reference:Microsoft.CSharp.dll (Join-Path $PSScriptRoot 'DrillWorker.cs')
+if($LASTEXITCODE -ne 0){throw '打孔工作器编译失败'}
 $tests=@(Get-ChildItem (Join-Path $root 'tests') -Filter '*.cs' -ErrorAction SilentlyContinue | ForEach-Object FullName)
 if($tests.Count){& $csc /nologo /target:exe /platform:x64 /out:"$bin\PanelTests.exe" /reference:"$interop" /reference:"$bin\TianGongCadSuite.dll" /reference:Microsoft.CSharp.dll /reference:System.Data.dll /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Management.dll $tests;if($LASTEXITCODE -ne 0){throw '测试程序编译失败'}}
 
