@@ -120,6 +120,8 @@ DEV_0.7_授权\tools\make-installer.ps1 -Version 0.7.2  # 换版本
 | --- | --- | --- |
 | **换 DLL 后 CAD 可能仍用旧版** | 注册表已指向新 DLL，实际加载的还是上一次那份 | 先关 CAD 再注册；启动后查 `%LOCALAPPDATA%\TianGongCadSuite\panel.log` 里最后一条 `AddInConnect`（插件自报 dll 路径+版本） |
 | **不要删 NDS 的加载项记录** | 手删 `HKCU\Software\NDS\TianGong\Version 225\AddIns\{GUID}` 后，CAD 只把它重建回来、插件却不再加载，功能区直接少一批命令 | 需要恢复时把 `(default)=天工工具箱 (DEV 0.7.0)`、`Cookie=<原值>`、`AutoConnect=1` 写回 |
+| **安装"成功"了功能区却什么都没有** | `HKCU\Software\NDS\TianGong\Version 225\AddIns\{GUID}\AutoConnect` 为 0 时，CAD 照样把插件列进它自己的会话日志 `Registered AddIns`（GUID、路径、版本全对），但紧接着那行写 **`Connect: FALSE`**——不连接、不报错、功能区什么都不出现，而安装程序这边一切正常 | 0.7.1 起安装程序会自动把它改成 1（保留名称与 Cookie，绝不删记录）。判断"到底连上没连上"看 CAD 自己的会话日志 `%TEMP%\cmdlog V225.txt` 里那行 `Connect:`，比面板日志更硬 |
+| **`.ps1` 丢了 UTF-8 BOM** | `安装.cmd` 走的是 `powershell.exe`（Windows PowerShell 5.1），读**无 BOM** 的 .ps1 会按系统 ANSI(GBK) 解码，中文注释当场变乱码 → 满屏 `Missing expression` / `Unexpected token`，安装半途而废 | 别用会吃掉 BOM 的编辑器或改写工具；`make-installer.ps1` 打包时已强制给 install.ps1 补 BOM |
 | **MessageBox 不能用 WM_CLOSE 关** | 弹框不消失，插件状态卡在"打孔中…" | 用真鼠标点确定/取消按钮 |
 | **单跑授权单测会清掉本机激活** | `PanelTests.exe --license` 会 `Deactivate()` + 清 HKCU | 跑完要重新激活一次 |
 | **CAD 是单实例程序** | 想并行起两个实例会静默退出 | 一次只跑一个 CAD 实例 |
