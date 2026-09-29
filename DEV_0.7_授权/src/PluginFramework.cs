@@ -24,11 +24,16 @@ namespace TianGongCadSuite {
         readonly List<IToolModule> modules=new List<IToolModule>();
         readonly List<ToolCommand> commands=new List<ToolCommand>();
         readonly Dictionary<int,ToolCommand> runtime=new Dictionary<int,ToolCommand>();
+        readonly HashSet<int> retired=new HashSet<int>();
         public IList<ToolCommand> Commands {get{return commands.AsReadOnly();}}
+        // 下线某个命令：不再往功能区注册（实现仍编译在 DLL 里，把这个 Retire 调用删掉就能恢复）。
+        // 注意：ToolCommand 的 ID 用过就永久保留，不要再分配给别的命令。
+        public void Retire(int id){retired.Add(id);}
         public void Add(IToolModule module){
             if(module==null)throw new ArgumentNullException("module");
             foreach(var m in modules)if(m.Id==module.Id)throw new ArgumentException("Duplicate module: "+module.Id);
-            var pending=new List<ToolCommand>(module.Commands);var ids=new HashSet<int>();
+            var pending=new List<ToolCommand>();foreach(var c in module.Commands)if(c!=null&&!retired.Contains(c.Id))pending.Add(c);
+            var ids=new HashSet<int>();
             foreach(var c in commands)ids.Add(c.Id);
             foreach(var c in pending)if(c==null || !ids.Add(c.Id))throw new ArgumentException("Duplicate or null command.");
             modules.Add(module);commands.AddRange(pending);
@@ -115,6 +120,11 @@ namespace TianGongCadSuite {
         public void Dispose(){}
     }
     public static class ModuleCatalog {
-        public static ToolRegistry Create(ToolContext context){var registry=new ToolRegistry();registry.Add(new InsetPanelModule(context));registry.Add(new LineupModule(context));registry.Add(new TrainingExportModule(context));registry.Add(new FormatConvertModule(context));registry.Add(new AutoHoleModule(context));return registry;}
+        // 已在功能区下线的命令（客户版不再出现）：
+        //   1 = 四面生成内嵌板（手工选四面，已被"型材自动填充"取代）
+        //   4 = 导出出图训练数据（内部研究用）
+        // 只影响"注册哪些按钮"；对应实现仍编译在 DLL 里，命令 ID 也永久保留。
+        static readonly int[] Hidden=new int[]{1,4};
+        public static ToolRegistry Create(ToolContext context){var registry=new ToolRegistry();foreach(int id in Hidden)registry.Retire(id);registry.Add(new InsetPanelModule(context));registry.Add(new LineupModule(context));registry.Add(new TrainingExportModule(context));registry.Add(new FormatConvertModule(context));registry.Add(new AutoHoleModule(context));return registry;}
     }
 }

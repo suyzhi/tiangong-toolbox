@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
@@ -127,6 +127,12 @@ namespace TianGongCadSuite {
                 if(((dynamic)occurrence.Relations3d).Count==0)assembly.Relations3d.AddGround(occurrence);
                 Array actual=new double[16];occurrence.GetMatrix(ref actual);
                 if(actual.Cast<object>().Select(Convert.ToDouble).Where((v,i)=>Math.Abs(v-spec.Placement.M[i])>1e-8).Any())throw new InvalidOperationException("板子的装配位置未通过检查。");
+                // 位置对不代表零件对：CAD 插实例时按“文件名”查找文件，装配目录里若有同名零件，
+                // 插进来的会是那个旧零件（位置是新算的，几何是旧的）。必须核对实例真正绑定的文档路径。
+                // 这条也必须留作护栏，用户手动命名（生成矩形板）时会踩到同一件事。
+                string bound=null;
+                try{var document=occurrence.OccurrenceDocument as F.SolidEdgeDocument;if(document!=null)bound=document.FullName;}catch{}
+                if(bound==null||!string.Equals(Path.GetFullPath(bound),path,StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("天工 CAD 没有使用刚生成的板子，而是按文件名找到了另一个同名零件：\n"+(bound==null?"（读不到该实例的文档路径）":bound)+"\n装配所在目录里如果有同名零件，CAD 会优先用它。请更换输出目录，或给板子换一个不重名的文件名。\n（本批已插入的板子与刚生成的 PAR 会被撤回。）");
                 return occurrence;
             } catch(Exception original) {
                 string cleanup="";bool detached=occurrence==null;

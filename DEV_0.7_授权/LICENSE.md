@@ -30,9 +30,27 @@
 
 ## 2. 管理员：签发激活码
 
-管理员工具是**独立程序**，不随插件分发给客户：tools/LicenseAdmin/build/TianGongLicenseAdmin.exe
+管理员工具是**独立程序**，不随插件分发给客户：`tools/LicenseAdmin/build/TianGongLicenseAdmin.exe`
 
-    0) 编译管理员工具
+**不想敲命令就用双击版**（推荐日常发码）：
+
+    DEV_0.7_授权\tools\LicenseAdmin\授权管理.cmd      ← 双击它，开一个小窗口
+    （窗口里：私钥文件[浏览] / 档位[一个月·半年·一年] / 数量 / 备注 → [生成激活码]
+      [查看台账] [复制结果] [档位说明]；生成后自动把结果另存成 txt，可整段复制发给客户）
+
+> 注意：`TianGongLicenseAdmin.exe` 是**命令行**程序——直接双击它只会"闪一下"
+> （它打印完用法就退出了，不是崩溃）。要看用法或做签发，用上面的窗口，或者在控制台里带参数运行：
+> `TianGongLicenseAdmin.exe new <私钥> M --note "客户甲"`。
+>
+> 命令行版菜单（同样支持双击/命令行参数）：`tools/LicenseAdmin/license-admin.ps1`，
+> 例如 `powershell -ExecutionPolicy Bypass -File license-admin.ps1 new M 客户甲`。
+>
+> 两个实现细节（踩过，别再踩）：① 控制台里**不要**改 `[Console]::OutputEncoding`、**不要**用 `Clear-Host` 循环，
+> 中文 Windows 的 conhost 上会出现"窗口一闪一闪、基本全黑"（旧版菜单就是这样翻车的，现在窗口版和菜单版都不这么干了）；
+> ② 调后台 exe **不要用 `Start-Process`**：环境里同时有 `NO_PROXY`/`no_proxy` 时它会抛
+> "已添加项。字典中的关键字"，而且子进程输出要显式按 UTF-8 解码，否则中文全是乱码。
+
+    0) 编译管理员工具（授权管理.cmd 会自动检查，缺了就编）
        DEV_0.7_授权\tools\LicenseAdmin\build-admin.ps1
 
     1) 生成密钥对（只做一次）

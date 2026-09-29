@@ -16,6 +16,7 @@
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../src/PanelNaming.cs" />
     <Compile Include="../../src/Geometry.cs" />
     <Compile Include="../../src/AutoHoleData.cs" />
     <Compile Include="../../src/AutoHolePattern.cs" />
@@ -24,6 +25,7 @@
     <Compile Include="../../src/FormatConvertCore.cs" />
     <Compile Include="../AutoHolePureTests.cs" />
     <Compile Include="../FormatConvertTests.cs" />
+    <Compile Include="../PanelNamingPureTests.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Stubs.cs" />
   </ItemGroup>

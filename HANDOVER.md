@@ -58,6 +58,51 @@
 
 ---
 
+## 2.5 2026-09-29：内嵌板"错位、大小不对"已定位并修复
+
+现场（`H:\桌面\SK26.01\SK26.01Lineup\OK310-0924\3号子围栏.asm`）复现 + 根因 + 真机复验，详见
+`DEV_0.7_授权/实测报告-内嵌板错位-20260929.md`。一句话：**几何算法没问题，是插入那一步被按名查找劫持了**。
+
+* 修复：`src/AutoPanelForm.cs`（批次文件名带时间戳）、`src/CadInterop.cs`（插入后核对实际绑定的文档，不一致就撤回并报错）、
+  `src/PanelNaming.cs` + `tests/PanelNamingPureTests.cs`（命名规则的纯逻辑回归）。
+* 复验：真机跑插件命令 → 14 块板子 14/14 绑定到本批次文件、尺寸与框口吻合。
+* 探针工具：`tools/panel-probe/PanelProbe.cs`（`tree/geom/readsel/panels/file/insert` 六个只读或最小写模式），
+  以后查这类"读到的几何不对"的问题先跑它。
+* 机器上还留着**两个更早版本**的同一款插件（`矩形板 (DEV 0.1.2)` / `(DEV 0.3.0)`，按钮同名、旧代码里有同样的按名查找坑），
+  建议用 `tools/uninstall-old-addins.ps1` 卸掉（默认干跑，`-AutoUninstall yes` 才真删）。
+
+### 发激活码的入口（管理员）
+
+* **双击版（推荐）**：`DEV_0.7_授权\tools\LicenseAdmin\授权管理.cmd` —— 弹一个小窗口（私钥/档位/数量/备注 → 生成激活码），
+  结果自动另存成 txt 方便整段复制；底层还是下面这个 exe。命令行菜单版：`license-admin.ps1`（支持 `new M 客户甲` 这种参数）。
+* **控制台里的两个坑**（旧版菜单翻车过，别再踩）：不要在控制台脚本里改 `[Console]::OutputEncoding` 或循环 `Clear-Host`
+  （中文 conhost 会"一闪一闪、基本全黑"）；调后台 exe 不要用 `Start-Process`（`NO_PROXY`/`no_proxy` 并存时会抛
+  "已添加项。字典中的关键字"），并且要显式按 UTF-8 解码子进程输出。
+* 命令行：`tools\LicenseAdmin\build\TianGongLicenseAdmin.exe new <私钥> M --note "客户甲"`
+  （**它是控制台程序，双击只会闪一下**：打印完用法就退出，不是崩溃；缺了就 `build-admin.ps1` 重编）。
+* 当前插件里嵌的是 **testmaster 测试公钥**（`src/License/LicenseKeySlot.cs`），私钥在 `tests/fixtures/license-test.tgkey`。
+  对外发之前必须先 `keygen` 换生产密钥 + 覆盖公钥槽 + 重打包（否则拿到仓库的人都能自己签码）。
+* 用户侧入口：装好插件 → 启动 CAD → 点**任意插件命令** → 弹「天工工具箱 授权激活」→ 整段粘贴 → 激活。
+
+### 安装包（给别人装的那一份）
+
+```powershell
+DEV_0.7_授权\tools\make-installer.ps1                 # 打 天工工具箱_DEV0.7.1_安装包_<日期>.zip
+DEV_0.7_授权\tools\make-installer.ps1 -Version 0.7.2  # 换版本
+```
+
+* 内容：`安装.cmd / 重新安装.cmd / 卸载.cmd`、`payload\`（DLL+互操作库+转换器+Lineup 型号表）、`tools\install.ps1`、
+  `使用说明.md`、`manifest-sha256.csv`。**不带源码**（要带源码的留档包仍用 `make-delivery.ps1`）。
+* 安装=把 payload 复制到 `%LOCALAPPDATA%\TianGongCadSuite\app` 再注册那份副本（包可删可挪）。
+* **强制关闭天工进程**：`install.ps1` 检测到 `TianGong*` 进程会弹窗问「是否强制结束这些进程并继续」，
+  答是就代为结束（含转换器拉起的隐藏 /automation 实例），不用手动逐个关、不用重启电脑；
+  `安装.cmd -Force` 走无人值守。只结束 `TianGong/TianGongConverter/TianGongDrillWorker/PanelLauncher/TrainingExportRunner`。
+* 下线的命令（客户版功能区不出现）：命令 **1 四面生成内嵌板**、**4 导出出图训练数据**。
+  配置在 `src/PluginFramework.cs` 的 `ModuleCatalog.Hidden`；实现仍在 DLL 里，把 id 从数组里拿掉即可恢复。
+* 实测报告（含提示框截图与复验数据）：`DEV_0.7_授权/安装包说明与实测-20260929.md`。
+
+---
+
 ## 3. 当前状态（2026-09-26）
 
 - ✅ 宿主合并完成，测试全绿：核心 109 项 + 自动打孔纯逻辑 203 项 + 授权 95 项 + UI 30 项，0 失败。
@@ -82,6 +127,7 @@
 | **坐标别靠肉眼估** | 点错标签/按钮 | 截图 → 裁切放大 → 量像素；窗口矩形 (-8,-8) 时"图像坐标 = 屏幕坐标 + 8" |
 | **PS 单元素管道是标量** | `(...)[0]` 取到的是首字符（把激活码写成 1 个字符） | 用 `@(...)[0]` |
 | **脚本里的源码根别写死层数** | `Split-Path` 多退一层会指向仓库根，脚本静默走错 | 向上查找含 `src\License\LicenseKeySlot.cs` 的目录 |
+| **CAD 插实例是"按文件名"找文件的** | 生成的内嵌板与装配目录里的旧板子同名时，`Occurrences.AddByFilename(绝对路径)` 会把**装配目录里那个旧同名文件**插进来：位置是新算的矩阵（对），几何是旧文件的（错）——现场表现为"板子错位、大小不对"，CAD 不报错 | 生成的零件一律用**唯一文件名**（已改成 `填充板_<批次时间戳>_001.par`，见 `src/PanelNaming.cs`）；插入后回读实例绑定的文档路径核对（`CadBuilder.Generate` 里的护栏） |
 
 ---
 

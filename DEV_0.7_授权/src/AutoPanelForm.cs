@@ -18,7 +18,7 @@ namespace TianGongCadSuite {
         internal int OpeningCount{get{return specs.Count;}}
         internal string StatusText{get{return status.Text;}}
         public AutoPanelForm(F.Application app,A.AssemblyDocument assembly){
-            this.app=app;this.assembly=assembly;Text="多型材自动填充 · DEV 0.7.0";ClientSize=new Size(1020,660);MinimumSize=new Size(960,660);Font=new Font("Microsoft YaHei UI",9);ShowInTaskbar=false;
+            this.app=app;this.assembly=assembly;Text="多型材自动填充 · DEV 0.7.1";ClientSize=new Size(1020,660);MinimumSize=new Size(960,660);Font=new Font("Microsoft YaHei UI",9);ShowInTaskbar=false;
             var split=new TableLayoutPanel{Dock=DockStyle.Fill,ColumnCount=2};split.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,365));split.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));Controls.Add(split);split.Controls.Add(preview,1,0);
             var left=new TableLayoutPanel{Dock=DockStyle.Fill,ColumnCount=2,Padding=new Padding(16)};left.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,125));left.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));split.Controls.Add(left,0,0);
             Add(left,new Label{Text="先用 CAD 的 Ctrl 多选或框选选择型材，再点击下方读取。也可选一个框架子装配。\n自动识别同一平面上的闭合矩形框口。",Dock=DockStyle.Fill},0,76);
@@ -53,10 +53,13 @@ namespace TianGongCadSuite {
         public static string Generate(F.Application app,A.AssemblyDocument assembly,IList<PanelSpec> specs,string parent){
             if(specs==null||specs.Count==0)throw new ArgumentException("没有待生成框口。");
             if(!Directory.Exists(parent))throw new DirectoryNotFoundException(parent);
-            string directory=Path.Combine(parent,"自动填充_"+DateTime.Now.ToString("yyyyMMdd_HHmmss")+"_"+Guid.NewGuid().ToString("N").Substring(0,8));Directory.CreateDirectory(directory);
+            // 文件名必须带批次时间戳（原因见 PanelNaming 的注释：CAD 会按文件名把装配目录里的旧同名零件插进来）。
+            string stamp=PanelNaming.Stamp(DateTime.Now);
+            Func<int,string> name=i=>PanelNaming.FileName(stamp,i);
+            string directory=Path.Combine(parent,PanelNaming.BatchDirectoryName(stamp,Guid.NewGuid().ToString("N").Substring(0,8)));Directory.CreateDirectory(directory);
             var created=new List<Tuple<A.Occurrence,string>>();
-            try{for(int i=0;i<specs.Count;i++){string file=Path.Combine(directory,"填充板_"+(i+1).ToString("D3")+".par");created.Add(Tuple.Create(CadBuilder.Generate(app,assembly,specs[i],file),file));}
-                File.WriteAllLines(Path.Combine(directory,"尺寸清单.csv"),new[]{"文件,宽mm,高mm,厚mm,每边间隙mm"}.Concat(specs.Select((s,i)=>string.Format(CultureInfo.InvariantCulture,"填充板_{0:D3}.par,{1:R},{2:R},{3:R},{4:R}",i+1,s.Width*1000,s.Height*1000,s.Thickness*1000,s.Gap*1000))),System.Text.Encoding.UTF8);return directory;
+            try{for(int i=0;i<specs.Count;i++){string file=Path.Combine(directory,name(i+1));created.Add(Tuple.Create(CadBuilder.Generate(app,assembly,specs[i],file),file));}
+                File.WriteAllLines(Path.Combine(directory,"尺寸清单.csv"),new[]{"文件,宽mm,高mm,厚mm,每边间隙mm"}.Concat(specs.Select((s,i)=>string.Format(CultureInfo.InvariantCulture,"{0},{1:R},{2:R},{3:R},{4:R}",name(i+1),s.Width*1000,s.Height*1000,s.Thickness*1000,s.Gap*1000))),System.Text.Encoding.UTF8);return directory;
             }catch(Exception original){var errors=new List<string>();foreach(var item in created.AsEnumerable().Reverse()){try{item.Item1.Delete();File.Delete(item.Item2);}catch(Exception e){errors.Add(item.Item2+": "+e.Message);}}
                 throw new InvalidOperationException("批量生成未完成："+original.Message+(errors.Count>0?"\n部分结果未能撤回，请检查：\n"+string.Join("\n",errors):"\n本批已插入的板子已撤回。")+"\n批次目录："+directory,original);
             }
