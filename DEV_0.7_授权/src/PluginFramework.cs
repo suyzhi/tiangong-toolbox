@@ -102,10 +102,11 @@ namespace TianGongCadSuite {
             return assembly;
         }
         // All modeless tools share one selection session; switching tools closes the previous form.
+        // 要在模型上点选的窗口（IPickingWindow）挂上"停靠 / 收起"条：贴 CAD 右边打开、记住位置、点模型自动收起。
         public void Show(Func<Form> create,Action<Form> start){
             TianGongCadSuite.Licensing.LicenseGate.Require();
             Dispose();var next=create();active=next;
-            try{next.Show(new CadOwner(Application.ActiveFramehWnd));if(start!=null)start(next);}catch{Dispose();throw;}
+            try{int frame=Application.ActiveFramehWnd;ToolWindow.Attach(next,frame);next.Show(new CadOwner(frame));if(start!=null)start(next);}catch{Dispose();throw;}
         }
         public void Dispose(){if(active!=null){if(!active.IsDisposed)active.Close();active.Dispose();active=null;}}
     }

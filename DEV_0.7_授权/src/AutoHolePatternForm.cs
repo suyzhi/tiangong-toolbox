@@ -13,7 +13,7 @@ using P=SolidEdgePart;
 namespace TianGongCadSuite {
     // 命令 7：批量排孔。沿线等分 / 沿线定距 / 圆周均布，可选腰孔。
     // 一切都围着"点一个面"：方向自动取该面最长边，孔心自动居中，参数有能直接用的默认值。
-    public sealed class AutoHolePatternForm : Form, F.ISEMouseEvents, F.ISECommandEvents {
+    public sealed class AutoHolePatternForm : Form, F.ISEMouseEvents, F.ISECommandEvents, IPickingWindow {
         readonly F.Application app;
         readonly A.AssemblyDocument assembly;
         F.ISECommand command; F.ISEMouse mouse; Connection mouseConnection, commandConnection;
@@ -48,13 +48,19 @@ namespace TianGongCadSuite {
 
         public AutoHolePatternForm(F.Application application, A.AssemblyDocument document){
             app = application; assembly = document;
-            Ui.Shell(this, "批量排孔", 620, 740, 560, 640);
+            Ui.Shell(this, "批量排孔", 620, 740, 560, 560);   // 可以缩矮，示意图那块先让出高度，再出滚动条
             BuildLayout();
             WireEvents();
             sizeBox.SelectedIndex = 3;   // M6
             RefreshPreview();
             FormClosed += (s, e) => Cleanup();
         }
+
+        // ---- IPickingWindow：点面、点圆边都在模型上，默认勾上"点模型时自动收起"（见 ToolWindow） ----
+        Label IPickingWindow.StatusLabel { get { return status; } }
+        bool IPickingWindow.AutoCollapseByDefault { get { return true; } }
+        string IPickingWindow.QuickActionText { get { return null; } }
+        void IPickingWindow.QuickAction(){ }
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData){
             if (keyData == Keys.Escape) { Close(); return true; }

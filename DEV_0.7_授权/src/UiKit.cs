@@ -107,6 +107,7 @@ namespace TianGongCadSuite {
         public int Gap = 8;
         public VerticalStack(){
             SetStyle(ControlStyles.ResizeRedraw, true);
+            DoubleBuffered = true;   // 拉窗口、折卡片时整片重排，不开双缓冲会一闪一闪
             BackColor = Ui.Bg;
             AutoScroll = true;
             Padding = new Padding(12, 10, 12, 10);
@@ -157,11 +158,13 @@ namespace TianGongCadSuite {
             LeftWidth = leftWidth;
             BackColor = Ui.Bg;
             SetStyle(ControlStyles.ResizeRedraw, true);
+            DoubleBuffered = true;
         }
         public SplitColumns(float leftFraction){
             LeftFraction = leftFraction;
             BackColor = Ui.Bg;
             SetStyle(ControlStyles.ResizeRedraw, true);
+            DoubleBuffered = true;
         }
         protected override void OnLayout(LayoutEventArgs e){
             SuspendLayout();
@@ -194,11 +197,49 @@ namespace TianGongCadSuite {
     public sealed class Card : Panel {
         public string Title = "";
         public string Hint = "";
+        // 可折叠：点标题行收起 / 展开，收起后只剩标题行。只给固定高度的卡片用 ——
+        // VerticalStack 里吃剩余高度（fill）的卡片，高度由容器分配，折了也会被撑回去。
+        public bool Collapsible;
+        public const int HeaderHeight = 32;
+        public event EventHandler CollapsedChanged;
+        bool collapsed;
+        int expandedHeight;
         public Card(){
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
             BackColor = Ui.Bg;
             Padding = new Padding(12, 34, 12, 10);
             Dock = DockStyle.None;
+        }
+        public bool Collapsed {
+            get { return collapsed; }
+            set {
+                if (value == collapsed) return;
+                collapsed = value;
+                SuspendLayout();
+                if (value) {
+                    expandedHeight = Height;
+                    foreach (Control c in Controls) c.Visible = false;
+                    Height = HeaderHeight;
+                } else {
+                    if (expandedHeight > HeaderHeight) Height = expandedHeight;
+                    foreach (Control c in Controls) c.Visible = true;
+                }
+                ResumeLayout(true);
+                Invalidate();
+                var h = CollapsedChanged;
+                if (h != null) h(this, EventArgs.Empty);
+            }
+        }
+        // 展开后的高度（收起状态下 Height 只是标题行）。
+        public int ExpandedHeight { get { return collapsed ? expandedHeight : Height; } }
+        bool InHeader(Point p){ return p.Y < HeaderHeight - 2; }
+        protected override void OnMouseMove(MouseEventArgs e){
+            base.OnMouseMove(e);
+            if (Collapsible) Cursor = InHeader(e.Location) ? Cursors.Hand : Cursors.Default;
+        }
+        protected override void OnMouseClick(MouseEventArgs e){
+            base.OnMouseClick(e);
+            if (Collapsible && e.Button == MouseButtons.Left && InHeader(e.Location)) Collapsed = !collapsed;
         }
         protected override void OnPaint(PaintEventArgs e){
             var g = e.Graphics;
@@ -212,9 +253,18 @@ namespace TianGongCadSuite {
             if (Title.Length > 0) {
                 TextRenderer.DrawText(g, Title, Ui.F9B, new Point(13, 9), Ui.Text);
                 if (Hint.Length > 0) {
+                    // 说明文字画在限宽矩形里、超长加省略号：窄窗口里不能糊到右边的「收起/展开」上
                     var sz = TextRenderer.MeasureText(g, Title, Ui.F9B);
-                    TextRenderer.DrawText(g, Hint, Ui.F8, new Point(13 + sz.Width + 8, 11), Ui.Muted);
+                    int hx = 13 + sz.Width + 8;
+                    var hr = new Rectangle(hx, 11, Math.Max(0, Width - hx - (Collapsible ? 64 : 12)), 16);
+                    TextRenderer.DrawText(g, Hint, Ui.F8, hr, Ui.Muted,
+                        TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
                 }
+            }
+            if (Collapsible) {
+                var r2 = new Rectangle(0, 8, Width - 14, 20);
+                TextRenderer.DrawText(g, collapsed ? "展开 ▼" : "收起 ▲", Ui.F8, r2, Ui.Accent,
+                    TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
             }
         }
     }

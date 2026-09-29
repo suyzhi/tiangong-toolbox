@@ -23,9 +23,11 @@
     <Compile Include="../../src/AutoHoleCheck.cs" />
     <Compile Include="../../src/HoleProfile.cs" />
     <Compile Include="../../src/FormatConvertCore.cs" />
+    <Compile Include="../../src/ToolWindowPlacement.cs" />
     <Compile Include="../AutoHolePureTests.cs" />
     <Compile Include="../FormatConvertTests.cs" />
     <Compile Include="../PanelNamingPureTests.cs" />
+    <Compile Include="../ToolWindowPlacementPureTests.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Stubs.cs" />
   </ItemGroup>

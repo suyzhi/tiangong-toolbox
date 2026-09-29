@@ -20,8 +20,14 @@ namespace TianGongCadSuite {
         // 之前这些只能靠人眼看截图，所以漏了整整两个。
         public static void UiState(){
             checks = 0;
+            // 两张说明卡片的折叠状态存在用户的注册表里：测之前记下，测完还原，不改用户自己的偏好。
+            bool savedShape = WindowLayoutStore.ReadFlag("AutoHoleForm", "ShapeCardCollapsed", true);
+            bool savedSource = WindowLayoutStore.ReadFlag("AutoHoleForm", "SourceCardCollapsed", true);
+            try {
             using (var form = new AutoHoleForm(null, null)) {
                 form.CreateControl();
+                // 孔形状参考默认折起；下面 ⑧⑨ 要看两个视图，先展开
+                FindCard(form, "孔形状参考").Collapsed = false;
                 var all = new List<W.Control>();
                 Collect(form, all);
                 var through = Chk(all, "贯通");
@@ -103,6 +109,35 @@ namespace TianGongCadSuite {
                 Assert(sec.Shape.MouthDiameterMm > sec.Shape.HoleDiameterMm, "沉孔的孔口比主孔大");
                 dia.Value = 3.2M;
                 Assert(Math.Abs(sec.Shape.HoleDiameterMm - 3.2) < 0.01, "改孔径后剖面立刻跟着变，实得 " + sec.Shape.HoleDiameterMm);
+
+                // ⑩ 孔形状参考能折起来，窗口跟着变矮（用户反馈窗口太大、挡模型）。
+                var shape = FindCard(form, "孔形状参考");
+                Assert(shape != null && shape.Collapsible, "孔形状参考卡片可折叠");
+                int open = form.Height;
+                shape.Collapsed = true;
+                Assert(shape.Height == Card.HeaderHeight && !sec.Visible, "折起后只剩标题行、视图藏起来");
+                Assert(form.Height == open - (244 - Card.HeaderHeight), "折起后窗口矮 212px，实得 " + (open - form.Height));
+                Assert(WindowLayoutStore.ReadFlag("AutoHoleForm", "ShapeCardCollapsed", false), "折叠状态记住了");
+                shape.Collapsed = false;
+                Assert(shape.Height == 244 && form.Height == open, "再展开：卡片和窗口都回到原高度");
+
+                // ⑪ 窄侧边栏：窗口 500 宽；「开始打孔」在固定底栏里，不随上面一列滚动
+                Assert(form.ClientSize.Width == 500, "自动打孔是 500 宽的侧边栏，实得 " + form.ClientSize.Width);
+                var runBtn = FindButton(form, "开始打孔");
+                Assert(runBtn != null, "折叠来回之后开始打孔按钮还在");
+                var footer = runBtn.Parent.Parent;
+                Assert(footer is VerticalStack && footer.Dock == W.DockStyle.Bottom && !((VerticalStack)footer).AutoScroll,
+                       "开始打孔在固定底栏里（Dock=Bottom、不滚动）");
+                var src = FindCard(form, "规格来源");
+                Assert(src != null && src.Collapsible, "规格来源卡片可折叠");
+                src.Collapsed = true;
+                Assert(src.Hint.Length > 0, "规格来源折起时，标题行上显示正在编辑谁：" + src.Hint);
+                src.Collapsed = false;
+                Assert(src.Hint.Length == 0, "展开后标题行不重复显示");
+            }
+            } finally {
+                WindowLayoutStore.WriteFlag("AutoHoleForm", "ShapeCardCollapsed", savedShape);
+                WindowLayoutStore.WriteFlag("AutoHoleForm", "SourceCardCollapsed", savedSource);
             }
             Console.WriteLine("AUTO-HOLE UI ASSERTIONS " + checks);
         }

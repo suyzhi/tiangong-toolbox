@@ -13,7 +13,7 @@ namespace TianGongCadSuite {
     // 命令 6：自动打孔。
     // 交互：点孔口的圆形边线 = 加参考孔；点零件平面 = 加打孔面；没有模式切换。
     // 孔型和规格从参考孔反推，但每一条都能在窗口里改，改完实时看到"将打哪些孔"。
-    public sealed class AutoHoleForm : Form, F.ISEMouseEvents, F.ISECommandEvents {
+    public sealed class AutoHoleForm : Form, F.ISEMouseEvents, F.ISECommandEvents, IPickingWindow {
         // 一组同直径的参考孔，共用一份可编辑的孔规格。
         sealed class RefGroup {
             public double DiameterMm;
@@ -93,7 +93,9 @@ namespace TianGongCadSuite {
 
         public AutoHoleForm(F.Application application, A.AssemblyDocument document){
             app = application; assembly = document;
-            Ui.Shell(this, "自动打孔", 900, 880, 780, 800);
+            // 窄侧边栏：500 宽；高度按两张说明卡片都折起时算（展开哪张，Foldable 就给窗口加多高）。
+            // 可以缩矮到 560：上面那一列出滚动条，底部的预览和「开始打孔」始终在。
+            Ui.Shell(this, "自动打孔", 500, 840, 516, 560);
 
             // 规格下拉框：第 0 项是「自定义」，后面跟表里的全部规格。
             // 漏了这段会怎样：参考孔是 Φ13.5（M12 过孔）时要选中第 7 项，而框里只有 1 项 →
@@ -163,20 +165,17 @@ namespace TianGongCadSuite {
         }
 
         // ---------------- 布局 ----------------
-        // ---------------- 布局 ----------------
-        // 左列 = 选东西（点孔 / 点面），右列 = 定规格；孔形状参考、预览和"开打"通栏放在底部。
-        // 这样 2D 剖面和 3D 参考各自都有半屏宽，尺寸标注才排得开。
+        // 窄侧边栏（500 宽，贴在 CAD 右边常驻也不怎么挡模型）：
+        //   上面一列可滚动：① 点孔 → ② 点面 → ③ 定规格 → 规格来源（可折叠）→ 孔形状参考（可折叠）；
+        //   底部固定：预览 + 开始打孔 + 状态 —— 上面内容再长，"开打"按钮也不会被滚出窗口。
+        // 以前是 900×880 的左右两列，展开时几乎占半个屏幕（用户反馈 2026-09-29）。
+        // 参数网格按 430px 内宽设计（见 BuildParamCard），500 宽减去边距和滚动条正好放得下。
         void BuildLayout(){
-            // 左列按比例而不是固定宽度：窗口缩到最小时，参数那一列还要放得下
-            var columns = new SplitColumns(0.365f);
-            var left = new VerticalStack();
-            var right = new VerticalStack();
-
-            // ---- 左列：① 点孔 / ② 点面 ----
+            // ---- ① 点孔 / ② 点面 ----
             var step1 = Ui.Step(1, "点孔", "点孔口的圆形边线，可连点多个");
             var refsCard = Ui.Card("参考孔", 0, "点圆边就会加到这里");
             var step2 = Ui.Step(2, "点面", "点要打孔的那个平面，可连点多个");
-            var facesCard = Ui.Card("打孔面", 128, "孔心按参考孔的轴线投影到这些面上");
+            var facesCard = Ui.Card("打孔面", 104, "孔心按参考孔的轴线投影到这些面上");
 
             // 参考孔列表
             refList.Dock = DockStyle.Fill; refList.IntegralHeight = false; refList.BorderStyle = BorderStyle.FixedSingle;
@@ -217,23 +216,21 @@ namespace TianGongCadSuite {
             faceBtns.Controls.Add(faceCount); faceBtns.Controls.Add(delFace); faceBtns.Controls.Add(clrFace);
             facesCard.Controls.Add(faceList); facesCard.Controls.Add(faceBtns);
 
-            left.Add(step1); left.Add(refsCard, true); left.Add(step2); left.Add(facesCard);
-
-            // ---- 右列：③ 定规格 + 规格来源 ----
+            // ---- ③ 定规格 + 两张说明卡片 ----
             var step3 = Ui.Step(3, "定规格", "默认是自动反推的，不动就按它打；要改就改这里");
-            paramCard = Ui.Card("孔参数", ParamCardRows4, "改任何一个数字，下面的孔形状立刻跟着变");
-            var srcCard = Ui.Card("规格来源", 0, "");
+            paramCard = Ui.Card("孔参数", ParamCardRows4, "改任何一个数字，孔形状立刻跟着变");
+            srcCard = Ui.Card("规格来源", SourceCardHeight, "");
             BuildParamCard(paramCard);
             BuildSourceCard(srcCard);
-            right.Add(step3); right.Add(paramCard); right.Add(srcCard, true);
-
-            columns.Add(left); columns.Add(right);
-
-            // ---- 通栏：孔形状参考 ----
-            var shapeCard = Ui.Card("孔形状参考", 244, "剖面看尺寸，3D 看打完之后数模长什么样");
+            var shapeCard = Ui.Card("孔形状参考", ShapeCardHeight, "剖面看尺寸，3D 看打完的样子");
             BuildShapeCard(shapeCard);
+            // 这两张是"参考说明"，点模型时用不上：可折叠（点标题），默认折起，折叠状态记住。
+            // 参数框里已经是具体数字；想看规格怎么来的、孔长什么样再展开。
+            Foldable(srcCard, "SourceCardCollapsed", SourceCardHeight);
+            Foldable(shapeCard, "ShapeCardCollapsed", ShapeCardHeight);
+            srcCard.CollapsedChanged += (s, e) => RefreshSourceCard();
 
-            // ---- 通栏：预览 ----
+            // ---- 底栏：预览 ----
             var previewCard = Ui.Card("预览", 88, "打完之前先看清楚要打几个、什么孔");
             var pvBody = new Panel { Dock = DockStyle.Fill, BackColor = Color.White };
             previewCard.Controls.Add(pvBody);
@@ -263,15 +260,55 @@ namespace TianGongCadSuite {
             status.TextAlign = ContentAlignment.MiddleLeft; status.ForeColor = Ui.Accent; status.BackColor = Ui.Bg;
             status.Text = "把鼠标移到孔口的圆形边线上点一下，就能加一个参考孔。";
 
-            // 纵向堆叠：添加顺序就是从上到下的顺序。两列那块吃掉剩余高度。
+            // 可滚动区：添加顺序就是从上到下的顺序，参考孔列表吃掉剩余高度。
             var stack = rootStack = new VerticalStack { Dock = DockStyle.Fill };
-            stack.Add(columns, true);
-            stack.Add(shapeCard);
-            stack.Add(previewCard);
-            stack.Add(actions);
-            stack.Add(status);
+            stack.Add(step1); stack.Add(refsCard, true); stack.Add(step2); stack.Add(facesCard);
+            stack.Add(step3); stack.Add(paramCard); stack.Add(srcCard); stack.Add(shapeCard);
+
+            // 固定底栏：预览 + 按钮 + 状态，上沿一条细线和滚动区分开
+            var footer = new VerticalStack { Dock = DockStyle.Bottom, Height = FooterHeight, AutoScroll = false, Padding = new Padding(12, 8, 12, 8) };
+            footer.Add(previewCard); footer.Add(actions); footer.Add(status);
+            footer.Paint += (s, e) => { using (var p = new Pen(Ui.Line)) e.Graphics.DrawLine(p, 0, 0, footer.Width, 0); };
+
+            // Dock 按 z-order 逆序停靠：后加的底栏先占住底部，滚动区填剩下的
             Controls.Add(stack);
+            Controls.Add(footer);
         }
+
+        const int ShapeCardHeight = 244, SourceCardHeight = 182;
+        const int FooterHeight = 8 + 88 + 8 + 56 + 8 + 26 + 8;   // 上下边距 + 预览 + 按钮 + 状态 + 间距
+        const string LayoutKey = "AutoHoleForm";   // 与 ToolWindow 记位置用的键一致（窗口类名）
+        Card srcCard;
+
+        // 可折叠卡片：初始状态按上次记住的（默认折起）；展开着打开时窗口先加高到放得下。
+        void Foldable(Card card, string flag, int fullHeight){
+            card.Collapsible = true;
+            int delta = fullHeight - Card.HeaderHeight;
+            if (WindowLayoutStore.ReadFlag(LayoutKey, flag, true)) card.Collapsed = true;
+            else ClientSize = new Size(ClientSize.Width, ClientSize.Height + delta);
+            card.CollapsedChanged += (s, e) => {
+                WindowLayoutStore.WriteFlag(LayoutKey, flag, card.Collapsed);
+                ResizeForCard(card.Collapsed ? -delta : delta);
+            };
+        }
+
+        // 卡片折叠/展开后窗口跟着变高变矮：只折卡片、窗口不变，空出来的地方会被参考孔列表吃掉，等于没省地方。
+        // 变高时不超过屏幕、底边不出屏幕（往上挪）；再高就靠滚动区滚动。
+        void ResizeForCard(int delta){
+            if (WindowState == FormWindowState.Normal) {
+                var work = Screen.FromControl(this).WorkingArea;
+                Height = Math.Max(MinimumSize.Height, Math.Min(work.Height, Height + delta));
+                if (Bottom > work.Bottom) Top = Math.Max(work.Top, work.Bottom - Height);
+            }
+            if (rootStack != null) rootStack.Relayout();
+        }
+
+        // ---- IPickingWindow：宿主据此挂"停靠 / 收起"条（见 ToolWindow） ----
+        // 点孔、点面都在模型上，默认勾上"点模型时自动收起"。收起条上不放「开始打孔」：打之前要展开看一眼预览。
+        Label IPickingWindow.StatusLabel { get { return status; } }
+        bool IPickingWindow.AutoCollapseByDefault { get { return true; } }
+        string IPickingWindow.QuickActionText { get { return null; } }
+        void IPickingWindow.QuickAction(){ }
 
         // 孔形状参考：左边 2D 剖面（带尺寸标注），右边 3D 半剖轴测。
         // 两个视图都直接吃 HoleShape —— 和 CAD 实际切出来的孔是同一份几何定义。
@@ -322,12 +359,17 @@ namespace TianGongCadSuite {
                 srcNote.ForeColor = Ui.Accent;
             }
             srcHint.Text = ThreadHint;
+            // 折起来时把"正在编辑谁"放到标题行上：不展开也知道改的是哪一组
+            if (srcCard != null) {
+                srcCard.Hint = srcCard.Collapsed ? srcWho.Text : "";
+                srcCard.Invalidate();
+            }
         }
 
         // 参数网格。所有行共用同一套列坐标，同类控件等宽、单位紧跟数字 ——
         // "控件不对齐、字体排列奇怪"的根治办法：位置是算出来的，不是一个个手摆的。
         // 三列的起点固定为 0 / 140 / 272（标签）+ 34 / 174 / 306（控件）。
-        // 整个网格按 430px 内宽设计：窗口缩到最小尺寸（780）时右列内宽约 445，正好放得下。
+        // 整个网格按 430px 内宽设计：侧边栏 500 宽减去边距、滚动条后卡片内宽约 435，正好放得下。
         void BuildParamCard(Card card){
             var body = new Panel { Dock = DockStyle.Fill, BackColor = Color.White };
             card.Controls.Add(body);
@@ -860,7 +902,16 @@ namespace TianGongCadSuite {
             return t;
         }
 
+        // 状态行分两种：操作结果（加了孔、清空了、打完了……）和鼠标悬停提示。
+        // 以前悬停提示也走 SetStatus：刚点完孔，鼠标一挪到空白处，"已加参考孔"那句就被冲掉了，
+        // 窗口收起时条上也一样。现在：有过一次操作结果之后，悬停提示就不再覆盖状态行。
+        bool statusIsHint = true;
         void SetStatus(string text, Color color){
+            status.Text = text; status.ForeColor = color;
+            statusIsHint = false;
+        }
+        void SetHint(string text, Color color){
+            if (!statusIsHint) return;
             status.Text = text; status.ForeColor = color;
         }
 
@@ -977,7 +1028,7 @@ namespace TianGongCadSuite {
         public new void MouseUp(short b, short s, double x, double y, double z, object w, int k, object g){ }
         public new void MouseMove(short b, short s, double x, double y, double z, object w, int k, object g){
             if (closing || busy) return;
-            if (g == null) SetStatus("把鼠标移到孔口的圆形边线，或零件平面上。", Ui.Muted);
+            if (g == null) SetHint("把鼠标移到孔口的圆形边线，或零件平面上。", Ui.Muted);
         }
         public void MouseDblClick(short b, short s, double x, double y, double z, object w, int k, object g){ }
         public void MouseDrag(short b, short s, double x, double y, double z, object w, short ds, int k, object g){ }

@@ -9,7 +9,7 @@ using F=SolidEdgeFramework;
 
 namespace TianGongCadSuite {
     // 命令 8：配孔检查。扫一遍装配里所有零件的孔，报漏打孔 / 孔偏了 / 配错孔。
-    public sealed class AutoHoleCheckForm : Form {
+    public sealed class AutoHoleCheckForm : Form, IPickingWindow {
         readonly F.Application app;
         readonly A.AssemblyDocument assembly;
         F.HighlightSet highlights;
@@ -33,6 +33,14 @@ namespace TianGongCadSuite {
             BuildLayout();
             FormClosed += (s, e) => Cleanup();
         }
+
+        // ---- IPickingWindow（见 ToolWindow） ----
+        // 默认不自动收起：这里是在列表里点一条、去模型上看高亮，看的时候常要旋转视图，
+        // 一转窗口就收起、列表就没了。需要的话用户自己在条上勾。
+        Label IPickingWindow.StatusLabel { get { return status; } }
+        bool IPickingWindow.AutoCollapseByDefault { get { return false; } }
+        string IPickingWindow.QuickActionText { get { return null; } }
+        void IPickingWindow.QuickAction(){ }
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData){
             if (keyData == Keys.Escape) { Close(); return true; }
