@@ -86,6 +86,7 @@ namespace TianGongCadSuite.Licensing {
                 if(LicenseMachine.Fingerprint().Length != LicensePayload.FingerprintSize)return false;
                 // 卸载自检：Guard 的类型信息必须仍在本程序集里。
                 if(self.GetType("TianGongCadSuite.Licensing.LicenseGate", false) == null)return false;
+                if(self.GetType("TianGongCadSuite.Licensing.LicenseOnline", false) == null)return false;
                 return true;
             }catch(Exception){ return false; }
         }

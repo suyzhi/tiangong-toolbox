@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="color-scheme" content="light only">
+<title>授权管理 · 天工工具箱</title>
+<link rel="stylesheet" href="/admin/app.css">
+<script src="/admin/app.js" defer></script>
+</head>
+<body>
+
+<div id="login" class="login" hidden>
+  <form id="login-form" class="login-card" autocomplete="on">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">天</span>
+      <div><h1>天工工具箱</h1><p>授权管理看板</p></div>
+    </div>
+    <label class="field">
+      <span class="label">管理员口令</span>
+      <input type="password" id="password" autocomplete="current-password" required>
+    </label>
+    <button type="submit" class="btn primary block" id="login-btn">登录</button>
+    <p class="form-error" id="login-error" role="alert"></p>
+  </form>
+</div>
+
+<div id="app" hidden>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">天</span>
+      <div><h1>授权管理</h1><p id="key-info"></p></div>
+    </div>
+    <div class="top-actions">
+      <span class="muted" id="today"></span>
+      <button type="button" class="btn ghost" id="refresh">刷新</button>
+      <button type="button" class="btn ghost" id="logout">退出</button>
+    </div>
+  </header>
+
+  <main class="main">
+    <section class="stats" id="stats" aria-label="概览"></section>
+
+    <div class="layout">
+      <section class="panel issue-panel" aria-labelledby="issue-title">
+        <h2 id="issue-title">签发激活码</h2>
+        <form id="issue-form">
+          <div class="field">
+            <span class="label">档位</span>
+            <div class="seg" id="plan-seg" role="radiogroup" aria-label="档位"></div>
+            <p class="hint" id="plan-hint"></p>
+          </div>
+          <div class="row2">
+            <label class="field">
+              <span class="label">数量</span>
+              <input type="number" id="count" min="1" max="50" value="1" inputmode="numeric">
+            </label>
+            <label class="field">
+              <span class="label">客户</span>
+              <input id="customer" maxlength="100" placeholder="如：XX 公司 王工">
+            </label>
+          </div>
+          <label class="field">
+            <span class="label">备注</span>
+            <input id="note" maxlength="200" placeholder="可选">
+          </label>
+          <button type="submit" class="btn primary block" id="issue-btn">生成激活码</button>
+          <p class="hint center" id="issue-quota"></p>
+        </form>
+        <p class="notice" id="issue-disabled" hidden>服务器没有配置签发私钥（serve --signing-key），这里只能管理已有的码。</p>
+      </section>
+
+      <section class="panel list-panel" aria-label="激活码列表">
+        <div class="toolbar">
+          <input type="search" id="search" placeholder="搜索码ID、客户、备注、机器" aria-label="搜索">
+          <div class="chips" id="filters" role="tablist"></div>
+        </div>
+        <div class="table-wrap">
+          <table class="codes">
+            <thead>
+              <tr><th>码ID</th><th>客户</th><th>档位</th><th>到期</th><th>状态</th><th>机器</th><th>换机</th><th>最近联网</th></tr>
+            </thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+        <p class="empty" id="empty" hidden>没有符合条件的激活码</p>
+      </section>
+    </div>
+  </main>
+</div>
+
+<div class="scrim" id="scrim" hidden></div>
+<aside class="drawer" id="drawer" aria-label="激活码详情" hidden></aside>
+
+<dialog class="dialog" id="result-dialog">
+  <div class="dialog-head">
+    <div><h2 id="result-title"></h2><p class="muted" id="result-sub"></p></div>
+    <button type="button" class="icon-btn" id="result-close" aria-label="关闭">×</button>
+  </div>
+  <div class="result-list" id="result-list"></div>
+  <div class="dialog-foot">
+    <p class="hint">激活码已存入台账，关掉后也能在列表里点开再复制。</p>
+    <div class="btns">
+      <button type="button" class="btn" id="result-download">下载 .txt</button>
+      <button type="button" class="btn primary" id="result-copy">全部复制</button>
+    </div>
+  </div>
+</dialog>
+
+<div class="toast" id="toast" role="status" hidden></div>
+</body>
+</html>

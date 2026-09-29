@@ -36,3 +36,10 @@ tmp_license_test/
 发码-*.txt
 # 给客户用的安装包目录（含 DLL/互操作库等二进制）：以 zip 形式分发，不入库
 天工工具箱_*_安装包_*/
+
+# 联网授权服务端：回执私钥与台账只在服务器上，绝不入库
+server.key
+*.key.pem
+license.db
+license.db-*
+master.pub.json

@@ -1,0 +1,19 @@
+# systemd 服务：/etc/systemd/system/tg-license.service
+# 启用：systemctl daemon-reload && systemctl enable --now tg-license
+[Unit]
+Description=TianGong toolbox license server
+After=network-online.target
+
+[Service]
+User=tglicense
+WorkingDirectory=/opt/tg-license
+ExecStart=/opt/tg-license/venv/bin/python /opt/tg-license/tg_license_server.py --db /opt/tg-license/license.db --default-quota 2 serve --listen 127.0.0.1:8750 --master /opt/tg-license/master.pub.json --key /opt/tg-license/server.key --signing-key /opt/tg-license/master.tgkey --max-issue-per-day 50 --trust-proxy
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/tg-license
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

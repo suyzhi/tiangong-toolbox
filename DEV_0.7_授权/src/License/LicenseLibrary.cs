@@ -12,7 +12,9 @@ namespace TianGongCadSuite.Licensing {
         ClockTampered = 5,
         Environment = 6,
         ExpiringSoon = 7,
-        Revoked = 8
+        Revoked = 8,
+        OnlineRequired = 9,
+        MovedAway = 10
     }
 
     public sealed class LicenseReport {
@@ -42,6 +44,9 @@ namespace TianGongCadSuite.Licensing {
                 case LicenseStatus.ClockTampered: return "检测到系统时间被回调，授权已暂停。请把系统时间校正后重新激活。";
                 case LicenseStatus.Environment: return "运行环境异常，授权校验被阻止。" + Detail;
                 case LicenseStatus.Revoked: return "该激活码已被管理员停用（作废），请联系管理员重新签发。";
+                case LicenseStatus.OnlineRequired: return "需要联网验证：本机已超过 " + LicenseOnline.GraceDays + " 天没有连上授权服务器（或还没完成联网登记）。请连上网络后点「重新联网验证」。"
+                    + (string.IsNullOrEmpty(Detail) ? "" : "\r\n原因：" + Detail);
+                case LicenseStatus.MovedAway: return "该激活码已在另一台电脑上激活，本机授权已转出。如需在本机继续使用，请重新输入激活码（会占用一次自助换机次数）。";
             }
             return "授权状态未知。";
         }
@@ -72,7 +77,7 @@ namespace TianGongCadSuite.Licensing {
             return cachedScan;
         }
 
-        internal static void ResetCache(){ cachedScan = -1; }
+        internal static void ResetCache(){ cachedScan = -1; LicenseOnline.ResetThrottle(); }
 
         // 解析激活码。开发密钥模式（%ProgramData% 里放了 license-dev.key，本机自带签发权）
         // 只编译进开发构建（build.ps1 -DevBuild）；正式构建只认内嵌公钥验签。
@@ -195,6 +200,15 @@ namespace TianGongCadSuite.Licensing {
                 return report;
             }
 
+            // 联网这一关：回执验签、宽限期、服务器下发的作废 / 转出结论。
+            string onlineDetail;
+            LicenseStatus online = LicenseOnline.Evaluate(record, code, out onlineDetail);
+            if(online != LicenseStatus.Valid){
+                report.Status = online;
+                report.Detail = onlineDetail;
+                return report;
+            }
+
             LicenseStore.Touch(record);
             if(report.DaysLeft <= WarnDays)report.Status = LicenseStatus.ExpiringSoon;
             else report.Status = LicenseStatus.Valid;
@@ -302,13 +316,22 @@ namespace TianGongCadSuite.Licensing {
             if(code.MachineBound && !FingerprintMatches(code.Payload.Fingerprint))
                 return Rejected(code,"该激活码是为另一台机器签发的。本机机器码：" + MachineCodeForDisplay(), out message);
 
-            // 同一个码在本机重复输入：算已完成，不重复计数，也不当成失败。
-            // （换一台机器再输同一个码，离线环境下无法察觉——见 LICENSE.md 第 5 节的说明；
-            //   管理员在台账里作废该码后，这份作废清单会随下一个版本让它在所有机器上失效。）
+            // 联网登记：首次激活必须连上授权服务器。码已在别的电脑上时，服务器按剩余自助换机次数决定能否转过来。
+            string onlineError;
+            LicenseReceipt receipt = LicenseOnline.Call("activate", code, fingerprint, out onlineError);
+            if(receipt == null)
+                return Rejected(code,"联网激活失败（激活必须连上授权服务器）：" + onlineError, out message);
+            if(!receipt.Ok)
+                return Rejected(code,receipt.RejectMessage(code), out message);
+
+            // 同一个码在本机重复输入：算已完成，不重复计数，也不当成失败（顺带刷新联网回执）。
             string canonical = LicenseCodec.Canonical(code.Payload.ToBytes(), code.Signature);
             ActivationRecord existing = LicenseStore.Load();
             if(existing != null && string.Equals(existing.Code, canonical, StringComparison.OrdinalIgnoreCase)
                 && FingerprintMatches(existing.MachineFingerprint)){
+                existing.Receipt = receipt.Raw;
+                existing.ReceiptSignature = receipt.Signature;
+                LicenseStore.Save(existing);
                 ResetCache();
                 LicenseReport again = Current();
                 notice = "该激活码已经在本机激活过了，不需要重复输入（码ID " + LicenseCodec.Display(code.CodeId) + "）。";
@@ -322,12 +345,16 @@ namespace TianGongCadSuite.Licensing {
             record.ActivatedDay = today;
             record.Counter = Math.Max(LicenseStore.Counter(), 0L) + 1;
             record.Code = canonical;
+            record.Receipt = receipt.Raw;
+            record.ReceiptSignature = receipt.Signature;
             if(!LicenseStore.Save(record))
                 return Rejected(code,"无法写入激活文件，请用管理员身份运行一次，或检查磁盘权限。", out message);
             ResetCache();
             message = null;
             LicenseReport report = Current();
             notice = "激活成功，该激活码已绑定本机（码ID " + LicenseCodec.Display(code.CodeId) + "）。";
+            if(receipt.Result == "rebound")
+                notice += "\r\n该码原先在另一台电脑上，已转到本机；原电脑会在下次联网时停用。剩余自助换机次数：" + receipt.Left + "。";
             report.Notice = notice;
             if(!report.Usable)
                 message = "激活文件已写入，但校验未通过：" + report.Describe();
@@ -415,6 +442,11 @@ namespace TianGongCadSuite.Licensing {
         // 注入一份作废清单，用来验证"码被管理员作废后任何机器都不能激活"。
         public static string[] RevokedOverride;
         public static bool DevKeyMode;
+        // 联网授权：注入"假服务器"（请求 JSON → 应答 JSON，返回 null 表示连不上）与配对的服务端公钥 BLOB；
+        // OnlineSynchronous 让本该在后台做的复核改为当场做，测试结果才确定。
+        public static Func<string,string> OnlineTransport;
+        public static byte[] ServerKeyOverride;
+        public static bool OnlineSynchronous;
 
         // 开发用私钥：放在 %ProgramData%\TianGongCadSuite\license-dev.key 时，
         // 本机按"自带签发权"模式运行，便于在真机上验证三档有效期；文件不存在时
@@ -440,6 +472,9 @@ namespace TianGongCadSuite.Licensing {
             CodeOverride = null;
             RevokedOverride = null;
             DevKeyMode = false;
+            OnlineTransport = null;
+            ServerKeyOverride = null;
+            OnlineSynchronous = false;
             LicenseLibrary.ResetCache();
         }
 

@@ -1,0 +1,14 @@
+# Caddy 反向代理：自动申请并续期 HTTPS 证书。把域名换成你自己的（先把域名 A 记录指到服务器 IP）。
+# 放到 /etc/caddy/Caddyfile，然后 systemctl reload caddy
+license.example.com {
+	handle /api/v1/* {
+		reverse_proxy 127.0.0.1:8750
+	}
+	# 管理看板。建议只放行你自己的公网 IP（把下面两行的注释去掉、换成你的 IP），其余一律 403
+	handle /admin* {
+		# @outsider not remote_ip 1.2.3.4
+		# respond @outsider 403
+		reverse_proxy 127.0.0.1:8750
+	}
+	respond 404
+}

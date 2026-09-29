@@ -11,6 +11,9 @@ namespace TianGongCadSuite.Licensing {
         public int ActivatedDay;
         public long Counter;
         public string Code;
+        // 联网授权回执（base64 原文 + 服务端签名）。0.7 离线激活的旧文件没有这两行，读出来是 null。
+        public string Receipt;
+        public string ReceiptSignature;
 
         public ActivationRecord Clone(){
             ActivationRecord copy = new ActivationRecord();
@@ -18,6 +21,8 @@ namespace TianGongCadSuite.Licensing {
             copy.ActivatedDay = ActivatedDay;
             copy.Counter = Counter;
             copy.Code = Code;
+            copy.Receipt = Receipt;
+            copy.ReceiptSignature = ReceiptSignature;
             return copy;
         }
 
@@ -28,6 +33,8 @@ namespace TianGongCadSuite.Licensing {
             text.Append(ActivatedDay.ToString(CultureInfo.InvariantCulture)).Append('\n');
             text.Append(Counter.ToString(CultureInfo.InvariantCulture)).Append('\n');
             text.Append(Code == null ? "" : Code).Append('\n');
+            text.Append(Receipt == null ? "" : Receipt).Append('\n');
+            text.Append(ReceiptSignature == null ? "" : ReceiptSignature).Append('\n');
             return Encoding.UTF8.GetBytes(text.ToString());
         }
 
@@ -45,6 +52,14 @@ namespace TianGongCadSuite.Licensing {
             record.ActivatedDay = day;
             record.Counter = counter;
             record.Code = lines[4].Trim();
+            if(lines.Length >= 7){
+                string receipt = lines[5].Trim();
+                string signature = lines[6].Trim();
+                if(receipt.Length > 0 && signature.Length > 0){
+                    record.Receipt = receipt;
+                    record.ReceiptSignature = signature;
+                }
+            }
             return record;
         }
 

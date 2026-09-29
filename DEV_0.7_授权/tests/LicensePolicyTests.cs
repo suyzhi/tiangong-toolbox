@@ -10,6 +10,7 @@ namespace PanelTests {
         static byte[] keyBlob;
         static byte[] fingerprint;
         static bool keyAvailable;
+        static FakeLicenseServer server;
 
         internal static void Run(Action<string,bool> check){
             keyBlob = LoadTestKey();
@@ -30,6 +31,9 @@ namespace PanelTests {
             LicenseTestHooks.GuardOverride = 0;
             LicenseTestHooks.GateOverride = 0;
             LicenseTestHooks.FingerprintOverride = fingerprint;
+            // 联网授权：所有用例都经过进程内的假服务器（规则同 server/tg_license_server.py）。
+            server = new FakeLicenseServer();
+            server.Install();
 
             try{
                 Plans(check);
@@ -43,7 +47,14 @@ namespace PanelTests {
                 Revocation(check);
                 ClockRollback(check);
                 Ghost(check);
+                OnlineFirstActivation(check);
+                OnlineSecondMachine(check);
+                OnlineRevocation(check);
+                OnlineGrace(check);
+                OnlineForgery(check);
+                OnlineLegacyRecord(check);
             }finally{
+                server.Dispose();
                 LicenseTestHooks.Reset();
                 LicenseLibrary.Deactivate();
                 CleanRegistry();
@@ -319,6 +330,163 @@ namespace PanelTests {
             LicenseLibrary.Deactivate();
             check("删除激活文件后状态回到未激活", LicenseLibrary.Current().Status == LicenseStatus.Missing);
             check("残留计数器被识别为可疑状态", LicenseStore.GhostDetected());
+        }
+
+        // ---------- 联网授权（DEV 0.8） ----------
+
+        static void Fresh(){
+            LicenseTestHooks.TodayOverride = -1;
+            LicenseTestHooks.FingerprintOverride = fingerprint;
+            server.Offline = false;
+            server.ReplayNonce = false;
+            server.Quota = 2;
+            server.Install();
+            LicenseLibrary.Deactivate();
+            LicenseLibrary.ResetCache();
+        }
+
+        static void OnlineFirstActivation(Action<string,bool> check){
+            Fresh();
+            string message;
+            string notice;
+            string code = Sign(LicensePlans.Yearly, null, false, LicenseTime.Today, 61);
+            server.Offline = true;
+            LicenseReport report = LicenseLibrary.Activate(code, out message, out notice);
+            check("断网时首次激活被拒", !report.Usable && message != null && message.IndexOf("联网") >= 0);
+            check("断网激活不写激活文件", LicenseLibrary.Current().Status == LicenseStatus.Missing);
+            server.Offline = false;
+            int calls = server.Calls;
+            report = LicenseLibrary.Activate(code, out message, out notice);
+            check("联网后激活成功", message == null && report.Usable);
+            check("激活时向服务器登记了一次", server.Calls == calls + 1);
+            check("服务器记下了本机", server.MachineOf(LicenseCodec.Parse(code).CodeId) == LicenseOnline.Hex(fingerprint));
+            calls = server.Calls;
+            check("当天内校验不联网", LicenseLibrary.Current().Usable && server.Calls == calls);
+            LicenseTestHooks.TodayOverride = LicenseTime.Today + 2;
+            LicenseLibrary.ResetCache();
+            check("回执过期一天以上会复核", LicenseLibrary.Current().Usable && server.Calls > calls);
+        }
+
+        // 同一个码拿到第二台电脑：主动输码可以转过去（占一次换机），原电脑下次复核即停用；次数用完就拒绝。
+        static void OnlineSecondMachine(Action<string,bool> check){
+            Fresh();
+            server.Quota = 1;
+            string message;
+            string notice;
+            byte[] other = new byte[fingerprint.Length];
+            for(int i = 0; i < other.Length; i++)other[i] = (byte)(fingerprint[i] ^ 0x3C);
+            string code = Sign(LicensePlans.Yearly, null, false, LicenseTime.Today, 62);
+            check("A 机激活", LicenseLibrary.Activate(code, out message, out notice).Usable && message == null);
+            ActivationRecord onA = LicenseStore.Load().Clone();
+
+            LicenseTestHooks.FingerprintOverride = other;
+            LicenseLibrary.Deactivate();
+            LicenseLibrary.ResetCache();
+            LicenseReport onB = LicenseLibrary.Activate(code, out message, out notice);
+            check("B 机输同一个码：占用换机次数后激活", onB.Usable && message == null);
+            check("B 机提示码是从别的电脑转来的", notice != null && notice.IndexOf("另一台电脑") >= 0);
+
+            // 回到 A 机（把 A 的激活文件放回去），一天后复核：服务器说码已转走。
+            LicenseTestHooks.FingerprintOverride = fingerprint;
+            LicenseStore.SaveForTest(onA);
+            LicenseTestHooks.TodayOverride = LicenseTime.Today + 1;
+            LicenseLibrary.ResetCache();
+            LicenseReport moved = LicenseLibrary.Current();
+            check("A 机复核后授权转出（" + moved.Status + "）", moved.Status == LicenseStatus.MovedAway);
+            check("转出后闸门关闭", !LicenseLibrary.Gate());
+            check("转出后回退日期也不能恢复", Reload(LicenseTime.Today).Status == LicenseStatus.MovedAway);
+
+            LicenseReport back = LicenseLibrary.Activate(code, out message, out notice);
+            check("换机次数用完后 A 机抢不回来", !back.Usable && message != null && message.IndexOf("换机次数") >= 0);
+        }
+
+        static LicenseReport Reload(int today){
+            LicenseTestHooks.TodayOverride = today;
+            LicenseLibrary.ResetCache();
+            return LicenseLibrary.Current();
+        }
+
+        // 服务器上作废：不发新版本，已激活的机器下次复核即失效；撤销作废后恢复。
+        static void OnlineRevocation(Action<string,bool> check){
+            Fresh();
+            string message;
+            string notice;
+            string code = Sign(LicensePlans.Yearly, null, false, LicenseTime.Today, 63);
+            string id = LicenseCodec.Parse(code).CodeId;
+            LicenseLibrary.Activate(code, out message, out notice);
+            server.Revoke(id, true);
+            check("作废后当天本机仍按回执放行（最迟一天内生效）", Reload(LicenseTime.Today).Usable);
+            check("服务器作废在下次复核时生效", Reload(LicenseTime.Today + 1).Status == LicenseStatus.Revoked);
+            check("服务器作废的码不能重新激活", !LicenseLibrary.Activate(code, out message, out notice).Usable && message != null && message.IndexOf("作废") >= 0);
+            server.Revoke(id, false);
+            check("撤销作废后复核恢复", Reload(LicenseTime.Today + 2).Usable);
+        }
+
+        // 断网宽限期：7 天内照常用，超过 7 天必须联网一次。
+        static void OnlineGrace(Action<string,bool> check){
+            Fresh();
+            string message;
+            string notice;
+            string code = Sign(LicensePlans.Yearly, null, false, LicenseTime.Today, 64);
+            LicenseLibrary.Activate(code, out message, out notice);
+            server.Offline = true;
+            check("断网 3 天仍可用", Reload(LicenseTime.Today + 3).Usable);
+            check("断网 7 天仍可用", Reload(LicenseTime.Today + 7).Usable);
+            LicenseReport late = Reload(LicenseTime.Today + 8);
+            check("断网超过 7 天要求联网", late.Status == LicenseStatus.OnlineRequired);
+            check("要求联网的文案带原因", late.Describe().IndexOf("联网") >= 0 && late.Describe().IndexOf("原因") >= 0);
+            server.Offline = false;
+            check("恢复联网后自动复核通过", Reload(LicenseTime.Today + 8).Usable);
+            server.Offline = true;
+            check("复核成功后宽限期重新计算", Reload(LicenseTime.Today + 15).Usable);
+            check("回调时间到服务器日期之前一周以上被识别", Reload(LicenseTime.Today).Status == LicenseStatus.ClockTampered);
+        }
+
+        // 伪造/篡改：换一把服务器密钥签的回执、改过的回执、重放旧 nonce，一律不认。
+        static void OnlineForgery(Action<string,bool> check){
+            Fresh();
+            string message;
+            string notice;
+            string code = Sign(LicensePlans.Yearly, null, false, LicenseTime.Today, 65);
+            using(FakeLicenseServer impostor = new FakeLicenseServer()){
+                LicenseTestHooks.OnlineTransport = impostor.Handle;   // 插件里仍是真服务器的公钥
+                LicenseReport report = LicenseLibrary.Activate(code, out message, out notice);
+                check("冒充的服务器签的回执不认", !report.Usable && message != null && message.IndexOf("验签") >= 0);
+            }
+            server.Install();
+            server.ReplayNonce = true;
+            check("nonce 对不上的回执不认", !LicenseLibrary.Activate(code, out message, out notice).Usable && message != null);
+            server.ReplayNonce = false;
+            check("正常激活", LicenseLibrary.Activate(code, out message, out notice).Usable);
+
+            ActivationRecord record = LicenseStore.Load();
+            char[] chars = record.Receipt.ToCharArray();
+            chars[10] = chars[10] == 'A' ? 'B' : 'A';
+            record.Receipt = new string(chars);
+            LicenseStore.SaveForTest(record);
+            server.Offline = true;
+            check("篡改过的回执 + 断网 = 要求联网", Reload(LicenseTime.Today).Status == LicenseStatus.OnlineRequired);
+            server.Offline = false;
+            check("篡改过的回执 + 联网 = 重新复核后可用", Reload(LicenseTime.Today).Usable);
+        }
+
+        // 0.7 离线激活留下的旧激活文件（没有回执）：联网时自动补登记，断网时要求联网。
+        static void OnlineLegacyRecord(Action<string,bool> check){
+            Fresh();
+            ActivationRecord record = new ActivationRecord();
+            record.MachineFingerprint = fingerprint;
+            record.ActivatedDay = LicenseTime.Today;
+            record.Counter = LicenseStore.CounterForTest() + 1;
+            record.Code = Sign(LicensePlans.Yearly, null, false, LicenseTime.Today, 66);
+            LicenseStore.SaveForTest(record);
+            server.Offline = true;
+            check("旧版激活文件断网时要求联网", Reload(LicenseTime.Today).Status == LicenseStatus.OnlineRequired);
+            server.Offline = false;
+            check("旧版激活文件联网后自动登记", Reload(LicenseTime.Today).Usable);
+            check("补登记后回执已落盘", LicenseStore.Load().Receipt != null);
+            LicenseTestHooks.TodayOverride = -1;
+            LicenseLibrary.Deactivate();
+            LicenseLibrary.ResetCache();
         }
 
         static LicensePayload BuildPayload(byte planCode,byte[] shortFingerprint,bool bound,int dayOffset,int nonceSeed){
