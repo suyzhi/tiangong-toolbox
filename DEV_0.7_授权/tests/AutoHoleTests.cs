@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -103,6 +103,12 @@ namespace TianGongCadSuite {
                 Assert(sec.Shape.MouthDiameterMm > sec.Shape.HoleDiameterMm, "沉孔的孔口比主孔大");
                 dia.Value = 3.2M;
                 Assert(Math.Abs(sec.Shape.HoleDiameterMm - 3.2) < 0.01, "改孔径后剖面立刻跟着变，实得 " + sec.Shape.HoleDiameterMm);
+
+                // ⑩ 「点平面自动认面上的孔」开关：默认勾选（点带孔的面 = 自动认孔），勾掉才是"点平面只当打孔面"
+                var scanBox = ChkPrefix(all, "点平面自动认面上的孔");
+                Assert(scanBox != null, "窗口里有「点平面自动认面上的孔」开关");
+                Assert(scanBox.Checked, "面扫描默认打开");
+                Assert(scanBox.Text.Contains("打孔面"), "开关上写明了勾掉的含义（勾掉＝点平面只当打孔面）");
             }
             Console.WriteLine("AUTO-HOLE UI ASSERTIONS " + checks);
         }
@@ -112,6 +118,11 @@ namespace TianGongCadSuite {
         }
         static W.CheckBox Chk(List<W.Control> all, string text){
             foreach (var c in all) { var b = c as W.CheckBox; if (b != null && b.Text == text) return b; }
+            return null;
+        }
+        // 文案是多行的（带换行），按前缀认。
+        static W.CheckBox ChkPrefix(List<W.Control> all, string prefix){
+            foreach (var c in all) { var b = c as W.CheckBox; if (b != null && b.Text != null && b.Text.StartsWith(prefix)) return b; }
             return null;
         }
         // 按"开头这几项"认下拉框：规格框是「自定义 + 9 个标准规格」，不能要求项数完全相等。

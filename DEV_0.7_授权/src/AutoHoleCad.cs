@@ -8,12 +8,14 @@ using G=SolidEdgeGeometry;
 using S=SolidEdgeFrameworkSupport;
 
 namespace TianGongCadSuite {
-    // 参考孔：用户点选的一条圆形边线。
-    public sealed class ReferenceHole {
-        public V3 Center;        // 装配坐标
-        public V3 Axis;          // 装配坐标，单位向量
-        public double DiameterMm;
-        public string Where = ""; // 给用户看的来源描述
+    // 参考孔：用户点选的一个已有的孔。三种点法都能得到它 ——
+    //   ① 点孔口的圆形边线；
+    //   ② 点一个"充满孔的面"（面上的孔自动全认出来，按孔径归成几类）；
+    //   ③ 点孔的内壁圆柱面（圆锥面 / 孔口圆角面也行）。
+    // 沉孔 / 锥沉 / 倒角孔口在读出来的时候就会取"孔口下面那个孔径"当配做孔径（见 HoleScan），
+    // 否则 Φ11 的沉孔会被当成 M10 过孔，目标件上配出来的孔整个是错的。
+    public sealed class ReferenceHole : ScannedHole {
+        public string Where = ""; // 给用户看的来源描述（保留旧字段，供日志与排查用）
     }
 
     // 目标面：用户点选的一个平面。
@@ -30,22 +32,23 @@ namespace TianGongCadSuite {
     }
 
     public static class AutoHoleReader {
-        public static ReferenceHole ReadReference(object selection){
-            var pg = PickGeometry.Unwrap(selection);
-            var edge = pg.Geometry as G.Edge;
-            if (edge == null) throw new ArgumentException("请选择一条圆形孔边线（孔的轮廓圆）。");
-            var circle = edge.Geometry as G.Circle;
-            if (circle == null) throw new ArgumentException("选中的边不是圆孔。请在模型上点击孔口的圆形边线。");
-            Array c = new double[3], axis = new double[3]; double radius = 0;
-            circle.GetCircleData(ref c, ref axis, out radius);
-            if (radius <= 0 || double.IsNaN(radius)) throw new ArgumentException("读取到的孔半径为 0，请重新选择孔边线。");
-            var hole = new ReferenceHole {
-                Center = pg.Transform.Point(V3.From(c)),
-                Axis = pg.Transform.Vector(V3.From(axis)).Unit(),
-                DiameterMm = radius * 2000.0   // 半径(米) -> 直径(毫米)
-            };
-            hole.Where = "Φ" + hole.DiameterMm.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+        // 读到的孔（装配坐标）转成参考孔。面扫描/圆柱面/圆边三条路都走这里。
+        public static ReferenceHole ToReference(ScannedHole scanned){
+            if (scanned == null) throw new ArgumentNullException("scanned");
+            var hole = new ReferenceHole();
+            hole.Center = scanned.Center;
+            hole.Axis = scanned.Axis;
+            hole.DiameterMm = scanned.DiameterMm;
+            hole.MouthDiameterMm = scanned.MouthDiameterMm;
+            hole.MouthKind = scanned.MouthKind;
+            hole.Source = scanned.Source;
+            hole.Tag = scanned.Tag;
+            hole.Where = "孔口 Φ" + scanned.MouthDiameterMm.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
             return hole;
+        }
+
+        public static ReferenceHole ReadReference(object selection){
+            return ToReference(HoleScanCad.ScanEdge(selection));
         }
 
         public static TargetFace ReadTarget(object selection){
@@ -218,6 +221,8 @@ namespace TianGongCadSuite {
         // 另外：共面判断只用 TargetFace.Plane（装配坐标的纯数据）换算到零件局部坐标，
         // 不依赖 face.Geometry —— 打完孔后面片会失效，GetPlaneData 直接抛。
         static readonly Dictionary<string, P.RefPlane> PlaneCache = new Dictionary<string, P.RefPlane>();
+        // 每个"零件 + 面"记住一次问出来的外法向：面片失效后（读完一批孔很常见）还得靠它判断朝向。
+        static readonly Dictionary<string, V3> OutwardCache = new Dictionary<string, V3>();
         static DateTime lastPrune = DateTime.MinValue;
 
         static P.RefPlane FindOrCreatePlane(P.PartDocument part, TargetFace target){
@@ -247,49 +252,110 @@ namespace TianGongCadSuite {
             // 同一批打孔里不必反复清；隔一会儿查一次就够了
             if ((DateTime.UtcNow - lastPrune).TotalSeconds > 5) { lastPrune = DateTime.UtcNow; PruneCache(LastApp); }
 
+            // 打孔基准面的两个硬条件（缺任何一个，孔都建不出来，而 CAD 只回一个含糊的 COM 错误）：
+            //   1) 位置：必须落在所选面那张平面上。实测偏 40mm 时盲孔整段切在空气里，
+            //      贯通孔却"看起来正常"（圆柱轴线不变，穿到哪儿算哪儿）——
+            //      用户报的"盲孔老报错、贯通就可以"就是这么来的。
+            //   2) 朝向：法向必须**背对材料**（= 面片的外法向）。实测同一张面、同一个孔心：
+            //      基准面法向朝外 → 贯通/盲孔都成功；法向扎进材料 → 两个方向都失败。
+            // 面片的几何法向不一定朝外（IsParamReversed=True 时正好相反）——
+            // 这张托盘铝板的上表面就是反的，两条都能踩上。
+            //
+            // 外法向必须拿准：打完第一批孔以后，用户点的那张面片对象会**失效**
+            // （实测第二次读 IsParamReversed 直接抛 E_FAIL；旧的 try/catch 会把 outward 退回
+            // 几何法向 —— 对反向面正好是**反的答案**，于是"位置对、朝向反"的基准面被当成合格的用上，
+            // 第二次打孔就失败）。所以按三级取：
+            //   1) 问目标面片；2) 面片失效时按平面数据在实体现有面里找回同一张面再问；
+            //   3) 还不行就用这个位置的**已知答案**（第一次成功时记下来的）。
+            bool reversed = false, knowReversed = false;
+            G.Face planeFace = target.Face;
+            knowReversed = ParamReversed(planeFace, out reversed);
+            if (!knowReversed) {
+                var fresh = FindModelFace(part, fpt, fnv);
+                if (fresh != null) { planeFace = fresh; knowReversed = ParamReversed(fresh, out reversed); }
+            }
+            V3 outward = fnv;
+            if (knowReversed) {
+                outward = reversed ? fnv * -1.0 : fnv;
+                OutwardCache[key] = outward;
+            } else {
+                V3 learned;
+                if (OutwardCache.TryGetValue(key, out learned)) outward = learned;
+            }
+            Func<P.RefPlane, bool> usable = knowReversed
+                ? (Func<P.RefPlane, bool>)(p => p != null && PlaneUsable(p) && PlaneOn(p, fpt, fnv) && PlaneFacesOut(p, outward))
+                // 朝向问不出来时只能按位置收（宁可让 CAD 判，也别因为自己瞎猜把好面丢掉）
+                : (Func<P.RefPlane, bool>)(p => p != null && PlaneUsable(p) && PlaneOn(p, fpt, fnv));
+
             // ① 缓存命中（同一张面之前打过孔）
             //    必须验证对象还活着：零件被重新加载/装配状态变化后，缓存里的基准面会变成死对象，
             //    拿它去建轮廓就报 RPC_E_DISCONNECTED(0x80010108)，而且重试同一个死对象永远失败
             //    —— 用户就是这么撞上"打孔异常：被调用的对象已与其客户端断开连接"的。
+            //    还必须是"位置对 + 朝外"的那张：缓存里可能留着上一版逻辑建偏/建反的那张。
             P.RefPlane cached;
             if (PlaneCache.TryGetValue(key, out cached)) {
-                if (cached != null && PlaneUsable(cached)) return cached;
+                if (usable(cached)) return cached;
                 PlaneCache.Remove(key);
             }
 
             // ② 已有的基准面里找共面的（用户自己建的基准面、或平行于默认基准面的情况）
             var existing = FindCoplanar(part, fpt, fnv);
-            if (existing != null) { PlaneCache[key] = existing; return existing; }
+            if (usable(existing)) { PlaneCache[key] = existing; return existing; }
 
-            // ③ 找一个与目标面平行的已有基准面，用"基准面 + 偏移"新建（不碰面片，最稳）
+            // ③ 直接拿面片建（距离给 0）：位置天然精确，法向跟着面片的外法向走 —— 首选。
+            //    实测面片建出来的这张：位置偏差 0mm、法向与面片外法向点积 = 1，不论
+            //    igNormalSide/igReverseNormalSide/FlipNormal 怎么给都一样（都朝外）。
+            try {
+                var created = Attempt("建基准面(面)", () => part.RefPlanes.AddParallelByDistance(planeFace, 0.0, P.ReferenceElementConstants.igNormalSide, M, M, M, M));
+                // 这张面：位置是精确的，法向是 CAD 按面片朝向自己给的 —— 位置对就收；
+                // 万一我们自己估的外法向和它不一致，只记一笔（别因为估计错了丢掉唯一能用的面）。
+                if (created != null && PlaneUsable(created) && PlaneOn(created, fpt, fnv)) {
+                    if (!PlaneFacesOut(created, outward))
+                        Info("注意：面片建的基准面法向与估计的外法向相反（点积 "
+                             + PlaneDot(created, outward).ToString("0.###") + "），以 CAD 的为准");
+                    PlaneCache[key] = created;
+                    return created;
+                }
+                if (created != null) {
+                    Info("用面片建的基准面不合格（位置偏 " + (PlaneGap(created, fpt) * 1000.0).ToString("0.###")
+                       + "mm，法向·外法向 = " + PlaneDot(created, outward).ToString("0.###") + "），弃用");
+                    TryDeletePlane(created);
+                }
+            } catch (Exception e) { Log.Write("AutoHolePlaneByFace", e); }
+
+            // ④ 兜底：与目标面平行的已有基准面 + 偏移新建（不碰面片，面片失效时也能建）。
+            //
+            // 偏移有两个方向，而且实测**两边建出来的法向可能一模一样**（都继承参照面的法向），
+            // 所以方向不能靠"比法向"猜，只能按位置算、按位置验收：
+            //   参照面根点 r0、法向 n（|n·fnv|≈1）；两个候选面在 r0 ± mag·n；
+            //   要的是轴向坐标 = fpt·fnv 的那一张 → 偏移走 +n 还是 -n 由 (fpt-r0)·n 的符号定。
+            // 实测约定：igNormalSide = 沿参照面法向 +n 偏，igReverseNormalSide = 沿 -n 偏。
+            // 位置对、但朝向反的（参照面本身朝材料里，本零件就是）一律不用 —— 用了孔照样建不出来。
             var parallel = FindParallel(part, fnv, fpt);
             if (parallel != null) {
-                // 距离取绝对值 + 两侧都试，并且**建完校验法向**：
-                // 实测下表面（相对 XY 基准面是负偏移）用 igNormalSide 建出来的基准面方向是反的，
-                // 打孔会失败。方向不对就换另一侧再建。
                 double mag = Math.Abs((fpt - parallel.Item1).Dot(fnv));
-                var sides = new[]{ P.ReferenceElementConstants.igNormalSide, P.ReferenceElementConstants.igReverseNormalSide };
-                foreach (var sd in sides) {
-                    try {
-                        var sdLocal = sd;
-                        var np = Attempt("建基准面(平行)", () => part.RefPlanes.AddParallelByDistance(parallel.Item2, mag, sdLocal, M, M, M, M));
-                        if (np == null) continue;
-                        Array nn = new double[3];
-                        np.GetNormal(ref nn);
-                        var nnv = V3.From(nn).Unit();
-                        if (nnv.Dot(fnv) > 0.99) { PlaneCache[key] = np; return np; }   // 方向对，收工
-                    } catch (Exception e) { Log.Write("AutoHolePlaneByRef", e); }
+                if (mag > PlaneOnTolM) {
+                    bool forward = (fpt - parallel.Item1).Dot(parallel.Item3) > 0;
+                    var first  = forward ? P.ReferenceElementConstants.igNormalSide : P.ReferenceElementConstants.igReverseNormalSide;
+                    var second = forward ? P.ReferenceElementConstants.igReverseNormalSide : P.ReferenceElementConstants.igNormalSide;
+                    foreach (var sd in new[]{ first, second }) {
+                        try {
+                            var sdLocal = sd;
+                            var np = Attempt("建基准面(平行)", () => part.RefPlanes.AddParallelByDistance(parallel.Item2, mag, sdLocal, M, M, M, M));
+                            if (np == null) continue;
+                            if (!usable(np)) {   // 位置或朝向不对：不是我们要的那张，删掉，别留在零件里
+                                Info("平行基准面建的候选不合格（位置偏 " + (PlaneGap(np, fpt) * 1000.0).ToString("0.###")
+                                   + "mm，法向·外法向 = " + PlaneDot(np, outward).ToString("0.###") + "），弃用");
+                                TryDeletePlane(np);
+                                continue;
+                            }
+                            PlaneCache[key] = np;
+                            return np;
+                        } catch (Exception e) { Log.Write("AutoHolePlaneByRef", e); }
+                    }
                 }
             }
-
-            // ④ 兜底：直接拿面片当父平面（首次打孔走这条）
-            try {
-                var created = Attempt("建基准面(面)", () => part.RefPlanes.AddParallelByDistance(target.Face, 0.0, P.ReferenceElementConstants.igNormalSide, M, M, M, M));
-                if (created != null) { PlaneCache[key] = created; return created; }
-            } catch (Exception e) {
-                throw new InvalidOperationException("无法在所选面上建立打孔基准面。请重新点一次这个面（打完孔以后原来的面对象会失效）再打。原始错误：" + e.Message, e);
-            }
-            throw new InvalidOperationException("无法在所选面上建立打孔基准面。");
+            throw new InvalidOperationException("无法在所选面上建立打孔基准面（位置/朝向都不对）。请重新点一次这个面再打。");
         }
 
         // 打孔失败信息里是不是"对象已断开"这类没法重试同一个对象的错误
@@ -460,18 +526,98 @@ namespace TianGongCadSuite {
             return null;
         }
 
-        // 找一个与目标面平行的基准面，返回它的(根点, 对象)
-        static Tuple<V3, P.RefPlane> FindParallel(P.PartDocument part, V3 normal, V3 point){
+        // 找一个与目标面平行的基准面，返回它的(根点, 对象, 法向)
+        static Tuple<V3, P.RefPlane, V3> FindParallel(P.PartDocument part, V3 normal, V3 point){
             foreach (var rp in AllPlanes(part)) {
                 try {
                     Array rn = new double[3], rr = new double[3];
                     rp.GetNormal(ref rn); rp.GetRootPoint(ref rr);
                     var rnv = V3.From(rn).Unit();
                     if (Math.Abs(Math.Abs(rnv.Dot(normal)) - 1) > 1e-6) continue;
-                    return Tuple.Create(V3.From(rr), rp);
+                    return Tuple.Create(V3.From(rr), rp, rnv);
                 } catch { }
             }
             return null;
+        }
+
+        const double PlaneOnTolM = 1e-6;   // 0.001mm，和 FindCoplanar 的共面容差同一个量级
+
+        // 基准面是不是**真的落在所选面那张平面上**？
+        //
+        // 只验"对象还活着"和"法向对不对"都不够 —— 实测（用户托盘铝板）：
+        //   上表面在零件局部 y=+20mm，法向因为面片参数反向读出来是 (0,-1,0)；
+        //   与它平行的零件基面在 y=0、法向也是 (0,-1,0)。
+        //   用"基面 + 偏移 20mm"新建，igNormalSide 和 igReverseNormalSide 建出来的面
+        //   **法向完全一样**，位置却一张在 y=-20mm（离面 40mm，整块在材料外）、一张在 y=+20mm。
+        //   旧代码只比法向，于是选中了 y=-20mm 那张。
+        // 后果正是用户报的现象：贯通孔照样能切（圆柱轴线不变，穿到哪儿算哪儿），
+        // 盲孔却整段切在空气里 → CAD 抛 RPC_E_DISCONNECTED / CO_E_OBJNOTREG，
+        // 提示还是"这个位置已经有一个孔了"，牛头不对马嘴。
+        static bool PlaneOn(P.RefPlane plane, V3 facePoint, V3 faceNormal){
+            try {
+                Array rr = new double[3], rn = new double[3];
+                plane.GetRootPoint(ref rr); plane.GetNormal(ref rn);
+                var rnv = V3.From(rn).Unit();
+                if (Math.Abs(Math.Abs(rnv.Dot(faceNormal)) - 1) > 1e-6) return false;      // 不平行
+                return Math.Abs((V3.From(rr) - facePoint).Dot(faceNormal)) <= PlaneOnTolM;  // 共面
+            } catch { return false; }
+        }
+
+        // 面片参数是不是反的（反了说明几何法向扎进材料）。读不到（面片已失效）返回 false。
+        static bool ParamReversed(G.Face face, out bool reversed){
+            reversed = false;
+            if (face == null) return false;
+            try { reversed = face.IsParamReversed; return true; } catch { return false; }
+        }
+
+        // 按平面数据（点 + 法向，零件局部）在实体现有面里找回同一张平面面。
+        // 用途：用户点的面片对象打完孔以后会失效，但外法向/建面都还需要一张能用的面片。
+        static G.Face FindModelFace(P.PartDocument part, V3 point, V3 normal){
+            try {
+                if (part.Models.Count < 1) return null;
+                var body = (G.Body)((P.Model)part.Models.Item(1)).Body;
+                G.Face best = null; double bestD = PlaneOnTolM;
+                foreach (G.Face f in (G.Faces)body.get_Faces(G.FeatureTopologyQueryTypeConstants.igQueryAll)) {
+                    var pl = f.Geometry as G.Plane;
+                    if (pl == null) continue;
+                    Array p = new double[3], n = new double[3];
+                    try { pl.GetPlaneData(ref p, ref n); } catch { continue; }
+                    var nv = V3.From(n).Unit();
+                    if (Math.Abs(Math.Abs(nv.Dot(normal)) - 1) > 1e-6) continue;      // 不平行
+                    double d = Math.Abs((V3.From(p) - point).Dot(normal));            // 共面程度
+                    if (d <= bestD) { bestD = d; best = f; }
+                }
+                return best;
+            } catch (Exception e) { Log.Write("AutoHoleFindModelFace", e); return null; }
+        }
+
+        // 基准面的法向是不是背对材料（= 面片的外法向）。
+        // 实测：法向扎进材料时，AddFinite/AddThroughAll 两个方向都建不出孔来。
+        static bool PlaneFacesOut(P.RefPlane plane, V3 outward){
+            return PlaneDot(plane, outward) > 0.99;
+        }
+        static double PlaneDot(P.RefPlane plane, V3 direction){
+            try {
+                Array rn = new double[3];
+                plane.GetNormal(ref rn);
+                return V3.From(rn).Unit().Dot(direction);
+            } catch { return 0; }
+        }
+
+        // 孔心到基准面的距离（米）。建出来的面不在孔心上时，这个值会明显大于 0。
+        static double PlaneGap(P.RefPlane plane, V3 point){
+            try {
+                Array rr = new double[3], rn = new double[3];
+                plane.GetRootPoint(ref rr); plane.GetNormal(ref rn);
+                var rnv = V3.From(rn).Unit();
+                return Math.Abs((V3.From(rr) - point).Dot(rnv));
+            } catch { return 0; }
+        }
+
+        // 只删我们自己刚建出来、验收没通过的那张基准面；用户自己建的、缓存里的面绝不碰。
+        static void TryDeletePlane(P.RefPlane plane){
+            if (plane == null) return;
+            try { plane.Delete(); } catch (Exception e) { Log.Write("AutoHolePlaneDelete", e); }
         }
 
         static bool DrillOne(P.PartDocument part, P.Model model, P.RefPlane plane, V3 localCentre, P.HoleData data, out string why, out P.Hole created){
@@ -487,6 +633,10 @@ namespace TianGongCadSuite {
                 why = "这个位置已经有孔了（Φ" + existingDiameter.ToString("0.##") + "），已跳过 —— 同一根轴线上重复打孔 CAD 会拒绝。";
                 return false;
             }
+            // 基准面必须落在孔心上（= 落在所选面上）。偏出去时：贯通孔照样能切（轴线不变），
+            // 盲孔会整段切在空气里 → CAD 只回一个含糊的 COM 错误。先把这件事说出来，省得又去猜。
+            double planeGapMm = PlaneGap(plane, localCentre) * 1000.0;
+            if (planeGapMm > 0.001) Info("注意：打孔基准面偏离孔心 " + planeGapMm.ToString("0.###") + "mm");
             P.Profile profile = null;
             try {
                 profile = Attempt("建轮廓", () => part.ProfileSets.Add().Profiles.Add(plane));
@@ -509,6 +659,13 @@ namespace TianGongCadSuite {
                     if ((int)st == (int)P.FeatureStatusConstants.igFeatureOK) { created = h; return true; }
                     try { h.Delete(); } catch {}
                     why = "打孔失败，状态 " + st + (desc == null ? "" : "（" + desc + "）");
+                }
+                if (why.Length == 0) why = "打孔失败";
+                if (blind) {
+                    // 盲孔的失败原因和贯通不一样，直接写清楚，别让用户猜（也别一律赖"已经有孔了"）
+                    why += "（盲孔深 " + N(depthMm) + "mm：请确认深度小于料厚、孔底还在材料里";
+                    if (planeGapMm > 0.001) why += "；当前打孔基准面偏离孔心 " + planeGapMm.ToString("0.###") + "mm";
+                    why += "）";
                 }
                 return false;
             } catch (Exception e) {

@@ -12,6 +12,7 @@ namespace TianGongCadSuite {
 
         // ---------- 纯逻辑：规格反推 ----------
         public static void Pure(){
+            ScanPure();   // 面扫描 / 沉孔识别 / 归类（见 AutoHoleScanPureTests.cs）
             // ICAN 的两个真实样例：8.5 -> M10 沉孔；13.5 -> M12 螺纹孔
             var a = HoleMatcher.Match(8.5);
             Assert(a.HasRow && a.Row.Size == "M10", "Φ8.5 -> M10");

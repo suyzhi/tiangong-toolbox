@@ -18,7 +18,7 @@
 
 | 命令 | 说明 |
 | --- | --- |
-| 自动打孔 / 批量排孔 / 配孔检查 | 自动打孔三件套（`AutoHole*.cs`、`HoleProfile.cs`、`HoleViews.cs`） |
+| 自动打孔 / 批量排孔 / 配孔检查 | 自动打孔三件套（`AutoHole*.cs`、`HoleScan*.cs`、`HoleProfile.cs`、`HoleViews.cs`） |
 | 四面生成内嵌板 / 型材自动填充 / 生成矩形板 | 内嵌板与型材（`PanelForm.cs`、`AutoPanelForm.cs`、`AutoFrame.cs`） |
 | 批量格式转换 | SolidWorks/STEP → 天工（`FormatConvert*.cs` + 独立 exe） |
 | Lineup 模型标记 | 装配级清单录入（`Lineup*.cs`） |
@@ -47,6 +47,8 @@
     DEV_0.7_授权\build\PanelTests.exe              # 核心：几何/Lineup/转换 + 自动打孔纯逻辑
     DEV_0.7_授权\build\PanelTests.exe --license    # 授权链
     DEV_0.7_授权\build\PanelTests.exe --autohole-ui # 孔型预览 UI 状态
+    DEV_0.7_授权\tools\run-autohole-native.ps1 -Modes --autohole-scan   # 面扫描/圆柱面/沉孔认孔（真机，36 条）
+      # 原生用例要真写模型：本机没激活时授权闸会一律拦住，测试入口在开发构建里统一放行（见 tests/Program.cs）
 
     # 纯逻辑测试，不需要 Windows / CAD（Mac、Linux 也能跑；需 .NET SDK，LangVersion 固定 C# 5）
     cd DEV_0.7_授权/tests/pure && dotnet run    # 自动打孔纯逻辑 + 转换续做标记 + 命令行转义

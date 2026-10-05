@@ -1,4 +1,6 @@
-﻿# tools/run-autohole-native.ps1 —— 在私有桌面上跑完自动打孔的全部原生回归，不打扰用户桌面。
+# tools/run-autohole-native.ps1 —— 在私有桌面上跑完自动打孔的全部原生回归，不打扰用户桌面。
+# 用法：tools\run-autohole-native.ps1 [-Modes --autohole-scan]   （只跑某几个模式时用 -Modes）
+param([string[]]$Modes)
 $ErrorActionPreference='Continue'
 $root = Split-Path $PSScriptRoot -Parent
 . (Join-Path $PSScriptRoot 'desk-lib.ps1')
@@ -20,7 +22,7 @@ if($w -eq $null){ Write-Output '私有桌面 CAD 未就绪'; exit 1 }
 Write-Output ('CAD 窗口就绪 hwnd=' + $w.H)
 Start-Sleep -Seconds 20
 
-$modes = @('--autohole-fixes','--autohole-tapped','--autohole-pattern','--autohole','--autohole-form','--autohole-multi')
+$modes = if($Modes -and $Modes.Count -gt 0){$Modes}else{@('--autohole-fixes','--autohole-tapped','--autohole-pattern','--autohole','--autohole-form','--autohole-multi','--autohole-scan')}
 foreach($m in $modes){
   $log = Join-Path $out ($m.TrimStart('-') + '.txt')
   if(Test-Path $log){ Remove-Item $log -Force }
@@ -36,6 +38,8 @@ foreach($m in $modes){
   }
   Start-Sleep -Seconds 3
   $res = if(Test-Path $log){ (Get-Content $log -Encoding UTF8 | Select-String -Pattern 'ASSERTIONS|FAIL:|FATAL|Exception' | ForEach-Object { $_.Line }) -join ' | ' } else { '（无输出）' }
+  # 探针式的诊断行也回显一份，省得每次都去翻日志（SCAN/HOLE/REQ/WALL/INFO 开头）
+  if(Test-Path $log){ Get-Content $log -Encoding UTF8 | Select-String -Pattern '^(SCAN|HOLE|REQ|WALL|INFO) ' | ForEach-Object { Write-Output ('   ' + $_.Line) } }
   Write-Output ($m + '  ->  ' + $res)
   Start-Sleep -Seconds 3
 }
