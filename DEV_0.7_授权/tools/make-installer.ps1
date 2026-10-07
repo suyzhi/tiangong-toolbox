@@ -1,4 +1,4 @@
-﻿# tools/make-installer.ps1 —— 打"给别人的安装包"：天工工具箱_DEV<版本>_安装包_<日期>/ + 同名 zip。
+# tools/make-installer.ps1 —— 打"给别人的安装包"：天工工具箱_DEV<版本>_安装包_<日期>/ + 同名 zip。
 # 与 make-delivery.ps1（给自己留档、带源码）不同：这里**只放安装需要的东西**——payload + 安装/卸载脚本 + 说明。
 #
 # 安装包行为：
@@ -7,7 +7,7 @@
 #     答是就代为强制结束（天工 CAD 是单实例程序，旧进程不退会导致新版本加载不上）；
 #   * 支持 安装.cmd -Force 走无人值守（不弹窗）。
 param(
-    [string]$Version = '0.7.1',
+    [string]$Version = '0.7.2',
     [string]$OutputRoot
 )
 $ErrorActionPreference='Stop'
@@ -23,7 +23,7 @@ if(Test-Path $dst){ Remove-Item $dst -Recurse -Force }
 
 Write-Output '1/5 编译（正式构建，不含测试开关）…'
 $bin = Join-Path $root ('build' + $sep + 'installer-' + $Version)
-& (Join-Path $PSScriptRoot 'build.ps1') -Version ($Version + '.0') -OutputDirectory $bin | Out-Null
+& (Join-Path $PSScriptRoot 'build.ps1') -Version $Version -OutputDirectory $bin | Out-Null
 $dll = Join-Path $bin 'TianGongCadSuite.dll'
 if(!(Test-Path $dll)){ throw '编译失败：没有生成 TianGongCadSuite.dll' }
 
@@ -62,12 +62,12 @@ function Write-Cmd([string]$file,[string]$body){
     [IO.File]::WriteAllText((Join-Path $dst $file), $head + $body + $NL + 'echo.' + $NL + 'pause' + $NL, $ansiEncoding)
 }
 $installBody = (@(
-    'echo 正在安装 天工工具箱 DEV 0.7.1 …',
+    ('echo 正在安装 天工工具箱 DEV ' + $Version + ' …'),
     'echo （若检测到天工 CAD 正在运行，会弹窗询问是否强制结束它）',
     ('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools' + $sep + 'install.ps1" -LibraryPath "%~dp0payload' + $sep + 'TianGongCadSuite.dll" -StageDirectory "%LOCALAPPDATA%' + $sep + 'TianGongCadSuite' + $sep + 'app" %*')
 ) -join $NL)
 $uninstallBody = (@(
-    'echo 正在卸载 天工工具箱 DEV 0.7.1 …',
+    ('echo 正在卸载 天工工具箱 DEV ' + $Version + ' …'),
     ('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools' + $sep + 'install.ps1" -Uninstall %*')
 ) -join $NL)
 Write-Cmd '安装.cmd'     $installBody
@@ -82,7 +82,7 @@ $addInGuid = '{8C05165C-65A4-4EF2-A138-508589D82004}'
 $readme = (@(
     '# 天工工具箱（天工 CAD 插件）安装说明',
     '',
-    '适用：天工 CAD 2025（Solid Edge 内核）。版本：DEV 0.7.1。',
+    ('适用：天工 CAD 2025（Solid Edge 内核）。版本：DEV ' + $Version + '。'),
     '',
     '## 一、安装',
     '',
@@ -168,4 +168,4 @@ Compress-Archive -Path (Join-Path $dst '*') -DestinationPath $zip -CompressionLe
 Write-Output ('安装包目录：' + $dst)
 Write-Output ('压缩包    ：' + $zip + '  (' + [math]::Round((Get-Item $zip).Length/1MB,2) + ' MB)')
 Write-Output ('文件数    ：' + (Get-ChildItem $dst -Recurse -File).Count)
-Write-Output ('插件版本  ：' + $Version + '  (assembly ' + $Version + '.0)')
+Write-Output ('插件版本  ：' + $Version + '  (assembly ' + $Version + ')')

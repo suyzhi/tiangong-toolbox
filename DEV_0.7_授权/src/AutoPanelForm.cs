@@ -18,7 +18,7 @@ namespace TianGongCadSuite {
         internal int OpeningCount{get{return specs.Count;}}
         internal string StatusText{get{return status.Text;}}
         public AutoPanelForm(F.Application app,A.AssemblyDocument assembly){
-            this.app=app;this.assembly=assembly;Text="多型材自动填充 · DEV 0.7.1";ClientSize=new Size(1020,660);MinimumSize=new Size(960,660);Font=new Font("Microsoft YaHei UI",9);ShowInTaskbar=false;
+            this.app=app;this.assembly=assembly;Text="多型材自动填充 · DEV 0.7.2";ClientSize=new Size(1020,660);MinimumSize=new Size(960,660);Font=new Font("Microsoft YaHei UI",9);ShowInTaskbar=false;
             var split=new TableLayoutPanel{Dock=DockStyle.Fill,ColumnCount=2};split.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,365));split.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));Controls.Add(split);split.Controls.Add(preview,1,0);
             var left=new TableLayoutPanel{Dock=DockStyle.Fill,ColumnCount=2,Padding=new Padding(16)};left.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,125));left.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));split.Controls.Add(left,0,0);
             Add(left,new Label{Text="先用 CAD 的 Ctrl 多选或框选选择型材，再点击下方读取。也可选一个框架子装配。\n自动识别同一平面上的闭合矩形框口。",Dock=DockStyle.Fill},0,76);

@@ -18,7 +18,7 @@ namespace TianGongCadSuite {
             // 换版本做 A/B 时先看这一行，避免"注册表换了、CAD 还加载旧 DLL"的误判。
             try{Log.Write("AddInConnect","dll="+typeof(PanelAddIn).Assembly.Location+" ver="+typeof(PanelAddIn).Assembly.GetName().Version+" cad="+((F.Application)application).Version);}catch{}
             try{addin=instance;context=new ToolContext((F.Application)application);registry=ModuleCatalog.Create(context);
-                addin.Description="天工工具箱 DEV 0.7.1 — 授权管理版";addin.GuiVersion=42;addin.Visible=true;
+                addin.Description="天工工具箱 DEV 0.7.2 — 授权管理版";addin.GuiVersion=42;addin.Visible=true;
                 events=new Connection(addin.AddInEvents,typeof(F.ISEAddInEvents),this);
                 // 按命令 ID 取（不要用下标：命令 1/4 已从功能区下线，下标会错位）
 diagnostics=new Diagnostics(context.Application,()=>Run(registry.Find(1)),()=>Run(registry.Find(2)),()=>Run(registry.Find(3)));addin.Object=diagnostics;
