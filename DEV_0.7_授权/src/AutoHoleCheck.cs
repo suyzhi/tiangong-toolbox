@@ -330,6 +330,19 @@ namespace TianGongCadSuite {
             foreach (var h in chain) { double l, u; Span(h, o, a, out l, out u); lo = Math.Min(lo, l); hi = Math.Max(hi, u); }
         }
 
+        // 零件 part 在这个孔的轴线上有没有一根同轴的轴/销/螺栓杆（方向差 < 2°，横向偏差不超过孔半径）
+        static bool HasCoaxialShaft(IList<HoleRecord> shafts, string part, HoleRecord hole){
+            if (shafts == null || hole == null) return false;
+            double cosTol = Math.Cos(AxisAngleTolDeg * Math.PI / 180.0);
+            double tol = Math.Max(AxisOffsetTolMm, hole.DiameterMm / 2.0);
+            foreach (var s in shafts) {
+                if (s == null || s.PartName != part) continue;
+                if (Math.Abs(s.Axis.Dot(hole.Axis)) < cosTol) continue;
+                if (LateralMm(hole, s) <= tol) return true;
+            }
+            return false;
+        }
+
         // 参与检查的孔（3–25mm）
         public static List<HoleRecord> Relevant(IList<HoleRecord> holes){
             if (holes == null) return new List<HoleRecord>();
@@ -350,9 +363,11 @@ namespace TianGongCadSuite {
         // 只遍历"有孔的零件"永远发现不了漏孔（漏的那个零件本来就没孔）。
         // bodies：预建好的「零件名 -> 射线目标」表（AutoHoleWriter.OccurrenceBodies.Build）。
         // 给了它就按"孔附近 CoaxialSpanTolMm 以内"判命中（见 PartRayTarget）；为 null 时退回 rayHitsPart（不限距离）。
+        // shafts：装配里的轴 / 销 / 螺栓杆（凸台外圆，CollectAssemblyHoles 另外收集）。孔的轴线穿过一根和它同轴的
+        // 螺栓杆是天经地义的 —— 不能因此报"螺栓上漏打孔"（原来每个装了螺栓的孔都会这么误报一次）。
         public static List<HoleIssue> Run(IList<HoleRecord> holes, Func<HoleRecord, string, bool> rayHitsPart,
                                           bool reportUnpaired = false, IList<string> allParts = null,
-                                          PartRayIndex bodies = null){
+                                          PartRayIndex bodies = null, IList<HoleRecord> shafts = null){
             var issues = new List<HoleIssue>();
             if (holes == null) return issues;
             var relevant = Relevant(holes);
@@ -376,6 +391,7 @@ namespace TianGongCadSuite {
                         string hitPart = null;
                         foreach (var other in partUniverse) {
                             if (other == h.PartName) continue;
+                            if (HasCoaxialShaft(shafts, other, h)) continue;   // 同轴的螺栓杆 / 销：本来就该穿过它
                             bool hit = bodies != null ? bodies.Hits(other, o, a, lo, hi, tol)
                                      : (rayHitsPart != null && rayHitsPart(h, other));
                             if (hit) { hitPart = other; break; }

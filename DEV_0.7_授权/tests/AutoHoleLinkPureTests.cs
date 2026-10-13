@@ -85,6 +85,15 @@ namespace TianGongCadSuite {
             moved.Add(PartRayTarget.WithBoxes("B", Transform.Frame(new V3(0, 0, 0.111), new V3(1, 0, 0), new V3(0, 1, 0), new V3(0, 0, 1)),
                 (o, d) => { double a0, a1; return slabLocal.Clip(o, d, out a0, out a1) ? new List<Box3>{ slabLocal } : new List<Box3>(); }));
             Assert(HoleCheck.Run(lone, null, false, all, moved).Count == 1, "零件平移到 z111 后按装配位置判：紧挨着 -> 漏打孔");
+
+            // ③ 孔里装了螺栓/销：轴线穿过螺栓杆是正常的，不报"螺栓上漏打孔"
+            var idxBolt = new PartRayIndex(); idxBolt.Add(Slab("BOLT", 90, 130));   // 螺栓杆整段压在孔附近
+            var shaftOk = new List<HoleRecord>{ new HoleRecord { PartName = "BOLT", DiameterMm = 6, Center = new V3(0, 0, 0.09), Axis = new V3(0, 0, -1) } };
+            var allB = new List<string>{ "A", "BOLT" };
+            Assert(HoleCheck.Run(lone, null, false, allB, idxBolt).Count == 1, "对照：不告诉它螺栓杆在哪时，会误报螺栓上漏打孔");
+            Assert(HoleCheck.Run(lone, null, false, allB, idxBolt, shaftOk).Count == 0, "螺栓杆和孔同轴：不报漏打孔");
+            var shaftOff = new List<HoleRecord>{ new HoleRecord { PartName = "BOLT", DiameterMm = 6, Center = new V3(0.02, 0, 0.09), Axis = new V3(0, 0, 1) } };
+            Assert(HoleCheck.Run(lone, null, false, allB, idxBolt, shaftOff).Count == 1, "螺栓杆偏开 20mm（不是装在这个孔里）：照样报");
         }
 
         // 天工孔标准表（GB Metric）：插件自动生成的孔都要能在表里认出来，天工自带的孔命令打开才不显示 *

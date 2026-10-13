@@ -176,10 +176,12 @@ namespace TianGongCadSuite {
                 foreach (var n in partNames) if (!allNames.Contains(n)) allNames.Add(n);
 
                 var warnings = new List<string>();
-                var holes = AutoHoleWriter.CollectAssemblyHoles(assembly, out warnings);
+                List<HoleRecord> shafts;
+                var holes = AutoHoleWriter.CollectAssemblyHoles(assembly, out warnings, out shafts);
+                lastHoles = holes; lastShafts = shafts;
                 SetStatus("读到 " + holes.Count + " 个孔，正在配对…", Ui.Accent); Application.DoEvents();
                 // 孤孔一律算出来，显示与否交给筛选胶囊（不用为了看孤孔再检查一遍）
-                ShowIssues(HoleCheck.Run(holes, null, true, allNames, bodies), HoleCheck.Relevant(holes).Count, HoleCheck.CountGroups(holes));
+                ShowIssues(HoleCheck.Run(holes, null, true, allNames, bodies, shafts), HoleCheck.Relevant(holes).Count, HoleCheck.CountGroups(holes));
                 failedParts = warnings.Count;
                 string s = summary.Text;
                 if (warnings.Count > 0) s += "　（" + warnings.Count + " 个零件读取失败）";
@@ -285,6 +287,12 @@ namespace TianGongCadSuite {
         }
 
         // ---- 测试 / 截图用的缝：不连 CAD，直接把一批结果灌进界面 ----
+        List<HoleRecord> lastHoles = new List<HoleRecord>(), lastShafts = new List<HoleRecord>();
+        public void RunCheckForTest(){ RunCheck(); }
+        public List<HoleIssue> IssuesForTest { get { return issues; } }
+        public List<HoleRecord> HolesForTest { get { return lastHoles; } }
+        public List<HoleRecord> ShaftsForTest { get { return lastShafts; } }
+        public string StatusForTest { get { return status.Text; } }
         public void ShowIssuesForTest(List<HoleIssue> found, int holes, int groups){ ShowIssues(found, holes, groups); }
         public int ListedCount { get { return shown.Count; } }
         public string SummaryText { get { return summary.Text; } }

@@ -9,7 +9,8 @@
 | `HoleFeatureProbe2.cs` | 多 Holes2d 每步的 Count、多 Circles2d、编组改名+属性重开、螺纹深度截图 |
 | `HoleFeatureProbe3.cs` | `Profile.End` 的 7 种校验标志、螺纹深度线框截图 |
 | `HoleStdProbe.cs` | 同一块板上建旧配方 / 新配方（天工 GB Metric 孔标准表）两组孔，回读 标准/子类型/大小/配合，存成 HoleStd.par 供天工孔命令打开对比 |
-| `LinkSyncE2E.cs` | 走「自动打孔」窗口的真实代码路径：认孔 → 打孔 → 核对编组/命名/螺纹/关联 → 挪参考零件 → 同步孔位 → 挪参考孔特征 → 同步 |
+| `LinkSyncE2E.cs` | 走「自动打孔」窗口的真实代码路径：认孔 → 打孔 → 核对编组/命名/螺纹/关联 → 挪参考零件 → 同步孔位 → 挪参考孔特征 → 同步 → 同一张面再打一批（并进已有组） |
+| `CheckPatternE2E.cs` | 「配孔检查」：夹在中间的漏孔、远处零件、插销的孔、远处同轴的不同规格孔；「批量排孔」：成组 + 同一个面再排一批并组 |
 
 ## 编译（x64，.NET Framework csc）
 

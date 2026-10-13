@@ -1201,7 +1201,14 @@ namespace TianGongCadSuite {
         // 全装配孔采集：遍历每个零件实例的所有圆形边，换算到装配坐标。
         // 用于配孔检查。返回的记录带 Selection（可高亮）。
         public static List<HoleRecord> CollectAssemblyHoles(A.AssemblyDocument assembly, out List<string> warnings){
+            List<HoleRecord> shafts;
+            return CollectAssemblyHoles(assembly, out warnings, out shafts);
+        }
+
+        // shafts：凸台外圆（螺栓杆、销、轴），不当孔，但配孔检查要知道它们在哪 —— 孔的轴线穿过同轴的螺栓杆不算漏打孔。
+        public static List<HoleRecord> CollectAssemblyHoles(A.AssemblyDocument assembly, out List<string> warnings, out List<HoleRecord> shafts){
             warnings = new List<string>();
+            shafts = new List<HoleRecord>();
             var result = new List<HoleRecord>();
             if (assembly == null) return result;
             var byBucket = new Dictionary<string, List<HoleRecord>>(StringComparer.Ordinal);
@@ -1225,7 +1232,14 @@ namespace TianGongCadSuite {
                     Array c = new double[3], ax = new double[3]; double r = 0;
                     try { circle.GetCircleData(ref c, ref ax, out r); } catch { continue; }
                     if (r <= 0) continue;
-                    if (HoleScanCad.IsBossEdge(edge)) continue;   // 螺栓杆、销、圆凸台的外圆不是孔
+                    if (HoleScanCad.IsBossEdge(edge)) {           // 螺栓杆、销、圆凸台的外圆不是孔，单独记下
+                        try {
+                            var pgs = PickGeometry.Unwrap(assembly.CreateReference(occ, edge));
+                            shafts.Add(new HoleRecord { Center = pgs.Transform.Point(V3.From(c)), Axis = pgs.Transform.Vector(V3.From(ax)).Unit(),
+                                                        DiameterMm = r * 2000.0, PartName = partName });
+                        } catch { }
+                        continue;
+                    }
                     object sel = null; V3 centre = new V3(), axis = new V3(0,0,1);
                     try {
                         sel = assembly.CreateReference(occ, edge);

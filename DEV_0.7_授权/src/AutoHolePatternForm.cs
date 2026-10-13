@@ -254,7 +254,10 @@ namespace TianGongCadSuite {
                 if (isFace || target == null) {
                     if (!isFace) throw new ArgumentException("请先点一个平面作为打孔面。");
                     var fresh = AutoHoleReader.ReadTarget(selected);
-                    bool sameFace = target != null && frame != null && target.Part == fresh.Part && target.Face != null && fresh.Face != null && target.Face.ID == fresh.Face.ID;
+                    // 打完一批孔以后旧的面片对象已经失效，读它的 ID 会抛 COM 异常 —— 原来这一下直接让"再点同一个面接着排"报错
+                    bool sameFace = false;
+                    try { sameFace = target != null && frame != null && target.Part == fresh.Part && target.Face != null && fresh.Face != null && target.Face.ID == fresh.Face.ID; }
+                    catch { sameFace = false; }
                     target = fresh; faceSelection = selected;
                     dirSelection = null; circleReady = false;
                     if (sameFace) {
