@@ -154,10 +154,10 @@ class FaceScanFormE2E {
                 Check(res.IndexOf("失败") < 0, "没有失败项");
             } finally { if (form != null) try { form.Close(); } catch {} }
 
-            // 几何核验：3 个 M6 螺纹孔（Φ4.917 贯通 20mm）+ 2 个 M6 沉孔（Φ11 深 6.5 + Φ6.6 走完 13.5）
+            // 几何核验：3 个 M6 螺纹孔（Φ4.917 贯通 20mm）+ 2 个 M6 沉孔（Φ11 深 6.8 + Φ6.6 走完 13.2；沉孔尺寸取天工孔标准表）
             double removed = volB0 - Vol(modelB);
             double expect = 3.0 * Math.PI * Math.Pow(0.004917/2, 2) * 0.020
-                          + 2.0 * (Math.PI * Math.Pow(0.0055, 2) * 0.0065 + Math.PI * Math.Pow(0.0033, 2) * 0.0135);
+                          + 2.0 * (Math.PI * Math.Pow(0.0055, 2) * 0.0068 + Math.PI * Math.Pow(0.0033, 2) * 0.0132);
             Check(Math.Abs(removed - expect) / expect < 0.03,
                   "B 板切除体积符合 3×M6 螺纹孔 + 2×M6 沉孔（实 " + N(removed*1e9) + " mm³ / 期 " + N(expect*1e9) + " mm³）");
             Check(modelB.Holes.Count == 5, "B 板新增 5 个孔特征（实 " + modelB.Holes.Count + "）");

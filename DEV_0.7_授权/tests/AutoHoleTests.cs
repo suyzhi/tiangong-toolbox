@@ -24,18 +24,28 @@ namespace TianGongCadSuite {
                 form.CreateControl();
                 var all = new List<W.Control>();
                 Collect(form, all);
-                var through = Chk(all, "贯通");
-                var blind = Chk(all, "盲孔");
+                var through = Radio(all, "贯通");
+                var blind = Radio(all, "盲孔");
+                var threadFull = Radio(all, "全长");
+                var threadPart = Radio(all, "指定深度");
                 var chamfer = Chk(all, "孔口倒角");
-                Assert(through != null && blind != null && chamfer != null, "窗口里有贯通/盲孔/孔口倒角三个勾选框");
-                var kind = Combo(all, new string[]{ "通孔", "螺纹孔", "圆柱沉孔", "锥形沉孔" });
+                Assert(through != null && blind != null && chamfer != null, "窗口里有贯通/盲孔单选和孔口倒角勾选框");
+                Assert(threadFull != null && threadPart != null, "窗口里有螺纹「全长 / 指定深度」单选");
+                var kind = FindControl<Segmented>(form);
+                Assert(kind != null && kind.Items.Count == 4 && kind.Items[0] == "通孔" && kind.Items[1] == "螺纹孔"
+                       && kind.Items[2] == "圆柱沉孔" && kind.Items[3] == "锥形沉孔", "孔型是四段按钮：通孔/螺纹孔/圆柱沉孔/锥形沉孔");
                 var bottom = Combo(all, new string[]{ "平底", "V 型底" });
                 var size = Combo(all, new string[]{ "自定义" });
-                Assert(kind != null && bottom != null && size != null, "窗口里有孔型/孔底/规格下拉框");
+                Assert(bottom != null && size != null, "窗口里有孔底/规格下拉框");
                 var dia = Num(all, 0.1M, 500M, 6M);
                 var depth = Num(all, 0.1M, 2000M, 10M);
                 var ang = Num(all, 30M, 179M, 118M);
-                Assert(dia != null && depth != null && ang != null, "窗口里有孔径/深度/孔底角度数值框");
+                var tdepth = Num(all, 0.5M, 2000M, 12M);
+                var chamferSet = Num(all, 0.1M, 20M, 0.5M);
+                Assert(dia != null && depth != null && ang != null && tdepth != null && chamferSet != null,
+                       "窗口里有孔径/深度/孔底角度/螺纹深度/倒角数值框");
+                var grid = FindControl<FieldGrid>(form);
+                Assert(grid != null, "孔参数由 FieldGrid 排版（行可以整行隐藏、自动顶上）");
 
                 // ① 默认贯通：深度、孔底、孔底角度都不该能改
                 Assert(through.Checked && !blind.Checked, "默认是贯通孔");
@@ -44,53 +54,93 @@ namespace TianGongCadSuite {
                 // ② 改盲孔：深度和孔底必须立刻可用。
                 //     原来 WriteBack() 在"没选中参考孔"这条路上直接 return，跳过了 ShowKindFields，
                 //     深度框一直灰着 —— 用户勾了"盲孔"却填不了深度。
-                through.Checked = false;
-                Assert(blind.Checked, "取消贯通会自动勾上盲孔");
+                blind.Checked = true;
+                Assert(!through.Checked, "选盲孔后贯通自动取消（单选）");
                 Assert(depth.Enabled, "改成盲孔后深度框必须可用（曾经是灰的）");
                 Assert(bottom.Enabled, "改成盲孔后孔底下拉必须可用");
                 Assert(!ang.Enabled, "平底时孔底角度仍然禁用");
                 bottom.SelectedIndex = 1;
                 Assert(ang.Enabled, "选 V 型底后孔底角度可用");
                 bottom.SelectedIndex = 0;
+                through.Checked = true;
+                Assert(!depth.Enabled, "切回贯通后深度框又禁用");
 
-                // ③ 孔口倒角能勾上
+                // ③ 孔口倒角：勾上以后倒角尺寸才能填
+                Assert(!chamferSet.Enabled, "没勾倒角时倒角尺寸禁用");
                 chamfer.Checked = true;
-                Assert(chamfer.Checked, "孔口倒角可以勾上");
+                Assert(chamfer.Checked && chamferSet.Enabled, "勾上孔口倒角后倒角尺寸可填");
+                chamfer.Checked = false;
 
-                // ④ 换孔型：沉孔那一行出现 + 卡片变高；切回通孔要收回去（中间不留空带）
-                //    注意不能断言 Control.Visible —— 窗口没 Show() 过，Visible 一律是 false。
-                //    改为断言排版结果：倒角行的位置 + 参数卡片高度，这两条正是"留不留空带"的判据。
-                Assert(RowExists(form, "沉孔Φ") && RowExists(form, "锥孔Φ"), "沉孔行和锥沉行都在（只是按孔型显示）");
-                int h0 = CardHeight(form, "孔参数");
-                int y0 = chamfer.Parent.Top;
+                // ④ 换孔型：螺纹/沉孔/锥孔那一行按孔型出现；倒角行跟着上下移，卡片跟着变高变矮（中间不留空带）
+                var threadRow = RowOf(grid, "螺纹"); var cboreRow = RowOf(grid, "沉孔"); var csinkRow = RowOf(grid, "锥孔"); var chamferRow = RowOf(grid, "倒角");
+                Assert(threadRow != null && cboreRow != null && csinkRow != null && chamferRow != null, "螺纹/沉孔/锥孔/倒角四行都在（只是按孔型显示）");
+                Assert(!threadRow.Shown && !cboreRow.Shown && !csinkRow.Shown, "通孔时螺纹/沉孔/锥孔行都隐藏");
+                int h0 = CardHeight(form, "③ 孔规格");
+                int y0 = grid.TopOf(chamferRow);
                 kind.SelectedIndex = 2;
-                Assert(chamfer.Parent.Top > y0, "圆柱沉孔时倒角行被顶下一行（给沉孔行让位）");
-                Assert(CardHeight(form, "孔参数") > h0, "多一行时参数卡片变高");
+                Assert(cboreRow.Shown && !csinkRow.Shown && !threadRow.Shown, "圆柱沉孔时只出现沉孔行");
+                Assert(grid.TopOf(chamferRow) > y0, "圆柱沉孔时倒角行被顶下一行（给沉孔行让位）");
+                Assert(CardHeight(form, "③ 孔规格") > h0, "多一行时规格卡片变高");
+                kind.SelectedIndex = 3;
+                Assert(csinkRow.Shown && !cboreRow.Shown, "锥形沉孔时只出现锥孔行");
+                Assert(!chamfer.Enabled, "锥形沉孔不叠加孔口倒角");
                 kind.SelectedIndex = 0;
-                Assert(chamfer.Parent.Top == y0, "切回通孔后倒角行顶回原位");
-                Assert(CardHeight(form, "孔参数") == h0, "切回通孔后参数卡片收回原高度，中间不留空带");
+                Assert(grid.TopOf(chamferRow) == y0, "切回通孔后倒角行顶回原位");
+                Assert(CardHeight(form, "③ 孔规格") == h0, "切回通孔后规格卡片收回原高度，中间不留空带");
 
-                // ⑤ 选标准规格：孔径要按表回填。没选中参考孔（草稿）时也必须一样 ——
-                //    原来 ApplySizeChange 在 g==null 时直接 return，于是"选了 M6 孔径还是 6.00"。
+                // ⑤ 螺纹孔：选标准规格，孔径按表回填（草稿也一样），螺纹深度行出现、默认全长
                 kind.SelectedIndex = 1;
+                Assert(threadRow.Shown, "螺纹孔时出现螺纹深度行");
                 int mi = IndexOfItem(size, "M6");
                 Assert(mi > 0, "规格下拉里有 M6");
                 size.SelectedIndex = mi;
                 Assert(Math.Abs((double)dia.Value - 4.917) < 0.01, "选 M6 后孔径回填成内小径 4.917，实得 " + dia.Value);
+                Assert(threadFull.Checked, "螺纹默认全长（原来 CAD 默认只攻 2mm）");
+                Assert(!tdepth.Enabled, "全长时螺纹深度框禁用");
+                threadPart.Checked = true;
+                Assert(tdepth.Enabled, "选「指定深度」后螺纹深度框可填");
+                Assert(tdepth.Value == 12M, "M6 默认指定螺纹深度 = 2×公称直径 = 12，实得 " + tdepth.Value);
+                var sec = FindControl<HoleSectionView>(form);
+                var mdl = FindControl<HoleModelView>(form);
+                Assert(sec != null && mdl != null, "窗口里有剖面视图和 3D 参考视图");
+                Assert(sec.Shape != null && !sec.Shape.ThreadFull && Math.Abs(sec.Shape.ThreadDepthMm - 12) < 0.01,
+                       "剖面的装饰螺纹按指定深度 12 画，实得 " + (sec.Shape == null ? "null" : sec.Shape.ThreadDepthMm.ToString(CultureInfo.InvariantCulture)));
+                tdepth.Value = 8M;
+                Assert(Math.Abs(sec.Shape.ThreadDepthMm - 8) < 0.01, "改螺纹深度后剖面立刻跟着变");
+                // 盲孔 10 + 螺纹深 15：规格不成立 —— 视图拒画、编辑区红字说原因
+                blind.Checked = true; depth.Value = 10M; tdepth.Value = 15M;
+                Assert(sec.Shape.Problem.Contains("超过"), "盲孔里螺纹深度超过孔深时视图拒画并说明：" + sec.Shape.Problem);
+                Assert(FindLabelPrefix(form, "⚠") != null, "编辑区用红字说出螺纹深度的问题");
+                tdepth.Value = 8M;
+                Assert(sec.Shape.Problem.Length == 0, "螺纹深度改回孔深以内后恢复正常");
+                threadFull.Checked = true;
+                Assert(sec.Shape.ThreadFull && Math.Abs(sec.Shape.ThreadDepthMm - 10) < 0.01, "盲孔全长螺纹 = 攻到孔底（10）");
+                through.Checked = true;
+                // 换规格：螺纹还是全长时，"指定深度"的默认值跟着新规格走（M8 → 16）
+                size.SelectedIndex = IndexOfItem(size, "M8");
+                threadPart.Checked = true;
+                Assert(tdepth.Value == 16M, "换成 M8 后默认指定螺纹深度 = 16，实得 " + tdepth.Value);
+                // 用户指定过的深度，换规格时保留
+                tdepth.Value = 9M;
+                size.SelectedIndex = IndexOfItem(size, "M6");
+                Assert(tdepth.Value == 9M && threadPart.Checked, "手填的螺纹深度换规格时保留（实得 " + tdepth.Value + "）");
+                threadFull.Checked = true;
 
                 // ⑥ 换孔型同样按表重填：螺纹孔 M6 切成通孔 -> M6 的中等装配过孔 6.6
                 kind.SelectedIndex = 0;
                 Assert(Math.Abs((double)dia.Value - 6.6) < 0.01, "M6 螺纹孔切成通孔后孔径 = 过孔 6.6，实得 " + dia.Value);
 
-                // ⑦ 三个按钮都在（别被排版挤没了）
+                // ⑦ 按钮都在（别被排版挤没了）；没有装配时「同步孔位」不可用
                 Assert(FindButton(form, "开始打孔") != null, "有开始打孔按钮");
                 Assert(FindButton(form, "全部重选") != null, "有全部重选按钮");
-                Assert(FindButton(form, "移除选中") != null, "有移除选中按钮");
+                Assert(FindButton(form, "移除") != null && FindButton(form, "清空") != null, "参考孔/打孔面卡片上有移除、清空按钮");
+                var sync = FindButton(form, "同步孔位");
+                Assert(sync != null && !sync.Enabled, "有「同步孔位」按钮，没有装配时不可用");
+                Assert(FindButton(form, "重新检查") != null, "有「重新检查」关联孔按钮");
+                var keep = Chk(all, "保持与参考孔关联");
+                Assert(keep != null && keep.Checked && form.KeepLink, "「保持与参考孔关联」默认勾选");
 
-                // ⑧ 孔形状参考的两个视图都在，而且真的拿到了形状
-                var sec = FindControl<HoleSectionView>(form);
-                var mdl = FindControl<HoleModelView>(form);
-                Assert(sec != null && mdl != null, "窗口里有剖面视图和 3D 参考视图");
+                // ⑧ 孔形状参考的两个视图真的拿到了形状
                 Assert(sec.Shape != null && mdl.Shape != null, "两个视图都拿到了孔形状");
                 Assert(sec.Shape.Kind == HoleKind.Through && Math.Abs(sec.Shape.HoleDiameterMm - 6.6) < 0.01,
                        "剖面画的是通孔 Φ6.6，实得 " + sec.Shape.Summary);
@@ -103,12 +153,21 @@ namespace TianGongCadSuite {
                 Assert(sec.Shape.MouthDiameterMm > sec.Shape.HoleDiameterMm, "沉孔的孔口比主孔大");
                 dia.Value = 3.2M;
                 Assert(Math.Abs(sec.Shape.HoleDiameterMm - 3.2) < 0.01, "改孔径后剖面立刻跟着变，实得 " + sec.Shape.HoleDiameterMm);
+                kind.SelectedIndex = 0;
 
-                // ⑩ 「点平面自动认面上的孔」开关：默认勾选（点带孔的面 = 自动认孔），勾掉才是"点平面只当打孔面"
-                var scanBox = ChkPrefix(all, "点平面自动认面上的孔");
-                Assert(scanBox != null, "窗口里有「点平面自动认面上的孔」开关");
+                // ⑩ 「点平面时自动识别面上的孔」开关：默认勾选（点带孔的面 = 自动认孔），勾掉才是"点平面只当打孔面"
+                var scanBox = Chk(all, "点平面时自动识别面上的孔");
+                Assert(scanBox != null, "窗口里有「点平面时自动识别面上的孔」开关");
                 Assert(scanBox.Checked, "面扫描默认打开");
-                Assert(scanBox.Text.Contains("打孔面"), "开关上写明了勾掉的含义（勾掉＝点平面只当打孔面）");
+
+                // ⑪ 有参考孔以后：Φ6.6（M6 过孔）自动反推成 M6 螺纹孔、螺纹全长；编辑区写明正在改哪一组
+                form.AddReferenceForTest(6.6, 4);
+                Assert(kind.SelectedIndex == 1, "Φ6.6 参考孔自动反推成螺纹孔（实得孔型 #" + kind.SelectedIndex + "）");
+                Assert(threadFull.Checked, "自动反推出来的螺纹孔默认全长");
+                Assert(FindLabelPrefix(form, "正在编辑：Φ6.6") != null, "编辑区写明正在改 Φ6.6 这一组");
+                threadPart.Checked = true;
+                Assert(form.UiSummary().Contains("螺纹深 12"), "改成指定深度后，参考孔组的规格跟着变：" + form.UiSummary());
+                Assert(form.SelfCheck().Length == 0, "全部孔型 × 规格组合过一遍编辑器没有异常");
             }
             Console.WriteLine("AUTO-HOLE UI ASSERTIONS " + checks);
         }
@@ -120,9 +179,21 @@ namespace TianGongCadSuite {
             foreach (var c in all) { var b = c as W.CheckBox; if (b != null && b.Text == text) return b; }
             return null;
         }
-        // 文案是多行的（带换行），按前缀认。
-        static W.CheckBox ChkPrefix(List<W.Control> all, string prefix){
-            foreach (var c in all) { var b = c as W.CheckBox; if (b != null && b.Text != null && b.Text.StartsWith(prefix)) return b; }
+        static W.RadioButton Radio(List<W.Control> all, string text){
+            foreach (var c in all) { var b = c as W.RadioButton; if (b != null && b.Text == text) return b; }
+            return null;
+        }
+        static FieldGrid.Row RowOf(FieldGrid grid, string caption){
+            foreach (var r in grid.Rows) if (r.Caption.Text == caption) return r;
+            return null;
+        }
+        static W.Label FindLabelPrefix(W.Control c, string prefix){
+            foreach (W.Control k in c.Controls) {
+                var l = k as W.Label;
+                if (l != null && l.Text != null && l.Text.StartsWith(prefix)) return l;
+                var deep = FindLabelPrefix(k, prefix);
+                if (deep != null) return deep;
+            }
             return null;
         }
         // 按"开头这几项"认下拉框：规格框是「自定义 + 9 个标准规格」，不能要求项数完全相等。

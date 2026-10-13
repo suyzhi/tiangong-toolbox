@@ -60,11 +60,35 @@ namespace TianGongCadSuite {
         public double BottomAngle = 118;  // V 型孔底角度（度）
         public bool Chamfer;              // 孔口倒角
         public double ChamferSetback = 0.5, ChamferAngle = 45;
+        // 螺纹深度（只对螺纹孔有意义）。
+        // 不显式给的话 CAD 默认只攻 2mm（真机实测 ThreadDepthMethod=igFinite / ThreadDepth=2mm，
+        // 装饰螺纹只在孔口一小圈 —— 用户报的"螺纹深度只有一点点"就是这个），所以一律显式给：
+        //   ThreadFull = true  → 螺纹全长：贯通孔整孔、盲孔到孔底（igThroughAll，真机截图确认两种都对）
+        //   ThreadFull = false → 指定深度 ThreadDepth（igFinite）
+        public bool ThreadFull = true;
+        public double ThreadDepth = 12;   // 毫米，ThreadFull=false 时生效
         public string Note = "";         // 给用户看的一句话说明
 
         public HoleSpec Clone(){ return (HoleSpec)MemberwiseClone(); }
 
         public bool Through { get { return Depth <= 1e-9; } }
+
+        // 实际攻丝深度（毫米）：全长时贯通孔返回 0（= 整孔），盲孔返回孔深。
+        public double EffectiveThreadDepth {
+            get {
+                if (Kind != HoleKind.Tapped) return 0;
+                if (ThreadFull) return Through ? 0 : Depth;
+                return Through ? ThreadDepth : Math.Min(ThreadDepth, Depth);
+            }
+        }
+
+        // 螺纹深度的一句话："螺纹全长" / "螺纹深 12"
+        public string ThreadText {
+            get {
+                if (Kind != HoleKind.Tapped) return "";
+                return ThreadFull ? "螺纹全长" : "螺纹深 " + N(ThreadDepth);
+            }
+        }
 
         public string Summary {
             get {
@@ -77,9 +101,39 @@ namespace TianGongCadSuite {
                 s += Through ? "　贯通" : "　深" + N(Depth);
                 if (!Through && Bottom == HoleBottom.VBottom) s += "（V 底 " + N(BottomAngle) + "°）";
                 if (!Through && Bottom == HoleBottom.Flat) s += "（平底）";
+                if (Kind == HoleKind.Tapped) s += "　" + ThreadText;
                 if (Chamfer) s += "　孔口倒角 " + N(ChamferSetback) + "×" + N(ChamferAngle) + "°";
                 return s;
             }
+        }
+
+        // 螺纹深度是否成立（空串 = 成立）。盲孔的指定螺纹深度不能超过孔深。
+        public string ThreadProblem {
+            get {
+                if (Kind != HoleKind.Tapped || ThreadFull) return "";
+                if (!(ThreadDepth > 0)) return "螺纹深度必须大于 0";
+                if (!Through && ThreadDepth > Depth + 1e-9)
+                    return "螺纹深度 " + N(ThreadDepth) + " 超过了孔深 " + N(Depth) + "（要攻到底请选「全长」）";
+                return "";
+            }
+        }
+
+        // 默认的指定螺纹深度：2 倍公称直径（常用的旋合长度），取到 0.5mm。
+        public static double DefaultThreadDepth(string size){
+            double nominal = HoleShapeBuilderNominal(size);
+            if (!(nominal > 0)) return 12;
+            return Math.Round(nominal * 2.0 * 2.0, MidpointRounding.AwayFromZero) / 2.0;
+        }
+        // "M6" -> 6（与 HoleShapeBuilder.NominalMm 相同；这里单独写一份，免得纯逻辑文件互相牵连）
+        static double HoleShapeBuilderNominal(string size){
+            if (string.IsNullOrEmpty(size)) return 0;
+            var sb = new System.Text.StringBuilder();
+            foreach (char c in size) {
+                if (char.IsDigit(c) || c == '.') sb.Append(c);
+                else if (sb.Length > 0) break;
+            }
+            double v;
+            return double.TryParse(sb.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out v) ? v : 0;
         }
         public static string KindName(HoleKind k){
             switch(k){ case HoleKind.Tapped: return "螺纹孔"; case HoleKind.Counterbore: return "圆柱沉孔";
@@ -116,16 +170,19 @@ namespace TianGongCadSuite {
         // 匹配容差（毫米）。标准值附近 ±0.35 视为命中；0.35≈相邻规格间距的一半。
         public const double Tolerance = 0.35;
 
+        // 沉孔直径/深度（第 7、8 列）与天工CAD 孔标准表 GB Metric「沉头孔 · 内六角螺钉」一致（2026-10-13 改）：
+        // 原来是经验值（M6 深 6.5、M8 Φ14.5 深 8.6……），用天工自带的孔命令打开时对不上表里任何一行，
+        // 大小一栏显示 *。过孔（第 5、6 列）本来就和表里「常规螺钉间隙」的紧密/普通两档相同。见 HoleStandard.cs。
         public static readonly ThreadRow[] Table = new ThreadRow[] {
             new ThreadRow("M3" ,0.5 ,2.5 ,2.459 ,3.2 ,3.4 ,6.0 ,3.4 ,2.75),
-            new ThreadRow("M4" ,0.7 ,3.3 ,3.242 ,4.3 ,4.5 ,8.0 ,4.4 ,3.60),
-            new ThreadRow("M5" ,0.8 ,4.2 ,4.134 ,5.3 ,5.5 ,9.5 ,5.4 ,4.50),
-            new ThreadRow("M6" ,1.0 ,5.0 ,4.917 ,6.4 ,6.6 ,11.0,6.5 ,5.00),
-            new ThreadRow("M8" ,1.25,6.8 ,6.647 ,8.4 ,9.0 ,14.5,8.6 ,6.50),
+            new ThreadRow("M4" ,0.7 ,3.3 ,3.242 ,4.3 ,4.5 ,8.0 ,4.6 ,3.60),
+            new ThreadRow("M5" ,0.8 ,4.2 ,4.134 ,5.3 ,5.5 ,10.0,5.7 ,4.50),
+            new ThreadRow("M6" ,1.0 ,5.0 ,4.917 ,6.4 ,6.6 ,11.0,6.8 ,5.00),
+            new ThreadRow("M8" ,1.25,6.8 ,6.647 ,8.4 ,9.0 ,15.0,9.0 ,6.50),
             new ThreadRow("M10",1.5 ,8.5 ,8.376 ,10.5,11.0,18.0,11.0,8.00),
             new ThreadRow("M12",1.75,10.2,10.106,13.0,13.5,20.0,13.0,9.00),
-            new ThreadRow("M16",2.0 ,14.0,13.835,17.0,17.5,26.0,17.0,12.00),
-            new ThreadRow("M20",2.5 ,17.5,17.294,21.0,22.0,33.0,21.0,15.00),
+            new ThreadRow("M16",2.0 ,14.0,13.835,17.0,17.5,26.0,17.5,12.00),
+            new ThreadRow("M20",2.5 ,17.5,17.294,21.0,22.0,33.0,21.5,15.00),
         };
 
         public static ThreadRow? Find(string size){
@@ -227,7 +284,8 @@ namespace TianGongCadSuite {
                 s.Note = "参考孔 Φ" + actual.ToString("0.##",CultureInfo.InvariantCulture) + " 是 " + r.Size + " 的螺纹底孔，目标件配做沉孔。";
                 return s;
             }
-            var t = new HoleSpec { Kind = HoleKind.Tapped, ThreadSize = r.Size, HoleDiameter = r.MinorDia, Depth = 0 };
+            var t = new HoleSpec { Kind = HoleKind.Tapped, ThreadSize = r.Size, HoleDiameter = r.MinorDia, Depth = 0,
+                                   ThreadFull = true, ThreadDepth = HoleSpec.DefaultThreadDepth(r.Size) };
             t.Note = "参考孔 Φ" + actual.ToString("0.##",CultureInfo.InvariantCulture) + " 是 " + r.Size + " 的过孔，目标件配做螺纹孔。";
             return t;
         }
@@ -256,9 +314,11 @@ namespace TianGongCadSuite {
         }
         static string N(double v){ return v.ToString("0.##",CultureInfo.InvariantCulture); }
 
-        // 锥形沉孔默认锥孔直径：按螺钉头径（= 2×头半径）取，90° 沉头螺钉正好沉到与表面齐平。
-        // 表里没填头半径时退回"沉孔直径 + 1"，并仍然是显式标注过的估算值。
+        // 锥形沉孔默认锥孔直径：优先取天工孔标准表「埋头孔 · 机用」（M3–M10，90°）——这样天工自带的孔命令
+        // 能认出它是标准孔（不显示 *）。表里没有的规格（M12 以上）才按螺钉头径（= 2×头半径）估算。
         public static double CountersinkDiameterFor(ThreadRow r){
+            double table;
+            if (HoleStandards.CountersinkOf(r.Size, out table)) return table;
             return r.HeadRadius > 0 ? Math.Round(2.0 * r.HeadRadius, 2) : r.CounterboreDia + 1.0;
         }
 
@@ -266,16 +326,20 @@ namespace TianGongCadSuite {
         public static HoleSpec FromRow(ThreadRow r, HoleKind kind){
             switch (kind) {
                 case HoleKind.Tapped:
-                    return new HoleSpec { Kind = HoleKind.Tapped, ThreadSize = r.Size, HoleDiameter = r.MinorDia, Depth = 0 };
+                    return new HoleSpec { Kind = HoleKind.Tapped, ThreadSize = r.Size, HoleDiameter = r.MinorDia, Depth = 0,
+                                          ThreadFull = true, ThreadDepth = HoleSpec.DefaultThreadDepth(r.Size) };
                 case HoleKind.Counterbore:
                     return new HoleSpec { Kind = HoleKind.Counterbore, ThreadSize = r.Size, HoleDiameter = r.ClearanceMid,
                                           CounterboreDiameter = r.CounterboreDia, CounterboreDepth = r.CounterboreDep, Depth = 0 };
                 case HoleKind.Countersink: {
-                    double cd = CountersinkDiameterFor(r);
+                    double cd = CountersinkDiameterFor(r), table;
+                    bool std = HoleStandards.CountersinkOf(r.Size, out table);
                     return new HoleSpec { Kind = HoleKind.Countersink, ThreadSize = r.Size, HoleDiameter = r.ClearanceMid,
                                           CountersinkDiameter = cd, CountersinkAngle = 90, Depth = 0,
-                                          Note = "锥孔Φ" + N(cd) + " 按 " + r.Size + " 沉头螺钉头径 2×" + N(r.HeadRadius)
-                                               + " 估算（90°），请按实际螺钉核对。" };
+                                          Note = std
+                                              ? "锥孔Φ" + N(cd) + " 取天工孔标准表 " + r.Size + " 机用沉头（90°），请按实际螺钉核对。"
+                                              : "锥孔Φ" + N(cd) + " 按 " + r.Size + " 沉头螺钉头径 2×" + N(r.HeadRadius)
+                                                + " 估算（90°，天工孔标准表里没有这个规格），请按实际螺钉核对。" };
                 }
                 default:
                     return new HoleSpec { Kind = HoleKind.Through, ThreadSize = r.Size, HoleDiameter = r.ClearanceMid, Depth = 0 };

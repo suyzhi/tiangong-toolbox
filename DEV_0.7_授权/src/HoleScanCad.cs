@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using P=SolidEdgePart;
@@ -279,6 +279,7 @@ namespace TianGongCadSuite {
             if (hole == null) throw new ArgumentException("这条边读不出孔径，请重新点一次孔口的圆形边线。");
             hole.Center = pg.Transform.Point(hole.Center);
             hole.Axis = pg.Transform.Vector(hole.Axis).Unit();
+            hole.Owner = part; hole.Placement = pg.Transform;
             hole.Source = "孔口圆边";
             return hole;
         }
@@ -300,6 +301,7 @@ namespace TianGongCadSuite {
             foreach (var h in holes) {
                 h.Center = target.Placement.Point(h.Center);
                 h.Axis = target.Placement.Vector(h.Axis).Unit();
+                h.Owner = target.Part; h.Placement = target.Placement;
                 h.Source = target.Label;
             }
             if (!byLoops) how = "这个 CAD 版本读不到面的环信息，识别结果里可能混进轮廓圆角或凸台";
@@ -363,6 +365,7 @@ namespace TianGongCadSuite {
             if (hole == null) throw new ArgumentException("没能从这条面上算出孔径，请重新点一次。");
             hole.Center = pg.Transform.Point(hole.Center);
             hole.Axis = pg.Transform.Vector(hole.Axis).Unit();
+            hole.Owner = part; hole.Placement = pg.Transform;
             hole.Source = label;
             return hole;
         }

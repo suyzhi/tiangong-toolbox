@@ -248,9 +248,9 @@ namespace TianGongCadSuite {
                 Assert(((P.Model)docB.Models.Item(1)).Holes.Count == 5, "B 板新增 5 个孔特征");
 
                 // 三个 Φ6.6（M6 过孔）-> M6 螺纹孔（按内小径 Φ4.917 贯通 20mm）
-                // 两个 Φ5 / Φ4.917（M6 底孔/内径）-> M6 沉孔（沉孔 Φ11 深 6.5 + 通孔 Φ6.6 走完剩下 13.5）
+                // 两个 Φ5 / Φ4.917（M6 底孔/内径）-> M6 沉孔（沉孔 Φ11 深 6.8 + 通孔 Φ6.6 走完剩下 13.2；沉孔尺寸取天工孔标准表）
                 double expect = 3.0 * Math.PI * Math.Pow(0.004917/2, 2) * 0.020
-                              + 2.0 * (Math.PI * Math.Pow(0.0055, 2) * 0.0065 + Math.PI * Math.Pow(0.0033, 2) * 0.0135);
+                              + 2.0 * (Math.PI * Math.Pow(0.0055, 2) * 0.0068 + Math.PI * Math.Pow(0.0033, 2) * 0.0132);
                 Assert(Math.Abs(removed - expect) / expect < 0.03,
                     "B 板切除体积 = 3×M6 螺纹孔 + 2×M6 沉孔（实 " + (removed*1e9).ToString("0.#") + " mm³ / 期 " + (expect*1e9).ToString("0.#") + " mm³）");
                 // 反证：孔口 Φ11 会被反推成 M10 螺纹孔（Φ8.376），切除体积是 M6 的 2.9 倍

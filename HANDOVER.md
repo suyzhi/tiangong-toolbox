@@ -105,6 +105,21 @@ DEV_0.7_授权\tools\make-installer.ps1 -Version 0.7.2  # 换版本
 
 ---
 
+## 2.6 2026-10-13：自动打孔 0.7.3（编组命名 / 螺纹深度 / 跟随参考孔 / 界面重排）
+
+详见 `DEV_0.7_授权/AUTO-HOLE.md` 开头「2026-10-13（0.7.3）」一节。要点：
+
+* **一个孔特征只能放一个孔**（`Profile.End` 后 Holes2d 只剩 1 个，换任何校验标志都一样）→ 同规格的孔编成**特征组**并按规格命名；
+* **螺纹深度**：不显式给时 CAD 只攻 2mm。现在默认全长（`igThroughAll`），可指定深度（`igFinite`）；
+* **跨零件关联**：CAD 接口建不了（`IncludeEdge` 0x80040224）→ 孔特征上记 `TGAutoHole/Link` 属性，窗口底部「同步孔位」按关联重新求孔心并挪孔；
+* 新文件：`src/HoleNaming.cs`、`src/HoleLink.cs`（纯逻辑）、`src/HoleLinkCad.cs`；探针与端到端在 `tools/hole-feature-probe/`
+  （`tools/run-hole-feature-probe.ps1` 运行，本机开着 CAD 时拒绝运行，收尾只结束自己起的 CAD）。
+* **天工孔命令打开显示 ***：原来建孔不写 标准/子类型/大小/配合、沉孔/锥沉尺寸也和天工表不一样 → 现在按天工 GB Metric 孔标准表
+  写全这四项、默认尺寸取表值（`src/HoleStandard.cs`）。表在 `Program\SEFactorySettings.sepref` 里的 `Preferences\Holes\GB Metric.xlsx`。
+* **版本戳没动**（仍是 0.7.2）：发安装包前按惯例 `make-installer.ps1 -Version 0.7.3` 并改窗体标题。
+
+---
+
 ## 3. 当前状态（2026-09-26）
 
 - ✅ 宿主合并完成，测试全绿：核心 109 项 + 自动打孔纯逻辑 203 项 + 授权 95 项 + UI 30 项，0 失败。

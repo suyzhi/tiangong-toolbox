@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -105,11 +105,15 @@ namespace TianGongCadSuite {
 
         public static void Placeholder(Graphics g, Rectangle r, string line1, string line2){
             var f1 = Ui.F9B; var f2 = Ui.F8;
+            // 第二行可能很长（"螺纹深度 30 超过了孔深 10……"）：按视图宽度折行，不能两头被切掉
+            int w = Math.Max(40, r.Width - 24);
             var s1 = g.MeasureString(line1, f1);
-            var s2 = g.MeasureString(line2, f2);
+            var s2 = g.MeasureString(line2, f2, w);
             float y = r.Top + (r.Height - s1.Height - s2.Height - 6) / 2f;
             using (var b = new SolidBrush(Ui.Muted)) g.DrawString(line1, f1, b, r.Left + (r.Width - s1.Width) / 2f, y);
-            using (var b = new SolidBrush(Ui.Muted)) g.DrawString(line2, f2, b, r.Left + (r.Width - s2.Width) / 2f, y + s1.Height + 6);
+            using (var fmt = new StringFormat { Alignment = StringAlignment.Center })
+            using (var b = new SolidBrush(Ui.Muted))
+                g.DrawString(line2, f2, b, new RectangleF(r.Left + (r.Width - w) / 2f, y + s1.Height + 6, w, s2.Height + 2), fmt);
         }
     }
 
@@ -192,10 +196,18 @@ namespace TianGongCadSuite {
                 using (var p = new Pen(Ui.Muted, 1f)) {
                     p.DashStyle = DashStyle.Dash;
                     float zTop = Y(shape.Chamfer ? shape.ChamferDepMm : 0);
-                    float zBot = Y(shape.VoidDepthMm - (shape.Through ? 0 : shape.TipHeightMm));
+                    double cylBottom = shape.VoidDepthMm - (shape.Through ? 0 : shape.TipHeightMm);
+                    double threadEnd = Math.Min(shape.ThreadDepthMm > 0 ? shape.ThreadDepthMm : cylBottom, cylBottom);
+                    float zBot = Y(threadEnd);
                     g.DrawLine(p, tr, zTop, tr, zBot);
                     g.DrawLine(p, tl, zTop, tl, zBot);
+                    // 螺纹终止线：没攻到底时画一条横线，一眼看出"只攻了一段"
+                    if (threadEnd < cylBottom - 1e-6) { p.DashStyle = DashStyle.Solid; g.DrawLine(p, tl, zBot, tr, zBot); }
                 }
+                string tt = shape.ThreadFull ? (shape.ThreadSize + " 螺纹全长") : (shape.ThreadSize + " 螺纹深 " + Draw2.N(shape.ThreadDepthMm));
+                var tsz = Draw2.Measure(g, tt, Ui.F8);
+                float ty = Y(Math.Min(shape.ThreadDepthMm, shape.VoidDepthMm) / 2.0) - tsz.Height / 2f;
+                Draw2.Halo(g, tt, Ui.F8, Ui.Accent, Math.Max(2f, tl - tsz.Width - 10), ty);
             }
 
             // 5) 中心线
@@ -403,11 +415,13 @@ namespace TianGongCadSuite {
                 Leader(g, f, P(cx + shape.MouthRadiusMm, cy - shape.MouthRadiusMm * 0.5, shape.ChamferDepMm * 0.5),
                        "孔口倒角 " + Draw2.N(shape.ChamferSetbackMm) + "×" + Draw2.N(shape.ChamferAngleDeg) + "°");
             if (shape.CosmeticThread)
-                Leader(g, f, P(cx + shape.ThreadMajorMm / 2.0, cy - shape.ThreadMajorMm / 2.0 * 0.55, 0), shape.ThreadSize + " 装饰螺纹");
+                Leader(g, f, P(cx + shape.ThreadMajorMm / 2.0, cy - shape.ThreadMajorMm / 2.0 * 0.55, 0),
+                       shape.ThreadSize + " 装饰螺纹 " + (shape.ThreadFull ? "全长" : "深 " + Draw2.N(shape.ThreadDepthMm)));
 
-            string cap = "3D 参考（半剖轴测）　·　" + shape.KindName
-                       + (shape.Through ? " 贯通" : " 深 " + Draw2.N(shape.DepthMm))
+            // 卡片标题已经写了"打完后的样子"，这里只留孔型和深度；太窄放不下就再短一点，别两头被切
+            string cap = "半剖轴测　·　" + shape.KindName + (shape.Through ? " 贯通" : " 深 " + Draw2.N(shape.DepthMm))
                        + "　·　板厚 " + Draw2.N(shape.ThicknessMm) + " 为示意";
+            if (Draw2.Measure(g, cap, Ui.F8).Width > Width - 8) cap = shape.KindName + (shape.Through ? " 贯通" : " 深 " + Draw2.N(shape.DepthMm));
             Draw2.HaloCenter(g, cap, Ui.F8, Ui.Muted, Width / 2f, Height - 15);
         }
 

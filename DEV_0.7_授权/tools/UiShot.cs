@@ -2,6 +2,7 @@
 //
 // 不需要 CAD：窗口的排版、参数联动、两个孔形状视图都只依赖控件本身，
 // 只有"点孔/点面/开打"才会走到 assembly 那条路（构造函数传 null 就不会碰）。
+// 参考孔列表用 AddReferenceForTest 填假数据（规格照常自动反推）。
 //
 // 用法：UiShot.exe <输出目录>
 using System;
@@ -23,7 +24,7 @@ static class UiShot {
         try {
             using (var form = new AutoHoleForm(null, null)) {
                 form.StartPosition = FormStartPosition.Manual;
-                form.Location = new Point(60, 30);
+                form.Location = new Point(40, 20);
                 form.Show();
                 form.Refresh();
                 Pump(900);
@@ -31,58 +32,50 @@ static class UiShot {
                 var all = new List<Control>();
                 Collect(form, all);
                 Console.WriteLine("控件总数 " + all.Count);
-                Dump(all, "初始");
 
-                Dump(all, "1 默认"); Shot(form, Path.Combine(outDir, "1-默认-点孔前.png"));
+                Shot(form, Path.Combine(outDir, "1-默认-点孔前.png"));
 
-                // 圆柱沉孔（自动反推的典型结果）
-                SetCombo(all, "通孔", "圆柱沉孔");
+                // 有参考孔：Φ6.6 ×4（M6 过孔 → 配螺纹孔）、Φ5 ×2（M6 底孔 → 配沉孔）
+                form.AddReferenceForTest(6.6, 4);
+                form.AddReferenceForTest(5.0, 2);
+                Pump(300);
+                Kind(all, "螺纹孔");                    // 选中第二组时是沉孔；切回第一组看螺纹孔
                 Pump(200);
-                Shot(form, Path.Combine(outDir, "2-圆柱沉孔.png"));
+                Shot(form, Path.Combine(outDir, "2-螺纹孔M6-全长.png"));
 
-                // 锥形沉孔
-                SetCombo(all, "通孔", "锥形沉孔");
+                Radio(all, "指定深度");
+                SetNum(all, 0.5M, 2000M, 12M, 10M);
                 Pump(200);
-                Shot(form, Path.Combine(outDir, "3-锥形沉孔.png"));
+                Shot(form, Path.Combine(outDir, "3-螺纹孔M6-指定深度10.png"));
 
-                // 螺纹孔 + 规格 M6
-                SetCombo(all, "通孔", "螺纹孔");
-                SetCombo(all, "自定义", "M6");
+                Kind(all, "圆柱沉孔");
                 Pump(200);
-                Shot(form, Path.Combine(outDir, "4-螺纹孔M6.png"));
+                Shot(form, Path.Combine(outDir, "4-圆柱沉孔.png"));
 
-                // 盲孔 V 型底 + 孔口倒角
-                SetCombo(all, "通孔", "通孔");
-                SetCombo(all, "自定义", "自定义");
-                Click(all, "贯通");                 // 取消贯通 —— 这一下会联动把"盲孔"勾上
+                Kind(all, "锥形沉孔");
+                Pump(200);
+                Shot(form, Path.Combine(outDir, "5-锥形沉孔.png"));
+
+                Kind(all, "通孔");
+                Radio(all, "盲孔");
                 SetCombo(all, "平底", "V 型底");
-                Click(all, "孔口倒角");
+                Check(all, "孔口倒角");
                 Pump(200);
-                Dump(all, "5 盲孔V底倒角"); Shot(form, Path.Combine(outDir, "5-盲孔V底倒角.png"));
+                Shot(form, Path.Combine(outDir, "6-盲孔V底倒角.png"));
 
-                // 盲孔平底 + 无倒角
-                SetCombo(all, "平底", "平底");      // 下拉框按第一项定位，选回第 0 项 = 平底
-                Click(all, "孔口倒角");
+                // 盲孔螺纹孔，螺纹深度超过孔深 -> 视图拒画 + 预览给原因 + 开始打孔变灰
+                SetCombo(all, "平底", "平底");
+                Check(all, "孔口倒角");
+                Kind(all, "螺纹孔");
+                Radio(all, "指定深度");
+                SetNumAny(all, 0.5M, 2000M, 30M);
                 Pump(200);
-                Dump(all, "6 盲孔平底"); Shot(form, Path.Combine(outDir, "6-盲孔平底.png"));
+                Shot(form, Path.Combine(outDir, "7-螺纹深超孔深-拒画.png"));
 
-                // 很小的孔：看缩放会不会把标注挤爆
-                SetNum(all, 0.1M, 500M, 6M, 2.5M);
-                Pump(200);
-                Shot(form, Path.Combine(outDir, "6b-小孔Φ2.5.png"));
-
-                // 不成立的规格：沉孔 Φ11 配 Φ20 的孔 -> 两个视图必须拒画并说明原因
-                SetCombo(all, "通孔", "圆柱沉孔");
-                SetNum(all, 0.1M, 500M, 6.6M, 20M);
-                Pump(200);
-                Dump(all, "8 非法沉孔");
-                Shot(form, Path.Combine(outDir, "8-非法沉孔-拒画.png"));
-                SetCombo(all, "圆柱沉孔", "通孔");
-
-                // 窄窗口：看两列布局在最小宽度下会不会挤坏
-                form.ClientSize = new Size(800, 720);
+                // 窄窗口：看两列布局在最小尺寸下会不会挤坏
+                form.ClientSize = new Size(900, 700);
                 Pump(400);
-                Dump(all, "7 最小尺寸"); Shot(form, Path.Combine(outDir, "7-最小尺寸.png"));
+                Shot(form, Path.Combine(outDir, "8-最小尺寸.png"));
 
                 form.Close();
             }
@@ -102,6 +95,15 @@ static class UiShot {
         while (DateTime.Now < end) { Application.DoEvents(); System.Threading.Thread.Sleep(20); }
         Application.DoEvents();
     }
+    static void Kind(List<Control> all, string pick){
+        foreach (var c in all) {
+            var s = c as Segmented;
+            if (s == null) continue;
+            int i = s.Items.IndexOf(pick);
+            if (i >= 0) { s.SelectedIndex = i; return; }
+        }
+        Console.WriteLine("找不到孔型：" + pick);
+    }
     static void SetCombo(List<Control> all, string firstItem, string pick){
         foreach (var c in all) {
             var cb = c as ComboBox;
@@ -118,34 +120,28 @@ static class UiShot {
         }
         Console.WriteLine("找不到数值框 " + from);
     }
-    static void Click(List<Control> all, string text){
+    // 按范围找（不管当前值）——螺纹深度框只有它是 0.5～2000
+    static void SetNumAny(List<Control> all, decimal min, decimal max, decimal to){
+        foreach (var c in all) {
+            var n = c as NumericUpDown;
+            if (n == null || n.Minimum != min || n.Maximum != max) continue;
+            n.Value = to; return;
+        }
+        Console.WriteLine("找不到数值框 " + min + "~" + max);
+    }
+    static void Check(List<Control> all, string text){
         foreach (var c in all) {
             var cb = c as CheckBox;
             if (cb != null && cb.Text == text) { cb.Checked = !cb.Checked; return; }
         }
         Console.WriteLine("找不到勾选框：" + text);
     }
-
-    // 关键控件的可用状态：光看截图分不清"灰"是禁用还是没焦点，直接把 Enabled 打出来。
-    // 一律用 ASCII 输出 —— 控制台是 GBK，中文全是乱码，判断不了"可用/禁用"。
-    static void Dump(List<Control> all, string tag){
-        var sb = new System.Text.StringBuilder();
-        sb.Append("[" + tag + "] ");
+    static void Radio(List<Control> all, string text){
         foreach (var c in all) {
-            var cb = c as CheckBox;
-            if (cb != null && (cb.Text == "贯通" || cb.Text == "盲孔" || cb.Text == "孔口倒角"))
-                sb.Append("chk" + (int)cb.Name.Length + cb.Text.Length + "=" + (cb.Checked ? "ON" : "off") + (cb.Enabled ? "" : "/DISABLED") + " ");
-            var n = c as NumericUpDown;
-            if (n != null && (n.Value == 10M || n.Value == 0.5M) && n.Maximum == (n.Value == 10M ? 2000M : 20M))
-                sb.Append("num" + n.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) + "=" + (n.Enabled ? "ENABLED" : "DISABLED") + " ");
-            var bx = c as ComboBox;
-            if (bx != null && bx.Items.Count > 0 && ((string)bx.Items[0] == "平底" || (string)bx.Items[0] == "通孔"))
-                sb.Append("combo" + (bx.Items.Count == 2 ? "(bottom)" : "(kind)") + "=" + (bx.Enabled ? "ENABLED" : "DISABLED") + " ");
-            var nd = c as NumericUpDown;
-            if (nd != null && (nd.Value == 6M || nd.Value == 118M))
-                sb.Append("num" + nd.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) + "=" + (nd.Enabled ? "ENABLED" : "DISABLED") + " ");
+            var rb = c as RadioButton;
+            if (rb != null && rb.Text == text) { rb.Checked = true; return; }
         }
-        Console.WriteLine(sb.ToString());
+        Console.WriteLine("找不到单选：" + text);
     }
 
     static void Shot(Form f, string path){

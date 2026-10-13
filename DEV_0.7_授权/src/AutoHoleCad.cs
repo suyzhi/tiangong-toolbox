@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using A=SolidEdgeAssembly;
@@ -43,6 +43,8 @@ namespace TianGongCadSuite {
             hole.MouthKind = scanned.MouthKind;
             hole.Source = scanned.Source;
             hole.Tag = scanned.Tag;
+            hole.Owner = scanned.Owner;
+            hole.Placement = scanned.Placement;
             hole.Where = "孔口 Φ" + scanned.MouthDiameterMm.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
             return hole;
         }
@@ -91,6 +93,10 @@ namespace TianGongCadSuite {
         public string Method = "";
         public string Audit = "";        // 打完孔回读到的异常（例如 CAD 偷偷换了孔型）
         public List<string> Failures = new List<string>();
+        // 特征树里新出现的节点名（特征组名，或单个孔的名字），结果框里告诉用户"去哪找"
+        public List<string> Features = new List<string>();
+        public string Standard = "";     // 最近一个孔对上的天工孔标准表行（"内六角螺钉 M6 普通 (H13)"），对不上为空
+        public int Linked;               // 写上了参考孔关联记录的孔数
         public bool Ok { get { return Created > 0 && Failures.Count == 0 && Audit.Length == 0; } }
     }
 
@@ -705,6 +711,16 @@ namespace TianGongCadSuite {
                 ? P.FeaturePropertyConstants.igVBottomDimToFlat
                 : P.FeaturePropertyConstants.igVBottomDimToV;
             var none = P.FeaturePropertyConstants.igNone;
+            // 标准 / 子类型 / 大小 / 配合：尺寸正好是天工孔标准表（GB Metric）里某一行的，就把那一行写进去，
+            // 天工自带的孔命令打开时才认得出是标准孔；原来写 "ISO Metric" + 子类型/大小/配合全空，
+            // 打开后大小一栏显示 *（用户反馈）。对不上表的孔（自定义尺寸）照旧，那种孔显示 * 是对的。
+            // 真机回读确认（tools/hole-feature-probe/HoleStdProbe.cs）：这四个字段原样存进文件、尺寸不被改动。
+            var row = HoleStandards.Resolve(spec);
+            object std = row != null ? (object)row.Standard : "ISO Metric";
+            object sub = row != null ? (object)row.SubType : M;
+            object fit = row != null && row.Fit.Length > 0 ? (object)row.Fit : M;
+            object stdSize = row != null ? (object)row.Size : M;
+            if (row != null) result.Standard = row.Label;
             P.HoleData d;
             switch (spec.Kind) {
                 case HoleKind.Counterbore: {
@@ -712,7 +728,7 @@ namespace TianGongCadSuite {
                     if (cd <= dia) throw new ArgumentException("沉孔直径必须大于通孔直径。");
                     if (cdep <= 0) throw new ArgumentException("沉孔深度必须大于 0。");
                     d = part.HoleDataCollection.AddEx(P.FeaturePropertyConstants.igCounterboreHole,
-                        "ISO Metric", M, M, M, dia,                               // 1-5
+                        std, sub, stdSize, fit, dia,                              // 1-5 标准/子类型/大小/配合/孔径
                         cd, cdep, 0.0, 0.0, bottom,                               // 6-10 沉孔尺寸 + 孔底角度
                         none, M, M, M, M, M, vd, M,                               // 11-18 处理方式 / 锥度 / 螺纹 / 孔底标注
                         P.FeaturePropertyConstants.igCounterboreProfileIsAtTop, M, M, M, M, true,   // 19-24
@@ -725,7 +741,7 @@ namespace TianGongCadSuite {
                     if (csd <= dia) throw new ArgumentException("锥形沉孔直径必须大于通孔直径。");
                     if (spec.CountersinkAngle <= 0 || spec.CountersinkAngle >= 180) throw new ArgumentException("锥角必须在 0～180° 之间。");
                     d = part.HoleDataCollection.AddEx(P.FeaturePropertyConstants.igCountersinkHole,
-                        "ISO Metric", M, M, M, dia,                               // 1-5
+                        std, sub, stdSize, fit, dia,                              // 1-5 标准/子类型/大小/配合/孔径
                         0.0, 0.0, csd, spec.CountersinkAngle, bottom,             // 6-10 锥孔尺寸 + 锥角
                         none, M, M, M, M, M, vd, M,                               // 11-18
                         M, M, M, M, M, true,                                      // 19-24
@@ -734,6 +750,8 @@ namespace TianGongCadSuite {
                     break;
                 }
                 case HoleKind.Tapped: {
+                    string problem = spec.ThreadProblem;
+                    if (problem.Length > 0) throw new ArgumentException(problem);
                     string size = spec.ThreadSize.Length > 0 ? spec.ThreadSize : "";
                     double nominal = dia;
                     double nominalMm = NominalMm(size);
@@ -745,20 +763,30 @@ namespace TianGongCadSuite {
                     //   IgnoreSavedDefaults, ThreadDiameterOption, TapDrill, HeadClearance, 9×倒角)
                     // 第 22/23 位（公称直径与螺纹规格）显式给值，装饰螺纹才带得上 M6 这个标注。
                     // 第 14 位 ThreadMinorDiameter = 孔径：孔按螺纹内小径建模（与 CAD 自己的孔命令一致）。
+                    // 第 11 位处理方式显式给 igTappedHole（实测孔型仍是 igRegularHole，而且公称直径/螺距
+                    // 都能回读出来；留 igNone 时 CAD 也会自己换成 igTappedHole，但公称直径、螺距回读为 0）。
+                    // 第 15/16 位螺纹深度**必须显式给**：留空时 CAD 填的是 igFinite + 2mm（真机实测），
+                    // 装饰螺纹只在孔口一小圈 —— 这就是"螺纹深度只有一点点、还没法调"。
+                    //   全长 → igThroughAll：贯通孔整孔攻丝、盲孔攻到孔底（真机线框截图确认）
+                    //   指定 → igFinite + 深度
+                    object tdm, tdep;
+                    if (spec.ThreadFull) { tdm = P.FeaturePropertyConstants.igThroughAll; tdep = M; }
+                    else { tdm = P.FeaturePropertyConstants.igFinite; tdep = spec.EffectiveThreadDepth * MmToM; }
                     d = part.HoleDataCollection.AddEx(P.FeaturePropertyConstants.igRegularHole,
-                        "ISO Metric", M, size.Length > 0 ? (object)size : M, M, dia,   // 1-5 标准/尺寸/孔径
+                        std, sub, row != null ? stdSize : (size.Length > 0 ? (object)size : M), fit, dia,   // 1-5 标准/子类型/大小/配合/孔径
                         0.0, 0.0, 0.0, 0.0, bottom,                               // 6-10 沉孔锥孔显式 0
-                        none, M, M, dia, M, M, vd, M,                             // 11-18 螺纹内径 = 孔径
+                        P.FeaturePropertyConstants.igTappedHole, M, M, dia, tdm, tdep, vd, M,   // 11-18 处理=攻丝 / 螺纹内径=孔径 / 螺纹深度
                         M, M, M, M, M, true,                                      // 19-24
                         M, M, M, M, M, M, M, M, M, M, M, M);                      // 25-36
                     TrySet(() => d.ThreadExternalDiameter = nominal, "AutoHoleThreadDia");
                     if (size.Length > 0) TrySet(() => d.ThreadDescription = size, "AutoHoleThreadDesc");
-                    result.Method = "螺纹孔 " + (size.Length > 0 ? size + "（Φ" + N(spec.HoleDiameter) + " 内径）" : "自定义 Φ" + N(spec.HoleDiameter));
+                    result.Method = "螺纹孔 " + (size.Length > 0 ? size + "（Φ" + N(spec.HoleDiameter) + " 内径）" : "自定义 Φ" + N(spec.HoleDiameter))
+                                  + " " + spec.ThreadText;
                     break;
                 }
                 default:
                     d = part.HoleDataCollection.AddEx(P.FeaturePropertyConstants.igRegularHole,
-                        "ISO Metric", M, M, M, dia,                               // 1-5
+                        std, sub, stdSize, fit, dia,                              // 1-5 标准/子类型/大小/配合/孔径
                         0.0, 0.0, 0.0, 0.0, bottom,                               // 6-10 空孔型参数显式 0
                         none, M, M, M, M, M, vd, M,                               // 11-18
                         M, M, M, M, M, true,                                      // 19-24
@@ -811,6 +839,13 @@ namespace TianGongCadSuite {
                     default: want = "igRegularHole"; break;
                 }
                 if (type != want) msgs.Add("CAD 实际生成的是 " + type + "（要求 " + want + "）");
+                // 天工孔标准表那一行要原样存进去（否则天工自带的孔命令打开时大小显示 *）
+                var row = HoleStandards.Resolve(spec);
+                if (row != null) {
+                    string gotSize = SafeStr(() => d.Size), gotSub = SafeStr(() => d.SubType);
+                    if ((gotSize.Length > 0 || gotSub.Length > 0) && (gotSize != row.Size || gotSub != row.SubType))
+                        msgs.Add("孔标准回读 " + gotSub + " " + gotSize + "（要求 " + row.SubType + " " + row.Size + "）");
+                }
 
                 double gotDia = Read(d, x => x.HoleDiameter) * 1000.0;
                 if (Off(gotDia, spec.HoleDiameter, AuditTolMm))
@@ -848,6 +883,17 @@ namespace TianGongCadSuite {
                         msgs.Add("CAD 未回读螺纹规格" + (spec.ThreadSize.Length > 0 ? "（要求 " + spec.ThreadSize + "）" : ""));
                     else if (spec.ThreadSize.Length > 0 && td.IndexOf(spec.ThreadSize, StringComparison.OrdinalIgnoreCase) < 0)
                         msgs.Add("螺纹规格回读 " + td + "（要求 " + spec.ThreadSize + "）");
+                    // 螺纹深度：全长要回读 igThroughAll；指定深度要回读 igFinite + 同样的深度
+                    string method = SafeStr(() => d.ThreadDepthMethod.ToString());
+                    if (spec.ThreadFull) {
+                        if (method.Length > 0 && method != "igThroughAll")
+                            msgs.Add("螺纹深度方式回读 " + method + "（要求全长）");
+                    } else {
+                        double gotTd = Read(d, x => x.ThreadDepth) * 1000.0;
+                        if (method.Length > 0 && method != "igFinite") msgs.Add("螺纹深度方式回读 " + method + "（要求指定深度）");
+                        else if (Off(gotTd, spec.EffectiveThreadDepth, AuditTolMm))
+                            msgs.Add("螺纹深度回读 " + N(gotTd) + "（要求 " + N(spec.EffectiveThreadDepth) + "）");
+                    }
                 }
                 return msgs.Count == 0 ? "" : "注意：" + string.Join("；", msgs.ToArray());
             } catch { return ""; }
@@ -869,6 +915,7 @@ namespace TianGongCadSuite {
             public HoleSpec Spec;
             public V3 Centre;
             public string Source = "";   // 来自哪个参考孔，出错时能说清
+            public HoleLink Link;        // 和参考孔的关联记录（不保持关联时为 null）；打成功后写进孔特征
         }
 
         // 一批不同规格的孔一次打完。基准面只建一次，每个规格各自建 HoleData。
@@ -932,6 +979,8 @@ namespace TianGongCadSuite {
             const int Rounds = 3;
             var done = new bool[requests.Count];
             var whyByRequest = new string[requests.Count];
+            var made = new P.Hole[requests.Count];        // 每个请求打出来的孔特征（命名、编组、写关联用）
+            var madeLocal = new V3[requests.Count];
             for (int round = 1; round <= Rounds; round++) {
                 if (round > 1) {
                     Info("整轮重试第 " + round + " 轮（重建基准面后重来）");
@@ -972,6 +1021,7 @@ namespace TianGongCadSuite {
                     string why; P.Hole created;
                     if (DrillOne(part, model, plane, local, data, r.Spec == null ? 0 : r.Spec.Depth, out why, out created)) {
                         done[i] = true;
+                        made[i] = created; madeLocal[i] = local;
                         result.Created++;
                         string note = Audit(created, r.Spec);
                         if (note.Length > 0 && !result.Audit.Contains(note)) result.Audit = result.Audit.Length == 0 ? note : result.Audit + "；" + note;
@@ -985,7 +1035,83 @@ namespace TianGongCadSuite {
             }
             for (int i = 0; i < requests.Count; i++) if (!done[i] && whyByRequest[i] != null) result.Failures.Add(whyByRequest[i]);
             result.Method = methods.Count > 0 ? string.Join("／", methods.ToArray()) : "—";
+            try { if (part.Models.Count >= 1) model = part.Models.Item(1); } catch { }
+            Organize(model, requests, made, madeLocal, result);
             return result;
+        }
+
+        // 打完一张面以后：同规格的孔编成一组、按规格命名，并写上和参考孔的关联记录。
+        // 这一步任何一处失败都只记一笔、不影响已经打好的孔（孔是对的，只是名字/编组/关联没写上）。
+        static void Organize(P.Model model, IList<HoleRequest> requests, P.Hole[] made, V3[] madeLocal, DrillResult result){
+            if (model == null) return;
+            var taken = ExistingFeatureNames(model);
+            // 按规格分组，保持打孔顺序
+            var order = new List<string>();
+            var bySpec = new Dictionary<string, List<int>>(StringComparer.Ordinal);
+            for (int i = 0; i < requests.Count; i++) {
+                if (made[i] == null) continue;
+                string key = HoleNaming.SpecKey(requests[i].Spec);
+                List<int> l;
+                if (!bySpec.TryGetValue(key, out l)) { l = new List<int>(); bySpec[key] = l; order.Add(key); }
+                l.Add(i);
+            }
+            foreach (var key in order) {
+                var idx = bySpec[key];
+                var spec = requests[idx[0]].Spec;
+                if (idx.Count == 1) {
+                    string name = HoleNaming.Unique(HoleNaming.Short(spec), taken);
+                    if (TryName(made[idx[0]], name)) { taken.Add(name); result.Features.Add(name); }
+                    continue;
+                }
+                var names = HoleNaming.Members(spec, idx.Count, taken);
+                for (int k = 0; k < idx.Count; k++) if (TryName(made[idx[k]], names[k])) taken.Add(names[k]);
+                string groupName = HoleNaming.Unique(HoleNaming.Group(spec, idx.Count), taken);
+                try {
+                    var items = new object[idx.Count];
+                    for (int k = 0; k < idx.Count; k++) items[k] = made[idx[k]];
+                    Array arr = items;
+                    var group = model.FeatureGroups.AddFeatureGroupsBySet(items.Length, ref arr);
+                    if (group == null) throw new InvalidOperationException("CAD 未返回特征组");
+                    try { group.Name = groupName; } catch (Exception e) { Log.Write("AutoHoleGroupName", e); }
+                    taken.Add(groupName);
+                    result.Features.Add(groupName);
+                } catch (Exception e) {
+                    Log.Write("AutoHoleGroup", e);
+                    result.Notes.Add(idx.Count + " 个「" + HoleNaming.Short(spec) + "」没能编成一组（" + Friendly(e) + "），已逐个命名。");
+                    result.Features.Add(HoleNaming.Short(spec) + " 等 " + idx.Count + " 个孔");
+                }
+            }
+            int wanted = 0;
+            for (int i = 0; i < requests.Count; i++) {
+                if (made[i] == null || requests[i].Link == null) continue;
+                wanted++;
+                try {
+                    requests[i].Link.TgtCenter = madeLocal[i];
+                    HoleLinkStore.Write(made[i], requests[i].Link);
+                    result.Linked++;
+                } catch (Exception e) { Log.Write("AutoHoleLinkWrite", e); }
+            }
+            if (result.Linked < wanted)
+                result.Notes.Add("有 " + (wanted - result.Linked) + " 个孔没写上关联记录，参考零件挪动后它们不会跟着同步。");
+        }
+
+        static bool TryName(P.Hole hole, string name){
+            try { hole.Name = name; return true; }
+            catch (Exception e) { Log.Write("AutoHoleName", e); return false; }
+        }
+
+        // 零件里已有的孔特征名 + 特征组名：新名字要避开它们（第二批同规格孔接着往下编号）
+        static HashSet<string> ExistingFeatureNames(P.Model model){
+            var set = new HashSet<string>(StringComparer.Ordinal);
+            try {
+                int n = model.Holes.Count;
+                for (int i = 1; i <= n; i++) { try { set.Add(model.Holes.Item(i).Name); } catch { } }
+            } catch { }
+            try {
+                int n = model.FeatureGroups.Count;
+                for (int i = 1; i <= n; i++) { try { set.Add(model.FeatureGroups.Item(i).Name); } catch { } }
+            } catch { }
+            return set;
         }
 
         // 腰孔（长圆孔）：Holes2d 只能做圆孔，所以走 ExtrudedCutouts 通切。

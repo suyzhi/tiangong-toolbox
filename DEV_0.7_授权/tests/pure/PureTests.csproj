@@ -23,9 +23,13 @@
     <Compile Include="../../src/AutoHoleCheck.cs" />
     <Compile Include="../../src/HoleProfile.cs" />
     <Compile Include="../../src/HoleScan.cs" />
+    <Compile Include="../../src/HoleNaming.cs" />
+    <Compile Include="../../src/HoleLink.cs" />
+    <Compile Include="../../src/HoleStandard.cs" />
     <Compile Include="../../src/FormatConvertCore.cs" />
     <Compile Include="../AutoHolePureTests.cs" />
     <Compile Include="../AutoHoleScanPureTests.cs" />
+    <Compile Include="../AutoHoleLinkPureTests.cs" />
     <Compile Include="../FormatConvertTests.cs" />
     <Compile Include="../PanelNamingPureTests.cs" />
     <Compile Include="Program.cs" />

@@ -13,6 +13,7 @@ namespace TianGongCadSuite {
         // ---------- 纯逻辑：规格反推 ----------
         public static void Pure(){
             ScanPure();   // 面扫描 / 沉孔识别 / 归类（见 AutoHoleScanPureTests.cs）
+            LinkPure();   // 螺纹深度 / 特征命名编组 / 参考孔关联（见 AutoHoleLinkPureTests.cs）
             // ICAN 的两个真实样例：8.5 -> M10 沉孔；13.5 -> M12 螺纹孔
             var a = HoleMatcher.Match(8.5);
             Assert(a.HasRow && a.Row.Size == "M10", "Φ8.5 -> M10");
@@ -61,7 +62,7 @@ namespace TianGongCadSuite {
             var ch = tap.Clone(); ch.Chamfer = true; ch.Depth = 6;
             Assert(ch.Summary.Contains("孔口倒角 0.5×45°"), "摘要写明孔口倒角");
             var cb = HoleMatcher.FromRow(row.Value, HoleKind.Counterbore);
-            Assert(Math.Abs(cb.CounterboreDiameter - 14.5) < 1e-9 && Math.Abs(cb.CounterboreDepth - 8.6) < 1e-9, "手工 M8 沉孔Φ14.5深8.6");
+            Assert(Math.Abs(cb.CounterboreDiameter - 15) < 1e-9 && Math.Abs(cb.CounterboreDepth - 9) < 1e-9, "手工 M8 沉孔Φ15深9（= 天工孔标准表 内六角螺钉 M8）");
 
             // 表本身单调、无重复
             Assert(HoleMatcher.Table.Length == 9, "螺纹表 9 个规格");
@@ -209,14 +210,18 @@ namespace TianGongCadSuite {
             // 离得远的不该报歧义（Φ12.7 首选 M12 过孔差 0.3，次选 M16 差 1.1）
             Assert(!HoleMatcher.Match(12.7).Ambiguous, "Φ12.7 不该报歧义");
 
-            // ---- 锥形沉孔默认值：按沉头螺钉头径（2×头半径），不是"沉孔直径+1" ----
+            // ---- 锥形沉孔默认值：天工孔标准表里有的（M3–M10）取表值，没有的才按沉头螺钉头径（2×头半径）估算 ----
             var m8 = HoleMatcher.Find("M8").Value;
-            Assert(Math.Abs(HoleMatcher.CountersinkDiameterFor(m8) - 13.0) < 1e-9,
-                   "M8 锥形沉孔默认锥孔Φ13（= 2×头半径 6.5），实得 " + HoleMatcher.CountersinkDiameterFor(m8));
+            Assert(Math.Abs(HoleMatcher.CountersinkDiameterFor(m8) - 17.3) < 1e-9,
+                   "M8 锥形沉孔默认锥孔Φ17.3（天工孔标准表 机用 M8），实得 " + HoleMatcher.CountersinkDiameterFor(m8));
             var sink = HoleMatcher.FromRow(m8, HoleKind.Countersink);
-            Assert(Math.Abs(sink.CountersinkDiameter - 13.0) < 1e-9 && Math.Abs(sink.CountersinkAngle - 90) < 1e-9,
-                   "M8 锥形沉孔：Φ13 / 90°");
-            Assert(sink.Note.Contains("估算"), "锥形沉孔的默认值是估算值，摘要里要说清楚：" + sink.Note);
+            Assert(Math.Abs(sink.CountersinkDiameter - 17.3) < 1e-9 && Math.Abs(sink.CountersinkAngle - 90) < 1e-9,
+                   "M8 锥形沉孔：Φ17.3 / 90°");
+            Assert(sink.Note.Contains("天工孔标准表"), "说明锥孔直径取自天工孔标准表：" + sink.Note);
+            var m12 = HoleMatcher.Find("M12").Value;
+            var sink12 = HoleMatcher.FromRow(m12, HoleKind.Countersink);
+            Assert(Math.Abs(sink12.CountersinkDiameter - 18.0) < 1e-9 && sink12.Note.Contains("估算"),
+                   "M12 天工表里没有机用沉头：按 2×头半径 9 估算成 Φ18，并说明是估算：" + sink12.Note);
             for (int i = 0; i < HoleMatcher.Table.Length; i++) {
                 var r3 = HoleMatcher.Table[i];
                 Assert(r3.HeadRadius > 0, r3.Size + " 表里有沉头头半径（锥形沉孔默认值要用）");

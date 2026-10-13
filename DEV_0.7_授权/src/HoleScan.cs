@@ -29,6 +29,10 @@ namespace TianGongCadSuite {
         public string MouthKind = "";  // 圆柱沉孔 / 锥形沉孔 / 孔口倒角 / 孔口圆角 / 孔口台阶；平孔为 ""
         public string Source = "";     // 这个孔是从哪来的（面名/圆柱面），给界面用
         public object Tag;
+        // 参考孔所在零件（零件文档 COM 对象）和它在装配里的变换（零件局部 → 装配）。
+        // 打孔时据此记下"这个孔照哪个零件上的哪个孔配的"，参考零件挪了以后才能把孔跟回去（HoleLink）。
+        public object Owner;
+        public Transform Placement;
         public bool Stepped { get { return MouthDiameterMm - DiameterMm > HoleScan.StepToleranceMm; } }
         public string Note {
             get {

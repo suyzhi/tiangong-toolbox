@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 
@@ -25,6 +25,8 @@ namespace TianGongCadSuite {
         public bool Tapped;                   // 螺纹孔：实体孔按内小径，螺纹是装饰螺纹
         public string ThreadSize = "";
         public double ThreadMajorMm;          // 装饰螺纹公称直径（仅 Tapped 有意义）
+        public bool ThreadFull = true;        // 螺纹全长（贯通孔整孔、盲孔到孔底）
+        public double ThreadDepthMm;          // 装饰螺纹从孔口往下画多深（已按全长/指定深度换算好）
 
         public bool Through;
         public double DepthMm;                // 盲孔总深（含钻尖）；贯通孔等于参考板厚
@@ -67,7 +69,7 @@ namespace TianGongCadSuite {
                 string s = KindName + " Φ" + N(HoleDiameterMm);
                 if (Kind == HoleKind.Counterbore) s += "，沉孔 Φ" + N(CounterboreDiaMm) + " 深 " + N(CounterboreDepMm);
                 if (Kind == HoleKind.Countersink) s += "，锥孔 Φ" + N(CountersinkDiaMm) + " " + N(CountersinkAngleDeg) + "°";
-                if (Tapped && ThreadSize.Length > 0) s += "（" + ThreadSize + " 装饰螺纹）";
+                if (Tapped && ThreadSize.Length > 0) s += "（" + ThreadSize + " 装饰螺纹，" + (ThreadFull ? "全长" : "深 " + N(ThreadDepthMm)) + "）";
                 s += Through ? "，贯通" : "，深 " + N(DepthMm);
                 if (!Through && Bottom == HoleBottom.VBottom) s += "，V 型底 " + N(BottomAngleDeg) + "°";
                 else if (!Through) s += "，平底";
@@ -124,6 +126,8 @@ namespace TianGongCadSuite {
                 t = spec.Depth + Math.Max(2.0, spec.Depth * 0.25);
             } else {
                 t = Math.Max(3.0, spec.HoleDiameter * 1.6);
+                // 指定了螺纹深度的贯通螺纹孔：板要比螺纹深，否则看不出"螺纹只攻了一段"
+                if (spec.Kind == HoleKind.Tapped && !spec.ThreadFull) t = Math.Max(t, spec.ThreadDepth + Math.Max(2.0, spec.ThreadDepth * 0.25));
                 if (spec.Kind == HoleKind.Counterbore) t = Math.Max(t, spec.CounterboreDepth * 1.6);
                 if (spec.Kind == HoleKind.Countersink) t = Math.Max(t, spec.CountersinkDiameter * 0.5);
             }
@@ -161,6 +165,11 @@ namespace TianGongCadSuite {
             if (s.Tapped) {
                 double nominal = NominalMm(s.ThreadSize);
                 s.ThreadMajorMm = nominal > 0 ? nominal : s.HoleDiameterMm;
+                s.ThreadFull = spec.ThreadFull;
+                double full = s.Through ? s.ThicknessMm : s.DepthMm;
+                s.ThreadDepthMm = spec.ThreadFull ? full : Math.Min(Math.Max(0.1, spec.ThreadDepth), full);
+                string tp = spec.ThreadProblem;
+                if (tp.Length > 0) s.Problem = tp;
             }
 
             double r = s.HoleRadiusMm;
