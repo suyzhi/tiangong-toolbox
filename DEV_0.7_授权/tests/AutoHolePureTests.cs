@@ -118,8 +118,8 @@ namespace TianGongCadSuite {
             catch (ArgumentException) { Assert(true, "圆周少于 2 孔被拒"); }
 
             // ---- 配孔检查 ----
-            var h1 = new HoleRecord { Center = new V3(0,0,0), Axis = new V3(0,0,1), DiameterMm = 8.5, PartName = "A" };
-            var h2 = new HoleRecord { Center = new V3(0,0,0.02), Axis = new V3(0,0,1), DiameterMm = 11.0, PartName = "B" };
+            var h1 = new HoleRecord { Center = new V3(0,0,0), Axis = new V3(0,0,1), DiameterMm = 8.5, PartName = "A", AxialMax = 0.02 };   // A 板 z 0~20
+            var h2 = new HoleRecord { Center = new V3(0,0,0.02), Axis = new V3(0,0,1), DiameterMm = 11.0, PartName = "B", AxialMax = 0.02 };   // B 板 z 20~40
             Assert(HoleCheck.GroupByAxis(new List<HoleRecord>{ h1, h2 }).Count == 1, "同轴孔归为一组");
             var off = new HoleRecord { Center = new V3(0.005,0,0.02), Axis = new V3(0,0,1), DiameterMm = 11.0, PartName = "B" };
             Assert(HoleCheck.GroupByAxis(new List<HoleRecord>{ h1, off }).Count == 2, "偏心 5mm 不算同轴");
@@ -152,15 +152,15 @@ namespace TianGongCadSuite {
             Assert(unpaired.Count == 2 && unpaired[0].Kind == HoleIssueKind.Unpaired, "要求报孤孔时得 2 条，实得 " + unpaired.Count);
             // 横向错开 0.5mm：超出 0.2mm 同轴容差，但轴线仍在对方孔内 -> 同一组，报"孔偏了"
             // （原来分组容差也是 0.2mm，这两个孔会被拆成两个默认隐藏的孤孔，"孔偏了"永远报不出来）
-            var nearHole = new HoleRecord { Center = new V3(0.0005,0,0.02), Axis = new V3(0,0,1), DiameterMm = 11.0, PartName = "B" };
+            var nearHole = new HoleRecord { Center = new V3(0.0005,0,0.02), Axis = new V3(0,0,1), DiameterMm = 11.0, PartName = "B", AxialMax = 0.02 };
             var nearHoleRun = HoleCheck.Run(new List<HoleRecord>{ h1, nearHole }, null, true);
             Assert(nearHoleRun.Count == 1 && nearHoleRun[0].Kind == HoleIssueKind.Misaligned
                    && nearHoleRun[0].Message.Contains("0.5mm"), "横向错开 0.5mm -> 孔偏了，实得 " + Describe(nearHoleRun));
             Assert(HoleCheck.Run(new List<HoleRecord>{ h1, nearHole }, null).Count == 1, "孔偏了不受“忽略孤孔”影响");
             MisalignmentAndRay();
             var wrongSpec = HoleCheck.Run(new List<HoleRecord>{
-                new HoleRecord{ Center=new V3(0,0,0), Axis=new V3(0,0,1), DiameterMm=8.5, PartName="A" },
-                new HoleRecord{ Center=new V3(0,0,0.02), Axis=new V3(0,0,1), DiameterMm=6.8, PartName="B" } }, null);
+                new HoleRecord{ Center=new V3(0,0,0), Axis=new V3(0,0,1), DiameterMm=8.5, PartName="A", AxialMax=0.02 },
+                new HoleRecord{ Center=new V3(0,0,0.02), Axis=new V3(0,0,1), DiameterMm=6.8, PartName="B", AxialMax=0.02 } }, null);
             Assert(wrongSpec.Count == 1 && wrongSpec[0].Kind == HoleIssueKind.WrongSpec, "M10 底孔配 M8 底孔 -> 配错孔");
 
             // 漏打孔：装配里有 A、B 两个零件，射线说 A 的孔穿过了 B，但 B 上没有孔
@@ -181,8 +181,8 @@ namespace TianGongCadSuite {
             // 配做比较必须拿"与螺钉杆配合的那个直径"（较小者），拿 Φ18 去比对方零件的
             // 螺纹底孔 Φ8.5 必然对不上 —— 会对一个打得完全正确的组合误报配错孔。
             var withCounterbore = new List<HoleRecord>{
-                new HoleRecord{ Center=new V3(0,0,0),    Axis=new V3(0,0,1), DiameterMm=8.5, PartName="A" },
-                new HoleRecord{ Center=new V3(0,0,0.02), Axis=new V3(0,0,1), DiameterMm=11.0, PartName="B" },
+                new HoleRecord{ Center=new V3(0,0,0),    Axis=new V3(0,0,1), DiameterMm=8.5, PartName="A", AxialMax=0.02 },
+                new HoleRecord{ Center=new V3(0,0,0.02), Axis=new V3(0,0,1), DiameterMm=11.0, PartName="B", AxialMax=0.02 },
                 new HoleRecord{ Center=new V3(0,0,0.02), Axis=new V3(0,0,1), DiameterMm=18.0, PartName="B" } };
             var cbIssues = HoleCheck.Run(withCounterbore, null);
             Assert(cbIssues.Count == 0, "沉孔 Φ11/Φ18 + 螺纹底孔 Φ8.5 不算配错孔，实得 " + cbIssues.Count
@@ -356,8 +356,8 @@ namespace TianGongCadSuite {
         // ---- 孔偏了的分组口径 + 漏打孔射线的坐标换算 ----
         static void MisalignmentAndRay(){
             // M6：A 板螺纹底孔 Φ5，B 板过孔 Φ6.6
-            var tap = new HoleRecord { Center = new V3(0,0,0), Axis = new V3(0,0,1), DiameterMm = 5.0, PartName = "A" };
-            Func<double, HoleRecord> clearanceAt = dx => new HoleRecord { Center = new V3(dx,0,0.02), Axis = new V3(0,0,-1), DiameterMm = 6.6, PartName = "B" };
+            var tap = new HoleRecord { Center = new V3(0,0,0), Axis = new V3(0,0,1), DiameterMm = 5.0, PartName = "A", AxialMax = 0.02 };
+            Func<double, HoleRecord> clearanceAt = dx => new HoleRecord { Center = new V3(dx,0,0.02), Axis = new V3(0,0,-1), DiameterMm = 6.6, PartName = "B", AxialMin = -0.02 };   // 轴线朝 -Z，沿 +Z 方向占 20mm
 
             var ok = HoleCheck.Run(new List<HoleRecord>{ tap, clearanceAt(0.0001) }, null, true);
             Assert(ok.Count == 0, "偏 0.1mm（容差内）且配做正确 -> 无问题，实得 " + Describe(ok));

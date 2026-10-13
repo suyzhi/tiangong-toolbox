@@ -291,6 +291,27 @@ class LinkSyncE2E {
                     var r5 = form.LinkReportForTest();
                     Check(r5.Misplaced == 0, "再查：全部同轴（" + r5.Summary + "）");
                 }
+                // ⑦ 同一张面上再打第二批同规格的孔：要并进已有的「M6 螺纹孔」组，而不是再出一个「… (2)」
+                L(""); L("⑦ 同一张面再打 2 个 M6 螺纹孔（第二批）");
+                object refB2 = null; TargetFace tB = null;
+                Retry(delegate { refB2 = asm.CreateReference(occB, FaceAtZ(modelB, 0.0)); tB = AutoHoleReader.ReadTarget(refB2); }, "B 底面引用（第二批）");
+                var m6 = HoleMatcher.FromRow(HoleMatcher.Find("M6").Value, HoleKind.Tapped);
+                var reqs = new List<AutoHoleWriter.HoleRequest>();
+                foreach (var xy in new[]{ new[]{ 0.05, 0.05 }, new[]{ 0.05, 0.09 } })
+                    reqs.Add(new AutoHoleWriter.HoleRequest { Spec = m6, Centre = tB.Placement.Point(new V3(xy[0], xy[1], 0)), Source = "第二批" });
+                DrillResult r7 = null;
+                Retry(delegate { r7 = AutoHoleWriter.DrillRequests(tB, reqs); }, "第二批打孔");
+                L("   第二批：打孔 " + r7.Created + "，特征树：" + string.Join(" | ", r7.Features.ToArray()) + (r7.Notes.Count > 0 ? "　说明：" + string.Join("；", r7.Notes.ToArray()) : ""));
+                Check(r7.Created == 2, "第二批打了 2 个孔");
+                var g7 = new List<string>();
+                foreach (P.FeatureGroup g in modelB.FeatureGroups) g7.Add(g.Name + "[" + g.Count + "]");
+                L("   特征组：" + string.Join(" | ", g7.ToArray()));
+                Check(g7.Count == 2, "还是 2 个特征组（第二批没有另起一组）");
+                Check(g7.Contains("M6 螺纹孔（螺纹全长） ×6[6]"), "螺纹孔组并成「M6 螺纹孔（螺纹全长） ×6」");
+                var n7 = new List<string>();
+                for (int i = 1; i <= modelB.Holes.Count; i++) n7.Add(modelB.Holes.Item(i).Name);
+                Check(n7.Contains("M6 螺纹孔（螺纹全长）-5") && n7.Contains("M6 螺纹孔（螺纹全长）-6"), "第二批的孔接着编号 -5、-6");
+
                 L(""); L("UI: " + form.UiSummary());
             } finally { if (form != null) try { form.Close(); } catch {} }
             try { ((dynamic)app.ActiveWindow).View.Fit(); ((dynamic)app.ActiveWindow).View.SaveAsImage(Path.Combine(outDir, "link-sync-e2e.png"), 1400, 1000); } catch {}

@@ -11,8 +11,44 @@ namespace TianGongCadSuite {
         public double DiameterMm;
         public string PartName = "";
         public object Selection;          // 用于结果窗口里高亮定位
+        // 孔沿自身轴线占的范围（相对 Center，米）。采集时同一个孔的上下两条圆边合并成一条记录，
+        // 范围就从 [0,0] 扩成 [0, 孔深]。配孔检查靠它判"两个孔沿轴线挨不挨着"：
+        // 同一条直线上隔着几百毫米的两个孔不是一对紧固孔，不能拿来互相比规格。
+        public double AxialMin, AxialMax;
+        public void Extend(V3 point){
+            V3 a;
+            try { a = Axis.Unit(); } catch { return; }
+            double t = (point - Center).Dot(a);
+            if (t < AxialMin) AxialMin = t;
+            if (t > AxialMax) AxialMax = t;
+        }
         public override string ToString(){
             return PartName + " Φ" + DiameterMm.ToString("0.##", CultureInfo.InvariantCulture) + " @ " + Center;
+        }
+    }
+
+    // 零件局部坐标下的轴对齐包围盒（米）。
+    public struct Box3 {
+        public V3 Lo, Hi;
+        public Box3(V3 lo, V3 hi){ Lo = lo; Hi = hi; }
+        // 读不到包围盒时用它：等价于"整条直线都算命中"（退回原来的判法，宁可多报不漏报）
+        public static Box3 Infinite { get { return new Box3(new V3(-1e9, -1e9, -1e9), new V3(1e9, 1e9, 1e9)); } }
+        // 直线 o + d·t（d 为单位向量）穿过盒子的参数区间；不穿过返回 false。
+        public bool Clip(V3 o, V3 d, out double t0, out double t1){
+            t0 = double.NegativeInfinity; t1 = double.PositiveInfinity;
+            double[] os = { o.X, o.Y, o.Z }, ds = { d.X, d.Y, d.Z }, los = { Lo.X, Lo.Y, Lo.Z }, his = { Hi.X, Hi.Y, Hi.Z };
+            for (int i = 0; i < 3; i++) {
+                if (Math.Abs(ds[i]) < 1e-12) {
+                    if (os[i] < los[i] - 1e-9 || os[i] > his[i] + 1e-9) return false;
+                    continue;
+                }
+                double a = (los[i] - os[i]) / ds[i], b = (his[i] - os[i]) / ds[i];
+                if (a > b) { double tmp = a; a = b; b = tmp; }
+                if (a > t0) t0 = a;
+                if (b < t1) t1 = b;
+                if (t0 > t1 + 1e-12) return false;
+            }
+            return true;
         }
     }
 
@@ -44,22 +80,54 @@ namespace TianGongCadSuite {
     // 必须先用这个实例的装配变换换算回零件坐标再打射线，否则零件只要在装配里有平移/旋转，
     // 射线就打在错误的位置（同一个 .par 在装配里用了多次时，每个实例的变换也各不相同）。
     // castLocal(原点, 单位方向) 在零件坐标里打一条单向射线，碰到材料返回 true。
+    //
+    // 2026-10-13：射线判据加"距离"。真机实测（AUTO-HOLE-SCAN-VALIDATION-20261005）：
+    // Body.get_FacesByRay 查的是**整条直线**，不是射线 —— 原来只要孔的轴线在装配里**任何地方**
+    // 碰到别的零件（比如一米外的另一根型材），就报"漏打孔"。现在用命中面的包围盒（Face.GetRange，
+    // 同样实测过）算出直线穿过那张面的大致位置，只有离这个孔沿轴线不超过 CoaxialSpanTolMm 的才算。
     public sealed class PartRayTarget {
         public readonly string Name;
         public readonly Transform Placement;
         readonly Func<V3, V3, bool> castLocal;
+        readonly Func<V3, V3, IList<Box3>> boxesLocal;
         public PartRayTarget(string name, Transform placement, Func<V3, V3, bool> castLocal){
             if (placement == null) throw new ArgumentNullException("placement");
             Name = name ?? ""; Placement = placement; this.castLocal = castLocal;
         }
-        // 沿轴线双向各打一条射线。
+        PartRayTarget(string name, Transform placement, Func<V3, V3, IList<Box3>> boxesLocal, bool unused){
+            if (placement == null) throw new ArgumentNullException("placement");
+            Name = name ?? ""; Placement = placement; this.boxesLocal = boxesLocal;
+        }
+        // boxesLocal(原点, 单位方向)：零件坐标里这条**直线**碰到的面，各自的包围盒
+        public static PartRayTarget WithBoxes(string name, Transform placement, Func<V3, V3, IList<Box3>> boxesLocal){
+            return new PartRayTarget(name, placement, boxesLocal, true);
+        }
+        // 不限距离：轴线所在的直线碰到这个零件就算（只给旧的布尔判据用）。
         public bool Hits(V3 centreAssembly, V3 axisAssembly){
+            if (boxesLocal != null) return Hits(centreAssembly, axisAssembly, -1e9, 1e9, 0);
             if (castLocal == null) return false;
             var origin = Placement.InversePoint(centreAssembly);
             var dir = Placement.InverseNormal(axisAssembly);   // 刚体变换：方向的逆旋转就是转置
             if (!origin.Finite || !dir.Finite || dir.Length < 1e-12) return false;
             dir = dir.Unit();
             return castLocal(origin, dir) || castLocal(origin, dir * -1);
+        }
+        // 限距离：直线 origin + axis·t 只在 t ∈ [lo - tol, hi + tol]（米）这一段碰到零件才算。
+        public bool Hits(V3 originAssembly, V3 axisAssembly, double lo, double hi, double tol){
+            if (boxesLocal == null) return Hits(originAssembly, axisAssembly);   // 没有包围盒信息：退回不限距离
+            var origin = Placement.InversePoint(originAssembly);
+            var dir = Placement.InverseNormal(axisAssembly);
+            if (!origin.Finite || !dir.Finite || dir.Length < 1e-12) return false;
+            dir = dir.Unit();
+            IList<Box3> boxes;
+            try { boxes = boxesLocal(origin, dir); } catch { return false; }
+            if (boxes == null) return false;
+            foreach (var b in boxes) {
+                double t0, t1;
+                if (!b.Clip(origin, dir, out t0, out t1)) continue;
+                if (t1 >= lo - tol && t0 <= hi + tol) return true;
+            }
+            return false;
         }
     }
 
@@ -71,10 +139,16 @@ namespace TianGongCadSuite {
             byName[target.Name] = target; return true;
         }
         public int Count { get { return byName.Count; } }
+        // 按这个孔自己的轴向范围 ± CoaxialSpanTolMm 查
         public bool Hits(HoleRecord hole, string partName){
+            if (hole == null) return false;
+            double tol = HoleCheck.CoaxialSpanTolMm / 1000.0;
+            return Hits(partName, hole.Center, hole.Axis, hole.AxialMin, hole.AxialMax, tol);
+        }
+        public bool Hits(string partName, V3 origin, V3 axis, double lo, double hi, double tol){
             PartRayTarget t;
-            if (hole == null || partName == null || !byName.TryGetValue(partName, out t)) return false;
-            return t.Hits(hole.Center, hole.Axis);
+            if (partName == null || !byName.TryGetValue(partName, out t)) return false;
+            return t.Hits(origin, axis, lo, hi, tol);
         }
     }
 
@@ -84,7 +158,7 @@ namespace TianGongCadSuite {
         public const double MaxDiameterMm = 25.0;
         public const double AxisAngleTolDeg = 2.0;   // 轴线方向容差
         public const double AxisOffsetTolMm = 0.2;   // 同轴偏移容差（超过即"孔偏了"）
-        public const double CoaxialSpanTolMm = 3.0;  // 轴向距离小于这个才认为是一对
+        public const double CoaxialSpanTolMm = 3.0;  // 沿轴线的间隙不超过这个才认为挨着（成对 / 漏打孔判定的范围）
 
         // 两条圆边是否属于"同一个孔"：同一零件、同一轴线、同一直径。
         // 通孔在零件上有上下两条圆边，不去重会被当成两个孔。
@@ -204,81 +278,157 @@ namespace TianGongCadSuite {
             return false;
         }
 
+        // 一组同轴孔按"沿轴线挨不挨着"再切成几段（链）。
+        //
+        // 原来 CoaxialSpanTolMm 定义了（注释写着"轴向距离小于这个才认为是一对"），却从来没用上：
+        // 同一条直线上隔着几百毫米、根本不相干的两个孔被当成一对来比规格/同轴度 —— 误报"配错孔""孔偏了"；
+        // 反过来，A、C 两块板有孔、中间夹着的 B 板漏打了，A、C 被当成一对"配好了"，B 的漏孔永远报不出来。
+        // 现在：每个零件在这条轴线上占一段区间（它所有孔记录的轴向范围的并），按区间排序，
+        // 相邻两段的间隙 ≤ CoaxialSpanTolMm 才连成一链；只有同一链里的孔才互相配对。
+        public static List<List<HoleRecord>> SplitByGap(IList<HoleRecord> group, double gapMm){
+            var chains = new List<List<HoleRecord>>();
+            if (group == null || group.Count == 0) return chains;
+            V3 o, a;
+            if (!Frame(group, out o, out a)) { chains.Add(new List<HoleRecord>(group)); return chains; }
+            var spans = new List<KeyValuePair<string, double[]>>();
+            var byPart = new Dictionary<string, List<HoleRecord>>(StringComparer.Ordinal);
+            foreach (var h in group) {
+                double lo, hi; Span(h, o, a, out lo, out hi);
+                List<HoleRecord> l;
+                if (!byPart.TryGetValue(h.PartName, out l)) { l = new List<HoleRecord>(); byPart[h.PartName] = l; spans.Add(new KeyValuePair<string, double[]>(h.PartName, new[]{ lo, hi })); }
+                else {
+                    foreach (var kv in spans) if (kv.Key == h.PartName) { kv.Value[0] = Math.Min(kv.Value[0], lo); kv.Value[1] = Math.Max(kv.Value[1], hi); }
+                }
+                l.Add(h);
+            }
+            spans.Sort((x, y) => x.Value[0].CompareTo(y.Value[0]));
+            double gap = gapMm / 1000.0;
+            List<HoleRecord> cur = null; double end = double.NegativeInfinity;
+            foreach (var kv in spans) {
+                if (cur == null || kv.Value[0] > end + gap) { cur = new List<HoleRecord>(); chains.Add(cur); end = kv.Value[1]; }
+                else end = Math.Max(end, kv.Value[1]);
+                cur.AddRange(byPart[kv.Key]);
+            }
+            return chains;
+        }
+
+        // 一组孔的公共参考：原点取第一个孔的孔心，方向取它的轴线
+        static bool Frame(IList<HoleRecord> g, out V3 o, out V3 a){
+            o = g[0].Center; a = new V3(0, 0, 1);
+            try { a = g[0].Axis.Unit(); return true; } catch { return false; }
+        }
+        // 一个孔记录在公共轴线上占的区间（米）。记录的轴线可能和公共方向相反（实测同一个孔两种方向都读到过）。
+        static void Span(HoleRecord h, V3 o, V3 a, out double lo, out double hi){
+            double s = h.Axis.Dot(a) >= 0 ? 1.0 : -1.0;
+            double t0 = (h.Center - o).Dot(a);
+            double x1 = t0 + s * h.AxialMin, x2 = t0 + s * h.AxialMax;
+            lo = Math.Min(x1, x2); hi = Math.Max(x1, x2);
+        }
+        static void ChainSpan(IList<HoleRecord> chain, out V3 o, out V3 a, out double lo, out double hi){
+            Frame(chain, out o, out a);
+            lo = double.PositiveInfinity; hi = double.NegativeInfinity;
+            foreach (var h in chain) { double l, u; Span(h, o, a, out l, out u); lo = Math.Min(lo, l); hi = Math.Max(hi, u); }
+        }
+
+        // 参与检查的孔（3–25mm）
+        public static List<HoleRecord> Relevant(IList<HoleRecord> holes){
+            if (holes == null) return new List<HoleRecord>();
+            return holes.Where(h => h != null && h.DiameterMm >= MinDiameterMm && h.DiameterMm <= MaxDiameterMm).ToList();
+        }
+        // 一共多少组"挨着的同轴孔"（摘要里那个"N 组同轴孔"）。原来界面拿**没筛过直径**的孔去分组，
+        // 和 Run 实际检查的组数对不上。
+        public static int CountGroups(IList<HoleRecord> holes){
+            int n = 0;
+            foreach (var g in GroupByAxis(Relevant(holes))) n += SplitByGap(g, CoaxialSpanTolMm).Count;
+            return n;
+        }
+
         // 主检查。holes 为全装配的孔；rayHitsPart 用于判"漏打孔"（可为 null 则跳过该项）。
         // reportUnpaired：是否把"只有一个零件有孔、且轴线没穿过任何其他零件"的孤孔也报出来。
         // 默认不报——真实装配里绝大多数孔本来就是孤孔，全报会淹没有用信息。
         // allParts：装配里所有零件的名字。判"漏打孔"必须知道有哪些零件——
         // 只遍历"有孔的零件"永远发现不了漏孔（漏的那个零件本来就没孔）。
         // bodies：预建好的「零件名 -> 射线目标」表（AutoHoleWriter.OccurrenceBodies.Build）。
-        // 给了它就直接按名字查零件，不再让 rayHitsPart 每次重新扫装配 —— 漏打孔判定原本是
-        // O(孤孔数 × 零件数²) 次 COM 调用，大装配上要跑分钟级。为 null 时退回 rayHitsPart。
+        // 给了它就按"孔附近 CoaxialSpanTolMm 以内"判命中（见 PartRayTarget）；为 null 时退回 rayHitsPart（不限距离）。
         public static List<HoleIssue> Run(IList<HoleRecord> holes, Func<HoleRecord, string, bool> rayHitsPart,
                                           bool reportUnpaired = false, IList<string> allParts = null,
                                           PartRayIndex bodies = null){
             var issues = new List<HoleIssue>();
             if (holes == null) return issues;
-            var relevant = holes.Where(h => h.DiameterMm >= MinDiameterMm && h.DiameterMm <= MaxDiameterMm).ToList();
+            var relevant = Relevant(holes);
             var groups = GroupByAxis(relevant);
             var partUniverse = allParts != null && allParts.Count > 0
                 ? allParts
                 : (IList<string>)holes.Select(x => x.PartName).Distinct().ToList();
-            Func<HoleRecord, string, bool> hits = rayHitsPart;
-            if (bodies != null) hits = (hh, pn) => bodies.Hits(hh, pn);
+            double tol = CoaxialSpanTolMm / 1000.0;
 
             foreach (var g in groups) {
-                // 同一零件上重复的孔（同轴同径）先去重，避免同一块板两个面各算一次
-                var parts = g.Select(h => h.PartName).Distinct().ToList();
+                // 同一条轴线上被同一个零件"挡住"的几段孔，合成一条漏打孔（A、C 有孔、中间的 B 没孔 -> 只报 B 一次）
+                var missingByPart = new Dictionary<string, HoleIssue>(StringComparer.Ordinal);
+                var missingOrder = new List<string>();
+                foreach (var chain in SplitByGap(g, CoaxialSpanTolMm)) {
+                    var parts = chain.Select(h => h.PartName).Distinct().ToList();
 
-                if (parts.Count == 1) {
-                    // 只有一个零件有孔：看轴线是否穿过别的零件
-                    var h = g[0];
-                    bool penetrates = false;
-                    if (hits != null) {
+                    if (parts.Count == 1) {
+                        // 只有一个零件有孔：看轴线在这个孔附近是否穿过别的零件
+                        var h = chain[0];
+                        V3 o, a; double lo, hi; ChainSpan(chain, out o, out a, out lo, out hi);
+                        string hitPart = null;
                         foreach (var other in partUniverse) {
                             if (other == h.PartName) continue;
-                            if (hits(h, other)) { penetrates = true; break; }
+                            bool hit = bodies != null ? bodies.Hits(other, o, a, lo, hi, tol)
+                                     : (rayHitsPart != null && rayHitsPart(h, other));
+                            if (hit) { hitPart = other; break; }
                         }
+                        if (hitPart != null) {
+                            HoleIssue mi;
+                            if (!missingByPart.TryGetValue(hitPart, out mi)) {
+                                mi = new HoleIssue { Kind = HoleIssueKind.MissingHole, Holes = new List<HoleRecord>() };
+                                missingByPart[hitPart] = mi; missingOrder.Add(hitPart);
+                            }
+                            mi.Holes.AddRange(chain);
+                        } else if (reportUnpaired) {
+                            issues.Add(new HoleIssue { Kind = HoleIssueKind.Unpaired, Holes = chain,
+                                Message = h.PartName + " 上的 Φ" + N(h.DiameterMm) + " 孔" + Pos(h) + "是孤孔（附近其他零件上没有同轴孔）" });
+                        }
+                        continue;
                     }
-                    if (penetrates) {
-                        issues.Add(new HoleIssue { Kind = HoleIssueKind.MissingHole, Holes = g,
-                            Message = h.PartName + " 上的 Φ" + N(h.DiameterMm) + " 孔" + Pos(h)
-                                    + "轴线穿过了其他零件，但对方没有对应的孔（疑似漏打孔）" });
-                    } else if (reportUnpaired) {
-                        issues.Add(new HoleIssue { Kind = HoleIssueKind.Unpaired, Holes = g,
-                            Message = h.PartName + " 上的 Φ" + N(h.DiameterMm) + " 孔是孤孔（其他零件上没有同轴孔）" });
+
+                    // 多零件：先查同轴度。只比不同零件之间的孔（同一零件上的沉孔两条边本来就同轴）。
+                    double maxLateral = 0;
+                    for (int i = 0; i < chain.Count; i++)
+                        for (int j = i + 1; j < chain.Count; j++)
+                            if (chain[i].PartName != chain[j].PartName) maxLateral = Math.Max(maxLateral, LateralMm(chain[i], chain[j]));
+                    if (maxLateral > AxisOffsetTolMm) {
+                        issues.Add(new HoleIssue { Kind = HoleIssueKind.Misaligned, Holes = chain,
+                            Message = "同组孔最大偏心 " + N(maxLateral) + "mm（容差 " + N(AxisOffsetTolMm) + "mm），涉及 " + string.Join("、", parts.ToArray()) + Pos(chain[0]) });
+                        continue;
                     }
-                    continue;
-                }
 
-                // 多零件：先查同轴度。只比不同零件之间的孔（同一零件上的沉孔两条边本来就同轴）。
-                double maxLateral = 0;
-                for (int i = 0; i < g.Count; i++)
-                    for (int j = i + 1; j < g.Count; j++)
-                        if (g[i].PartName != g[j].PartName) maxLateral = Math.Max(maxLateral, LateralMm(g[i], g[j]));
-                if (maxLateral > AxisOffsetTolMm) {
-                    issues.Add(new HoleIssue { Kind = HoleIssueKind.Misaligned, Holes = g,
-                        Message = "同组孔最大偏心 " + N(maxLateral) + "mm（容差 " + N(AxisOffsetTolMm) + "mm），涉及 " + string.Join("、", parts.ToArray()) });
-                    continue;
-                }
-
-                // 再查配做：每个零件取该组里**最小**的直径。
-                // 一个圆柱沉孔在实体上有两条不同直径的圆边（Φ11 过孔 + Φ18 沉孔外径），
-                // CollectAssemblyHoles 按边遍历、SameHoleLine 只去重"直径几乎相同"的边，
-                // 所以这里会拿到两个直径。真正跟螺钉杆配合、决定螺纹规格的是**过孔**那个
-                // 较小直径；拿 Φ18 去比对对方零件的螺纹底孔必然对不上，会把一个打得完全
-                // 正确的"沉孔 + 螺纹孔"组合误报成配错孔。
-                // 不让用户去猜：最小直径就是这条轴线上与紧固件配合的直径。
-                var byPart = g.GroupBy(h => h.PartName).Select(x => new { Part = x.Key, Dia = x.Min(y => y.DiameterMm) }).ToList();
-                if (byPart.Count >= 2) {
+                    // 再查配做：每个零件取该组里**最小**的直径。
+                    // 一个圆柱沉孔在实体上有两条不同直径的圆边（Φ11 过孔 + Φ18 沉孔外径），
+                    // CollectAssemblyHoles 按边遍历、SameHoleLine 只去重"直径几乎相同"的边，
+                    // 所以这里会拿到两个直径。真正跟螺钉杆配合、决定螺纹规格的是**过孔**那个
+                    // 较小直径；拿 Φ18 去比对对方零件的螺纹底孔必然对不上，会把一个打得完全
+                    // 正确的"沉孔 + 螺纹孔"组合误报成配错孔。
+                    var byPart = chain.GroupBy(x => x.PartName).Select(x => new { Part = x.Key, Dia = x.Min(y => y.DiameterMm) }).ToList();
                     for (int i = 0; i < byPart.Count; i++)
                         for (int j = i + 1; j < byPart.Count; j++) {
                             string why;
                             if (!IsValidPair(byPart[i].Dia, byPart[j].Dia, out why)) {
-                                issues.Add(new HoleIssue { Kind = HoleIssueKind.WrongSpec, Holes = g,
-                                    Message = byPart[i].Part + " Φ" + N(byPart[i].Dia) + " 与 " + byPart[j].Part + " Φ" + N(byPart[j].Dia) + " " + why });
+                                issues.Add(new HoleIssue { Kind = HoleIssueKind.WrongSpec, Holes = chain,
+                                    Message = byPart[i].Part + " Φ" + N(byPart[i].Dia) + " 与 " + byPart[j].Part + " Φ" + N(byPart[j].Dia) + " " + why + Pos(chain[0]) });
                                 i = byPart.Count; break;
                             }
                         }
+                }
+                foreach (var part in missingOrder) {
+                    var mi = missingByPart[part];
+                    var owners = mi.Holes.Select(x => x.PartName).Distinct().ToList();
+                    var first = mi.Holes[0];
+                    mi.Message = string.Join("、", owners.ToArray()) + " 上的 Φ" + N(first.DiameterMm) + " 孔" + Pos(first)
+                               + "轴线穿过了 " + part + "，但 " + part + " 在这里没有对应的孔（疑似漏打孔）";
+                    issues.Add(mi);
                 }
             }
             return issues;

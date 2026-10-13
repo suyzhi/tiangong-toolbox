@@ -98,7 +98,9 @@ namespace TianGongCadSuite {
         readonly Segmented kindSeg = new Segmented("通孔", "螺纹孔", "圆柱沉孔", "锥形沉孔");
         readonly ComboBox sizeBox = Ui.Combo(84, "自定义");
         readonly ComboBox bottomBox = Ui.Combo(72, "平底", "V 型底");
-        readonly NumericUpDown diaNum = Ui.Num(0.1M, 500M, 6M, 2, 0.1M, 72);
+        // 孔径框 3 位小数：螺纹内小径是 4.917 / 6.647 / 8.376 这种三位数。原来 2 位小数会把 4.917 圆成 4.92，
+        // 用户一动别的参数，规格就按 4.92 重建 —— 不再等于天工孔标准表那一行，天工孔命令里又显示 *。
+        readonly NumericUpDown diaNum = Ui.Num(0.1M, 500M, 6M, 3, 0.1M, 72);
         readonly NumericUpDown depthNum = Ui.Num(0.1M, 2000M, 10M, 2, 1M, 72);
         readonly NumericUpDown bottomAngNum = Ui.Num(30M, 179M, 118M, 0, 1M, 54);
         readonly NumericUpDown threadNum = Ui.Num(0.5M, 2000M, 12M, 2, 1M, 72);
@@ -671,7 +673,7 @@ namespace TianGongCadSuite {
                     si = r.HasValue ? Array.IndexOf(HoleMatcher.Table, r.Value) + 1 : 0;
                 }
                 sizeBox.SelectedIndex = si;
-                diaNum.Value = Ui.Clamp((decimal)Math.Round(sp.HoleDiameter, 2), diaNum.Minimum, diaNum.Maximum);
+                diaNum.Value = Ui.Clamp((decimal)Math.Round(sp.HoleDiameter, 3), diaNum.Minimum, diaNum.Maximum);
                 throughRadio.Checked = sp.Through; blindRadio.Checked = !sp.Through;
                 depthNum.Value = Ui.Clamp((decimal)Math.Round(sp.Depth <= 0 ? 10 : sp.Depth, 2), depthNum.Minimum, depthNum.Maximum);
                 bottomBox.SelectedIndex = sp.Bottom == HoleBottom.VBottom ? 1 : 0;

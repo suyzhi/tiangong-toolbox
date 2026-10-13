@@ -79,6 +79,35 @@ static class UiShot {
 
                 form.Close();
             }
+            // ---- 批量排孔 ----
+            using (var pf = new AutoHolePatternForm(null, null)) {
+                pf.StartPosition = FormStartPosition.Manual; pf.Location = new Point(40, 20);
+                pf.Show(); pf.Refresh(); Pump(600);
+                var pall = new List<Control>(); Collect(pf, pall);
+                Shot(pf, Path.Combine(outDir, "P1-批量排孔-默认.png"));
+                Kind(pall, "螺纹孔"); Radio(pall, "指定深度"); Pump(200);
+                Shot(pf, Path.Combine(outDir, "P2-批量排孔-螺纹孔.png"));
+                SegPick(pall, "沿线等分", "圆周均布"); Kind(pall, "圆柱沉孔"); Pump(200);
+                Shot(pf, Path.Combine(outDir, "P3-批量排孔-圆周沉孔.png"));
+                pf.Close();
+            }
+            // ---- 配孔检查 ----
+            using (var cf = new AutoHoleCheckForm(null, null)) {
+                cf.StartPosition = FormStartPosition.Manual; cf.Location = new Point(40, 20);
+                cf.Show(); cf.Refresh(); Pump(600);
+                Shot(cf, Path.Combine(outDir, "C1-配孔检查-未检查.png"));
+                Func<string, double, double, HoleRecord> rec = (p, d, x) => new HoleRecord { PartName = p, DiameterMm = d, Center = new V3(x, 0.05, 0.02), Axis = new V3(0, 0, 1) };
+                var found = new List<HoleIssue>{
+                    new HoleIssue { Kind = HoleIssueKind.MissingHole, Message = "底板.par:1、顶板.par:1 上的 Φ6.6 孔（@X120 Y50 Z20）轴线穿过了 中间板.par:1，但 中间板.par:1 在这里没有对应的孔（疑似漏打孔）", Holes = new List<HoleRecord>{ rec("底板.par:1", 6.6, 0.12), rec("顶板.par:1", 6.6, 0.12) } },
+                    new HoleIssue { Kind = HoleIssueKind.Misaligned, Message = "同组孔最大偏心 0.5mm（容差 0.2mm），涉及 底板.par:1、支架.par:2（@X40 Y50 Z20）", Holes = new List<HoleRecord>{ rec("底板.par:1", 4.917, 0.04), rec("支架.par:2", 6.6, 0.0405) } },
+                    new HoleIssue { Kind = HoleIssueKind.WrongSpec, Message = "底板.par:1 Φ8.5 与 盖板.par:1 Φ6.6 两个孔的规格不同（M10 与 M6）（@X80 Y50 Z20）", Holes = new List<HoleRecord>{ rec("底板.par:1", 8.5, 0.08), rec("盖板.par:1", 6.6, 0.08) } },
+                    new HoleIssue { Kind = HoleIssueKind.Unpaired, Message = "孤孔", Holes = new List<HoleRecord>{ rec("侧板.par:1", 9, 0.2) } },
+                };
+                cf.ShowIssuesForTest(found, 42, 17);
+                cf.SelectForTest(0); Pump(300);
+                Shot(cf, Path.Combine(outDir, "C2-配孔检查-有结果.png"));
+                cf.Close();
+            }
             Console.WriteLine("UISHOT DONE " + outDir);
             return 0;
         } catch (Exception e) {
@@ -103,6 +132,14 @@ static class UiShot {
             if (i >= 0) { s.SelectedIndex = i; return; }
         }
         Console.WriteLine("找不到孔型：" + pick);
+    }
+    static void SegPick(List<Control> all, string firstItem, string pick){
+        foreach (var c in all) {
+            var s = c as Segmented;
+            if (s == null || s.Items.Count == 0 || s.Items[0] != firstItem) continue;
+            int i = s.Items.IndexOf(pick); if (i >= 0) { s.SelectedIndex = i; return; }
+        }
+        Console.WriteLine("找不到分段按钮：" + firstItem + " -> " + pick);
     }
     static void SetCombo(List<Control> all, string firstItem, string pick){
         foreach (var c in all) {

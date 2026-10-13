@@ -90,6 +90,18 @@ namespace TianGongCadSuite {
                 return wall.IsParamReversed ? 1 : 0;
             } catch { return -1; }
         }
+        // 这条圆边是不是圆凸台 / 销 / 轴 / 螺栓杆的外壁（不是孔）。配孔检查采集孔时用：
+        // 原来装配里每一条圆边都当孔，装配里的螺栓、销钉、圆柱凸台都会混进来，
+        // 和真孔配对后误报"配错孔"、轴线碰到别的零件还会误报"漏打孔"。
+        // 判据与点圆边认孔同一条（真机实测：孔壁圆柱面 IsParamReversed=True，凸台外壁 False）；
+        // 判不出来（孔口是锥面/圆角、读不到面）一律当孔 —— 宁可多查，不漏查。
+        public static bool IsBossEdge(G.Edge edge){
+            if (edge == null) return false;
+            G.Face wall;
+            WallOf(edge, null, out wall);
+            return WallSaysHole(wall) == 0;
+        }
+
         const string BossWallMessage = "这是一根圆凸台（或销）的外壁，不是孔。请点孔口的圆形边线，或点孔的内壁圆柱面。";
         static string GeometryName(object geometry){
             if (geometry == null) return "";

@@ -476,6 +476,38 @@ namespace TianGongCadSuite {
         }
     }
 
+    // 可点的筛选胶囊："漏打孔 3"，点一下切换显示/隐藏这一类。选中时实心底色，没选中只留描边、字变灰。
+    public sealed class ToggleChip : Control {
+        public Color ChipColor = Ui.Accent;
+        bool on = true, hover;
+        public event EventHandler CheckedChanged;
+        public ToggleChip(){
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            BackColor = Color.White; Font = Ui.F8; Height = 22; Cursor = Cursors.Hand;
+        }
+        public bool Checked {
+            get { return on; }
+            set { if (on == value) return; on = value; Invalidate(); var h = CheckedChanged; if (h != null) h(this, EventArgs.Empty); }
+        }
+        protected override void OnClick(EventArgs e){ Checked = !Checked; base.OnClick(e); }
+        protected override void OnMouseEnter(EventArgs e){ hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e){ hover = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnPaint(PaintEventArgs e){
+            var g = e.Graphics;
+            g.Clear(Parent != null ? Parent.BackColor : Color.White);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            var r = new Rectangle(0, 0, Width - 1, Height - 1);
+            using (var path = Ui.Rounded(r, 10)) {
+                if (on) using (var b = new SolidBrush(Color.FromArgb(hover ? 48 : 30, ChipColor))) g.FillPath(b, path);
+                else if (hover) using (var b = new SolidBrush(Color.FromArgb(14, Ui.Muted))) g.FillPath(b, path);
+                using (var p = new Pen(on ? Color.FromArgb(120, ChipColor) : Ui.Line)) g.DrawPath(p, path);
+            }
+            g.SmoothingMode = SmoothingMode.Default;
+            TextRenderer.DrawText(g, (on ? "✓ " : "") + Text, on ? Ui.F9B : Font, r, on ? ChipColor : Ui.Muted,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        }
+    }
+
     // 状态胶囊：一行小字 + 底色。
     public sealed class Chip : Control {
         public Color ChipColor = Ui.Accent;

@@ -1055,31 +1055,15 @@ namespace TianGongCadSuite {
                 if (!bySpec.TryGetValue(key, out l)) { l = new List<int>(); bySpec[key] = l; order.Add(key); }
                 l.Add(i);
             }
+            // 编组、命名、并进之前那批的组：见 HoleGrouping
             foreach (var key in order) {
                 var idx = bySpec[key];
-                var spec = requests[idx[0]].Spec;
-                if (idx.Count == 1) {
-                    string name = HoleNaming.Unique(HoleNaming.Short(spec), taken);
-                    if (TryName(made[idx[0]], name)) { taken.Add(name); result.Features.Add(name); }
-                    continue;
-                }
-                var names = HoleNaming.Members(spec, idx.Count, taken);
-                for (int k = 0; k < idx.Count; k++) if (TryName(made[idx[k]], names[k])) taken.Add(names[k]);
-                string groupName = HoleNaming.Unique(HoleNaming.Group(spec, idx.Count), taken);
-                try {
-                    var items = new object[idx.Count];
-                    for (int k = 0; k < idx.Count; k++) items[k] = made[idx[k]];
-                    Array arr = items;
-                    var group = model.FeatureGroups.AddFeatureGroupsBySet(items.Length, ref arr);
-                    if (group == null) throw new InvalidOperationException("CAD 未返回特征组");
-                    try { group.Name = groupName; } catch (Exception e) { Log.Write("AutoHoleGroupName", e); }
-                    taken.Add(groupName);
-                    result.Features.Add(groupName);
-                } catch (Exception e) {
-                    Log.Write("AutoHoleGroup", e);
-                    result.Notes.Add(idx.Count + " 个「" + HoleNaming.Short(spec) + "」没能编成一组（" + Friendly(e) + "），已逐个命名。");
-                    result.Features.Add(HoleNaming.Short(spec) + " 等 " + idx.Count + " 个孔");
-                }
+                var holes = new List<P.Hole>();
+                foreach (int i in idx) holes.Add(made[i]);
+                string node = "";
+                try { node = HoleGrouping.Apply(model, requests[idx[0]].Spec, holes, taken, result.Notes); }
+                catch (Exception e) { Log.Write("AutoHoleGrouping", e); }
+                if (node.Length > 0 && !result.Features.Contains(node)) result.Features.Add(node);
             }
             int wanted = 0;
             for (int i = 0; i < requests.Count; i++) {
@@ -1093,11 +1077,6 @@ namespace TianGongCadSuite {
             }
             if (result.Linked < wanted)
                 result.Notes.Add("有 " + (wanted - result.Linked) + " 个孔没写上关联记录，参考零件挪动后它们不会跟着同步。");
-        }
-
-        static bool TryName(P.Hole hole, string name){
-            try { hole.Name = name; return true; }
-            catch (Exception e) { Log.Write("AutoHoleName", e); return false; }
         }
 
         // 零件里已有的孔特征名 + 特征组名：新名字要避开它们（第二批同规格孔接着往下编号）
@@ -1246,6 +1225,7 @@ namespace TianGongCadSuite {
                     Array c = new double[3], ax = new double[3]; double r = 0;
                     try { circle.GetCircleData(ref c, ref ax, out r); } catch { continue; }
                     if (r <= 0) continue;
+                    if (HoleScanCad.IsBossEdge(edge)) continue;   // 螺栓杆、销、圆凸台的外圆不是孔
                     object sel = null; V3 centre = new V3(), axis = new V3(0,0,1);
                     try {
                         sel = assembly.CreateReference(occ, edge);
@@ -1262,8 +1242,10 @@ namespace TianGongCadSuite {
                     string bucket = partName + "|" + Math.Round(rec.DiameterMm, 1).ToString(CultureInfo.InvariantCulture);
                     List<HoleRecord> same;
                     if (!byBucket.TryGetValue(bucket, out same)) { same = new List<HoleRecord>(); byBucket[bucket] = same; }
+                    // 去重的同时把这条边的位置并进那个孔的轴向范围：上下两条边合并后，范围就是孔深，
+                    // 配孔检查据此判"两个孔沿轴线挨不挨着"。
                     bool dup = false;
-                    foreach (var existing in same) if (HoleCheck.SameHoleLine(existing, rec)) { dup = true; break; }
+                    foreach (var existing in same) if (HoleCheck.SameHoleLine(existing, rec)) { existing.Extend(rec.Center); dup = true; break; }
                     if (!dup) { same.Add(rec); result.Add(rec); }
                 }
             }
@@ -1297,10 +1279,30 @@ namespace TianGongCadSuite {
                     try { Array m = new double[16]; occ.GetMatrix(ref m); placement = new Transform(m); }
                     catch (Exception e) { Log.Write("AutoHoleCheckMatrix " + name, e); continue; }   // 读不到变换宁可不判，也不按原点瞎判
                     var b = body;
-                    index.Add(new PartRayTarget(name, placement, (o, d) => CastLocal(b, o, d)));
+                    index.Add(PartRayTarget.WithBoxes(name, placement, (o, d) => CastBoxes(b, o, d)));
                 }
                 return index;
             }
+        }
+
+        // 零件坐标里这条**直线**碰到的面，各自的包围盒（零件坐标）。
+        // get_FacesByRay 实测是整条直线的查询、只给面不给交点位置（AUTO-HOLE-SCAN-VALIDATION-20261005），
+        // 所以再用 Face.GetRange（同样实测：3D 包围盒）把交点的大致位置框出来，供配孔检查判"离孔多远"。
+        // 读不到包围盒的面按无穷大处理（= 原来的判法，宁可多报）。
+        static IList<Box3> CastBoxes(G.Body body, V3 origin, V3 dir){
+            var boxes = new List<Box3>();
+            object faces;
+            try { faces = body.get_FacesByRay(origin.X, origin.Y, origin.Z, dir.X, dir.Y, dir.Z); } catch { return boxes; }
+            var coll = faces as System.Collections.IEnumerable;
+            if (coll == null) return boxes;
+            foreach (object o in coll) {
+                var f = o as G.Face;
+                if (f == null) { if (o != null) boxes.Add(Box3.Infinite); continue; }
+                Array lo = new double[3], hi = new double[3];
+                try { f.GetRange(ref lo, ref hi); boxes.Add(new Box3(V3.From(lo), V3.From(hi))); }
+                catch { boxes.Add(Box3.Infinite); }
+            }
+            return boxes;
         }
 
         // 在零件坐标里打一条单向射线；命中任何面即认为穿过了该零件的材料。

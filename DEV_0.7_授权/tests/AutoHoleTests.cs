@@ -94,7 +94,10 @@ namespace TianGongCadSuite {
                 int mi = IndexOfItem(size, "M6");
                 Assert(mi > 0, "规格下拉里有 M6");
                 size.SelectedIndex = mi;
-                Assert(Math.Abs((double)dia.Value - 4.917) < 0.01, "选 M6 后孔径回填成内小径 4.917，实得 " + dia.Value);
+                Assert(dia.Value == 4.917M, "选 M6 后孔径回填成内小径 4.917（不能被圆成 4.92），实得 " + dia.Value);
+                // 动一下别的参数（规格会按控件现读重建）：仍然要是天工标准孔，否则天工孔命令里显示 *
+                chamfer.Checked = true; chamfer.Checked = false;
+                Assert(FindLabelContains(form, "天工标准孔：标准螺纹 M6") != null, "改过别的参数后，M6 螺纹孔仍是天工标准孔");
                 Assert(threadFull.Checked, "螺纹默认全长（原来 CAD 默认只攻 2mm）");
                 Assert(!tdepth.Enabled, "全长时螺纹深度框禁用");
                 threadPart.Checked = true;
@@ -169,7 +172,99 @@ namespace TianGongCadSuite {
                 Assert(form.UiSummary().Contains("螺纹深 12"), "改成指定深度后，参考孔组的规格跟着变：" + form.UiSummary());
                 Assert(form.SelfCheck().Length == 0, "全部孔型 × 规格组合过一遍编辑器没有异常");
             }
+            PatternUiState();
+            CheckUiState();
             Console.WriteLine("AUTO-HOLE UI ASSERTIONS " + checks);
+        }
+
+        static W.Label FindLabelContains(W.Control c, string text){
+            foreach (W.Control k in c.Controls) {
+                var l = k as W.Label;
+                if (l != null && l.Text != null && l.Text.Contains(text)) return l;
+                var deep = FindLabelContains(k, text);
+                if (deep != null) return deep;
+            }
+            return null;
+        }
+        static FieldGrid.Row RowAny(W.Control root, string caption){
+            foreach (var g in FindAll<FieldGrid>(root)) { var r = RowOf(g, caption); if (r != null) return r; }
+            return null;
+        }
+        static List<T> FindAll<T>(W.Control c) where T : W.Control {
+            var res = new List<T>();
+            foreach (W.Control k in c.Controls) { var t = k as T; if (t != null) res.Add(t); res.AddRange(FindAll<T>(k)); }
+            return res;
+        }
+
+        // 批量排孔窗口：同一套控件、按排布方式/孔型整行显隐、螺纹深度、天工标准孔提示
+        static void PatternUiState(){
+            using (var form = new AutoHolePatternForm(null, null)) {
+                form.CreateControl();
+                var all = new List<W.Control>();
+                Collect(form, all);
+                var segs = FindAll<Segmented>(form);
+                var mode = segs.FirstOrDefault(s => s.Items.Contains("沿线等分"));
+                var kind = segs.FirstOrDefault(s => s.Items.Contains("螺纹孔"));
+                Assert(mode != null && mode.Items.Count == 3 && kind != null && kind.Items.Count == 4, "批量排孔：排布方式、孔型都是分段按钮");
+                var countRow = RowAny(form, "孔数"); var pitchRow = RowAny(form, "间距"); var edgeRow = RowAny(form, "边距");
+                var angleRow = RowAny(form, "起始角"); var threadRow = RowAny(form, "螺纹"); var slotRow = RowAny(form, "腰孔");
+                Assert(countRow != null && pitchRow != null && edgeRow != null && angleRow != null && threadRow != null && slotRow != null, "批量排孔：各参数行都在");
+                Assert(countRow.Shown && !pitchRow.Shown && edgeRow.Shown && !angleRow.Shown, "沿线等分：显示孔数、边距");
+                mode.SelectedIndex = 1;
+                Assert(!countRow.Shown && pitchRow.Shown && edgeRow.Shown && !angleRow.Shown, "沿线定距：显示间距、边距（不显示孔数）");
+                mode.SelectedIndex = 2;
+                Assert(countRow.Shown && !pitchRow.Shown && !edgeRow.Shown && angleRow.Shown && !slotRow.Shown, "圆周均布：显示孔数、起始角，不显示腰孔");
+                mode.SelectedIndex = 0;
+                Assert(slotRow.Shown, "沿线排布时可以排腰孔");
+                var dia = all.OfType<W.NumericUpDown>().FirstOrDefault(n => n.Minimum == 0.1M && n.Maximum == 500M);
+                Assert(dia != null && Math.Abs((double)dia.Value - 6.6) < 0.01, "默认 M6 通孔，孔径 = 过孔 6.6");
+                Assert(FindLabelPrefix(form, "天工标准孔") != null, "默认孔是天工标准孔（常规螺钉间隙 M6）并写明");
+                kind.SelectedIndex = 1;
+                Assert(threadRow.Shown && dia.Value == 4.917M, "选螺纹孔：出现螺纹深度行，孔径 = 内小径 4.917（不被圆成 4.92）");
+                Assert(FindLabelPrefix(form, "天工标准孔：标准螺纹 M6") != null, "批量排孔的 M6 螺纹孔是天工标准孔");
+                var full = Radio(all, "全长"); var part = Radio(all, "指定深度");
+                var tdepth = all.OfType<W.NumericUpDown>().FirstOrDefault(n => n.Minimum == 0.5M && n.Maximum == 2000M);
+                Assert(full != null && full.Checked && part != null && tdepth != null && !tdepth.Enabled && tdepth.Value == 12M, "螺纹默认全长，指定深度默认 12");
+                part.Checked = true;
+                Assert(tdepth.Enabled, "选指定深度后可填");
+                kind.SelectedIndex = 2;
+                Assert(!threadRow.Shown && Math.Abs((double)dia.Value - 6.6) < 0.01, "圆柱沉孔：不显示螺纹行，孔径 6.6");
+                dia.Value = 6.33M;
+                Assert(FindLabelPrefix(form, "非标孔") != null, "改成表里没有的孔径：提示非标孔（天工里会显示 *）");
+                Assert(FindButton(form, "开始打孔") != null && !FindButton(form, "开始打孔").Enabled, "还没选面时开始打孔不可用");
+            }
+        }
+
+        // 配孔检查窗口：筛选胶囊、孤孔默认不显示、详情列出每个孔
+        static void CheckUiState(){
+            using (var form = new AutoHoleCheckForm(null, null)) {
+                form.CreateControl();
+                var chips = FindAll<ToggleChip>(form);
+                Assert(chips.Count == 4, "配孔检查：四个筛选胶囊");
+                var unpaired = chips.FirstOrDefault(c => c.Text.StartsWith("孤孔"));
+                var missingChip = chips.FirstOrDefault(c => c.Text.StartsWith("漏打孔"));
+                Assert(unpaired != null && !unpaired.Checked && missingChip != null && missingChip.Checked, "孤孔默认不显示，漏打孔默认显示");
+                Func<string, double, HoleRecord> rec = (p, d) => new HoleRecord { PartName = p, DiameterMm = d, Center = new V3(0.01, 0.02, 0.03), Axis = new V3(0, 0, 1) };
+                var found = new List<HoleIssue>{
+                    new HoleIssue { Kind = HoleIssueKind.MissingHole, Message = "A 上的 Φ6.6 孔轴线穿过了 B（疑似漏打孔）", Holes = new List<HoleRecord>{ rec("A", 6.6) } },
+                    new HoleIssue { Kind = HoleIssueKind.Misaligned, Message = "同组孔最大偏心 0.5mm", Holes = new List<HoleRecord>{ rec("A", 6.6), rec("C", 4.917) } },
+                    new HoleIssue { Kind = HoleIssueKind.Unpaired, Message = "孤孔 1", Holes = new List<HoleRecord>{ rec("D", 9) } },
+                    new HoleIssue { Kind = HoleIssueKind.Unpaired, Message = "孤孔 2", Holes = new List<HoleRecord>{ rec("E", 9) } },
+                };
+                form.ShowIssuesForTest(found, 20, 8);
+                Assert(form.ListedCount == 2, "默认只列漏打孔 + 孔偏了（孤孔隐藏），实得 " + form.ListedCount);
+                Assert(unpaired.Text == "孤孔 2" && missingChip.Text == "漏打孔 1", "胶囊上写着各类数量：" + unpaired.Text + " / " + missingChip.Text);
+                Assert(form.SummaryText.Contains("发现 2 处问题"), "结论只数显示的几类：" + form.SummaryText);
+                unpaired.Checked = true;
+                Assert(form.ListedCount == 4 && form.SummaryText.Contains("发现 4 处问题"), "点开孤孔胶囊：4 条，结论跟着变");
+                missingChip.Checked = false;
+                Assert(form.ListedCount == 3, "点掉漏打孔胶囊：剩 3 条");
+                missingChip.Checked = true; unpaired.Checked = false;
+                form.SelectForTest(1);
+                Assert(form.DetailText.Contains("孔偏了") && form.DetailText.Contains("C") && form.DetailText.Contains("Φ4.92"), "详情列出涉及的每个孔：" + form.DetailText);
+                form.ShowIssuesForTest(new List<HoleIssue>(), 5, 3);
+                Assert(form.ListedCount == 0 && form.SummaryText.Contains("没有发现问题"), "没有问题时：列表空、结论写没有发现问题");
+            }
         }
 
         static void Collect(W.Control c, List<W.Control> all){

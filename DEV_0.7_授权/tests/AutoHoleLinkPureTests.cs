@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 
 namespace TianGongCadSuite {
     // 0.7.3 的三件事的纯逻辑回归：螺纹深度、特征命名/编组、参考孔关联（序列化 + 求新孔心）。
@@ -12,6 +13,78 @@ namespace TianGongCadSuite {
             LinkFormatPure();
             LinkSolvePure();
             StandardPure();
+            CheckChainPure();
+        }
+
+        // 配孔检查（2026-10-13 复查修的两处）：
+        //   ① 同一条直线上隔得很远的孔不算一对（CoaxialSpanTolMm 原来定义了却没用上）；
+        //   ② 漏打孔只看孔附近（get_FacesByRay 实测是整条直线的查询，原来一米外的零件也会触发）。
+        static HoleRecord Rec(string part, double zLoMm, double zHiMm, double dia){
+            return new HoleRecord { Center = new V3(0, 0, zLoMm / 1000.0), Axis = new V3(0, 0, 1), DiameterMm = dia, PartName = part,
+                                    AxialMin = 0, AxialMax = (zHiMm - zLoMm) / 1000.0 };
+        }
+        // 零件 = z 区间 [lo,hi]mm 的一块板（x,y 各 ±100mm）；直线碰到就返回它的包围盒
+        static PartRayTarget Slab(string name, double zLoMm, double zHiMm){
+            var box = new Box3(new V3(-0.1, -0.1, zLoMm / 1000.0), new V3(0.1, 0.1, zHiMm / 1000.0));
+            return PartRayTarget.WithBoxes(name, Transform.Identity, (o, d) => {
+                double t0, t1;
+                return box.Clip(o, d, out t0, out t1) ? new List<Box3>{ box } : new List<Box3>();
+            });
+        }
+
+        static void CheckChainPure(){
+            // 包围盒求交
+            double t0, t1;
+            var b = new Box3(new V3(0, 0, 0.01), new V3(0.1, 0.1, 0.02));
+            Assert(b.Clip(new V3(0.05, 0.05, 0), new V3(0, 0, 1), out t0, out t1) && Math.Abs(t0 - 0.01) < 1e-12 && Math.Abs(t1 - 0.02) < 1e-12, "直线穿过盒子：参数区间 [10,20]mm");
+            Assert(!b.Clip(new V3(0.2, 0.05, 0), new V3(0, 0, 1), out t0, out t1), "直线在盒子外：不相交");
+            Assert(Box3.Infinite.Clip(new V3(5, 5, 5), new V3(0, 1, 0), out t0, out t1), "无穷大盒子总相交（读不到包围盒时的退路）");
+
+            // 孔记录的轴向范围：同一个孔的上下两条圆边合并
+            var r = new HoleRecord { Center = new V3(0, 0, 0.01), Axis = new V3(0, 0, -1), DiameterMm = 6.6, PartName = "A" };
+            r.Extend(new V3(0, 0, 0));
+            Assert(Math.Abs(r.AxialMin) < 1e-12 && Math.Abs(r.AxialMax - 0.01) < 1e-12, "轴线朝 -Z 的孔，下面那条边在 +0.01（沿自身轴线）");
+
+            // ① 隔得很远的同轴孔不配对：A 板 Φ8.5（M10 底孔）在 z0~20，C 板 Φ6.8（M8 底孔）在 z300~320
+            var farPair = new List<HoleRecord>{ Rec("A", 0, 20, 8.5), Rec("C", 300, 320, 6.8) };
+            Assert(HoleCheck.GroupByAxis(farPair).Count == 1, "两孔同一条直线（分组仍是一组）");
+            Assert(HoleCheck.SplitByGap(HoleCheck.GroupByAxis(farPair)[0], HoleCheck.CoaxialSpanTolMm).Count == 2, "隔 280mm 切成两段");
+            Assert(HoleCheck.Run(farPair, null).Count == 0, "隔 280mm 的两个孔不再互相比规格（原来报配错孔）");
+            Assert(HoleCheck.Run(farPair, null, true).Count(i => i.Kind == HoleIssueKind.Unpaired) == 2, "要求报孤孔时两个都是孤孔");
+            Assert(HoleCheck.CountGroups(farPair) == 2, "摘要里按 2 组同轴孔计");
+            // 挨着（间隙 2mm）照样配对、照样能报配错孔
+            var near = new List<HoleRecord>{ Rec("A", 0, 20, 8.5), Rec("C", 22, 42, 6.8) };
+            Assert(HoleCheck.Run(near, null).Count(i => i.Kind == HoleIssueKind.WrongSpec) == 1, "间隙 2mm 仍算一对：M10 底孔配 M8 底孔 -> 配错孔");
+            Assert(HoleCheck.CountGroups(new List<HoleRecord>{ Rec("A", 0, 20, 8.5), Rec("A", 0, 20, 2.0) }) == 1, "组数只算 3~25mm 的孔（Φ2 不计）");
+
+            // ② 漏打孔只看孔附近
+            var idx = new PartRayIndex();
+            idx.Add(Slab("B", 10, 20));         // 夹在 A、C 中间
+            idx.Add(Slab("FAR", 800, 820));     // 同一条直线上 800mm 外
+            var all = new List<string>{ "A", "B", "C", "FAR" };
+            // A z0~10、C z20~30 都有 Φ6.6，中间的 B 没孔：原来 A、C 被当成"配好的一对"，B 的漏孔报不出来
+            var sandwich = new List<HoleRecord>{ Rec("A", 0, 10, 6.6), Rec("C", 20, 30, 6.6) };
+            var sw = HoleCheck.Run(sandwich, null, false, all, idx);
+            Assert(sw.Count == 1 && sw[0].Kind == HoleIssueKind.MissingHole, "夹在中间的 B 漏打孔被报出来，实得 " + Describe(sw));
+            Assert(sw.Count == 1 && sw[0].Message.Contains("穿过了 B") && sw[0].Message.Contains("A、C"), "一条漏孔说清是 B，且 A、C 合成一条：" + (sw.Count > 0 ? sw[0].Message : ""));
+            // 只有远处有零件：不报
+            var lone = new List<HoleRecord>{ Rec("A", 100, 110, 6.6) };
+            var idxFar = new PartRayIndex(); idxFar.Add(Slab("FAR", 800, 820));
+            Assert(HoleCheck.Run(lone, null, false, all, idxFar).Count == 0, "800mm 外的零件不再触发漏打孔（原来整条直线都算）");
+            // 紧挨着（间隙 2mm）没孔的零件：报
+            var idxNear = new PartRayIndex(); idxNear.Add(Slab("B", 112, 122));
+            var ln = HoleCheck.Run(lone, null, false, all, idxNear);
+            Assert(ln.Count == 1 && ln[0].Kind == HoleIssueKind.MissingHole, "间隙 2mm 的零件没孔 -> 漏打孔");
+            // 读不到包围盒（Infinite）：退回整条直线都算，宁可多报
+            var idxInf = new PartRayIndex();
+            idxInf.Add(PartRayTarget.WithBoxes("B", Transform.Identity, (o, d) => new List<Box3>{ Box3.Infinite }));
+            Assert(HoleCheck.Run(lone, null, false, all, idxInf).Count == 1, "读不到包围盒时宁可多报");
+            // 零件在装配里平移了：包围盒在零件坐标里，换算后才判距离
+            var moved = new PartRayIndex();
+            var slabLocal = new Box3(new V3(-0.1, -0.1, 0), new V3(0.1, 0.1, 0.01));
+            moved.Add(PartRayTarget.WithBoxes("B", Transform.Frame(new V3(0, 0, 0.111), new V3(1, 0, 0), new V3(0, 1, 0), new V3(0, 0, 1)),
+                (o, d) => { double a0, a1; return slabLocal.Clip(o, d, out a0, out a1) ? new List<Box3>{ slabLocal } : new List<Box3>(); }));
+            Assert(HoleCheck.Run(lone, null, false, all, moved).Count == 1, "零件平移到 z111 后按装配位置判：紧挨着 -> 漏打孔");
         }
 
         // 天工孔标准表（GB Metric）：插件自动生成的孔都要能在表里认出来，天工自带的孔命令打开才不显示 *
