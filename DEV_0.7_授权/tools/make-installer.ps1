@@ -7,7 +7,7 @@
 #     答是就代为强制结束（天工 CAD 是单实例程序，旧进程不退会导致新版本加载不上）；
 #   * 支持 安装.cmd -Force 走无人值守（不弹窗）。
 param(
-    [string]$Version = '0.7.2',
+    [string]$Version = '0.7.3',
     [string]$OutputRoot
 )
 $ErrorActionPreference='Stop'
