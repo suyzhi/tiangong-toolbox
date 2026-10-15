@@ -17,14 +17,8 @@ namespace TianGongCadSuite {
             CaptureOccurrence(doc.SelectSet.Item(1),record);
         }
         public static object Instance(object selected) {
-            if(selected is A.Occurrence||selected is A.SubOccurrence)return selected;
-            var reference=selected as SolidEdgeFramework.Reference;
-            if(reference!=null){
-                object top;int count,bound;Array path=new object[0];
-                reference.GetOccurrencesInPath(out top,out count,out bound,ref path);
-                if(count==0&&top is A.Occurrence)return top;
-                if(count==bound&&path!=null&&path.Length>0){var leaf=path.GetValue(path.GetUpperBound(0));if(leaf is A.SubOccurrence)return leaf;}
-            }
+            var instance=OccurrencePick.Instance(selected);
+            if(instance!=null)return instance;
             throw new InvalidOperationException("无法识别此选择的零件实例。请在装配树中选择具体零件（支持子装配内部零件），再加入或绑定。");
         }
         public static void CaptureOccurrence(object selected,LineupRecord record) {

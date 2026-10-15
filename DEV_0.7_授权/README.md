@@ -7,6 +7,7 @@
 - 自动打孔与孔型预览：[AUTO-HOLE.md](AUTO-HOLE.md)、[../DEV_0.6_打孔预览/AUTO-HOLE-UI.md](../DEV_0.6_打孔预览/AUTO-HOLE-UI.md)
 - 构建产物：tools/build.ps1 → build/（版本号读 VERSION）；授权联调：tools/LicenseAdmin/make-test-codes.ps1；tools 目录分类见 [tools/README.md](tools/README.md)
 - 批量排孔（0.7.6）：默认建成「种子孔 + 阵列」，改种子孔整排跟着变；新命令「改孔型」（命令 9）：已打好的孔整组换孔型/规格、可撤销。见 [AUTO-HOLE.md](AUTO-HOLE.md) 开头「0.7.6」一节
+- 型材自动填充跨子装配（0.7.7）：顶层装配里可以 Ctrl 多选不同子装配的型材、选几个整的子装配，或分几次「追加选择」；子装配内部的选择由 `OccurrencePick` 解析成顶层坐标的 SubOccurrence；子装配里的非型材零件跳过、已有板子不当型材并把盖住的框口标「已有板」（`PanelPlates`）。真机验证见 `tools/panel-probe/CrossFrameE2E.cs`
 - 型材自动填充（0.7.5 重写）：一次可以选几个面的型材，按平面自动分开识别（FrameGrouping）；框口可勾选；材质/尺寸写进零件属性；输出目录、厚度、间隙、材质记在 `%LOCALAPPDATA%\TianGongCadSuite\autopanel.tsv`
 
 下面几节是各模块的历史说明（Lineup、训练数据导出等），保留供查阅。

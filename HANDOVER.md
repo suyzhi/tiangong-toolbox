@@ -1,6 +1,6 @@
 # 交接文档（给下一个 AI / 下一个开发者）
 
-**更新：2026-10-14（0.7.5）**。读这一份就能接手，不用翻聊天记录。过去的长篇排查过程搬到了
+**更新：2026-10-15（0.7.7）**。读这一份就能接手，不用翻聊天记录。过去的长篇排查过程搬到了
 `DEV_0.7_授权/排查记录-实例零件打孔-20260926.md`，这里只留**现在的状态、坑、下一步**。
 
 ---
@@ -68,7 +68,22 @@
 
 ---
 
-## 3. 当前状态（2026-10-14，0.7.6）
+## 3. 当前状态（2026-10-15，0.7.7）
+
+**0.7.7 改了什么**：型材自动填充可以**跨子装配**选型材（围栏四个子装配环起来，某一面的立柱属于隔壁子装配，以前那几个框口生成不了）。
+
+* 根因：在顶层装配里点选子装配内部的零件，SelectSet 里是 `Reference`（真机确认）；`FrameReader` 原来取 `Reference.Object`，
+  拿到的是子装配自己文档里的实例 →「选择不属于当前装配」。现在用 `OccurrencePick`（从 `LineupCad.Instance` 抽出来，Lineup 也改用它）
+  沿 `GetOccurrencesInPath` 解析成顶层装配里的 `SubOccurrence`；
+* 整个子装配选上时：非直型材零件（MISUMI 多实体件等）跳过并记下，不再整批失败；薄板（填充板、玻璃板）不当型材
+  （以前它们和型材同层 →「板厚超出型材共同深度范围」，整面识别不出），只用来把盖住的框口标「已有板」、默认不勾（`PanelPlates`）；
+* 窗口：「追加选择」「清空」，型材汇总写来自哪几个子装配，框口标「跨 N 个子装配」；生成的板子插在当前（顶层）装配；单次上限 200→400 根；
+* 验证：`tests/pure` 全过（新增 `PanelPlatesPureTests`）、`PanelTests` 核心 106 全过；真机 `tools/panel-probe/CrossFrameE2E.cs`
+  在用户围栏 SK26.01-OK310-03-001 的副本上走窗口真实路径（2 号子围栏 + 1/3 号角柱 → 两端 6 个框口出现、生成的板子中心/尺寸与识别一致、
+  追加选择、去重、已有板标记），结果在 `DEV_0.7_授权/artifacts/cross-frame-e2e/`；
+* 没做：板子放进"型材所属的子装配"（现在插顶层）；需要的话要先探针确认能否不激活子装配直接往里插实例。
+
+### 0.7.6
 
 **0.7.6 改了什么**（详见 `DEV_0.7_授权/AUTO-HOLE.md` 开头「0.7.6」一节）：
 
@@ -132,6 +147,8 @@ NDS 注册表里 `Assembly\AddIns\{GUID}\GuiVersion` 仍显示 42，那几个键
 | **换成螺纹孔时 CAD 按旧孔径查螺纹表** | Φ9 的孔换上 M6 螺纹数据 → 螺纹变成「Tr 11 x 2」、孔径还是 Φ9 | 先换同孔径的普通孔、写孔径、重算，再换螺纹数据（`SwapData`）；赋回原 HoleData 对象也会撞上，所以撤销按原规格重建 |
 | **换了 HoleData 以后 SystemName 会变** | SystemName 形如「M6 标准螺纹 孔 1」，跟着孔型走；按旧 SystemName 找不到孔 | 撤销记录同时留 COM 引用（`HoleEditUndo`、`HoleUndo`） |
 | **贯通孔改不成盲孔** | 贯通孔设 `ExtentType=igFinite` 后特征失败（翻面也不行） | 「改孔型」直接拒绝并说明；盲孔改深度/改贯通没问题 |
+| **命令行发码在 powershell.exe 下找不到私钥** | `powershell.exe -File license-admin.ps1 -Action new …` 报「找不到私钥文件：C:\…\澶╁伐…」——5.1 把无 BOM 的 `admin-key.txt` 按 GBK 读，中文路径变乱码 | 用 PowerShell 7（`pwsh`）跑 `license-admin.ps1`，或双击 `授权管理.cmd`；发码 txt 默认存在私钥旁（`tests/fixtures`），发给同事前挪到仓库根并改名「发码-同事-<档位>-…」 |
+| **`PanelTests.exe --auto` 单独跑空引用** | `Host` 只有插件内诊断入口会设，独立 exe 跑 `--auto` 时 `SectionTests` 第一句就 NullReference | 0.7.7 已改成和 `--cad` 一样连当前 CAD；`run-autohole-native.ps1 -Modes --cad,--auto` 可直接跑 |
 | **阵列的角度是弧度** | `AddByRectangular` / `AddByCircular` 的角度单位、方向没文档 | 弧度，从基准面参考方向绕法向逆时针；建完核对孔心（`HolePatternWriter.Verify`） |
 
 ---

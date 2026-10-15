@@ -43,7 +43,7 @@
 | `hole-feature-probe/` | 多孔合一、特征命名、螺纹深度、跟随参考孔、天工孔标准表；`HoleMultiProbe.cs`（2026-10-14）：同一草图集多轮廓、AddSync、用户定义阵列、矩形阵列、已建孔改孔型、编组失败的几种猜测 |
 | `blind-probe/` | 盲孔报错根因（基准面位置/朝向） |
 | `facescan-probe/` | 面扫描、沉孔识别 |
-| `panel-probe/` | 内嵌板错位排查（读几何 / 插实例） |
+| `panel-probe/` | 内嵌板错位排查（读几何 / 插实例）；`CrossFrameProbe.cs`（只读，看一个装配按子装配拆开能识别出哪些框口）、`CrossFrameE2E.cs`（跨子装配填充端到端，参数：输出目录 + 围栏副本装配路径），都用 `run-hole-feature-probe.ps1 -Exe … -ExeArgs …` 在私有桌面跑 |
 | `HoleSpike.cs`、`HoleDefaultProbe.cs`、`PlaneReuseSpike.cs`、`ChamferProbe.cs`、`DiagnosePlane.cs` + 对应 `run-*.ps1` | 早期打孔配方、默认值污染、基准面复用、倒角 |
 | `TrainingViewProbe.cs`、`TrainingSemanticFixture.cs`、`*training*` | 出图训练数据导出（命令 4，已下线） |
 | `LineupDemo.cs`、`LineupPreview.cs`、`Import-LineupLocations.ps1`、`LineupLocations.bas` | Lineup 演示与定位导入 |

@@ -1,7 +1,7 @@
 ﻿// 由 tools/build.ps1 生成，请勿手工修改。
 using System.Reflection;
-[assembly:AssemblyVersion("0.7.6")]
-[assembly:AssemblyFileVersion("0.7.6")]
+[assembly:AssemblyVersion("0.7.7")]
+[assembly:AssemblyFileVersion("0.7.7")]
 [assembly:AssemblyTitle("TianGongCadSuite")]
 namespace TianGongCadSuite.Licensing {
     internal static class LicenseConstants {

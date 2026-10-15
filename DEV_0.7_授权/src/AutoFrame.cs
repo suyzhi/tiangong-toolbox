@@ -12,6 +12,7 @@ namespace TianGongCadSuite {
     }
     public sealed class FrameMember {
         public string Name;
+        public string Source="";   // 来自哪个顶层实例（子装配名），界面汇总用
         public V3 Axis;
         public List<V3> Points=new List<V3>();
         public List<FrameFace> Faces=new List<FrameFace>();
@@ -22,16 +23,41 @@ namespace TianGongCadSuite {
         public V3 MidPoint;
         public PanelSpec Solve(double thickness,double gap){return PanelGeometry.Solve(Planes,MidPoint,thickness,gap);}
     }
+    // 一次读取的结果：型材、已有板子（不参与识别，只用来标"已有板"）、读不了跳过的零件
+    public sealed class FrameSelection {
+        public readonly List<FrameMember> Members=new List<FrameMember>();
+        public readonly List<FrameMember> Plates=new List<FrameMember>();
+        public readonly List<string> Skipped=new List<string>();   // 零件实例名（原因写在 panel.log 的 FrameReaderSkip）
+        public string Summary(){
+            var sources=Members.GroupBy(m=>m.Source??"").Select(g=>(g.Key.Length>0?g.Key:"顶层零件")+" "+g.Count()+" 根").ToList();
+            string text="已读 "+Members.Count+" 根型材"+(sources.Count>1?"，来自 "+sources.Count+" 处："+string.Join("、",sources.ToArray()):"")+"。";
+            if(Plates.Count>0)text+="另有 "+Plates.Count+" 块板子（不当型材，只用来标出已有板的框口）。";
+            if(Skipped.Count>0)text+="跳过 "+Skipped.Count+" 个不是直型材的零件（"+string.Join("、",Skipped.Take(2).ToArray())+(Skipped.Count>2?" 等":"")+"）。";
+            return text;
+        }
+    }
     public static class FrameReader {
-        // Only occurrence identities are deduplicated, never the shared source filename.
+        const int MaxMembers=400;
+        // 只认实例身份去重，不按源文件名（同一根型材文件插很多次是常态）。
         public static List<FrameMember> Read(A.AssemblyDocument assembly,IEnumerable<object> selection){
-            var result=new List<FrameMember>();var seen=new HashSet<string>();
-            foreach(var item in selection)ReadOne(assembly,item,result,seen);
-            if(result.Count<4)throw new ArgumentException("请至少选择围成框口的四根型材，或选择包含它们的框架子装配。");
+            var result=ReadAll(assembly,selection);
+            if(result.Members.Count<4)throw new ArgumentException("请至少选择围成框口的四根型材，或选择包含它们的框架子装配。"+(result.Members.Count+result.Plates.Count+result.Skipped.Count>0?"\n"+result.Summary():""));
+            return result.Members;
+        }
+        // 2026-10-15：可以跨子装配选型材了。
+        //   · 子装配内部的零件（顶层装配里在装配树/快速选取点的）由 OccurrencePick 解析成顶层装配里的 SubOccurrence，
+        //     坐标是顶层装配的 —— 原来直接取 Reference.Object，拿到的是子装配自己文档里的实例，报「选择不属于当前装配」；
+        //   · 整个子装配选上时，里面不是直型材的零件（多实体的标准件、铰链……）跳过并记下，不再整批失败；
+        //   · 薄板（以前生成的填充板、玻璃板）放进 Plates，不当型材。
+        public static FrameSelection ReadAll(A.AssemblyDocument assembly,IEnumerable<object> selection){
+            var result=new FrameSelection();var seen=new HashSet<string>();
+            foreach(var item in selection)ReadOne(assembly,item,result,seen,null);
             return result;
         }
-        static void ReadOne(A.AssemblyDocument assembly,object selected,List<FrameMember> result,HashSet<string> seen){
-            var reference=selected as F.Reference;if(reference!=null)selected=reference.Object;
+        static void ReadOne(A.AssemblyDocument assembly,object selected,FrameSelection result,HashSet<string> seen,string source){
+            object instance=OccurrencePick.Instance(selected);
+            if(instance==null){var reference=selected as F.Reference;if(reference!=null)instance=reference.Object;}
+            selected=instance??selected;
             var occurrence=selected as A.Occurrence;var sub=selected as A.SubOccurrence;
             if(occurrence==null&&sub==null)throw new ArgumentException("请在装配选择工具中选中零件实例或框架子装配，不要选择面、边或草图。");
             if(!ReferenceEquals(occurrence!=null?occurrence.TopLevelDocument:sub.TopLevelDocument,assembly))throw new ArgumentException("选择不属于当前装配。");
@@ -39,9 +65,22 @@ namespace TianGongCadSuite {
             if(occurrence!=null)occurrence.GetReferenceKey(ref key,out size);else sub.GetReferenceKey(ref key,out size);
             string identity=Convert.ToBase64String(key.Cast<object>().Select(Convert.ToByte).ToArray());
             if(!seen.Add(identity))return;
-            if(result.Count>=200)throw new ArgumentException("单次最多读取 200 根型材，请按框架分组选取。");
+            if(source==null)source=OccurrencePick.TopName(selected);
             bool isAssembly=occurrence!=null?occurrence.Subassembly:sub.Subassembly;
-            if(isAssembly){foreach(A.SubOccurrence child in occurrence!=null?occurrence.SubOccurrences:sub.SubOccurrences)ReadOne(assembly,child,result,seen);return;}
+            if(isAssembly){foreach(A.SubOccurrence child in occurrence!=null?occurrence.SubOccurrences:sub.SubOccurrences)ReadOne(assembly,child,result,seen,source);return;}
+            if(result.Members.Count>=MaxMembers)throw new ArgumentException("单次最多读取 "+MaxMembers+" 根型材，请分批选取。");
+            string name=occurrence!=null?occurrence.Name:sub.Name;
+            FrameMember member;
+            try{member=ReadPart(assembly,selected,occurrence,sub);}
+            catch(Exception e){
+                // 不是直型材（多实体标准件、曲面件……）：跳过、记下，别让整批失败
+                if(!(e is ArgumentException||e is System.Runtime.InteropServices.COMException||e is InvalidCastException))throw;
+                result.Skipped.Add(name);Log.Write("FrameReaderSkip",name+"："+e.Message);return;
+            }
+            member.Source=source??"";
+            if(PanelPlates.IsPlate(member.Axis,member.Points))result.Plates.Add(member);else result.Members.Add(member);
+        }
+        static FrameMember ReadPart(A.AssemblyDocument assembly,object selected,A.Occurrence occurrence,A.SubOccurrence sub){
             // Native StructuralFrames use override bodies for their cut-to-length/mitered geometry.
             var definition=occurrence??sub.ThisAsOccurrence;
             bool subOverride=sub!=null&&sub.HasBodyOverride;
@@ -87,7 +126,7 @@ namespace TianGongCadSuite {
             if(facets.Length!=facetCount*9)throw new ArgumentException("CAD 未返回完整的三角面数据："+member.Name);
             var bodyTransform=bodyOverride?overrideTransform:placementTransform;
             for(int i=0;i<facets.Length;i+=9){var triangle=new V3[3];for(int j=0;j<3;j++)triangle[j]=bodyTransform.Point(new V3(Convert.ToDouble(facets.GetValue(i+j*3)),Convert.ToDouble(facets.GetValue(i+j*3+1)),Convert.ToDouble(facets.GetValue(i+j*3+2))));member.Triangles.Add(triangle);}
-            result.Add(member);
+            return member;
         }
     }
     public static class FrameDetection {
