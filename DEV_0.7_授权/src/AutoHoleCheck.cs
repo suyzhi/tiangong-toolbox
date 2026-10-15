@@ -178,6 +178,7 @@ namespace TianGongCadSuite {
         // 轴线方向先按 ±0.5° 量化成一个桶键：方向差超过 2° 的孔一定不同桶，
         // 所以只需在同一个（或相邻的 26 个）桶里做精确比较。相邻桶必须一起看 ——
         // 两个方向只差 0.4° 但落在桶边界两侧时，粗筛会把它们分到不同桶。
+        // 反平行的轴线也算同一条（SameLine 用 |dot|），所以还要再看"反方向"那个桶键的相邻桶。
         public static List<List<HoleRecord>> GroupByAxis(IList<HoleRecord> holes){
             var groups = new List<List<HoleRecord>>();
             if (holes == null) return groups;
@@ -187,7 +188,7 @@ namespace TianGongCadSuite {
                 if (h == null) continue;
                 var key = DirKey(h.Axis);
                 List<HoleRecord> hit = null;
-                foreach (var nk in NeighbourKeys(key)) {
+                foreach (var nk in NeighbourKeys(key).Concat(NeighbourKeys(DirKey(h.Axis * -1)))) {
                     List<List<HoleRecord>> cand;
                     if (!buckets.TryGetValue(nk, out cand)) continue;
                     foreach (var g in cand) {
@@ -242,14 +243,14 @@ namespace TianGongCadSuite {
         }
 
         // 方向量化：单位向量按 ±0.5° 取整（cos/sin 步长 ≈ 0.0087）。
-        // 先做符号规范化（让第一个非零分量为正），这样 (0,0,-1) 与 (0,0,1) 落在同一个桶 ——
-        // SameLine 用 |dot| 比较，桶键也必须"正反同键"，否则反平行的两条同轴孔连候选都进不了。
+        // 不做正反规范化：原来按"第一个非零分量为正"翻转，用的是 == 0 精确判断，而装配变换算出来的轴线
+        // 带 1e-16 量级的浮点噪声 —— (0,0,1) 落在 z=+115 桶，(1.2e-16,0,-1) 却不翻转、落在 z=-115 桶，
+        // 两桶不相邻，同一条轴线的两个孔连候选都进不了（偏 0.5mm 的一对孔被报成两个孤孔而不是"孔偏了"）。
+        // 反平行由 GroupByAxis 另查反方向桶键来覆盖。Math.Round 对正负对称，所以反方向的键正好是各分量取负。
         const double DirStep = 0.0087;
         static string DirKey(V3 axis){
-            var a = axis;
-            if (a.X < 0 || (a.X == 0 && (a.Y < 0 || (a.Y == 0 && a.Z < 0)))) a = new V3(-a.X, -a.Y, -a.Z);
             Func<double, int> q = v => (int)Math.Round(v / DirStep);
-            return q(a.X) + "," + q(a.Y) + "," + q(a.Z);
+            return q(axis.X) + "," + q(axis.Y) + "," + q(axis.Z);
         }
         // 27 个相邻桶键（含自身）：覆盖"方向差 0.5° 但被桶边界切开"的情况
         static IEnumerable<string> NeighbourKeys(string key){

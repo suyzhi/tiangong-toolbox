@@ -137,6 +137,13 @@ namespace TianGongCadSuite {
             var flip2 = new HoleRecord { Center = new V3(0,0,0.01), Axis = new V3(0,0,-1), DiameterMm = 5.5, PartName = "B" };
             Assert(HoleCheck.GroupByAxis(new List<HoleRecord>{ flip1, flip2 }).Count == 1, "轴线方向相反的同一个孔算同一条轴线");
             Assert(HoleCheck.SameHoleLine(flip1, flip2, 10.0), "SameHoleLine 也认反平行的同一条轴线");
+            // 轴线带浮点噪声（装配变换 Transform.Vector() 算出来常见 1e-16 量级）：原来桶键按"第一个非零分量为正"
+            // 用 == 0 精确判断来翻转方向，(0,0,1) 落在 z=+115 桶、(1e-16,0,-1) 落在 z=-115 桶，两桶不相邻，
+            // 连候选都进不了，一条轴线被拆成两组。
+            var noisyFlip = new HoleRecord { Center = new V3(0,0,0.01), Axis = new V3(1e-16,0,-1), DiameterMm = 5.5, PartName = "B" };
+            Assert(HoleCheck.GroupByAxis(new List<HoleRecord>{ flip1, noisyFlip }).Count == 1, "轴线带 1e-16 噪声、方向相反的同一个孔算同一条轴线");
+            var noisySame = new HoleRecord { Center = new V3(0,0,0.01), Axis = new V3(-1e-16,0,1), DiameterMm = 5.5, PartName = "B" };
+            Assert(HoleCheck.GroupByAxis(new List<HoleRecord>{ flip1, noisySame }).Count == 1, "轴线带 -1e-16 噪声、方向相同的孔算同一条轴线");
 
             string whyPair;
             Assert(HoleCheck.IsValidPair(8.5, 11.0, out whyPair), "M10 底孔 + M10 过孔 是合法配做");
@@ -157,6 +164,12 @@ namespace TianGongCadSuite {
             Assert(nearHoleRun.Count == 1 && nearHoleRun[0].Kind == HoleIssueKind.Misaligned
                    && nearHoleRun[0].Message.Contains("0.5mm"), "横向错开 0.5mm -> 孔偏了，实得 " + Describe(nearHoleRun));
             Assert(HoleCheck.Run(new List<HoleRecord>{ h1, nearHole }, null).Count == 1, "孔偏了不受“忽略孤孔”影响");
+            // 同上，但 B 的孔轴线读成带噪声的反方向 (1.2e-16,0,-1)（B 板仍是 z 20~40）：
+            // 原来两个孔分进不相邻的桶，变成两个孤孔，"孔偏了"报不出来
+            var nearNoisy = new HoleRecord { Center = new V3(0.0005,0,0.04), Axis = new V3(1.2e-16,0,-1), DiameterMm = 11.0, PartName = "B", AxialMax = 0.02 };
+            var nearNoisyRun = HoleCheck.Run(new List<HoleRecord>{ h1, nearNoisy }, null, true);
+            Assert(nearNoisyRun.Count == 1 && nearNoisyRun[0].Kind == HoleIssueKind.Misaligned
+                   && nearNoisyRun[0].Message.Contains("0.5mm"), "轴线带噪声且反向、横向错开 0.5mm -> 孔偏了，实得 " + Describe(nearNoisyRun));
             MisalignmentAndRay();
             var wrongSpec = HoleCheck.Run(new List<HoleRecord>{
                 new HoleRecord{ Center=new V3(0,0,0), Axis=new V3(0,0,1), DiameterMm=8.5, PartName="A", AxialMax=0.02 },
