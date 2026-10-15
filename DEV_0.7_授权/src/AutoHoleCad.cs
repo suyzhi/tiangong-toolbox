@@ -97,6 +97,9 @@ namespace TianGongCadSuite {
         public List<string> Features = new List<string>();
         public string Standard = "";     // 最近一个孔对上的天工孔标准表行（"内六角螺钉 M6 普通 (H13)"），对不上为空
         public int Linked;               // 写上了参考孔关联记录的孔数
+        public readonly HoleUndo Undo = new HoleUndo();   // 这次改了模型的哪些地方（「撤销本次打孔」用）
+        // 每个孔位的结果（带装配坐标，结果列表点一条就能跳过去）
+        public readonly List<ResultList.Item> Outcomes = new List<ResultList.Item>();
         public bool Ok { get { return Created > 0 && Failures.Count == 0 && Audit.Length == 0; } }
     }
 
@@ -128,7 +131,7 @@ namespace TianGongCadSuite {
         const int RetryCount = 6;
         const int RetrySleepMs = 400;
 
-        static T Attempt<T>(string what, Func<T> f){
+        internal static T Attempt<T>(string what, Func<T> f){
             Exception last = null;
             for (int i = 0; i < RetryCount; i++) {
                 try { return f(); }
@@ -143,7 +146,7 @@ namespace TianGongCadSuite {
             }
             throw last;
         }
-        static void Attempt(string what, Action a){ Attempt<object>(what, () => { a(); return null; }); }
+        internal static void Attempt(string what, Action a){ Attempt<object>(what, () => { a(); return null; }); }
 
         // 天工CAD 的孔特征方向必须指向材料内部，否则 igFeatureFailed。
         // 面片的几何法向与实体外法向不一定一致（IsParamReversed），因此用"先试一侧、失败换另一侧"。
@@ -192,6 +195,7 @@ namespace TianGongCadSuite {
                 string why; P.Hole created;
                 if (DrillOne(part, model, plane, lp, data, depth, out why, out created)) {
                     result.Created++;
+                    result.Undo.Hole(part, created);
                     if (result.Audit.Length == 0) result.Audit = Audit(created, spec);
                     continue;
                 }
@@ -206,6 +210,7 @@ namespace TianGongCadSuite {
                         if (plane != null && part.Models.Count >= 1) model = part.Models.Item(1);
                         if (plane != null && DrillOne(part, model, plane, lp, data, depth, out why, out created)) {
                             result.Created++;
+                            result.Undo.Hole(part, created);
                             if (result.Audit.Length == 0) result.Audit = Audit(created, spec);
                             continue;
                         }
@@ -231,7 +236,7 @@ namespace TianGongCadSuite {
         static readonly Dictionary<string, V3> OutwardCache = new Dictionary<string, V3>();
         static DateTime lastPrune = DateTime.MinValue;
 
-        static P.RefPlane FindOrCreatePlane(P.PartDocument part, TargetFace target){
+        internal static P.RefPlane FindOrCreatePlane(P.PartDocument part, TargetFace target){
             if (target == null) throw new ArgumentNullException("target");
             V3 fpt = new V3(), fnv = new V3(0, 0, 1); bool havePlane = false;
             try {
@@ -370,7 +375,7 @@ namespace TianGongCadSuite {
             return why.Contains("0x80010108") || why.Contains("断开") || why.Contains("0x800401FD")
                 || why.Contains("0x800401FB") || why.Contains("RPC_E_DISCONNECTED") || why.Contains("CO_E_OBJNOT");
         }
-        static void Info(string s){ Console.WriteLine("INFO " + s); }
+        internal static void Info(string s){ Console.WriteLine("INFO " + s); }
 
         // 把 COM 错误翻译成用户看得懂的话（原始 HRESULT 照样保留在日志里）
         public static string Friendly(Exception e){
@@ -394,7 +399,7 @@ namespace TianGongCadSuite {
         // 该位置是不是"已经有一个孔了"？——同一轴线上重复打孔会被 CAD 拒绝，
         // 而且它只报一个含糊的 COM 错误（CO_E_OBJNOTREG / RPC_E_DISCONNECTED）。
         // 这里用"圆边圆心到孔心的径向距离"判断：径向距离≈0 就认为这个位置已经有孔。
-        static bool ExistingHoleAt(P.RefPlane plane,P.PartDocument part,V3 localCentre,out double diameterMm){
+        internal static bool ExistingHoleAt(P.RefPlane plane,P.PartDocument part,V3 localCentre,out double diameterMm){
             diameterMm=0;
             try{
                 V3 normal=new V3(0,0,1);
@@ -422,7 +427,7 @@ namespace TianGongCadSuite {
             catch { return false; }
         }
         // 这个零件上缓存过的基准面全部作废（零件被重新加载后调用）
-        static void DropCache(P.PartDocument part){
+        internal static void DropCache(P.PartDocument part){
             try { DropCacheByDocKey(DocKey(part)); } catch { }
         }
 
@@ -631,7 +636,7 @@ namespace TianGongCadSuite {
         }
 
         // depthMm > 0 时打有限深度的盲孔，否则贯通。
-        static bool DrillOne(P.PartDocument part, P.Model model, P.RefPlane plane, V3 localCentre, P.HoleData data, double depthMm, out string why, out P.Hole created){
+        internal static bool DrillOne(P.PartDocument part, P.Model model, P.RefPlane plane, V3 localCentre, P.HoleData data, double depthMm, out string why, out P.Hole created){
             why = ""; created = null;
             // 先把"这个位置已经有孔"挡在前头，别让 CAD 报一个含糊的 COM 错误。
             double existingDiameter;
@@ -643,9 +648,9 @@ namespace TianGongCadSuite {
             // 盲孔会整段切在空气里 → CAD 只回一个含糊的 COM 错误。先把这件事说出来，省得又去猜。
             double planeGapMm = PlaneGap(plane, localCentre) * 1000.0;
             if (planeGapMm > 0.001) Info("注意：打孔基准面偏离孔心 " + planeGapMm.ToString("0.###") + "mm");
-            P.Profile profile = null;
+            P.Profile profile = null; object profileSet = null;
             try {
-                profile = Attempt("建轮廓", () => part.ProfileSets.Add().Profiles.Add(plane));
+                profile = Attempt("建轮廓", () => { var ps = part.ProfileSets.Add(); profileSet = ps; return ps.Profiles.Add(plane); });
                 double x2 = 0, y2 = 0;
                 Attempt("轮廓坐标", () => { profile.Convert3DCoordinate(localCentre.X, localCentre.Y, localCentre.Z, out x2, out y2); return 0; });
                 Attempt("孔心", () => { profile.Holes2d.Add(x2, y2); return 0; });
@@ -679,7 +684,15 @@ namespace TianGongCadSuite {
                 return false;
             } finally {
                 if (profile != null) { try { profile.Visible = false; } catch {} }
+                // 没建成孔：把这次建的空轮廓删掉。留着它会夹在前后两个孔特征之间，
+                // 特征组只收连续的一段 —— 这批孔就编不成组了（现场"编组失败"的来源之一）。
+                if (created == null) DropProfile(profile, profileSet);
             }
+        }
+
+        static void DropProfile(P.Profile profile, object profileSet){
+            if (profile != null) { try { profile.Delete(); } catch { } }
+            if (profileSet != null) { try { ((dynamic)profileSet).Delete(); } catch { } }
         }
 
         // 按规格造 HoleData —— 全部走「全参数显式」的 AddEx。
@@ -703,7 +716,7 @@ namespace TianGongCadSuite {
         // 4) 圆柱沉孔的 CounterboreProfileLocationType 显式给 igCounterboreProfileIsAtTop：
         //    剖面画在孔的起始端（= 用户点的那张面）那一侧。实测给 igCounterboreProfileIsAtBottom
         //    时沉孔会被切到材料内部、表面上看不到沉孔（切除体积只剩通孔那一段）。
-        static P.HoleData BuildHoleData(P.PartDocument part, HoleSpec spec, DrillResult result){
+        internal static P.HoleData BuildHoleData(P.PartDocument part, HoleSpec spec, DrillResult result){
             double dia = spec.HoleDiameter * MmToM;
             if (dia <= 0) throw new ArgumentException("孔径必须大于 0。");
             double bottom = spec.Bottom == HoleBottom.Flat ? 0.0 : spec.BottomAngle;
@@ -826,7 +839,7 @@ namespace TianGongCadSuite {
         // 切除体积 + 锥面数来钉死（tests/AutoHoleTests.cs）。
         const double AuditTolMm = 0.05;
 
-        static string Audit(P.Hole hole, HoleSpec spec){
+        internal static string Audit(P.Hole hole, HoleSpec spec){
             try {
                 var d = hole.HoleData as P.HoleData;
                 if (d == null) return "";
@@ -981,6 +994,11 @@ namespace TianGongCadSuite {
             var whyByRequest = new string[requests.Count];
             var made = new P.Hole[requests.Count];        // 每个请求打出来的孔特征（命名、编组、写关联用）
             var madeLocal = new V3[requests.Count];
+            // 按规格分批打，同规格的孔在特征树里挨着建。天工的特征组只收特征树里连续的一段：
+            // 同一批里两种规格交错（6、9、6、9）时 AddFeatureGroupsBySet 报 E_INVALIDARG —— 真机复现
+            // （tools/hole-feature-probe/HoleMultiProbe.cs G3），就是 10-13 现场"编组失败"的原因。
+            // 整轮重试也放在每个规格里面做：重试补上的孔仍然紧挨着同规格的孔。
+            foreach (var batch in SpecBatches(requests))
             for (int round = 1; round <= Rounds; round++) {
                 if (round > 1) {
                     Info("整轮重试第 " + round + " 轮（重建基准面后重来）");
@@ -991,7 +1009,7 @@ namespace TianGongCadSuite {
                     } catch (Exception e) { Info("重建基准面失败：" + Friendly(e)); }
                 }
                 bool anyLeft = false;
-                for (int i = 0; i < requests.Count; i++) {
+                foreach (int i in batch) {
                     if (done[i]) continue;
                     var r = requests[i];
                     var local = target.Placement.InversePoint(r.Centre);
@@ -1002,13 +1020,11 @@ namespace TianGongCadSuite {
                     if (ExistingHoleAt(plane, part, local, out existing) && round == 1) {
                         double want = r.Spec == null ? 0 : r.Spec.HoleDiameter;
                         string where = r.Source.Length > 0 ? r.Source + "：" : "";
-                        if (want > 0 && Math.Abs(existing - want) <= 0.05) {
-                            result.AlreadyOk++;
-                            result.Notes.Add(where + "这个位置已经有同规格的孔（Φ" + existing.ToString("0.##") + "），无需再打。");
-                        } else {
-                            result.AlreadyOk++;
-                            result.Notes.Add(where + "这个位置已经有孔（Φ" + existing.ToString("0.##") + "），规格与要打的不同，已跳过。");
-                        }
+                        string say = Math.Abs(existing - want) <= 0.05 && want > 0
+                            ? where + "这个位置已经有同规格的孔（Φ" + existing.ToString("0.##") + "），无需再打。"
+                            : where + "这个位置已经有孔（Φ" + existing.ToString("0.##") + "），规格与要打的不同，已跳过。";
+                        result.AlreadyOk++;
+                        result.Outcomes.Add(new ResultList.Item(ResultList.Kind.Skip, say).At(r.Centre, existing));
                         done[i] = true;
                         whyByRequest[i] = null;
                         continue;
@@ -1023,6 +1039,7 @@ namespace TianGongCadSuite {
                         done[i] = true;
                         made[i] = created; madeLocal[i] = local;
                         result.Created++;
+                        result.Undo.Hole(part, created);
                         string note = Audit(created, r.Spec);
                         if (note.Length > 0 && !result.Audit.Contains(note)) result.Audit = result.Audit.Length == 0 ? note : result.Audit + "；" + note;
                         whyByRequest[i] = null;
@@ -1033,16 +1050,44 @@ namespace TianGongCadSuite {
                 }
                 if (!anyLeft) break;
             }
-            for (int i = 0; i < requests.Count; i++) if (!done[i] && whyByRequest[i] != null) result.Failures.Add(whyByRequest[i]);
+            for (int i = 0; i < requests.Count; i++) if (!done[i] && whyByRequest[i] != null) {
+                result.Failures.Add(whyByRequest[i]);
+                result.Outcomes.Add(new ResultList.Item(ResultList.Kind.Fail, whyByRequest[i]).At(requests[i].Centre, requests[i].Spec == null ? 6 : requests[i].Spec.HoleDiameter));
+            }
             result.Method = methods.Count > 0 ? string.Join("／", methods.ToArray()) : "—";
             try { if (part.Models.Count >= 1) model = part.Models.Item(1); } catch { }
-            Organize(model, requests, made, madeLocal, result);
+            Organize(part, model, requests, made, madeLocal, result);
+            // 打好的孔：名字是编组/命名之后的（「M6 螺纹孔（螺纹全长）-3」），用户在特征树里找得到
+            string partName = "";
+            try { partName = part.Name; } catch { }
+            for (int i = 0; i < requests.Count; i++) {
+                if (made[i] == null) continue;
+                string nm = "";
+                try { nm = made[i].Name; } catch { }
+                result.Outcomes.Add(new ResultList.Item(ResultList.Kind.Done, (partName.Length > 0 ? partName + "：" : "") + (nm.Length > 0 ? nm : HoleNaming.Short(requests[i].Spec)))
+                    .At(requests[i].Centre, requests[i].Spec == null ? 6 : requests[i].Spec.HoleDiameter));
+            }
+            return result;
+        }
+
+        // 请求按规格分批（批的顺序 = 规格第一次出现的顺序，批内保持原顺序）
+        static List<List<int>> SpecBatches(IList<HoleRequest> requests){
+            var order = new List<string>();
+            var by = new Dictionary<string, List<int>>(StringComparer.Ordinal);
+            for (int i = 0; i < requests.Count; i++) {
+                string key = requests[i].Spec == null ? "" : HoleNaming.SpecKey(requests[i].Spec);
+                List<int> l;
+                if (!by.TryGetValue(key, out l)) { l = new List<int>(); by[key] = l; order.Add(key); }
+                l.Add(i);
+            }
+            var result = new List<List<int>>();
+            foreach (var k in order) result.Add(by[k]);
             return result;
         }
 
         // 打完一张面以后：同规格的孔编成一组、按规格命名，并写上和参考孔的关联记录。
         // 这一步任何一处失败都只记一笔、不影响已经打好的孔（孔是对的，只是名字/编组/关联没写上）。
-        static void Organize(P.Model model, IList<HoleRequest> requests, P.Hole[] made, V3[] madeLocal, DrillResult result){
+        static void Organize(P.PartDocument part, P.Model model, IList<HoleRequest> requests, P.Hole[] made, V3[] madeLocal, DrillResult result){
             if (model == null) return;
             var taken = ExistingFeatureNames(model);
             // 按规格分组，保持打孔顺序
@@ -1061,7 +1106,7 @@ namespace TianGongCadSuite {
                 var holes = new List<P.Hole>();
                 foreach (int i in idx) holes.Add(made[i]);
                 string node = "";
-                try { node = HoleGrouping.Apply(model, requests[idx[0]].Spec, holes, taken, result.Notes); }
+                try { node = HoleGrouping.Apply(model, requests[idx[0]].Spec, holes, taken, result.Notes, result.Undo, part); }
                 catch (Exception e) { Log.Write("AutoHoleGrouping", e); }
                 if (node.Length > 0 && !result.Features.Contains(node)) result.Features.Add(node);
             }
@@ -1079,8 +1124,8 @@ namespace TianGongCadSuite {
                 result.Notes.Add("有 " + (wanted - result.Linked) + " 个孔没写上关联记录，参考零件挪动后它们不会跟着同步。");
         }
 
-        // 零件里已有的孔特征名 + 特征组名：新名字要避开它们（第二批同规格孔接着往下编号）
-        static HashSet<string> ExistingFeatureNames(P.Model model){
+        // 零件里已有的孔特征名 + 特征组名 + 阵列名：新名字要避开它们（第二批同规格孔接着往下编号）
+        internal static HashSet<string> ExistingFeatureNames(P.Model model){
             var set = new HashSet<string>(StringComparer.Ordinal);
             try {
                 int n = model.Holes.Count;
@@ -1089,6 +1134,10 @@ namespace TianGongCadSuite {
             try {
                 int n = model.FeatureGroups.Count;
                 for (int i = 1; i <= n; i++) { try { set.Add(model.FeatureGroups.Item(i).Name); } catch { } }
+            } catch { }
+            try {
+                int n = model.Patterns.Count;
+                for (int i = 1; i <= n; i++) { try { set.Add(model.Patterns.Item(i).Name); } catch { } }
             } catch { }
             return set;
         }
@@ -1107,7 +1156,8 @@ namespace TianGongCadSuite {
                 var plane = FindOrCreatePlane(part, target);
                 if (plane == null) { why = "无法在所选面上建立基准面。"; return false; }
                 profile = part.ProfileSets.Add().Profiles.Add(plane);
-                return SlotProfile(part, model, profile, localCentre, localDirInPlane, lengthMm, widthMm, out why);
+                P.ExtrudedCutout made;
+                return SlotProfile(part, model, profile, localCentre, localDirInPlane, lengthMm, widthMm, out why, out made);
             } catch (Exception e) {
                 why = "腰孔异常：" + e.Message;
                 return false;
@@ -1118,8 +1168,8 @@ namespace TianGongCadSuite {
 
         // 腰孔轮廓 + 通切。profile 由调用方建好，基准面只建一次。
         static bool SlotProfile(P.PartDocument part, P.Model model, P.Profile profile, V3 localCentre, V3 localDirInPlane,
-                                double lengthMm, double widthMm, out string why){
-            why = "";
+                                double lengthMm, double widthMm, out string why, out P.ExtrudedCutout made){
+            why = ""; made = null;
             try {
                 double cx, cy, dx1, dy1;
                 profile.Convert3DCoordinate(localCentre.X, localCentre.Y, localCentre.Z, out cx, out cy);
@@ -1156,7 +1206,7 @@ namespace TianGongCadSuite {
                     catch (Exception e) { why = "腰孔失败：" + e.Message; continue; }
                     if (cut == null) { why = "腰孔失败：CAD 未返回切除特征"; continue; }
                     object desc = null;
-                    if ((int)cut.GetStatusEx(out desc) == (int)P.FeatureStatusConstants.igFeatureOK) return true;
+                    if ((int)cut.GetStatusEx(out desc) == (int)P.FeatureStatusConstants.igFeatureOK) { made = cut; return true; }
                     try { cut.Delete(); } catch {}
                     why = "腰孔失败，状态 " + desc;
                 }
@@ -1179,21 +1229,28 @@ namespace TianGongCadSuite {
             for (int i = 0; i < localCentres.Count; i++) {
                 string why;
                 var dir = i < localDirs.Count ? localDirs[i] : new V3(1,0,0);
-                if (DrillSlotOnPlane(part, model, plane, localCentres[i], dir, lengthMm, widthMm, out why)) result.Created++;
-                else result.Failures.Add(why);
+                P.ExtrudedCutout made;
+                V3 where = target.Placement.Point(localCentres[i]);   // 装配坐标：结果列表里点一条跳过去
+                if (DrillSlotOnPlane(part, model, plane, localCentres[i], dir, lengthMm, widthMm, out why, out made)) {
+                    result.Created++; result.Undo.Cutout(part, made);
+                    result.Outcomes.Add(new ResultList.Item(ResultList.Kind.Done, "第 " + (i + 1) + " 个腰孔 " + N(lengthMm) + "×" + N(widthMm)).At(where, lengthMm));
+                } else {
+                    result.Failures.Add(why);
+                    result.Outcomes.Add(new ResultList.Item(ResultList.Kind.Fail, "第 " + (i + 1) + " 个腰孔：" + why).At(where, lengthMm));
+                }
             }
             return result;
         }
 
         static bool DrillSlotOnPlane(P.PartDocument part, P.Model model, P.RefPlane plane, V3 localCentre, V3 localDirInPlane,
-                                     double lengthMm, double widthMm, out string why){
-            why = "";
+                                     double lengthMm, double widthMm, out string why, out P.ExtrudedCutout made){
+            why = ""; made = null;
             if (lengthMm <= widthMm) { why = "腰孔总长必须大于槽宽。"; return false; }
             if (widthMm <= 0) { why = "槽宽必须大于 0。"; return false; }
             P.Profile profile = null;
             try {
                 profile = part.ProfileSets.Add().Profiles.Add(plane);
-                return SlotProfile(part, model, profile, localCentre, localDirInPlane, lengthMm, widthMm, out why);
+                return SlotProfile(part, model, profile, localCentre, localDirInPlane, lengthMm, widthMm, out why, out made);
             } catch (Exception e) { why = "腰孔异常：" + e.Message; return false; }
             finally { if (profile != null) { try { profile.Visible = false; } catch {} } }
         }
@@ -1207,23 +1264,21 @@ namespace TianGongCadSuite {
 
         // shafts：凸台外圆（螺栓杆、销、轴），不当孔，但配孔检查要知道它们在哪 —— 孔的轴线穿过同轴的螺栓杆不算漏打孔。
         public static List<HoleRecord> CollectAssemblyHoles(A.AssemblyDocument assembly, out List<string> warnings, out List<HoleRecord> shafts){
+            List<AssemblyPart> parts;
+            return CollectAssemblyHoles(assembly, out warnings, out shafts, out parts);
+        }
+
+        // parts：装配里所有零件实例（含子装配里的，见 AssemblyPart）。配孔检查拿它建射线表、列零件名，只遍历一次。
+        public static List<HoleRecord> CollectAssemblyHoles(A.AssemblyDocument assembly, out List<string> warnings, out List<HoleRecord> shafts, out List<AssemblyPart> parts){
             warnings = new List<string>();
             shafts = new List<HoleRecord>();
             var result = new List<HoleRecord>();
-            if (assembly == null) return result;
+            parts = AssemblyPart.List(assembly, warnings);
             var byBucket = new Dictionary<string, List<HoleRecord>>(StringComparer.Ordinal);
-            foreach (A.Occurrence occ in assembly.Occurrences) {
-                P.PartDocument part = null;
-                try { part = occ.OccurrenceDocument as P.PartDocument; } catch { }
-                if (part == null) continue;
-                if (part.Models.Count < 1) continue;
-                G.Body body = null;
-                try { body = (G.Body)((P.Model)part.Models.Item(1)).Body; } catch (Exception e) { warnings.Add(occ.Name + " 读取实体失败：" + e.Message); continue; }
-                if (body == null) continue;
-                string partName;
-                try { partName = occ.Name; } catch { partName = "零件"; }
+            foreach (var ap in parts) {
+                string partName = ap.Name;
                 object rawEdges;
-                try { rawEdges = body.get_Edges(G.FeatureTopologyQueryTypeConstants.igQueryAll); }
+                try { rawEdges = ap.Body.get_Edges(G.FeatureTopologyQueryTypeConstants.igQueryAll); }
                 catch (Exception e) { warnings.Add(partName + " 读取边失败：" + e.Message); continue; }
                 foreach (G.Edge edge in (G.Edges)rawEdges) {
                     G.Circle circle = null;
@@ -1234,7 +1289,7 @@ namespace TianGongCadSuite {
                     if (r <= 0) continue;
                     if (HoleScanCad.IsBossEdge(edge)) {           // 螺栓杆、销、圆凸台的外圆不是孔，单独记下
                         try {
-                            var pgs = PickGeometry.Unwrap(assembly.CreateReference(occ, edge));
+                            var pgs = PickGeometry.Unwrap(ap.Reference(edge));
                             shafts.Add(new HoleRecord { Center = pgs.Transform.Point(V3.From(c)), Axis = pgs.Transform.Vector(V3.From(ax)).Unit(),
                                                         DiameterMm = r * 2000.0, PartName = partName });
                         } catch { }
@@ -1242,7 +1297,7 @@ namespace TianGongCadSuite {
                     }
                     object sel = null; V3 centre = new V3(), axis = new V3(0,0,1);
                     try {
-                        sel = assembly.CreateReference(occ, edge);
+                        sel = ap.Reference(edge);
                         var pg = PickGeometry.Unwrap(sel);
                         centre = pg.Transform.Point(V3.From(c));
                         axis = pg.Transform.Vector(V3.From(ax)).Unit();
@@ -1280,20 +1335,18 @@ namespace TianGongCadSuite {
         public static class OccurrenceBodies {
             // names 仅为兼容旧调用保留，不再使用：实例名直接从装配里读。
             public static PartRayIndex Build(A.AssemblyDocument assembly, List<string> names){
+                return Build(AssemblyPart.List(assembly, null));
+            }
+            // 子装配里的零件也进表（AssemblyPart）：它们一样可能是"漏打孔的那个零件"
+            public static PartRayIndex Build(IList<AssemblyPart> parts){
                 var index = new PartRayIndex();
-                if (assembly == null) return index;
-                foreach (A.Occurrence occ in assembly.Occurrences) {
-                    string name; try { name = occ.Name; } catch { continue; }
-                    P.PartDocument part = null;
-                    try { part = occ.OccurrenceDocument as P.PartDocument; } catch { }
-                    G.Body body = null;
-                    if (part != null) { try { if (part.Models.Count >= 1) body = (G.Body)((P.Model)part.Models.Item(1)).Body; } catch { } }
-                    if (body == null) continue;
+                if (parts == null) return index;
+                foreach (var ap in parts) {
                     Transform placement;
-                    try { Array m = new double[16]; occ.GetMatrix(ref m); placement = new Transform(m); }
-                    catch (Exception e) { Log.Write("AutoHoleCheckMatrix " + name, e); continue; }   // 读不到变换宁可不判，也不按原点瞎判
-                    var b = body;
-                    index.Add(PartRayTarget.WithBoxes(name, placement, (o, d) => CastBoxes(b, o, d)));
+                    try { placement = ap.Placement; }
+                    catch (Exception e) { Log.Write("AutoHoleCheckMatrix " + ap.Name, e); continue; }   // 读不到变换宁可不判，也不按原点瞎判
+                    var b = ap.Body;
+                    index.Add(PartRayTarget.WithBoxes(ap.Name, placement, (o, d) => CastBoxes(b, o, d)));
                 }
                 return index;
             }

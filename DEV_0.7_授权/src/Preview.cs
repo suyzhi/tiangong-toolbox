@@ -7,7 +7,7 @@ using System.Windows.Forms;
 namespace TianGongCadSuite {
     // A world-coordinate preview, independent of the CAD viewport's render backend.
     public sealed class Preview : Control {
-        public PanelSpec Spec;public V3 PickedPoint;public List<V3[]> SourceEdges=new List<V3[]>();
+        public PanelSpec Spec;public V3 PickedPoint;public string EmptyText="选四个面和定位点，并输入总厚度后显示。";public List<V3[]> SourceEdges=new List<V3[]>();
         public int DrawCount;double yaw=-.55,pitch=.65,zoom=1;Point last;bool dragging;
         public Preview(){DoubleBuffered=true;BackColor=Color.FromArgb(245,248,252);Dock=DockStyle.Fill;SetStyle(ControlStyles.ResizeRedraw,true);}
         public void ResetView(){yaw=-.55;pitch=.65;zoom=1;Invalidate();}
@@ -19,7 +19,7 @@ namespace TianGongCadSuite {
         protected override void OnPaint(PaintEventArgs e){base.OnPaint(e);var g=e.Graphics;g.SmoothingMode=SmoothingMode.AntiAlias;
             using(var title=new Font("Microsoft YaHei UI",10,FontStyle.Bold))g.DrawString("位置预览",title,Brushes.DimGray,16,16);
             g.DrawString("拖动旋转 · 滚轮缩放 · 双击复位",Font,Brushes.Gray,16,42);
-            if(Spec==null){g.DrawString("选四个面和定位点，并输入总厚度后显示。",Font,Brushes.Gray,16,90);return;}
+            if(Spec==null){g.DrawString(EmptyText,Font,Brushes.Gray,16,90);return;}
             DrawCount++;
             var all=SourceEdges.SelectMany(x=>x).Concat(Enumerable.Range(0,4).SelectMany(i=>new[]{Spec.Corner(i,-Spec.Thickness/2),Spec.Corner(i,Spec.Thickness/2)})).ToList();
             var center=new V3((all.Min(p=>p.X)+all.Max(p=>p.X))/2,(all.Min(p=>p.Y)+all.Max(p=>p.Y))/2,(all.Min(p=>p.Z)+all.Max(p=>p.Z))/2);

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 
 // 纯逻辑测试入口（不需要天工 CAD）。见 PureTests.csproj。
 // FormatConvertTests.Pure() 整套不在这里跑：其中"worker 解析到插件旁的 TianGongConverter.exe"
@@ -10,6 +10,7 @@ static class PureProgram {
         failed += Run("FormatConvert.ResumeMarker", FormatConvertTests.ResumeMarker);
         failed += Run("FormatConvert.CommandLineQuoting", FormatConvertTests.CommandLineQuoting);
         failed += Run("PanelNaming", TianGongCadSuite.PanelNamingPureTests.Run);
+        failed += Run("RulesPattern", TianGongCadSuite.RulesPatternPureTests.Run);
         Console.WriteLine(failed == 0 ? "ALL PURE SUITES PASSED" : failed + " SUITE(S) FAILED");
         return failed == 0 ? 0 : 1;
     }

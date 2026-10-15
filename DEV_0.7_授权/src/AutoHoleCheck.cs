@@ -62,6 +62,7 @@ namespace TianGongCadSuite {
     public sealed class HoleIssue {
         public HoleIssueKind Kind;
         public string Message = "";
+        public string MissingPart = "";   // 漏打孔：没打孔的那个零件（「去配孔」时提示用户点它的面）
         public List<HoleRecord> Holes = new List<HoleRecord>();
         public string KindName {
             get {
@@ -152,13 +153,72 @@ namespace TianGongCadSuite {
         }
     }
 
+    // 配孔检查的判定口径。原来是写死的常量；现在窗口里「判定口径」可以改，存在
+    // %LOCALAPPDATA%\TianGongCadSuite\hole-check.tsv（一行一项：名字 \t 值），默认值和原来一样。
+    public sealed class HoleCheckOptions {
+        public const string FileName = "hole-check.tsv";
+        public double MinDiameterMm = 3.0;     // 小于这个直径不当作连接孔
+        public double MaxDiameterMm = 25.0;
+        public double AxisAngleTolDeg = 2.0;   // 轴线方向容差
+        public double AxisOffsetTolMm = 0.2;   // 同轴偏移容差（超过即"孔偏了"）
+        public double CoaxialSpanTolMm = 3.0;  // 沿轴线的间隙不超过这个才认为挨着（成对 / 漏打孔判定的范围）
+
+        public HoleCheckOptions Clone(){ return (HoleCheckOptions)MemberwiseClone(); }
+
+        public string Problem(){
+            if (!(MinDiameterMm > 0) || !(MaxDiameterMm > MinDiameterMm)) return "孔径范围要满足 0 < 最小 < 最大。";
+            if (!(AxisAngleTolDeg > 0 && AxisAngleTolDeg < 30)) return "方向容差要在 0～30° 之间。";
+            if (!(AxisOffsetTolMm > 0)) return "同轴偏差容差要大于 0。";
+            if (!(CoaxialSpanTolMm >= 0)) return "轴向间隙不能为负。";
+            return "";
+        }
+
+        static readonly string[] Keys = { "最小孔径mm", "最大孔径mm", "方向容差度", "同轴偏差mm", "轴向间隙mm" };
+        double[] Values(){ return new[]{ MinDiameterMm, MaxDiameterMm, AxisAngleTolDeg, AxisOffsetTolMm, CoaxialSpanTolMm }; }
+        void Set(int i, double v){
+            switch (i) { case 0: MinDiameterMm = v; break; case 1: MaxDiameterMm = v; break; case 2: AxisAngleTolDeg = v; break; case 3: AxisOffsetTolMm = v; break; default: CoaxialSpanTolMm = v; break; }
+        }
+
+        public static HoleCheckOptions Load(string path){
+            var o = new HoleCheckOptions();
+            foreach (var r in SettingsFile.Read(path)) {
+                if (r.Length < 2) continue;
+                int i = Array.IndexOf(Keys, r[0]);
+                double v;
+                if (i >= 0 && double.TryParse(r[1], NumberStyles.Float, CultureInfo.InvariantCulture, out v)) o.Set(i, v);
+            }
+            return o.Problem().Length == 0 ? o : new HoleCheckOptions();
+        }
+        public void Save(string path){
+            var rows = new List<string[]>();
+            var v = Values();
+            for (int i = 0; i < Keys.Length; i++) rows.Add(new[]{ Keys[i], v[i].ToString("R", CultureInfo.InvariantCulture) });
+            SettingsFile.Write(path, rows, "天工工具箱 · 配孔检查的判定口径（每行：名字<TAB>值）");
+        }
+
+        public string Describe(){
+            return "判定口径\r\n" +
+                "· 只看 " + N(MinDiameterMm) + "–" + N(MaxDiameterMm) + "mm 的孔（连接孔）；螺栓杆、销、圆凸台的外圆不算孔。\r\n" +
+                "· 同一条轴线（方向差 < " + N(AxisAngleTolDeg) + "°）、沿轴线挨着（间隙 ≤ " + N(CoaxialSpanTolMm) + "mm）的孔算一组。\r\n" +
+                "· 漏打孔：一个零件有孔，轴线在孔附近（" + N(CoaxialSpanTolMm) + "mm 内）穿过了另一个零件，但那个零件在这里没有孔。\r\n" +
+                "· 孔偏了：同一组里不同零件的孔，轴线横向偏差 > " + N(AxisOffsetTolMm) + "mm。\r\n" +
+                "· 配错孔：同一组的孔配不上同一个螺纹规格（底孔/内小径配过孔/沉孔才算对）；沉孔按较小的过孔直径比。\r\n" +
+                "· 孤孔：只有一个零件有孔、附近也没穿过别的零件（大多数本来就该是孤孔，默认不显示）。\r\n" +
+                "· 子装配里的零件也一起检查（零件名写成「子装配/零件」）。\r\n" +
+                "（点「判定口径」可以改这些数）";
+        }
+        static string N(double v){ return v.ToString("0.###", CultureInfo.InvariantCulture); }
+    }
+
     // 配孔检查。规则轻量，对齐 ICAN 的做法：按孔径范围筛选 + 按轴向间距配对。
     public static class HoleCheck {
-        public const double MinDiameterMm = 3.0;     // 小于这个直径不当作连接孔
-        public const double MaxDiameterMm = 25.0;
-        public const double AxisAngleTolDeg = 2.0;   // 轴线方向容差
-        public const double AxisOffsetTolMm = 0.2;   // 同轴偏移容差（超过即"孔偏了"）
-        public const double CoaxialSpanTolMm = 3.0;  // 沿轴线的间隙不超过这个才认为挨着（成对 / 漏打孔判定的范围）
+        // 当前判定口径（窗口里改了会换成用户的那一份；测试里可以直接换）
+        public static HoleCheckOptions Options = new HoleCheckOptions();
+        public static double MinDiameterMm { get { return Options.MinDiameterMm; } }     // 小于这个直径不当作连接孔
+        public static double MaxDiameterMm { get { return Options.MaxDiameterMm; } }
+        public static double AxisAngleTolDeg { get { return Options.AxisAngleTolDeg; } } // 轴线方向容差
+        public static double AxisOffsetTolMm { get { return Options.AxisOffsetTolMm; } } // 同轴偏移容差（超过即"孔偏了"）
+        public static double CoaxialSpanTolMm { get { return Options.CoaxialSpanTolMm; } } // 沿轴线的间隙不超过这个才认为挨着
 
         // 两条圆边是否属于"同一个孔"：同一零件、同一轴线、同一直径。
         // 通孔在零件上有上下两条圆边，不去重会被当成两个孔。
@@ -399,7 +459,7 @@ namespace TianGongCadSuite {
                         if (hitPart != null) {
                             HoleIssue mi;
                             if (!missingByPart.TryGetValue(hitPart, out mi)) {
-                                mi = new HoleIssue { Kind = HoleIssueKind.MissingHole, Holes = new List<HoleRecord>() };
+                                mi = new HoleIssue { Kind = HoleIssueKind.MissingHole, Holes = new List<HoleRecord>(), MissingPart = hitPart };
                                 missingByPart[hitPart] = mi; missingOrder.Add(hitPart);
                             }
                             mi.Holes.AddRange(chain);

@@ -1,13 +1,17 @@
 ﻿param(
     [string]$CadHome='C:\Program Files\NDS\TianGong 2025',
     [string]$OutputDirectory,
-    [string]$Version='0.7.0.0',
+    # 版本号只有一个来源：DEV_0.7_授权\VERSION。不传 -Version 就读它（以前默认写死 0.7.0.0，
+    # 随手跑一次 build.ps1 就会把 LicenseBuild.cs 里的版本戳改回 0.7.0）。
+    [string]$Version,
     # 开发构建：打开授权测试开关 / 开发密钥模式 / Diagnostics 测试入口，并编译 PanelTests.exe。
     # 默认（不加）是正式构建，交付包和"重新编译安装.cmd"都用它。开发构建绝不能发给别人。
     [switch]$DevBuild
 )
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
+if(-not $Version){$Version=(Get-Content -LiteralPath (Join-Path $root 'VERSION') -TotalCount 1).Trim()}
+if($Version -notmatch '^\d+\.\d+\.\d+(\.\d+)?$'){throw ('版本号格式不对：' + $Version)}
 $bin=if($OutputDirectory){[IO.Path]::GetFullPath($OutputDirectory)}else{Join-Path $root 'build'}
 New-Item -Path $bin -ItemType Directory -Force | Out-Null
 $interop=Join-Path $CadHome 'Program\TGAiHelper\Interop.TG.dll'

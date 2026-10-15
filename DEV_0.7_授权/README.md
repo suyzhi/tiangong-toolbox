@@ -1,11 +1,13 @@
-# 天工 CAD 插件平台 DEV 0.7（唯一在用宿主）
+﻿# 天工 CAD 插件平台 DEV 0.7（唯一在用宿主）
 
 本目录是**当前唯一在用的宿主**：DEV 0.6 的「孔形状参考面板」与 DEV 0.7 的「授权与防盗版」已合并到这里。
 
 - 授权方案（管理员只发码 → 用户激活即绑定本机 → 台账 + 作废黑名单）：[LICENSE.md](LICENSE.md)
 - 真机鼠标点击实测记录与截图：[MOUSE-E2E-20260926.md](MOUSE-E2E-20260926.md)
 - 自动打孔与孔型预览：[AUTO-HOLE.md](AUTO-HOLE.md)、[../DEV_0.6_打孔预览/AUTO-HOLE-UI.md](../DEV_0.6_打孔预览/AUTO-HOLE-UI.md)
-- 构建产物：tools/build.ps1 → build/；授权联调：tools/LicenseAdmin/make-test-codes.ps1
+- 构建产物：tools/build.ps1 → build/（版本号读 VERSION）；授权联调：tools/LicenseAdmin/make-test-codes.ps1；tools 目录分类见 [tools/README.md](tools/README.md)
+- 批量排孔（0.7.6）：默认建成「种子孔 + 阵列」，改种子孔整排跟着变；新命令「改孔型」（命令 9）：已打好的孔整组换孔型/规格、可撤销。见 [AUTO-HOLE.md](AUTO-HOLE.md) 开头「0.7.6」一节
+- 型材自动填充（0.7.5 重写）：一次可以选几个面的型材，按平面自动分开识别（FrameGrouping）；框口可勾选；材质/尺寸写进零件属性；输出目录、厚度、间隙、材质记在 `%LOCALAPPDATA%\TianGongCadSuite\autopanel.tsv`
 
 下面几节是各模块的历史说明（Lineup、训练数据导出等），保留供查阅。
 

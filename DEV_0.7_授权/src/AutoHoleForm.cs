@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
@@ -67,6 +67,16 @@ namespace TianGongCadSuite {
         // 保持关联：把"这个孔照哪个孔配的"写进孔特征，参考零件挪了以后能一键同步回去
         readonly CheckBox linkCheck = new CheckBox { Checked = true, Text = "保持与参考孔关联", AutoSize = true };
 
+        // 打孔结果：窗口里的列表（原来是一个长到一屏放不下的弹框）。点一条就把镜头拉到那个孔。
+        readonly ResultList results = new ResultList();
+        Card resultCard, previewCard;
+        // 「撤销本次打孔」：上一批打孔改了模型的哪些地方（见 HoleUndo）
+        HoleUndo lastUndo;
+        readonly Button undoButton = Ui.Secondary("撤销本次打孔", 112, 30);
+        // 打完发现孔型不对：把刚打的这批孔带进「改孔型」窗口，换孔型不用删了重打
+        readonly Button editButton = Ui.Secondary("改孔型…", 84, 30);
+        List<KeyValuePair<SolidEdgePart.PartDocument, string>> lastCreated;
+
         // 关联孔位条：窗口一打开就查一遍，有错位的孔就亮出「同步孔位」
         readonly Panel linkBar = new Panel();
         readonly Label linkLabel = new Label();
@@ -78,6 +88,7 @@ namespace TianGongCadSuite {
         readonly Label editWho = new Label();
         readonly Label editNote = new Label();
         readonly ToolTip tips = new ToolTip { AutoPopDelay = 15000, InitialDelay = 400 };
+        Card refsCard;
 
         // 孔形状参考：左 2D 剖面（带尺寸），右 3D 半剖轴测
         readonly HoleSectionView sectionView = new HoleSectionView();
@@ -136,6 +147,7 @@ namespace TianGongCadSuite {
             foreach (var row in HoleMatcher.Table) sizeBox.Items.Add(row.Size);
             sizeBox.SelectedIndex = 0;
 
+            HoleRuleBook.LoadFromDisk();   // 用户改过配做规则就按他的来（文件读不到就是默认规则）
             BuildLayout();
             WireEvents();
             RefreshAll();
@@ -215,11 +227,14 @@ namespace TianGongCadSuite {
             var right = rightStack = new VerticalStack { Padding = new Padding(0) };
 
             // ---- 左列 ----
-            var refsCard = Ui.Card("① 参考孔", 0, "点孔口圆边 / 孔内壁 / 带孔的面");
+            refsCard = Ui.Card("① 参考孔", 0, "");   // 标题行放了三个按钮，说明写不下；配做规则在规格卡片的说明行里
+            var rulesButton = Ui.Small("配做规则");
+            rulesButton.Click += (s, e) => EditRules();
+            tips.SetToolTip(rulesButton, "参考孔是螺纹底孔/过孔时，目标件各配什么孔（沉头螺钉、螺钉头露在外面、锥形沉头、螺栓+螺母，或按规格自己定）。");
             var delRef = Ui.Small("移除"); var clrRef = Ui.Small("清空");
             delRef.Click += (s, e) => RemoveSelected();
             clrRef.Click += (s, e) => { groups.Clear(); scannedPicks.Clear(); lastScanNote = ""; RefreshAll(); SetStatus("已清空参考孔。", Ui.Muted); };
-            refsCard.AddHeader(delRef); refsCard.AddHeader(clrRef);
+            refsCard.AddHeader(rulesButton); refsCard.AddHeader(delRef); refsCard.AddHeader(clrRef);
             refList.Dock = DockStyle.Fill; refList.IntegralHeight = false; refList.BorderStyle = BorderStyle.None;
             refList.DrawMode = DrawMode.OwnerDrawFixed; refList.ItemHeight = 46; refList.BackColor = Color.White;
             refList.DrawItem += DrawRefItem;
@@ -261,7 +276,7 @@ namespace TianGongCadSuite {
             columns.Add(left); columns.Add(right);
 
             // ---- 底部：预览 ----
-            var previewCard = Ui.Card("④ 预览", 96, "打之前先看清楚要打几个、什么孔");
+            previewCard = Ui.Card("④ 预览", 96, "打之前先看清楚要打几个、什么孔");
             var pvBody = new Panel { Dock = DockStyle.Fill, BackColor = Color.White };
             previewCard.Controls.Add(pvBody);
             chip.SetBounds(0, 0, 120, 24);
@@ -288,11 +303,33 @@ namespace TianGongCadSuite {
             run.Click += (s, e) => RunDrill();
             tips.SetToolTip(run, "Ctrl+Enter");
             tips.SetToolTip(close, "Esc");
-            actions.Controls.Add(run); actions.Controls.Add(linkCheck); actions.Controls.Add(clearAll); actions.Controls.Add(close);
+            undoButton.Enabled = false;
+            undoButton.Click += (s, e) => UndoLastBatch();
+            tips.SetToolTip(undoButton, "删掉上一次「开始打孔」打出来的孔（编组、改名一并恢复）。\r\n只撤这个窗口打的那一批，不会动你在 CAD 里做的其它操作。");
+            editButton.Enabled = false;
+            editButton.Click += (s, e) => OpenEdit();
+            tips.SetToolTip(editButton, "把上一次「开始打孔」打出来的孔带进「改孔型」窗口：整组换孔型/规格，不用删了重打。");
+            actions.Controls.Add(run); actions.Controls.Add(linkCheck); actions.Controls.Add(editButton); actions.Controls.Add(undoButton); actions.Controls.Add(clearAll); actions.Controls.Add(close);
             actions.Resize += (s, e) => {
                 close.SetBounds(actions.Width - 80, 5, 80, 30);
                 clearAll.SetBounds(actions.Width - 80 - 8 - 96, 5, 96, 30);
+                undoButton.SetBounds(clearAll.Left - 8 - 112, 5, 112, 30);
+                editButton.SetBounds(undoButton.Left - 8 - 84, 5, 84, 30);
             };
+
+            // ---- 底部：打孔结果（打完才出现，顶替预览卡片的位置）----
+            resultCard = Ui.Card("本次结果", 190, "点一条跳到那个孔");
+            var copyResult = Ui.Small("复制"); var hideResult = Ui.Small("收起");
+            copyResult.Click += (s, e) => { try { Clipboard.SetText(results.AsText()); SetStatus("结果已复制。", Ui.Ok); } catch (Exception ex) { SetStatus("复制失败：" + ex.Message, Ui.Warn); } };
+            hideResult.Click += (s, e) => ShowResults(false);
+            resultCard.AddHeader(copyResult); resultCard.AddHeader(hideResult);
+            results.Dock = DockStyle.Fill;
+            results.Locate += it => {
+                if (CadView.ZoomToHole(app, it.Where, it.DiameterMm)) SetStatus("已跳到：" + it.Text, Ui.Accent);
+                else SetStatus("没能移动视图（请确认装配窗口是当前窗口）。", Ui.Warn);
+            };
+            resultCard.Controls.Add(results);
+            resultCard.Visible = false;
 
             // ---- 底部：关联孔位条 ----
             linkBar.Height = 34; linkBar.BackColor = Ui.ChipBg;
@@ -317,6 +354,7 @@ namespace TianGongCadSuite {
             var stack = new VerticalStack { Dock = DockStyle.Fill };
             stack.Add(columns, true);
             stack.Add(previewCard);
+            stack.Add(resultCard);
             stack.Add(actions);
             stack.Add(linkBar);
             stack.Add(status);
@@ -553,6 +591,25 @@ namespace TianGongCadSuite {
 
         // 加一个参考孔：按孔径归到已有的那一类；没有就新建一类（规格自动反推）。
         // batch = 面扫描批量加：重复的孔静默跳过（返回 false），不打断整批。
+        // 配孔检查「去配孔」带进来的孔：每个零件上的同一个孔可能有几条圆边（沉孔 = 过孔边 + 沉头边），
+        // 配做取最小的那个直径（和面扫描"按孔口下面的孔径配做"同一个道理），最大的当孔口直径。
+        // 这些孔没有零件/变换信息，所以不写"跟随参考孔"的关联（结果里会说明）。
+        public void PreloadReferences(IList<HoleRecord> holes, string missingPart){
+            if (holes == null || holes.Count == 0) return;
+            int added = 0;
+            foreach (var byPart in holes.GroupBy(h => h.PartName)) {
+                var list = byPart.ToList();
+                var bottom = list.OrderBy(h => h.DiameterMm).First();
+                var r = new ReferenceHole { Center = bottom.Center, Axis = bottom.Axis, DiameterMm = bottom.DiameterMm,
+                                            MouthDiameterMm = list.Max(h => h.DiameterMm), Source = byPart.Key + "（配孔检查）" };
+                if (r.MouthDiameterMm - r.DiameterMm > HoleScan.StepToleranceMm) r.MouthKind = "孔口台阶";
+                try { if (AddHole(r, bottom.Selection, true)) added++; } catch (Exception e) { Log.Write("AutoHolePreload", e); }
+            }
+            RefreshList(groups.Count - 1);
+            RefreshPreview();
+            SetStatus("已从配孔检查带入 " + added + " 个参考孔。请点" + (string.IsNullOrEmpty(missingPart) ? "要打孔的零件" : "「" + missingPart + "」") + "上要打孔的面，再点「开始打孔」。", Ui.Accent);
+        }
+
         bool AddHole(ReferenceHole r, object selection, bool batch){
             var g = groups.FirstOrDefault(x => Math.Abs(x.DiameterMm - r.DiameterMm) <= HoleScan.GroupToleranceMm);
             bool isNew = g == null;
@@ -756,7 +813,7 @@ namespace TianGongCadSuite {
                 if (r.HasValue) return r.Value;
             }
             var m = HoleMatcher.Match(referenceDiameterMm > 0 ? referenceDiameterMm : 6.0);
-            return m.HasRow ? m.Row : HoleMatcher.Table[3];
+            return m.HasRow ? m.Row : HoleMatcher.M6;
         }
 
         void ApplySizeChange(){
@@ -1071,6 +1128,8 @@ namespace TianGongCadSuite {
                 int made = 0, skipped = 0, failed = 0, already = 0, linked = 0;
                 var problems = new List<string>(); var methods = new List<string>(); var audits = new List<string>();
                 var features = new List<string>();
+                var outcomes = new List<ResultList.Item>();
+                var batchUndo = new HoleUndo();
                 var resolved0 = new List<TargetFace>();   // 这一批真正打过的零件（收尾时作废它们的圆缓存）
                 for (int ti = 0; ti < targets.Count; ti++) {
                     var t = ResolvedFace(ti);
@@ -1103,7 +1162,8 @@ namespace TianGongCadSuite {
                     if (res.Method.Length > 0 && !methods.Contains(res.Method)) methods.Add(res.Method);
                     if (res.Audit.Length > 0 && !audits.Contains(res.Audit)) audits.Add(res.Audit);
                     foreach (var f in res.Features) features.Add(partName + "：" + f);
-                    foreach (var pf in res.Failures) AddProblem(problems, pf);
+                    outcomes.AddRange(res.Outcomes);
+                    batchUndo.Absorb(res.Undo);
                 }
                 foreach (var why in unlinked) AddProblem(problems, "有的孔没能关联参考孔：" + why + "（孔照常打好了，只是参考零件挪动后不会自动跟上）");
 
@@ -1119,12 +1179,28 @@ namespace TianGongCadSuite {
                     msg += "\r\n\r\n已关联参考孔 " + linked + " 个：参考零件挪动后，点窗口底部的「同步孔位」，孔会重新对准。";
                 if (audits.Count > 0) msg += "\r\n\r\n自检：" + string.Join("；", audits.ToArray());
                 msg += "\r\n\r\n请保存装配。";
-                if (problems.Count > 0) msg += "\r\n\r\n说明：\r\n· " + string.Join("\r\n· ", problems.ToArray());
-                // 只有"真的失败/自检异常"才用警告图标；"位置本来就有孔"是正常情况，不该吓人。
+                // LastResult：给真机脚本/测试读的纯文本，内容和原来的结果框一致（失败、本来就有孔也在"说明"里）
+                var legacy = new List<string>();
+                foreach (var o in outcomes) if (o.Kind == ResultList.Kind.Fail || o.Kind == ResultList.Kind.Skip) legacy.Add(o.Text);
+                legacy.AddRange(problems);
+                if (legacy.Count > 0) msg += "\r\n\r\n说明：\r\n· " + string.Join("\r\n· ", legacy.ToArray());
                 LastResult = msg;
-                if (!SuppressDialogs)
-                    MessageBox.Show(this, msg, "自动打孔完成", MessageBoxButtons.OK,
-                        (failed > 0 || audits.Count > 0) ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
+                // 结果进窗口里的列表（不再弹框）：失败/跳过/打好的孔逐条列出，点一条跳过去。
+                var items = new List<ResultList.Item>(outcomes);
+                foreach (var f in features) items.Add(new ResultList.Item(ResultList.Kind.Info, "特征树：" + f));
+                foreach (var au in audits) items.Add(new ResultList.Item(ResultList.Kind.Fail, "自检：" + au));
+                foreach (var pr in problems) items.Add(new ResultList.Item(ResultList.Kind.Info, pr));
+                if (skipped > 0) items.Add(new ResultList.Item(ResultList.Kind.Info, skipped + " 个参考孔的投影不落在所选面上，已跳过（参考孔只对着其中一部分面时是正常的）。"));
+                if (stepped > 0) items.Add(new ResultList.Item(ResultList.Kind.Info, stepped + " 个参考孔是沉孔/锥沉/倒角孔口，按孔口下面的孔径配做。"));
+                if (linkSession != null && made > 0) items.Add(new ResultList.Item(ResultList.Kind.Info, "已关联参考孔 " + linked + " 个：参考零件挪动后点底部「同步孔位」。"));
+                if (made > 0) items.Add(new ResultList.Item(ResultList.Kind.Info, "记得保存装配。打错了点「撤销本次打孔」。"));
+                string head = "打孔 " + made + " 个" + (already > 0 ? " · 本来就有孔 " + already : "") + (skipped > 0 ? " · 跳过 " + skipped : "") + (failed > 0 ? " · 失败 " + failed : "");
+                results.SetResult(head, failed > 0 || audits.Count > 0 ? Ui.Bad : (made > 0 ? Ui.Ok : Ui.Warn), items);
+                ShowResults(true);
+                lastUndo = batchUndo;
+                undoButton.Enabled = !batchUndo.IsEmpty;
+                lastCreated = batchUndo.Created();
+                editButton.Enabled = lastCreated.Count > 0;
 
                 // 这批面已经用掉了：面片对象失效，解析缓存也一并作废，逼着用户重新点一个面。
                 // 参考孔（纯数据）和规格保留 —— 换个面就能接着打同一批孔，不用重选。
@@ -1150,6 +1226,72 @@ namespace TianGongCadSuite {
                 if (!SuppressDialogs) MessageBox.Show(this, e.Message, "自动打孔", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
+
+        // 改配做规则：保存后，已经点好的参考孔按新规则重推规格（用户改过的深度/倒角/螺纹深度保留）
+        void EditRules(){
+            using (var f = new HoleRulesForm(HoleRuleBook.Current)) {
+                if (f.ShowDialog(this) != DialogResult.OK || f.Result == null) return;
+            }
+            int n = 0;
+            foreach (var g in groups) {
+                var fresh = HoleMatcher.Match(g.DiameterMm).Target;
+                if (g.Spec != null) CopyUserEdits(g.Spec, fresh);
+                g.Spec = fresh; n++;
+            }
+            RefreshAll();
+            SetStatus("配做规则已改成「" + HoleRuleBook.NameOf(HoleRuleBook.Current) + "」" + (n > 0 ? "，已按新规则重推 " + n + " 组参考孔的规格。" : "。"), Ui.Ok);
+        }
+
+        // 结果卡片和预览卡片占同一个位置：打完显示结果，「收起」回到预览
+        void ShowResults(bool show){
+            if (resultCard == null) return;
+            resultCard.Visible = show && results.Count > 0;
+            previewCard.Visible = !resultCard.Visible;
+            var stack = resultCard.Parent as VerticalStack;
+            if (stack != null) stack.Relayout();
+        }
+
+        // 撤销上一次「开始打孔」：删掉那一批孔，编组和改名恢复原样（HoleUndo）。
+        void UndoLastBatch(){
+            if (busy || closing || lastUndo == null || lastUndo.IsEmpty) return;
+            if (!SuppressDialogs && MessageBox.Show(this,
+                    "删掉上一次打的 " + lastUndo.HoleCount + " 个孔？\r\n（编组、改名会一并恢复；之后你在 CAD 里对这些孔做的修改也会一起没掉）",
+                    "撤销本次打孔", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
+            busy = true; UseWaitCursor = true; undoButton.Enabled = false;
+            bool hadCmd = command != null;
+            StopCommand();
+            try {
+                var outcome = lastUndo.Run();
+                lastUndo = null;
+                lastCreated = null; editButton.Enabled = false;
+                foreach (var part in outcome.Parts) { try { HoleScanCad.Invalidate(part); } catch { } }
+                resolved.Clear();
+                var items = new List<ResultList.Item>();
+                foreach (var n in outcome.Notes) items.Add(new ResultList.Item(ResultList.Kind.Info, n));
+                results.SetResult(outcome.Summary, outcome.Failed > 0 ? Ui.Warn : Ui.Ok, items);
+                ShowResults(true);
+                LastResult = outcome.Summary + (outcome.Notes.Count > 0 ? "\r\n· " + string.Join("\r\n· ", outcome.Notes.ToArray()) : "");
+                SetStatus(outcome.Summary + "　参考孔还在，重新点一个打孔面就能再打。", outcome.Failed > 0 ? Ui.Warn : Ui.Ok);
+                ScanLinks(false);
+            } catch (Exception e) {
+                Log.Write("AutoHoleUndo", e);
+                SetStatus("撤销没有完成：" + e.Message, Ui.Bad);
+                LastResult = "撤销中断：" + e.Message;
+            } finally {
+                busy = false; UseWaitCursor = false;
+                if (hadCmd) { try { StartPicking(); } catch (Exception ex) { SetStatus(ex.Message, Ui.Warn); } }
+                RefreshPreview();
+            }
+        }
+        void OpenEdit(){
+            if (busy || closing || lastCreated == null || lastCreated.Count == 0) return;
+            try { AutoHoleModule.OpenEdit(app, assembly, lastCreated); }
+            catch (Exception e) { Log.Write("AutoHoleOpenEdit", e); SetStatus("打不开改孔型窗口：" + e.Message, Ui.Bad); }
+        }
+        public List<KeyValuePair<SolidEdgePart.PartDocument, string>> LastCreatedForTest { get { return lastCreated; } }
+        public void UndoForTest(){ UndoLastBatch(); }
+        public bool CanUndo { get { return lastUndo != null && !lastUndo.IsEmpty; } }
+        public IList<ResultList.Item> ResultItemsForTest { get { return results.Items; } }
 
         void StopCommand(){
             if (highlights != null) { try { highlights.Delete(); } catch { } highlights = null; }

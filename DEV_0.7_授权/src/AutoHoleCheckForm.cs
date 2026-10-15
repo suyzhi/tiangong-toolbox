@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
@@ -36,19 +36,19 @@ namespace TianGongCadSuite {
         readonly ToggleChip cWrong = new ToggleChip { Text = "配错孔 0", ChipColor = Ui.Accent };
         readonly ToggleChip cUnpaired = new ToggleChip { Text = "孤孔 0", ChipColor = Ui.Muted };
         readonly ToolTip tips = new ToolTip { AutoPopDelay = 20000, InitialDelay = 300 };
-
-        const string RulesText =
-            "判定口径\r\n" +
-            "· 只看 3–25mm 的孔（连接孔）；螺栓杆、销、圆凸台的外圆不算孔。\r\n" +
-            "· 同一条轴线（方向差 < 2°）、沿轴线挨着（间隙 ≤ 3mm）的孔算一组。\r\n" +
-            "· 漏打孔：一个零件有孔，轴线在孔附近（3mm 内）穿过了另一个零件，但那个零件在这里没有孔。\r\n" +
-            "· 孔偏了：同一组里不同零件的孔，轴线横向偏差 > 0.2mm。\r\n" +
-            "· 配错孔：同一组的孔配不上同一个螺纹规格（底孔/内小径配过孔/沉孔才算对）；沉孔按较小的过孔直径比。\r\n" +
-            "· 孤孔：只有一个零件有孔、附近也没穿过别的零件（大多数本来就该是孤孔，默认不显示）。";
+        // 跳转到孔：选中一条就把镜头拉到涉及的孔上（大装配里光高亮看不见几毫米的孔）
+        readonly CheckBox autoJump = new CheckBox { Text = "选中即跳转", Checked = true, AutoSize = true };
+        readonly Button jump = Ui.Small("跳转到孔");
+        readonly Button goDrill = Ui.Small("去配孔");
+        // 「去配孔」：打开自动打孔，把这条漏打孔涉及的孔带进去当参考孔（由命令模块接上，见 AutoHoleModule）
+        public Action<List<HoleRecord>, string> GoDrill;
 
         public AutoHoleCheckForm(F.Application application, A.AssemblyDocument document){
             app = application; assembly = document;
             Ui.Shell(this, "配孔检查", 840, 680, 700, 560);
+            // 用户改过判定口径就按他的来（读不到就是默认值）
+            try { HoleCheck.Options = HoleCheckOptions.Load(SettingsFile.PathOf(HoleCheckOptions.FileName)); }
+            catch (Exception e) { Log.Write("HoleCheckOptionsLoad", e); }
             cUnpaired.Checked = false;
             BuildLayout();
             ApplyFilter();
@@ -74,9 +74,10 @@ namespace TianGongCadSuite {
             var bar = new Panel { Height = 40, BackColor = Ui.Bg };
             run.SetBounds(0, 2, 130, 34);
             copy.SetBounds(140, 5, 96, 30); copy.Enabled = false;
-            rules.Text = "判定口径 ⓘ"; rules.AutoSize = true; rules.ForeColor = Ui.Accent; rules.Cursor = Cursors.Help;
+            rules.Text = "判定口径 ⓘ"; rules.AutoSize = true; rules.ForeColor = Ui.Accent; rules.Cursor = Cursors.Hand;
             rules.Location = new Point(250, 12); rules.BackColor = Ui.Bg;
-            tips.SetToolTip(rules, RulesText);
+            tips.SetToolTip(rules, HoleCheck.Options.Describe());
+            rules.Click += (s, e) => EditOptions();
             summary.AutoSize = false; summary.TextAlign = ContentAlignment.MiddleRight; summary.AutoEllipsis = true;
             summary.ForeColor = Ui.Muted; summary.BackColor = Ui.Bg; summary.Font = Ui.F9B;
             summary.Text = "还没检查";
@@ -96,10 +97,18 @@ namespace TianGongCadSuite {
             list.Dock = DockStyle.Fill; list.IntegralHeight = false; list.BorderStyle = BorderStyle.None;
             list.DrawMode = DrawMode.OwnerDrawFixed; list.ItemHeight = 46; list.BackColor = Color.White;
             list.DrawItem += DrawIssue;
-            list.SelectedIndexChanged += (s, e) => { HighlightSelected(); ShowDetail(); };
+            list.SelectedIndexChanged += (s, e) => { HighlightSelected(); ShowDetail(); if (autoJump.Checked) JumpToSelected(false); };
+            list.DoubleClick += (s, e) => JumpToSelected(true);
             listCard.Controls.Add(list);
 
             var detailCard = Ui.Card("详情", 132, "选中一条，这里列出涉及的每个孔");
+            autoJump.Font = Ui.F8; autoJump.BackColor = Color.White; autoJump.Height = 22;
+            jump.Click += (s, e) => JumpToSelected(true);
+            goDrill.Click += (s, e) => GoDrillSelected();
+            goDrill.Enabled = false; jump.Enabled = false;
+            tips.SetToolTip(jump, "把视图镜头拉到这一条涉及的孔上（双击列表也行）。");
+            tips.SetToolTip(goDrill, "漏打孔：打开「自动打孔」，这几个孔直接带进去当参考孔，再点没打孔那个零件上的面就能配做。");
+            detailCard.AddHeader(goDrill); detailCard.AddHeader(jump); detailCard.AddHeader(autoJump);
             detail.Dock = DockStyle.Fill; detail.Multiline = true; detail.ReadOnly = true; detail.BorderStyle = BorderStyle.None;
             detail.BackColor = Color.White; detail.ForeColor = Ui.Text; detail.ScrollBars = ScrollBars.Vertical; detail.Font = Ui.F9;
             detailCard.Controls.Add(detail);
@@ -169,21 +178,22 @@ namespace TianGongCadSuite {
 
                 // 一次性建好「零件名 -> 实体」表：漏打孔判定要按名字查几百次零件，
                 // 每次重新遍历 Occurrences 读 occ.Name 都是跨进程 COM 调用（O(S×P²)）。
-                var partNames = new List<string>();
-                foreach (A.Occurrence occ in assembly.Occurrences) { try { partNames.Add(occ.Name); } catch { } }
-                var bodies = AutoHoleWriter.OccurrenceBodies.Build(assembly, partNames);
-                var allNames = new List<string>();
-                foreach (var n in partNames) if (!allNames.Contains(n)) allNames.Add(n);
-
+                // 零件实例只遍历一次（含子装配里的，见 AssemblyPart）：孔、射线表、零件名都从这一份来
                 var warnings = new List<string>();
                 List<HoleRecord> shafts;
-                var holes = AutoHoleWriter.CollectAssemblyHoles(assembly, out warnings, out shafts);
+                List<AssemblyPart> parts;
+                var holes = AutoHoleWriter.CollectAssemblyHoles(assembly, out warnings, out shafts, out parts);
+                var bodies = AutoHoleWriter.OccurrenceBodies.Build(parts);
+                var allNames = new List<string>();
+                foreach (var ap in parts) if (!allNames.Contains(ap.Name)) allNames.Add(ap.Name);
+                int nested = parts.Count(x => x.Nested);
                 lastHoles = holes; lastShafts = shafts;
                 SetStatus("读到 " + holes.Count + " 个孔，正在配对…", Ui.Accent); Application.DoEvents();
                 // 孤孔一律算出来，显示与否交给筛选胶囊（不用为了看孤孔再检查一遍）
                 ShowIssues(HoleCheck.Run(holes, null, true, allNames, bodies, shafts), HoleCheck.Relevant(holes).Count, HoleCheck.CountGroups(holes));
                 failedParts = warnings.Count;
                 string s = summary.Text;
+                if (nested > 0) s += "　（含子装配里的 " + nested + " 个零件）";
                 if (warnings.Count > 0) s += "　（" + warnings.Count + " 个零件读取失败）";
                 SetStatus(s, issues.Count(i => i.Kind != HoleIssueKind.Unpaired) == 0 ? Ui.Ok : Ui.Warn);
             } catch (Exception e) {
@@ -232,11 +242,14 @@ namespace TianGongCadSuite {
         void ShowDetail(){
             int idx = list.SelectedIndex;
             if (idx < 0 || idx >= shown.Count) {
+                jump.Enabled = false; goDrill.Enabled = false;
                 detail.Text = shown.Count == 0 ? "" : "在上面选一条，这里列出涉及的每个孔（零件、孔径、装配坐标位置）。";
                 detail.ForeColor = Ui.Muted;
                 return;
             }
             var it = shown[idx];
+            jump.Enabled = it.Holes.Count > 0;
+            goDrill.Enabled = it.Kind == HoleIssueKind.MissingHole && GoDrill != null;
             var sb = new StringBuilder();
             sb.Append("【").Append(it.KindName).Append("】").Append(it.Message).Append("\r\n");
             foreach (var h in it.Holes.OrderBy(x => x.PartName, StringComparer.Ordinal))
@@ -279,6 +292,40 @@ namespace TianGongCadSuite {
                 foreach (var h in shown[idx].Holes) if (h.Selection != null) highlights.AddItem(h.Selection);
                 highlights.Draw();
             } catch (Exception e) { Log.Write("AutoHoleCheckHighlight", e); }
+        }
+
+        // 跳转到孔：镜头框住这一条涉及的所有孔（只有一个孔时按孔径放大）
+        void JumpToSelected(bool explicitly){
+            int idx = list.SelectedIndex;
+            if (idx < 0 || idx >= shown.Count) return;
+            var it = shown[idx];
+            if (it.Holes.Count == 0) return;
+            bool ok;
+            if (it.Holes.Count == 1 || it.Holes.All(h => (h.Center - it.Holes[0].Center).Length < 0.002))
+                ok = CadView.ZoomToHole(app, it.Holes[0].Center, it.Holes.Max(h => h.DiameterMm));
+            else
+                ok = CadView.ZoomToPoints(app, it.Holes.Select(h => h.Center).ToList(), Math.Max(0.01, it.Holes.Max(h => h.DiameterMm) * 3 / 1000.0));
+            if (ok) SetStatus("已跳到：" + it.KindName + "　" + it.Holes[0].PartName + " Φ" + it.Holes[0].DiameterMm.ToString("0.##", CultureInfo.InvariantCulture), Ui.Accent);
+            else if (explicitly) SetStatus("没能移动视图（请确认装配窗口是当前窗口）。", Ui.Warn);
+        }
+
+        // 去配孔：漏打孔那一条的孔带进「自动打孔」当参考孔
+        void GoDrillSelected(){
+            int idx = list.SelectedIndex;
+            if (idx < 0 || idx >= shown.Count || GoDrill == null) return;
+            var it = shown[idx];
+            if (it.Kind != HoleIssueKind.MissingHole) { SetStatus("只有「漏打孔」能直接去配孔。", Ui.Warn); return; }
+            try { GoDrill(new List<HoleRecord>(it.Holes), it.MissingPart); }
+            catch (Exception e) { Log.Write("AutoHoleCheckGoDrill", e); SetStatus("打不开自动打孔：" + e.Message, Ui.Bad); }
+        }
+
+        void EditOptions(){
+            using (var f = new HoleCheckOptionsForm(HoleCheck.Options)) {
+                if (f.ShowDialog(this) != DialogResult.OK || f.Result == null) return;
+                HoleCheck.Options = f.Result;
+            }
+            tips.SetToolTip(rules, HoleCheck.Options.Describe());
+            SetStatus(checkedOnce ? "判定口径已改，点「重新检查」按新口径再查一遍。" : "判定口径已改。", Ui.Ok);
         }
 
         void Cleanup(){

@@ -192,6 +192,7 @@ class CheckPatternE2E {
             try {
                 Retry(delegate { pf = new AutoHolePatternForm(app, asm); }, "打开批量排孔");
                 pf.SuppressDialogs = true;
+                pf.AsPattern = false;   // 这里专门测"逐个打孔"那条路（编组、并组、接着编号）；种子孔 + 阵列在 EditPatternE2E
                 Retry(delegate { pf.Show(); }, "显示");
                 Pump(6);
                 var all = All(pf);

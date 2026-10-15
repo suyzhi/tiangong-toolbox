@@ -17,6 +17,14 @@ namespace TianGongCadSuite {
         public V3 Normal;        // 单位向量，装配坐标，面法向
         public double LengthMm;  // 沿 Direction 的可用长度（毫米）
         public double WidthMm;   // 沿 Perp 的面宽（毫米）
+        // 方向边（自动取的最长边，或用户点的那条）离面中线多远（毫米，沿 Perp 带符号）。
+        // 批量排孔的「离方向边 X mm」靠它换算成横向偏移：用户量尺寸都是从一条看得见的边量，不是从中线量。
+        public double EdgeLateralMm;
+        // 「孔心离方向边 d 毫米」→ 沿 Perp 的横向偏移（毫米）：从方向边往面里面走 d
+        public double LateralFromEdge(double d){
+            double toward = EdgeLateralMm > 1e-6 ? -1 : 1;   // 方向边在 +Perp 一侧就往 -Perp 走
+            return EdgeLateralMm + toward * d;
+        }
         public string Label = "";
         public V3 At(double offsetMm){ return Origin + Direction * (offsetMm * 0.001); }
     }
@@ -30,7 +38,7 @@ namespace TianGongCadSuite {
             Collect(target, pts, ref bestDir, ref bestP1, ref bestLen);
             if (bestLen <= 1e-9)
                 throw new ArgumentException("这个面上找不到可用的直线边，无法确定排孔方向。请在面上选择一条边作为排孔方向。");
-            return Build(target, pts, bestDir.Unit(), "自动取最长边");
+            return Build(target, pts, bestDir.Unit(), "自动取最长边", bestP1);
         }
 
         // 用户显式指定一条边作为排孔方向。
@@ -49,7 +57,7 @@ namespace TianGongCadSuite {
             var pts = new List<V3>();
             V3 bd = new V3(), bp = new V3(); double bl = 0;
             Collect(target, pts, ref bd, ref bp, ref bl);
-            return Build(target, pts, dir.Unit(), "手动指定边");
+            return Build(target, pts, dir.Unit(), "手动指定边", q1);
         }
 
         static void Collect(TargetFace target, List<V3> pts, ref V3 bestDir, ref V3 bestP1, ref double bestLen){
@@ -65,7 +73,7 @@ namespace TianGongCadSuite {
             }
         }
 
-        static FaceFrame Build(TargetFace target, List<V3> pts, V3 dir, string how){
+        static FaceFrame Build(TargetFace target, List<V3> pts, V3 dir, string how, V3 edgePoint){
             if (pts.Count < 2) throw new ArgumentException("这个面上读不到可用的边，无法排孔。");
             var normal = target.Plane.Normal.Unit();
             var perp = normal.Cross(dir);
@@ -85,6 +93,7 @@ namespace TianGongCadSuite {
                 Direction = dir, Perp = perp, Normal = normal,
                 Origin = basePoint + dir * dmin + perp * ((pmin + pmax) / 2),
                 LengthMm = length * 1000.0, WidthMm = width * 1000.0,
+                EdgeLateralMm = ((edgePoint - basePoint).Dot(perp) - (pmin + pmax) / 2) * 1000.0,
                 Label = how + "（" + (length*1000).ToString("0.##") + " × " + (width*1000).ToString("0.##") + "mm）"
             };
             return f;

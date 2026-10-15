@@ -100,6 +100,22 @@ namespace TianGongCadSuite {
             return b;
         }
 
+        // 一行文字输入的小对话框（WinForms 没有现成的 InputBox；VB 的那个要多引一个程序集）。取消返回 null。
+        public static string Prompt(IWin32Window owner, string title, string label, string initial){
+            using (var f = new Form()) {
+                Shell(f, title, 360, 116, 300, 116);
+                f.FormBorderStyle = FormBorderStyle.FixedToolWindow;
+                var l = new Label { Text = label, AutoSize = false, Bounds = new Rectangle(12, 10, 336, 20), ForeColor = Text, BackColor = Color.Transparent };
+                var t = new TextBox { Text = initial ?? "", Bounds = new Rectangle(12, 34, 336, 24) };
+                var ok = Primary("确定", 80, 28); ok.Bounds = new Rectangle(176, 76, 80, 28); ok.DialogResult = DialogResult.OK;
+                var cancel = Secondary("取消", 80, 28); cancel.Bounds = new Rectangle(266, 76, 80, 28); cancel.DialogResult = DialogResult.Cancel;
+                f.Controls.Add(l); f.Controls.Add(t); f.Controls.Add(ok); f.Controls.Add(cancel);
+                f.AcceptButton = ok; f.CancelButton = cancel;
+                f.Shown += (s, e) => { t.SelectAll(); t.Focus(); };
+                return f.ShowDialog(owner) == DialogResult.OK ? t.Text : null;
+            }
+        }
+
         // 步骤标题：编号圆点 + 加粗标题 + 灰色说明。
         public static StepHeader Step(int number, string title, string hint){
             return new StepHeader { Number = number, Title = title, Hint = hint, Height = 26 };

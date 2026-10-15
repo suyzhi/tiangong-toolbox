@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -65,7 +65,7 @@ namespace TianGongCadSuite {
             Assert(Math.Abs(cb.CounterboreDiameter - 15) < 1e-9 && Math.Abs(cb.CounterboreDepth - 9) < 1e-9, "手工 M8 沉孔Φ15深9（= 天工孔标准表 内六角螺钉 M8）");
 
             // 表本身单调、无重复
-            Assert(HoleMatcher.Table.Length == 9, "螺纹表 9 个规格");
+            Assert(HoleMatcher.Table.Length == 13, "螺纹表 13 个规格（M2.5～M30）");
             for (int i = 1; i < HoleMatcher.Table.Length; i++)
                 Assert(HoleMatcher.Table[i].TapDrill > HoleMatcher.Table[i-1].TapDrill, "螺纹表底孔单调递增 " + HoleMatcher.Table[i].Size);
             for (int i = 0; i < HoleMatcher.Table.Length; i++) {

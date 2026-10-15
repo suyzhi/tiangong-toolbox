@@ -1,4 +1,4 @@
-# tools/make-installer.ps1 —— 打"给别人的安装包"：天工工具箱_DEV<版本>_安装包_<日期>/ + 同名 zip。
+﻿# tools/make-installer.ps1 —— 打"给别人的安装包"：天工工具箱_DEV<版本>_安装包_<日期>/ + 同名 zip。
 # 与 make-delivery.ps1（给自己留档、带源码）不同：这里**只放安装需要的东西**——payload + 安装/卸载脚本 + 说明。
 #
 # 安装包行为：
@@ -7,14 +7,31 @@
 #     答是就代为强制结束（天工 CAD 是单实例程序，旧进程不退会导致新版本加载不上）；
 #   * 支持 安装.cmd -Force 走无人值守（不弹窗）。
 param(
-    [string]$Version = '0.7.4',
-    [string]$OutputRoot
+    [string]$Version,            # 不传就读 DEV_0.7_授权\VERSION（版本号只有这一个来源）
+    [string]$OutputRoot,
+    [switch]$SkipTests           # 不跑打包前的纯逻辑测试（不推荐）
 )
 $ErrorActionPreference='Stop'
 $NL=[Environment]::NewLine
 $sep=[IO.Path]::DirectorySeparatorChar
 $root = Split-Path $PSScriptRoot -Parent          # DEV_0.7_授权
 $repo = Split-Path $root -Parent                  # 仓库根
+if(-not $Version){ $Version = (Get-Content -LiteralPath (Join-Path $root 'VERSION') -TotalCount 1).Trim() }
+
+# 打包前先跑纯逻辑测试（不需要 CAD）：测试不过就不出包，免得把回归带给用户。
+if(-not $SkipTests){
+    Write-Output '0/5 纯逻辑测试（tests\pure，需要 .NET SDK）…'
+    $dotnet = Get-Command dotnet -ErrorAction SilentlyContinue
+    if(-not $dotnet){ throw '找不到 dotnet（.NET SDK），跑不了打包前测试。装上 SDK，或确认无误后加 -SkipTests。' }
+    $pure = Join-Path $root ('tests' + [IO.Path]::DirectorySeparatorChar + 'pure')
+    Push-Location $pure
+    try { $testOut = & dotnet run 2>&1; $testExit = $LASTEXITCODE } finally { Pop-Location }
+    if($testExit -ne 0 -or -not ($testOut -match 'ALL PURE SUITES PASSED')){
+        $testOut | Select-Object -Last 30 | ForEach-Object { Write-Output ('  ' + $_) }
+        throw '纯逻辑测试没通过，不打包。'
+    }
+    Write-Output '  纯逻辑测试全部通过'
+}
 if(-not $OutputRoot){ $OutputRoot = $repo }
 $stamp = Get-Date -Format 'yyyyMMdd'
 $name  = '天工工具箱_DEV' + $Version + '_安装包_' + $stamp
@@ -108,7 +125,6 @@ $readme = (@(
     '| 自动打孔 | 参考孔 + 目标面 → 按规格配对打孔 |',
     '| 批量排孔 | 在一个面上按行列 / 圆周 / 腰孔等方式批量排孔 |',
     '| 配孔检查 | 检查同轴孔是否配做、有没有漏打孔、孔是否偏心 |',
-    '',
     '> 早期版本的「四面生成内嵌板」「导出出图训练数据」两个命令已从功能区下线',
     '> （前者被「型材自动填充」取代，后者属于内部研究用）。',
     '',

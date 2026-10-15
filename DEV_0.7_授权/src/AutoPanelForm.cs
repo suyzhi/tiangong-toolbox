@@ -1,68 +1,329 @@
-using System;
-using System.IO;
-using System.Linq;
+﻿using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
-using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Windows.Forms;
 using F=SolidEdgeFramework;
 using A=SolidEdgeAssembly;
+
 namespace TianGongCadSuite {
-    public sealed class AutoPanelForm:Form {
-        readonly F.Application app;readonly A.AssemblyDocument assembly;
-        readonly TextBox thickness=new TextBox{Text="6"},gap=new TextBox{Text="0"};
-        readonly Label status=new Label{AutoSize=false,Dock=DockStyle.Fill};
-        readonly ListBox openings=new ListBox{Dock=DockStyle.Fill};readonly Preview preview=new Preview();
-        readonly Button generate=new Button{Text="批量保存并插入全部框口",Dock=DockStyle.Fill,Enabled=false};
-        List<object> selection=new List<object>();List<FrameMember> cachedMembers;List<PanelSpec> specs=new List<PanelSpec>();bool busy;
-        internal int OpeningCount{get{return specs.Count;}}
-        internal string StatusText{get{return status.Text;}}
-        public AutoPanelForm(F.Application app,A.AssemblyDocument assembly){
-            this.app=app;this.assembly=assembly;Text="多型材自动填充 · DEV 0.7.4";ClientSize=new Size(1020,660);MinimumSize=new Size(960,660);Font=new Font("Microsoft YaHei UI",9);ShowInTaskbar=false;
-            var split=new TableLayoutPanel{Dock=DockStyle.Fill,ColumnCount=2};split.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,365));split.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));Controls.Add(split);split.Controls.Add(preview,1,0);
-            var left=new TableLayoutPanel{Dock=DockStyle.Fill,ColumnCount=2,Padding=new Padding(16)};left.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,125));left.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));split.Controls.Add(left,0,0);
-            Add(left,new Label{Text="先用 CAD 的 Ctrl 多选或框选选择型材，再点击下方读取。也可选一个框架子装配。\n自动识别同一平面上的闭合矩形框口。",Dock=DockStyle.Fill},0,76);
-            var read=new Button{Text="读取当前选择并识别框口",Dock=DockStyle.Fill};read.Click+=(s,e)=>ReadSelection();Add(left,read,1,40);
-            left.Controls.Add(new Label{Text="总厚度（mm）",Dock=DockStyle.Fill},0,2);left.Controls.Add(thickness,1,2);left.RowStyles.Add(new RowStyle(SizeType.Absolute,38));
-            left.Controls.Add(new Label{Text="每边间隙（mm）",Dock=DockStyle.Fill},0,3);left.Controls.Add(gap,1,3);left.RowStyles.Add(new RowStyle(SizeType.Absolute,38));
-            Add(left,new Label{Text="定位：采用型材厚度中心的共同平面。\n边界取中心剖面的材料面，可识别槽内边界。\n点击列表逐个预览，生成时包含全部框口。",Dock=DockStyle.Fill},4,68);
-            Add(left,openings,5,160);Add(left,status,6,100);Add(left,generate,7,42);
-            var close=new Button{Text="关闭",Dock=DockStyle.Fill};close.Click+=(s,e)=>Close();Add(left,close,8,34);CancelButton=close;
-            openings.SelectedIndexChanged+=(s,e)=>ShowPreview();thickness.TextChanged+=(s,e)=>Recompute();gap.TextChanged+=(s,e)=>Recompute();generate.Click+=(s,e)=>Generate();
+    // 命令 2：型材自动填充。在装配里多选型材 → 自动识别闭合矩形框口 → 每个框口生成一块内嵌板（独立 PAR）插进装配。
+    //
+    // 2026-10-14 重写界面（和打孔系列同一套 UiKit 样式），并且：
+    //   · 输入厚度/间隙不再"敲一个字符就重算一遍"：停手 350ms 才算（原来输到"6."这种半截数字还会报红字）；
+    //   · 一次可以选好几个面的型材，按平面自动分开识别（FrameGrouping），不用一面一面地框选；
+    //   · 框口列表可以勾选，只生成勾上的；
+    //   · 材质、尺寸写进零件文件属性（BOM/明细栏直接引用）；
+    //   · 输出目录、厚度、间隙、材质记住（autopanel.tsv），默认放在装配所在目录；
+    //   · 生成完窗口不关，生成过的框口标出来、默认不再勾选（免得重复生成）。
+    // 每个框口仍然各生成一个 PAR（不合并成一个零件）。
+    public sealed class AutoPanelForm : Form {
+        const string SettingsName = "autopanel.tsv";
+        static readonly string[] Materials = { "", "玻璃", "钢化玻璃", "亚克力", "PC 耐力板", "铝板", "不锈钢板", "钢板", "木板" };
+
+        readonly F.Application app;
+        readonly A.AssemblyDocument assembly;
+        readonly NumericUpDown thickness = Ui.Num(0.1M, 500M, 6M, 2, 0.5M, 80);
+        readonly NumericUpDown gap = Ui.Num(0M, 100M, 0M, 2, 0.5M, 80);
+        readonly ComboBox material = new ComboBox { DropDownStyle = ComboBoxStyle.DropDown, Width = 150 };
+        readonly Label memberInfo = new Label();
+        readonly CheckedListBox openings = new CheckedListBox();
+        readonly Label outputLabel = new Label();
+        readonly Label status = new Label();
+        readonly Button read = Ui.Primary("读取当前选择", 130, 32);
+        readonly Button generate = Ui.Primary("生成选中的框口", 160, 36);
+        readonly Preview preview = new Preview();
+        readonly Timer debounce = new Timer { Interval = 350 };
+        readonly ToolTip tips = new ToolTip { AutoPopDelay = 15000, InitialDelay = 400 };
+
+        List<object> selection = new List<object>();
+        List<FrameMember> cachedMembers;
+        List<FoundOpening> found = new List<FoundOpening>();
+        List<PanelSpec> specs = new List<PanelSpec>();
+        readonly HashSet<string> generated = new HashSet<string>();   // 生成过的框口（按中心点）
+        string outputDir = "";
+        bool busy, loading;
+
+        internal int OpeningCount { get { return specs.Count; } }
+        internal string StatusText { get { return status.Text; } }
+
+        public AutoPanelForm(F.Application app, A.AssemblyDocument assembly){
+            this.app = app; this.assembly = assembly;
+            Ui.Shell(this, Product.Title("型材自动填充"), 1040, 680, 900, 600);
+            material.Items.AddRange(Materials);
+            BuildLayout();
+            LoadSettings();
+            debounce.Tick += (s, e) => { debounce.Stop(); Recompute(); };
+            foreach (var n in new[]{ thickness, gap }) n.ValueChanged += (s, e) => { if (!loading) { debounce.Stop(); debounce.Start(); } };
+            FormClosed += (s, e) => { debounce.Dispose(); tips.Dispose(); };
             ReadSelection();
         }
-        static void Add(TableLayoutPanel p,Control c,int row,int height){p.Controls.Add(c,0,row);p.SetColumnSpan(c,2);p.RowStyles.Add(new RowStyle(SizeType.Absolute,height));}
-        void Context(){if(!ReferenceEquals(app.ActiveDocument,assembly)||assembly.ReadOnly||assembly.InPlaceActivated)throw new InvalidOperationException("请保持目标装配处于活动、可编辑的顶层状态。");}
-        internal void ReadSelection(){try{Context();selection=assembly.SelectSet.Cast<object>().ToList();cachedMembers=null;if(selection.Count>0)cachedMembers=FrameReader.Read(assembly,selection);Recompute();}catch(Exception e){selection.Clear();cachedMembers=null;InvalidateResult(e.Message);}}
-        internal void SetParameters(string t,string g){thickness.Text=t;gap.Text=g;}
-        void InvalidateResult(string text){specs.Clear();openings.Items.Clear();generate.Enabled=false;preview.Spec=null;preview.SourceEdges.Clear();preview.Invalidate();status.Text=text;status.ForeColor=Color.Firebrick;}
-        List<PanelSpec> ReadSpecs(bool refresh){Context();double t,g;if(!double.TryParse(thickness.Text,NumberStyles.Float,CultureInfo.CurrentCulture,out t)||!double.TryParse(gap.Text,NumberStyles.Float,CultureInfo.CurrentCulture,out g))throw new ArgumentException("请输入有效的厚度和间隙（mm）。");
-            if(refresh||cachedMembers==null)cachedMembers=FrameReader.Read(assembly,selection);var found=FrameDetection.Detect(cachedMembers,t/1000,g/1000);var result=found.Select(o=>o.Solve(t/1000,g/1000)).ToList();preview.SourceEdges=cachedMembers.SelectMany(m=>m.Faces).SelectMany(f=>f.Edges).ToList();return result;
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData){
+            if (keyData == Keys.Escape) { Close(); return true; }
+            return base.ProcessCmdKey(ref msg, keyData);
         }
-        void Recompute(){if(busy)return;InvalidateResult("");if(selection.Count==0){status.Text="尚未读取型材，请在模型中多选后点击读取。";return;}
-            try{specs=ReadSpecs(false);for(int i=0;i<specs.Count;i++){var s=specs[i];openings.Items.Add(string.Format("框口 {0}：{1:0.###} × {2:0.###} × {3:0.###} mm",i+1,s.Width*1000,s.Height*1000,s.Thickness*1000));}openings.SelectedIndex=0;generate.Enabled=true;status.ForeColor=Color.DarkGreen;status.Text="识别到 "+specs.Count+" 个闭合框口。请检查预览后生成。";}catch(Exception e){InvalidateResult(e.Message);Log.Write("AutoDetect",e);}
+
+        // ┌ 左：① 型材 ② 板子 ③ 框口（勾选）输出目录 ┬ 右：位置预览 ┐
+        // │ [生成选中的框口]                              [关闭] │
+        // └ 状态栏 ─────────────────────────────────────────────────┘
+        void BuildLayout(){
+            var columns = new SplitColumns(390);
+            var left = new VerticalStack { Padding = new Padding(0) };
+
+            var memberCard = Ui.Card("① 型材", 118, "CAD 里多选型材 / 框选 / 选框架子装配");
+            var mb = new Panel { Dock = DockStyle.Fill, BackColor = Color.White };
+            read.SetBounds(0, 0, 130, 32);
+            read.Click += (s, e) => ReadSelection();
+            memberInfo.SetBounds(0, 38, 360, 36); memberInfo.AutoSize = false; memberInfo.ForeColor = Ui.Muted; memberInfo.BackColor = Color.White;
+            memberInfo.Text = "一次可以选好几个面的型材，会按平面自动分开识别。";
+            mb.Controls.Add(read); mb.Controls.Add(memberInfo);
+            mb.Resize += (s, e) => memberInfo.Width = Math.Max(60, mb.ClientSize.Width);
+            memberCard.Controls.Add(mb);
+
+            var panelCard = Ui.Card("② 板子", 34 + 3 * 32 + 10, "改了数字停一下就会重新识别");
+            var grid = new FieldGrid { LabelWidth = 64, Dock = DockStyle.Fill };
+            grid.Add("总厚度", thickness, FieldGrid.Unit("mm"));
+            grid.Add("每边间隙", gap, FieldGrid.Unit("mm"), FieldGrid.Space(8), Ui.Muted8("板边离型材槽底的距离"));
+            grid.Add("材质", material, FieldGrid.Space(8), Ui.Muted8("写进零件属性，可留空"));
+            panelCard.Controls.Add(grid);
+            tips.SetToolTip(material, "写进零件的自定义属性「材质」，并尝试套用天工材料库里同名的材料。可以直接输入别的名字。");
+
+            var openCard = Ui.Card("③ 框口", 0, "勾上的才生成；点一个看预览");
+            var all = Ui.Small("全选"); var none = Ui.Small("全不选");
+            all.Click += (s, e) => SetAllChecked(true);
+            none.Click += (s, e) => SetAllChecked(false);
+            openCard.AddHeader(all); openCard.AddHeader(none);
+            openings.Dock = DockStyle.Fill; openings.BorderStyle = BorderStyle.None; openings.IntegralHeight = false;
+            openings.CheckOnClick = true; openings.BackColor = Color.White; openings.Font = Ui.F9;
+            openings.SelectedIndexChanged += (s, e) => ShowPreview();
+            // ItemCheck 触发时勾选状态还没改，所以延后刷新按钮；窗口还没显示时（构造里读预选就会 Recompute）
+            // 不能 BeginInvoke，而 Recompute 末尾本来就会刷新，跳过即可。
+            openings.ItemCheck += (s, e) => { if (IsHandleCreated) BeginInvoke((Action)UpdateGenerateButton); };
+            openCard.Controls.Add(openings);
+
+            var outCard = Ui.Card("输出目录", 70, "每批一个子目录，每个框口一个 PAR");
+            var change = Ui.Small("更改…");
+            change.Click += (s, e) => PickOutputDir();
+            outCard.AddHeader(change);
+            outputLabel.Dock = DockStyle.Fill; outputLabel.AutoEllipsis = true; outputLabel.BackColor = Color.White; outputLabel.ForeColor = Ui.Text;
+            outCard.Controls.Add(outputLabel);
+
+            left.Add(memberCard); left.Add(panelCard); left.Add(openCard, true); left.Add(outCard);
+
+            // 预览控件自己画标题和操作提示，卡片不再写一遍
+            var previewCard = Ui.Card("", 0, "");
+            previewCard.Padding = new Padding(1, 1, 1, 1);
+            preview.Dock = DockStyle.Fill;
+            preview.EmptyText = "读取型材、识别出框口后，点左边列表里的框口在这里看位置。";
+            previewCard.Controls.Add(preview);
+            columns.Add(left); columns.Add(previewCard);
+
+            var actions = new Panel { Height = 42, BackColor = Ui.Bg };
+            var close = Ui.Secondary("关闭", 80, 30);
+            generate.SetBounds(0, 3, 160, 36); generate.Enabled = false;
+            generate.Click += (s, e) => Generate();
+            close.Click += (s, e) => Close();
+            actions.Controls.Add(generate); actions.Controls.Add(close);
+            actions.Resize += (s, e) => close.SetBounds(actions.Width - 80, 6, 80, 30);
+
+            status.Height = 40; status.AutoSize = false; status.Padding = new Padding(2, 0, 10, 0);
+            status.TextAlign = ContentAlignment.MiddleLeft; status.BackColor = Ui.Bg; status.AutoEllipsis = true;
+
+            var stack = new VerticalStack { Dock = DockStyle.Fill };
+            stack.Add(columns, true); stack.Add(actions); stack.Add(status);
+            Controls.Add(stack);
         }
-        void ShowPreview(){int i=openings.SelectedIndex;preview.Spec=i>=0&&i<specs.Count?specs[i]:null;if(preview.Spec!=null)preview.PickedPoint=preview.Spec.Corner(0,0);preview.Invalidate();}
-        void Generate(){try{specs=ReadSpecs(true);using(var dialog=new FolderBrowserDialog{Description="选择输出目录；会创建独立批次子目录，每个框口一个 PAR"}){if(dialog.ShowDialog(this)!=DialogResult.OK)return;
-                    specs=ReadSpecs(true);busy=true;Enabled=false;
-                    string dir=BatchPanels.Generate(app,assembly,specs,dialog.SelectedPath);
-                    MessageBox.Show(this,"已生成 "+specs.Count+" 块板子：\n"+dir+"\n请保存装配。","自动填充完成");Close();
-                }}catch(Exception e){Log.Write("AutoGenerate",e);busy=false;Enabled=true;Recompute();status.Text=e.Message;status.ForeColor=Color.Firebrick;}}
-    }
-    public static class BatchPanels {
-        public static string Generate(F.Application app,A.AssemblyDocument assembly,IList<PanelSpec> specs,string parent){
-            if(specs==null||specs.Count==0)throw new ArgumentException("没有待生成框口。");
-            if(!Directory.Exists(parent))throw new DirectoryNotFoundException(parent);
-            // 文件名必须带批次时间戳（原因见 PanelNaming 的注释：CAD 会按文件名把装配目录里的旧同名零件插进来）。
-            string stamp=PanelNaming.Stamp(DateTime.Now);
-            Func<int,string> name=i=>PanelNaming.FileName(stamp,i);
-            string directory=Path.Combine(parent,PanelNaming.BatchDirectoryName(stamp,Guid.NewGuid().ToString("N").Substring(0,8)));Directory.CreateDirectory(directory);
-            var created=new List<Tuple<A.Occurrence,string>>();
-            try{for(int i=0;i<specs.Count;i++){string file=Path.Combine(directory,name(i+1));created.Add(Tuple.Create(CadBuilder.Generate(app,assembly,specs[i],file),file));}
-                File.WriteAllLines(Path.Combine(directory,"尺寸清单.csv"),new[]{"文件,宽mm,高mm,厚mm,每边间隙mm"}.Concat(specs.Select((s,i)=>string.Format(CultureInfo.InvariantCulture,"{0},{1:R},{2:R},{3:R},{4:R}",name(i+1),s.Width*1000,s.Height*1000,s.Thickness*1000,s.Gap*1000))),System.Text.Encoding.UTF8);return directory;
-            }catch(Exception original){var errors=new List<string>();foreach(var item in created.AsEnumerable().Reverse()){try{item.Item1.Delete();File.Delete(item.Item2);}catch(Exception e){errors.Add(item.Item2+": "+e.Message);}}
-                throw new InvalidOperationException("批量生成未完成："+original.Message+(errors.Count>0?"\n部分结果未能撤回，请检查：\n"+string.Join("\n",errors):"\n本批已插入的板子已撤回。")+"\n批次目录："+directory,original);
+
+        // ---------------- 设置（记住上次的输入）----------------
+        void LoadSettings(){
+            loading = true;
+            try {
+                foreach (var r in SettingsFile.Read(SettingsFile.PathOf(SettingsName))) {
+                    if (r.Length < 2) continue;
+                    decimal d;
+                    if (r[0] == "thickness" && decimal.TryParse(r[1], NumberStyles.Float, CultureInfo.InvariantCulture, out d)) thickness.Value = Ui.Clamp(d, thickness.Minimum, thickness.Maximum);
+                    else if (r[0] == "gap" && decimal.TryParse(r[1], NumberStyles.Float, CultureInfo.InvariantCulture, out d)) gap.Value = Ui.Clamp(d, gap.Minimum, gap.Maximum);
+                    else if (r[0] == "material") material.Text = r[1];
+                    else if (r[0] == "outputDir" && Directory.Exists(r[1])) outputDir = r[1];
+                }
+            } catch (Exception e) { Log.Write("AutoPanelSettings", e); }
+            finally { loading = false; }
+            if (outputDir.Length == 0) {
+                // 默认：装配所在目录（新装配还没保存时没有目录，生成前会让用户选）
+                try { string f = assembly.FullName; if (!string.IsNullOrEmpty(f) && File.Exists(f)) outputDir = Path.GetDirectoryName(f); } catch { }
+            }
+            ShowOutputDir();
+        }
+
+        void SaveSettings(){
+            try {
+                var ci = CultureInfo.InvariantCulture;
+                SettingsFile.Write(SettingsFile.PathOf(SettingsName), new List<string[]>{
+                    new[]{ "thickness", thickness.Value.ToString(ci) }, new[]{ "gap", gap.Value.ToString(ci) },
+                    new[]{ "material", material.Text.Trim() }, new[]{ "outputDir", outputDir } },
+                    "天工工具箱 · 型材自动填充上次的输入");
+            } catch (Exception e) { Log.Write("AutoPanelSettingsSave", e); }
+        }
+
+        void ShowOutputDir(){
+            outputLabel.Text = outputDir.Length > 0 ? outputDir : "（还没选 —— 生成时会让你选）";
+            outputLabel.ForeColor = outputDir.Length > 0 ? Ui.Text : Ui.Muted;
+            tips.SetToolTip(outputLabel, outputLabel.Text);
+        }
+
+        bool PickOutputDir(){
+            using (var dialog = new FolderBrowserDialog { Description = "选择输出目录：每批会建一个子目录，每个框口一个 PAR", SelectedPath = outputDir }) {
+                if (dialog.ShowDialog(this) != DialogResult.OK) return false;
+                outputDir = dialog.SelectedPath;
+            }
+            ShowOutputDir();
+            SaveSettings();
+            return true;
+        }
+
+        // ---------------- 读型材 / 识别框口 ----------------
+        void Context(){
+            if (!ReferenceEquals(app.ActiveDocument, assembly) || assembly.ReadOnly || assembly.InPlaceActivated)
+                throw new InvalidOperationException("请保持目标装配处于活动、可编辑的顶层状态。");
+        }
+
+        internal void ReadSelection(){
+            try {
+                Context();
+                selection = assembly.SelectSet.Cast<object>().ToList();
+                cachedMembers = null;
+                if (selection.Count > 0) cachedMembers = FrameReader.Read(assembly, selection);
+                generated.Clear();
+                Recompute();
+            } catch (Exception e) {
+                selection.Clear(); cachedMembers = null;
+                memberInfo.Text = "一次可以选好几个面的型材，会按平面自动分开识别。";
+                ClearResult(e.Message);
             }
         }
+
+        internal void SetParameters(string t, string g){
+            decimal a, b;
+            loading = true;
+            try {
+                if (decimal.TryParse(t, NumberStyles.Float, CultureInfo.InvariantCulture, out a)) thickness.Value = Ui.Clamp(a, thickness.Minimum, thickness.Maximum);
+                if (decimal.TryParse(g, NumberStyles.Float, CultureInfo.InvariantCulture, out b)) gap.Value = Ui.Clamp(b, gap.Minimum, gap.Maximum);
+            } finally { loading = false; }
+            Recompute();   // 脚本/测试调用：立刻算，不等防抖
+        }
+
+        void ClearResult(string text){
+            found.Clear(); specs.Clear(); openings.Items.Clear();
+            preview.Spec = null; preview.SourceEdges.Clear(); preview.Invalidate();
+            SetStatus(text, Ui.Bad);
+            UpdateGenerateButton();
+        }
+
+        static string Key(PanelSpec s){
+            var c = s.Corner(0, 0) + s.U * (s.Width / 2) + s.V * (s.Height / 2);
+            return Math.Round(c.X, 5) + "," + Math.Round(c.Y, 5) + "," + Math.Round(c.Z, 5);
+        }
+
+        void Recompute(){
+            if (busy) return;
+            debounce.Stop();
+            if (selection.Count == 0 || cachedMembers == null) {
+                ClearResult("");
+                SetStatus("还没读取型材：在模型里多选型材后点「读取当前选择」。", Ui.Muted);
+                return;
+            }
+            try {
+                Context();
+                double t = (double)thickness.Value / 1000, g = (double)gap.Value / 1000;
+                var notes = new List<string>();
+                found = FrameGrouping.Detect(cachedMembers, t, g, notes);
+                specs = found.Select(o => o.Opening.Solve(t, g)).ToList();
+                int planes = found.Select(o => o.PlaneIndex).Distinct().Count();
+                memberInfo.Text = "已读 " + cachedMembers.Count + " 根型材，" + planes + " 个平面里有框口。";
+                openings.BeginUpdate();
+                try {
+                    openings.Items.Clear();
+                    for (int i = 0; i < specs.Count; i++) {
+                        var s = specs[i];
+                        bool done = generated.Contains(Key(s));
+                        string text = string.Format(CultureInfo.InvariantCulture, "{0} · 框口 {1}：{2:0.###} × {3:0.###} × {4:0.###} mm{5}",
+                            planes > 1 ? found[i].PlaneLabel : "", i + 1, s.Width * 1000, s.Height * 1000, s.Thickness * 1000, done ? "　（已生成）" : "");
+                        openings.Items.Add(text.TrimStart(' ', '·'), !done);
+                    }
+                } finally { openings.EndUpdate(); }
+                if (openings.Items.Count > 0) openings.SelectedIndex = 0;
+                string msg = "识别到 " + specs.Count + " 个闭合框口" + (planes > 1 ? "（" + planes + " 个平面）" : "") + "。检查预览，勾上要生成的。";
+                if (notes.Count > 0) msg += "　另有：" + string.Join("；", notes.ToArray());
+                SetStatus(msg, notes.Count > 0 ? Ui.Warn : Ui.Ok);
+                tips.SetToolTip(status, msg);
+            } catch (Exception e) {
+                ClearResult(e.Message);
+                tips.SetToolTip(status, e.Message);
+                Log.Write("AutoDetect", e);
+            }
+            UpdateGenerateButton();
+        }
+
+        void ShowPreview(){
+            int i = openings.SelectedIndex;
+            preview.Spec = i >= 0 && i < specs.Count ? specs[i] : null;
+            preview.SourceEdges = i >= 0 && i < found.Count
+                ? found[i].Members.SelectMany(m => m.Faces).SelectMany(f => f.Edges).ToList()
+                : new List<V3[]>();
+            if (preview.Spec != null) preview.PickedPoint = preview.Spec.Corner(0, 0);
+            preview.Invalidate();
+        }
+
+        void SetAllChecked(bool on){
+            for (int i = 0; i < openings.Items.Count; i++) openings.SetItemChecked(i, on);
+            UpdateGenerateButton();
+        }
+
+        void UpdateGenerateButton(){
+            int n = openings.CheckedIndices.Count;
+            generate.Text = n > 0 ? "生成选中的 " + n + " 个框口" : "生成选中的框口";
+            generate.Enabled = n > 0 && !busy;
+        }
+
+        // ---------------- 生成 ----------------
+        void Generate(){
+            if (busy) return;
+            try {
+                var pick = openings.CheckedIndices.Cast<int>().Where(i => i < specs.Count).ToList();
+                if (pick.Count == 0) { SetStatus("先勾上要生成的框口。", Ui.Warn); return; }
+                if (outputDir.Length == 0 || !Directory.Exists(outputDir)) { if (!PickOutputDir()) return; }
+                // 生成前按当前选择重读一遍型材（几何可能在窗口开着的时候改过），框口对不上就不生成
+                cachedMembers = FrameReader.Read(assembly, selection);
+                double t = (double)thickness.Value / 1000, g = (double)gap.Value / 1000;
+                var fresh = FrameGrouping.Detect(cachedMembers, t, g, null).Select(o => o.Opening.Solve(t, g)).ToList();
+                var chosen = pick.Select(i => specs[i]).ToList();
+                foreach (var s in chosen)
+                    if (!fresh.Any(f => Key(f) == Key(s))) throw new InvalidOperationException("型材在窗口打开期间改过，框口和刚才识别的不一样了。请点「读取当前选择」重新识别。");
+
+                busy = true; Enabled = false; UseWaitCursor = true;
+                SetStatus("正在生成 " + chosen.Count + " 块板子…", Ui.Accent); Application.DoEvents();
+                var props = new PanelProps { Material = material.Text.Trim() };
+                string dir = BatchPanels.Generate(app, assembly, chosen, outputDir, props);
+                foreach (var s in chosen) generated.Add(Key(s));
+                SaveSettings();
+                busy = false; Enabled = true; UseWaitCursor = false;
+                Recompute();   // 刷新列表：生成过的标出来、取消勾选
+                string msg = "已生成 " + chosen.Count + " 块板子：" + dir + "　记得保存装配。";
+                if (props.Problems.Count > 0) msg += "　注意：" + string.Join("；", props.Problems.ToArray());
+                SetStatus(msg, props.Problems.Count > 0 ? Ui.Warn : Ui.Ok);
+                tips.SetToolTip(status, msg);
+            } catch (Exception e) {
+                Log.Write("AutoGenerate", e);
+                busy = false; Enabled = true; UseWaitCursor = false;
+                SetStatus(e.Message, Ui.Bad);
+                tips.SetToolTip(status, e.Message);
+                UpdateGenerateButton();
+            }
+        }
+
+        void SetStatus(string text, Color color){ status.Text = text; status.ForeColor = color; }
     }
 }

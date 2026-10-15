@@ -48,6 +48,8 @@ namespace TianGongCadSuite {
 
         public static string Group(HoleSpec s, int count){ return Clip(Short(s) + " ×" + count); }
         public static string Member(HoleSpec s, int index){ return Clip(Short(s) + "-" + index); }
+        // 批量排孔的阵列特征（种子孔照常叫「…-1」，阵列出来的其余孔都在这个特征里）
+        public static string PatternName(HoleSpec s){ return Clip(Short(s) + " 阵列"); }
 
         // 在已有名字里找一个不重名的：base、base (2)、base (3)……
         // 特征重名时 CAD 的行为没有实测保证（可能拒绝、可能静默加后缀），所以自己先避开。

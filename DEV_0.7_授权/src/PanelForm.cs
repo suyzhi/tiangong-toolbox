@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Drawing;
 using System.Globalization;
@@ -9,11 +9,6 @@ using System.Windows.Forms;
 using F=SolidEdgeFramework;
 using A=SolidEdgeAssembly;
 namespace TianGongCadSuite {
-    public static class Log {
-        public static string FilePath {get{return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"TianGongCadSuite","panel.log");}}
-        public static void Write(string area,Exception e){Write(area,e.ToString());}
-        public static void Write(string area,string detail){try{Directory.CreateDirectory(Path.GetDirectoryName(FilePath));File.AppendAllText(FilePath,DateTime.Now.ToString("s")+" "+area+" "+detail+Environment.NewLine);}catch{}}
-    }
     [ComVisible(true),ClassInterface(ClassInterfaceType.None)]
     public sealed class PanelForm : Form,F.ISEMouseEvents,F.ISECommandEvents {
         readonly F.Application app;readonly A.AssemblyDocument assembly;
@@ -36,7 +31,7 @@ namespace TianGongCadSuite {
         internal int PreviewDrawCount {get{return preview==null?0:preview.DrawCount;}}
         public PanelForm(F.Application app,A.AssemblyDocument assembly){
             this.app=app;this.assembly=assembly;
-            Text="生成矩形板 · DEV 0.7.4";ClientSize=new Size(390,600);Font=new Font("Microsoft YaHei UI",9);FormBorderStyle=FormBorderStyle.SizableToolWindow;MinimumSize=new Size(406,639);MaximizeBox=false;MinimizeBox=false;ShowInTaskbar=false;StartPosition=FormStartPosition.Manual;Location=new Point(Screen.PrimaryScreen.WorkingArea.Left+12,Screen.PrimaryScreen.WorkingArea.Top+150);
+            Text=Product.Title("生成矩形板");ClientSize=new Size(390,600);Font=new Font("Microsoft YaHei UI",9);FormBorderStyle=FormBorderStyle.SizableToolWindow;MinimumSize=new Size(406,639);MaximizeBox=false;MinimizeBox=false;ShowInTaskbar=false;StartPosition=FormStartPosition.Manual;Location=new Point(Screen.PrimaryScreen.WorkingArea.Left+12,Screen.PrimaryScreen.WorkingArea.Top+150);
             var split=new TableLayoutPanel{Dock=DockStyle.Fill,ColumnCount=2,RowCount=1};split.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,390));split.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));Controls.Add(split);
             preview=new Preview();split.Controls.Add(preview,1,0);
             var layout=new TableLayoutPanel{Dock=DockStyle.Fill,Padding=new Padding(16),ColumnCount=2,RowCount=11};layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,112));layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));split.Controls.Add(layout,0,0);
@@ -69,7 +64,7 @@ namespace TianGongCadSuite {
                 ((F.ISEMouseEx3)mouse).PathfinderLocate=false;
                 ConfigureFilter();
                 moveLogged=false;hoverLogged=false;
-                Log.Write("PickStart","build=0.7.0, CAD="+app.Version+", interDocument="+InterDocumentPicking+", locateMode="+mouse.LocateMode+", move="+mouse.EnabledMove+", windowTypes="+mouse.WindowTypes);
+                Log.Write("PickStart","build="+Product.Version+", CAD="+app.Version+", interDocument="+InterDocumentPicking+", locateMode="+mouse.LocateMode+", move="+mouse.EnabledMove+", windowTypes="+mouse.WindowTypes);
                 if(highlights!=null)highlights.Delete();highlights=assembly.HighlightSets.Add();highlights.Color=ColorTranslator.ToOle(Color.DeepSkyBlue);
                 hoverHighlights=assembly.HighlightSets.Add();hoverHighlights.Color=ColorTranslator.ToOle(Color.Gold);
             }catch{Cleanup();throw;}

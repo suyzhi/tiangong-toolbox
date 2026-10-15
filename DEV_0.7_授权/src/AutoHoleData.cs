@@ -173,7 +173,11 @@ namespace TianGongCadSuite {
         // 沉孔直径/深度（第 7、8 列）与天工CAD 孔标准表 GB Metric「沉头孔 · 内六角螺钉」一致（2026-10-13 改）：
         // 原来是经验值（M6 深 6.5、M8 Φ14.5 深 8.6……），用天工自带的孔命令打开时对不上表里任何一行，
         // 大小一栏显示 *。过孔（第 5、6 列）本来就和表里「常规螺钉间隙」的紧密/普通两档相同。见 HoleStandard.cs。
+        // 2026-10-14 补上 M2.5 / M14 / M24 / M30：过孔、内螺纹小径、内六角沉头尺寸都按天工自带的 GB Metric 孔标准表
+        // （SEFactorySettings.sepref → Preferences\Holes\GB Metric.xlsx，离线读出来核对过），攻丝底孔按常用钻头。
+        // 原来只到 M20、中间缺 M14，参考孔是 Φ15.5（M14 过孔）这种就只能当自定义通孔。
         public static readonly ThreadRow[] Table = new ThreadRow[] {
+            new ThreadRow("M2.5",0.45,2.05,2.013 ,2.7 ,2.9 ,5.0 ,2.9 ,2.25),
             new ThreadRow("M3" ,0.5 ,2.5 ,2.459 ,3.2 ,3.4 ,6.0 ,3.4 ,2.75),
             new ThreadRow("M4" ,0.7 ,3.3 ,3.242 ,4.3 ,4.5 ,8.0 ,4.6 ,3.60),
             new ThreadRow("M5" ,0.8 ,4.2 ,4.134 ,5.3 ,5.5 ,10.0,5.7 ,4.50),
@@ -181,9 +185,15 @@ namespace TianGongCadSuite {
             new ThreadRow("M8" ,1.25,6.8 ,6.647 ,8.4 ,9.0 ,15.0,9.0 ,6.50),
             new ThreadRow("M10",1.5 ,8.5 ,8.376 ,10.5,11.0,18.0,11.0,8.00),
             new ThreadRow("M12",1.75,10.2,10.106,13.0,13.5,20.0,13.0,9.00),
+            new ThreadRow("M14",2.0 ,12.0,11.835,15.0,15.5,24.0,15.0,10.50),
             new ThreadRow("M16",2.0 ,14.0,13.835,17.0,17.5,26.0,17.5,12.00),
             new ThreadRow("M20",2.5 ,17.5,17.294,21.0,22.0,33.0,21.5,15.00),
+            new ThreadRow("M24",3.0 ,21.0,20.752,25.0,26.0,40.0,25.5,18.00),
+            new ThreadRow("M30",3.5 ,26.5,26.211,31.0,33.0,48.0,32.0,22.50),
         };
+
+        // 常用的默认规格（界面上"没选规格时"用它，不要再写 Table[3] 这种下标 —— 表里一加行就指错）
+        public static ThreadRow M6 { get { return Find("M6").Value; } }
 
         public static ThreadRow? Find(string size){
             foreach (var r in Table) if (string.Equals(r.Size, size, StringComparison.OrdinalIgnoreCase)) return r;
@@ -276,18 +286,24 @@ namespace TianGongCadSuite {
                 + (m.Ambiguous ? " [歧义: " + m.AmbiguousWith + " dev=" + m.AmbiguousDeviation.ToString("0.####", CultureInfo.InvariantCulture) + "]" : "");
         }
 
-        // 参考孔是螺纹底孔 -> 目标件配沉孔；参考孔是过孔 -> 目标件配螺纹孔。
+        // 目标件打什么孔由配做规则决定（HoleRuleBook.Current，默认"沉头螺钉"：底孔配沉孔、过孔配螺纹孔）。
         static HoleSpec Build(ThreadRow r, bool referenceIsTapped, double actual){
-            if (referenceIsTapped) {
-                var s = new HoleSpec { Kind = HoleKind.Counterbore, ThreadSize = r.Size,
-                    HoleDiameter = r.ClearanceMid, CounterboreDiameter = r.CounterboreDia, CounterboreDepth = r.CounterboreDep, Depth = 0 };
-                s.Note = "参考孔 Φ" + actual.ToString("0.##",CultureInfo.InvariantCulture) + " 是 " + r.Size + " 的螺纹底孔，目标件配做沉孔。";
-                return s;
-            }
-            var t = new HoleSpec { Kind = HoleKind.Tapped, ThreadSize = r.Size, HoleDiameter = r.MinorDia, Depth = 0,
-                                   ThreadFull = true, ThreadDepth = HoleSpec.DefaultThreadDepth(r.Size) };
-            t.Note = "参考孔 Φ" + actual.ToString("0.##",CultureInfo.InvariantCulture) + " 是 " + r.Size + " 的过孔，目标件配做螺纹孔。";
-            return t;
+            var role = referenceIsTapped ? HoleRefRole.TapDrill : HoleRefRole.Clearance;
+            var rule = HoleRuleBook.Current.For(r.Size, role);
+            var s = ApplyFit(FromRow(r, rule.Target), rule.Fit);
+            string ruleName = HoleRuleBook.NameOf(HoleRuleBook.Current);
+            s.Note = "参考孔 Φ" + actual.ToString("0.##",CultureInfo.InvariantCulture) + " 是 " + r.Size + " 的" + HoleRuleBook.RoleName(role)
+                   + "，目标件配做" + HoleSpec.KindName(rule.Target) + "（配做规则：" + ruleName + "）。"
+                   + (s.Note.Length > 0 ? s.Note : "");
+            return s;
+        }
+
+        // 通孔/沉孔/锥沉的孔径按规则里的过孔配合（紧密/普通/宽松）取天工表那一档；螺纹孔不受影响
+        public static HoleSpec ApplyFit(HoleSpec s, string fit){
+            if (s == null || s.Kind == HoleKind.Tapped || string.IsNullOrEmpty(fit) || s.ThreadSize.Length == 0) return s;
+            double d;
+            if (HoleStandards.ClearanceOf(s.ThreadSize, fit, out d)) s.HoleDiameter = d;
+            return s;
         }
 
         // 未命中标准表：原样复制参考孔径做通孔，并明确告知。

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -45,7 +45,7 @@ namespace TianGongCadSuite {
         IntPtr jobHandle=IntPtr.Zero;
 
         public FormatConvertForm(){
-            Text="天工CAD 批量格式转换 SolidWorks / STEP (DEV 0.7.4)";
+            Text=Product.Title("批量格式转换 SolidWorks / STEP");
             ClientSize=new Size(900,660);
             MinimumSize=new Size(760,560);
             StartPosition=FormStartPosition.CenterScreen;

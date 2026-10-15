@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Windows.Forms;
 using F=SolidEdgeFramework;
@@ -61,9 +61,9 @@ namespace TianGongCadSuite {
         public A.AssemblyDocument EditingAssembly(){
             try{
                 var part=Application.ActiveDocument as P.PartDocument;
-                if(part==null){Log.Write("ContextProbe","活动文档不是零件文档");return null;}
-                string partName=null;try{partName=part.FullName;}catch(Exception e){Log.Write("ContextProbe","读活动零件 FullName 失败:"+e.Message);}
-                if(string.IsNullOrEmpty(partName)){Log.Write("ContextProbe","活动零件 FullName 为空");return null;}
+                if(part==null){Log.Debug("ContextProbe","活动文档不是零件文档");return null;}
+                string partName=null;try{partName=part.FullName;}catch(Exception e){Log.Debug("ContextProbe","读活动零件 FullName 失败:"+e.Message);}
+                if(string.IsNullOrEmpty(partName)){Log.Debug("ContextProbe","活动零件 FullName 为空");return null;}
                 int documents=Application.Documents.Count;
                 for(int i=1;i<=documents;i++){
                     var assembly=Application.Documents.Item(i) as A.AssemblyDocument;
@@ -78,7 +78,7 @@ namespace TianGongCadSuite {
                     }catch{}
                 }
             }catch(Exception e){Log.Write("EditingAssembly",e);}
-            Log.Write("ContextProbe","打开的装配里没有匹配该零件的实例：" + SafeName(Application.ActiveDocument));
+            Log.Debug("ContextProbe","打开的装配里没有匹配该零件的实例：" + SafeName(Application.ActiveDocument));
             return null;
         }
         // 可用上下文 = 活动文档是装配，或者正在原位编辑装配里的某个零件。
@@ -90,7 +90,7 @@ namespace TianGongCadSuite {
             var editing=hasAssembly?null:EditingAssembly();
             bool result=hasAssembly||editing!=null;
             string summary="activeIsAssembly="+hasAssembly+" editingAssembly="+(editing==null?"null":SafeName(editing))+" => "+result;
-            if(summary!=lastContextProbe){lastContextProbe=summary;Log.Write("ContextProbe",summary);}
+            if(summary!=lastContextProbe){lastContextProbe=summary;Log.Debug("ContextProbe",summary);}
             return result;
         }
         static string SafeName(object document){try{dynamic d=document;return Convert.ToString(d.Name);}catch(Exception e){return "读名字失败:"+e.Message;}}

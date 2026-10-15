@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using A=SolidEdgeAssembly;
 using F=SolidEdgeFramework;
@@ -30,14 +30,41 @@ namespace TianGongCadSuite {
                     "勾「腰孔」可排长圆孔，总长和槽宽分开填；窗口下半部分会画出排孔示意图。",
                     context.HasEditableContext,
                     () => { var doc = context.RequireEditableAssembly(); context.Show(() => new AutoHolePatternForm(context.Application, doc), f => ((AutoHolePatternForm)f).StartPicking()); });
+                yield return new ToolCommand(9, "改孔型",
+                    "把已经打好的孔换成别的孔型/规格（整组一起改），不用删了重打",
+                    "① 在模型里点要改的孔（孔口圆边或孔内壁，可以连续点几个）→ ② 选新的孔型和规格 → ③ 点「应用」。\n" +
+                    "默认整组一起改：自动打孔、批量排孔打的同规格孔是一个特征组，组名和孔名按新规格重起。\n" +
+                    "点到批量排孔阵列里的孔 = 改它的种子孔，整排跟着变。\n" +
+                    "盲孔可以改深度或改成贯通；贯通孔不能直接改成盲孔（天工接口限制）。改错了点「撤销修改」。",
+                    context.HasEditableContext,
+                    () => { var doc = context.RequireEditableAssembly(); context.Show(() => new HoleEditForm(context.Application, doc), f => ((HoleEditForm)f).StartPicking()); });
                 yield return new ToolCommand(8, "配孔检查",
                     "扫一遍装配，查漏打孔、孔偏了、配错孔",
-                    "打开装配，点「开始检查」。结果列表里点一条可以高亮对应的孔。\n" +
-                    "判定口径：孔径 3–25mm 视为连接孔；同轴容差 0.2mm；轴线方向容差 2°；\n" +
-                    "配做规则——参考孔是螺纹底孔就配沉孔，是过孔就配螺纹孔。",
+                    "打开装配，点「开始检查」。结果列表里点一条会高亮并跳到对应的孔（双击或「跳转到孔」也行）。\n" +
+                    "漏打孔可以点「去配孔」：涉及的孔直接带进「自动打孔」当参考孔。子装配里的零件也一起检查。\n" +
+                    "判定口径（默认孔径 3–25mm、同轴容差 0.2mm、方向容差 2°）点窗口上的「判定口径」可以改。",
                     context.HasAssembly,
-                    () => { var doc = context.RequireAssembly(); context.Show(() => new AutoHoleCheckForm(context.Application, doc), null); });
+                    () => {
+                        var doc = context.RequireAssembly();
+                        context.Show(() => new AutoHoleCheckForm(context.Application, doc) { GoDrill = (holes, part) => OpenDrillFromCheck(doc, holes, part) }, null);
+                    });
             }
+        }
+        // 配孔检查里的「去配孔」：另开一个自动打孔窗口（检查窗口留着，还能接着看下一条），
+        // 把漏打孔那一条的孔带进去当参考孔，用户只要再点没打孔那个零件上的面。
+        void OpenDrillFromCheck(A.AssemblyDocument doc, List<HoleRecord> holes, string missingPart){
+            if (!TianGongCadSuite.Licensing.LicenseGate.EnsureInteractive(new CadOwner(context.Application.ActiveFramehWnd))) return;
+            var f = new AutoHoleForm(context.Application, doc);
+            f.Show(new CadOwner(context.Application.ActiveFramehWnd));
+            f.StartPicking();
+            f.PreloadReferences(holes, missingPart);
+        }
+        // 「自动打孔 / 批量排孔」的「改孔型…」：另开改孔型窗口，把刚打的那批孔带进去（打孔窗口留着）
+        internal static void OpenEdit(F.Application app, A.AssemblyDocument doc, IList<KeyValuePair<SolidEdgePart.PartDocument, string>> created){
+            var f = new HoleEditForm(app, doc);
+            f.Show(new CadOwner(app.ActiveFramehWnd));
+            f.StartPicking();
+            f.Preload(created);
         }
         public void Dispose(){}
     }

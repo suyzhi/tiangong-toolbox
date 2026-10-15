@@ -11,6 +11,8 @@ using F=SolidEdgeFramework;
 namespace TianGongCadSuite {
     [ComVisible(true),Guid("8C05165C-65A4-4EF2-A138-508589D82004"),ProgId("TianGongCadSuite.SuiteDevAddIn"),ClassInterface(ClassInterfaceType.None)]
     public sealed class PanelAddIn : F.ISolidEdgeAddIn,F.ISEAddInEvents {
+        // 功能区：「天工工具箱」→ 组「功能」（原来叫"天工工具箱 DEV"，日常用的版本不该带 DEV 字样）
+        const string RibbonGroup="天工工具箱\n功能";
         const string AssemblyCategory="{26618395-09D6-11D1-BA07-080036230602}";
         F.AddIn addin;Connection events;ToolContext context;ToolRegistry registry;Diagnostics diagnostics;
         public void OnConnection(object application,F.SeConnectMode mode,F.AddIn instance){
@@ -18,7 +20,8 @@ namespace TianGongCadSuite {
             // 换版本做 A/B 时先看这一行，避免"注册表换了、CAD 还加载旧 DLL"的误判。
             try{Log.Write("AddInConnect","dll="+typeof(PanelAddIn).Assembly.Location+" ver="+typeof(PanelAddIn).Assembly.GetName().Version+" cad="+((F.Application)application).Version);}catch{}
             try{addin=instance;context=new ToolContext((F.Application)application);registry=ModuleCatalog.Create(context);
-                addin.Description="天工工具箱 DEV 0.7.4 — 授权管理版";addin.GuiVersion=42;addin.Visible=true;
+                // GuiVersion 变了 CAD 才会按新的组名重建功能区按钮（firstTime=true）；改组名/增删按钮时要跟着加一。
+                addin.Description=Product.Name+" "+Product.Version;addin.GuiVersion=44;addin.Visible=true;
                 events=new Connection(addin.AddInEvents,typeof(F.ISEAddInEvents),this);
                 // 按命令 ID 取（不要用下标：命令 1/4 已从功能区下线，下标会错位）
 diagnostics=new Diagnostics(context.Application,()=>Run(registry.Find(1)),()=>Run(registry.Find(2)),()=>Run(registry.Find(3)));addin.Object=diagnostics;
@@ -31,9 +34,9 @@ diagnostics=new Diagnostics(context.Application,()=>Run(registry.Find(1)),()=>Ru
             try{int count=registry.Commands.Count;var labels=new string[count];var localIds=new int[count];var buttons=new F.SeButtonStyle[count];
                 for(int i=0;i<count;i++){var c=registry.Commands[i];labels[i]="{8C05165C-65A4-4EF2-A138-508589D82004}_"+c.Id+"\n"+c.Title+"\n"+c.Description+"\n"+c.Title;localIds[i]=c.Id;buttons[i]=F.SeButtonStyle.seButtonCaption;}
                 Array names=labels,ids=localIds,styles=buttons;
-                ((F.ISEAddInEx2)addin).SetAddInInfoEx2(typeof(PanelAddIn).Assembly.Location,category,"天工工具箱 DEV\n功能",0,0,0,0,count,ref names,ref ids,ref styles);
+                ((F.ISEAddInEx2)addin).SetAddInInfoEx2(typeof(PanelAddIn).Assembly.Location,category,RibbonGroup,0,0,0,0,count,ref names,ref ids,ref styles);
                 registry.Bind(ids);
-                if(firstTime)foreach(var c in registry.Commands){var button=addin.AddCommandBarButton(category,"天工工具箱 DEV\n功能",c.Id);button.Style=F.SeButtonStyle.seButtonCaption;button.Caption=c.Title;}
+                if(firstTime)foreach(var c in registry.Commands){var button=addin.AddCommandBarButton(category,RibbonGroup,c.Id);button.Style=F.SeButtonStyle.seButtonCaption;button.Caption=c.Title;}
                 diagnostics.MenuStatus="Registered "+count+" commands";
             }catch(Exception e){diagnostics.MenuStatus="ERROR: "+e.Message;Log.Write("Register",e);}
         }

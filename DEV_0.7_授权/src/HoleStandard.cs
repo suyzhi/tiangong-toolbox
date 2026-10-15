@@ -58,18 +58,21 @@ namespace TianGongCadSuite {
         };
         // 标准螺纹（螺纹孔按内螺纹小径建模）：大小、内螺纹小径
         static readonly object[][] Tap = {
+            new object[]{"M2.5",2.013}, new object[]{"M14",11.835}, new object[]{"M24",20.752}, new object[]{"M30",26.211},
             new object[]{"M3",2.459}, new object[]{"M4",3.242}, new object[]{"M5",4.134}, new object[]{"M6",4.917},
             new object[]{"M8",6.647}, new object[]{"M10",8.376}, new object[]{"M12",10.106}, new object[]{"M16",13.835},
             new object[]{"M20",17.294},
         };
         // 沉头孔·内六角螺钉：大小、沉头直径、沉头深度（孔径按配合取常规螺钉间隙那三档）
         static readonly object[][] Counterbore = {
+            new object[]{"M2.5",5.0,2.9}, new object[]{"M14",24.0,15.0}, new object[]{"M24",40.0,25.5}, new object[]{"M30",48.0,32.0},
             new object[]{"M3",6.0,3.4}, new object[]{"M4",8.0,4.6}, new object[]{"M5",10.0,5.7}, new object[]{"M6",11.0,6.8},
             new object[]{"M8",15.0,9.0}, new object[]{"M10",18.0,11.0}, new object[]{"M12",20.0,13.0}, new object[]{"M16",26.0,17.5},
             new object[]{"M20",33.0,21.5},
         };
         // 埋头孔·机用（90°）：大小、埋头直径。天工表里只到 M10。
         static readonly object[][] Countersink = {
+            new object[]{"M2.5",5.5},
             new object[]{"M3",6.3}, new object[]{"M4",9.4}, new object[]{"M5",10.4}, new object[]{"M6",12.6},
             new object[]{"M8",17.3}, new object[]{"M10",20.0},
         };

@@ -30,6 +30,17 @@ static class AutoTests {
         members=Frame();members[0].Faces.Clear();Reject(()=>FrameDetection.Detect(members,.006),"envelope alone cannot prove a boundary");
         members=Frame();members.Add(Box(.24,0,.02,.15));Reject(()=>FrameDetection.Detect(members,.006),"partial divider makes a nonrectangular hole");
         Reject(()=>FrameDetection.Detect(Frame(),.03),"thickness outside frame depth");
+        // 自动分组（FrameGrouping）：一个平面时和直接 Detect 一样；两个互相垂直的平面一起选，各自识别
+        var single=FrameGrouping.Detect(Frame(),.006,.001,new List<string>());Check(single.Count==1&&Math.Abs(single[0].Opening.Solve(.006,.001).Width*single[0].Opening.Solve(.006,.001).Height-.498*.298)<1e-10,"grouping one plane = plain detection");
+        var side=Frame();var turn=Transform.Frame(new V3(2,0,0),new V3(0,0,1),new V3(0,1,0),new V3(-1,0,0));
+        foreach(var m in side){m.Axis=turn.Vector(m.Axis);m.Points=m.Points.Select(turn.Point).ToList();foreach(var f in m.Faces){f.Plane=new PlaneInput(turn.Point(f.Plane.Point),turn.Normal(f.Plane.Normal),"side");f.Edges=f.Edges.Select(e=>e.Select(turn.Point).ToArray()).ToList();}}
+        var cube=Frame();cube.AddRange(side);
+        Reject(()=>FrameDetection.Detect(cube,.006),"plain detection still refuses two planes at once");
+        var notes=new List<string>();var both=FrameGrouping.Detect(cube,.006,.001,notes);
+        Check(both.Count==2&&both.Select(o=>o.PlaneIndex).Distinct().Count()==2&&notes.Count==0,"grouping finds one opening in each of two perpendicular planes");
+        var broken=Frame();broken.AddRange(side.Take(3));notes=new List<string>();var partial=FrameGrouping.Detect(broken,.006,.001,notes);
+        Check(partial.Count==1,"incomplete second plane is skipped, first plane still detected");
+        var lone=Frame();lone.RemoveAt(3);Reject(()=>FrameGrouping.Detect(lone,.006,.001,new List<string>()),"grouping with no closed frame still rejects");
         var two=Frame();var shifted=Frame();foreach(var m in shifted){m.Points=m.Points.Select(p=>p+new V3(1,0,0)).ToList();foreach(var f in m.Faces){f.Plane.Point=f.Plane.Point+new V3(1,0,0);f.Edges=f.Edges.Select(e=>e.Select(p=>p+new V3(1,0,0)).ToArray()).ToList();}}two.AddRange(shifted);Check(FrameDetection.Detect(two,.006).Count==2,"two disjoint closed frames");
     }
     public static void Native(F.Application app,string dir){
@@ -51,7 +62,7 @@ static class AutoTests {
             // Use actual selected occurrences, including repeated selection, through the new UI.
             frame.Activate();frame.SelectSet.RemoveAll();foreach(var item in selection)frame.SelectSet.Add(item);
             Check(FrameReader.Read(frame,selection.Concat(selection)).Count==members.Count,"duplicate occurrence selection is deduplicated");
-            using(var form=new AutoPanelForm(app,frame)){form.Show();form.SetParameters("6","1");Application.DoEvents();Check(form.OpeningCount==1,"automatic dialog reads native preselection: "+form.StatusText);using(var bitmap=new Bitmap(form.Width,form.Height)){form.DrawToBitmap(bitmap,new Rectangle(0,0,form.Width,form.Height));bitmap.Save(Path.Combine(output,"automatic-dialog.png"));}form.Close();}
+            using(var form=new AutoPanelForm(app,frame)){form.Show();Application.DoEvents();Check(form.OpeningCount==1,"dialog detects preselection on open without parameter change: "+form.StatusText);form.SetParameters("6","1");Application.DoEvents();Check(form.OpeningCount==1,"automatic dialog reads native preselection: "+form.StatusText);using(var bitmap=new Bitmap(form.Width,form.Height)){form.DrawToBitmap(bitmap,new Rectangle(0,0,form.Width,form.Height));bitmap.Save(Path.Combine(output,"automatic-dialog.png"));}form.Close();}
             frame.SelectSet.RemoveAll();sketch.Visible=false;
             string batch=BatchPanels.Generate(app,frame,new[]{spec},output);Check(Directory.GetFiles(batch,"*.par").Length==1,"batch produces one native PAR");frame.Save();
             ((dynamic)app.ActiveWindow).View.Fit();((dynamic)app.ActiveWindow).View.Update();Application.DoEvents();app.DoIdle();((dynamic)app.ActiveWindow).View.SaveAsImage(Path.Combine(output,"native-frame-panel.png"),1400,1000);

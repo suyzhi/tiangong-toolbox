@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
@@ -77,7 +77,9 @@ namespace TianGongCadSuite {
     public static class CadBuilder {
         public static string TemplatePath {get{return Path.Combine(CadInstallRoot,"Template","ISO Metric","iso metric part.par");}}
         public static string CadInstallRoot {get{return Environment.GetEnvironmentVariable("TIANGONG_HOME")??@"C:\Program Files\NDS\TianGong 2025";}}
-        public static P.PartDocument CreatePart(F.Application app,PanelSpec s){
+        public static P.PartDocument CreatePart(F.Application app,PanelSpec s){return CreatePart(app,s,null);}
+        // props 不为空：把尺寸、材质写进零件文件（BOM、工程图明细栏直接能引用），写不上的记进 props.Problems，不影响建模。
+        public static P.PartDocument CreatePart(F.Application app,PanelSpec s,PanelProps props){
             TianGongCadSuite.Licensing.LicenseGate.Require();
             P.PartDocument part=null;
             try {
@@ -102,15 +104,39 @@ namespace TianGongCadSuite {
                 model.ExtrudedProtrusions.Item(1).Name="板厚（对称）";
                 profile.Visible=false;
                 CheckBody((G.Body)model.Body,s.Width,s.Height,s.Thickness);
+                if(props!=null)WriteProps(app,part,s,props);
                 return part;
             } catch {if(part!=null)try{part.Close(false);}catch{}throw;}
+        }
+        // 尺寸/材质写进文件属性。自定义属性用 Properties.Item("Custom").Add —— Solid Edge 的标准接口；
+        // 材质用材料表 ApplyMaterial（材料库里要有这个名字）。两样都没在天工上单独验证过，所以失败只记一笔。
+        static void WriteProps(F.Application app,P.PartDocument part,PanelSpec s,PanelProps props){
+            var ci=System.Globalization.CultureInfo.InvariantCulture;
+            try{
+                dynamic custom=((dynamic)part.Properties).Item("Custom");
+                PutProp(custom,"宽度mm",(s.Width*1000).ToString("0.###",ci));
+                PutProp(custom,"高度mm",(s.Height*1000).ToString("0.###",ci));
+                PutProp(custom,"厚度mm",(s.Thickness*1000).ToString("0.###",ci));
+                PutProp(custom,"每边间隙mm",(s.Gap*1000).ToString("0.###",ci));
+                PutProp(custom,"规格",(s.Width*1000).ToString("0.#",ci)+"×"+(s.Height*1000).ToString("0.#",ci)+"×"+(s.Thickness*1000).ToString("0.#",ci));
+                if(!string.IsNullOrEmpty(props.Material))PutProp(custom,"材质",props.Material);
+                PutProp(custom,"来源","天工工具箱 型材自动填充");
+            }catch(Exception e){Log.Write("PanelProps",e);props.Problem("尺寸没能写进零件的自定义属性："+e.Message);}
+            if(string.IsNullOrEmpty(props.Material))return;
+            try{dynamic table=((dynamic)app).GetMaterialTable();table.ApplyMaterial(part,props.Material);}
+            catch(Exception e){Log.Write("PanelMaterial",e);props.Problem("材质「"+props.Material+"」没能套用材料库（材料库里可能没有这个名字），已写进自定义属性「材质」。");}
+        }
+        static void PutProp(dynamic custom,string name,string value){
+            try{custom.Item(name).Value=value;return;}catch{}
+            custom.Add(name,value);
         }
         public static void CheckBody(G.Body body,double w,double h,double t){
             Array min=new double[3],max=new double[3];body.GetRange(ref min,ref max);var lo=V3.From(min);var hi=V3.From(max);
             const double tol=1e-7;
             if(Math.Abs(lo.X)>tol||Math.Abs(lo.Y)>tol||Math.Abs(lo.Z+t/2)>tol||Math.Abs(hi.X-w)>tol||Math.Abs(hi.Y-h)>tol||Math.Abs(hi.Z-t/2)>tol)throw new InvalidOperationException("生成实体的尺寸或对称位置未通过检查："+lo+" → "+hi);
         }
-        public static A.Occurrence Generate(F.Application app,A.AssemblyDocument assembly,PanelSpec spec,string filename){
+        public static A.Occurrence Generate(F.Application app,A.AssemblyDocument assembly,PanelSpec spec,string filename){return Generate(app,assembly,spec,filename,null);}
+        public static A.Occurrence Generate(F.Application app,A.AssemblyDocument assembly,PanelSpec spec,string filename,PanelProps props){
             if(assembly==null||assembly.ReadOnly||assembly.InPlaceActivated)throw new InvalidOperationException("请在可编辑的装配顶层运行命令，先退出原位编辑。");
             string path=Path.GetFullPath(filename);
             if(!string.Equals(Path.GetExtension(path),".par",StringComparison.OrdinalIgnoreCase))throw new ArgumentException("输出文件必须是 .par。");
@@ -119,7 +145,7 @@ namespace TianGongCadSuite {
             string staging=Path.Combine(Path.GetDirectoryName(path),".panel-"+Guid.NewGuid().ToString("N")+".par");
             P.PartDocument part=null;A.Occurrence occurrence=null;bool moved=false;
             try {
-                part=CreatePart(app,spec);part.SaveAs(staging);part.Close(false);part=null;
+                part=CreatePart(app,spec,props);part.SaveAs(staging);part.Close(false);part=null;
                 // Atomic, no-overwrite publication. A competing file is never replaced.
                 File.Move(staging,path);moved=true;
                 assembly.Activate();occurrence=assembly.Occurrences.AddByFilename(path);
