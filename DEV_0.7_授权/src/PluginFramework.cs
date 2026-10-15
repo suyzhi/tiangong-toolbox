@@ -58,12 +58,19 @@ namespace TianGongCadSuite {
         // 原位编辑（在装配里双击零件）时，活动文档是**零件**而不是装配。
         // 而天工CAD 只允许往"正在编辑的那个零件文档"里写模型，所以这个上下文恰恰是打孔唯一能成功的地方
         // —— 插件必须在这里也能用。做法：遍历打开的装配，谁的实例零件就是当前活动零件，就返回谁。
+        //
+        // 这里的 ContextProbe 日志跟 HasEditableContext 一样只在内容变化时写：HasEditableContext 是自动打孔
+        // 命令的 CanExecute，CAD 每次刷新功能区（OnCommandUpdateUI）都会轮询它，原来每轮都写一行
+        // "活动文档不是零件文档" / "打开的装配里没有匹配该零件的实例"，panel.log 无限增长。
+        static string lastEditingProbe;
+        static void LogEditingProbe(string detail){if(detail!=lastEditingProbe){lastEditingProbe=detail;Log.Write("ContextProbe",detail);}}
         public A.AssemblyDocument EditingAssembly(){
             try{
                 var part=Application.ActiveDocument as P.PartDocument;
-                if(part==null){Log.Write("ContextProbe","活动文档不是零件文档");return null;}
-                string partName=null;try{partName=part.FullName;}catch(Exception e){Log.Write("ContextProbe","读活动零件 FullName 失败:"+e.Message);}
-                if(string.IsNullOrEmpty(partName)){Log.Write("ContextProbe","活动零件 FullName 为空");return null;}
+                if(part==null){LogEditingProbe("活动文档不是零件文档");return null;}
+                // 读失败与"为空"合成一条：分两次写的话两条内容交替出现，去重就失效了
+                string partName=null,why="活动零件 FullName 为空";try{partName=part.FullName;}catch(Exception e){why="读活动零件 FullName 失败:"+e.Message;}
+                if(string.IsNullOrEmpty(partName)){LogEditingProbe(why);return null;}
                 int documents=Application.Documents.Count;
                 for(int i=1;i<=documents;i++){
                     var assembly=Application.Documents.Item(i) as A.AssemblyDocument;
@@ -73,12 +80,12 @@ namespace TianGongCadSuite {
                             var occurrencePart=occurrence.OccurrenceDocument as P.PartDocument;
                             if(occurrencePart==null)continue;
                             string name=null;try{name=occurrencePart.FullName;}catch{}
-                            if(string.Equals(name,partName,StringComparison.OrdinalIgnoreCase))return assembly;
+                            if(string.Equals(name,partName,StringComparison.OrdinalIgnoreCase)){lastEditingProbe=null;return assembly;}
                         }
                     }catch{}
                 }
             }catch(Exception e){Log.Write("EditingAssembly",e);}
-            Log.Write("ContextProbe","打开的装配里没有匹配该零件的实例：" + SafeName(Application.ActiveDocument));
+            LogEditingProbe("打开的装配里没有匹配该零件的实例：" + SafeName(Application.ActiveDocument));
             return null;
         }
         // 可用上下文 = 活动文档是装配，或者正在原位编辑装配里的某个零件。
