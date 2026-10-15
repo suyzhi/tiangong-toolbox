@@ -1,7 +1,8 @@
 ﻿param(
     [string]$CadHome='C:\Program Files\NDS\TianGong 2025',
     [string]$OutputDirectory,
-    [string]$Version='0.7.0.0',
+    # 不给时沿用 src\License\LicenseBuild.cs 里现有的版本（只有 make-installer.ps1 这类显式传 -Version 的才改版本戳）。
+    [string]$Version,
     # 开发构建：打开授权测试开关 / 开发密钥模式 / Diagnostics 测试入口，并编译 PanelTests.exe。
     # 默认（不加）是正式构建，交付包和"重新编译安装.cmd"都用它。开发构建绝不能发给别人。
     [switch]$DevBuild
@@ -15,6 +16,17 @@ if(!(Test-Path $interop)){throw '找不到天工 CAD 接口库。请通过 -CadH
 Copy-Item -LiteralPath $interop -Destination $bin -Force
 
 # 版本戳：程序集版本与 LicenseLibrary 里的常量必须同时写入，运行期自检会比较两者。
+# 原来 -Version 默认 '0.7.0.0'：Install.cmd（build-install.ps1）/ make-delivery.ps1 / 重新编译安装.cmd 等
+# 不传 -Version 的入口每跑一次，就把已提交的版本戳（如 0.7.3）改回 0.7.0.0。
+# 现在不传就沿用现有的 AssemblyVersion，读不到才用常量。
+$stampPath=Join-Path $root 'src\License\LicenseBuild.cs'
+if(-not $Version){
+    $Version='0.7.0.0'
+    if(Test-Path -LiteralPath $stampPath){
+        $m=[regex]::Match([IO.File]::ReadAllText($stampPath), 'AssemblyVersion\("([0-9]+(\.[0-9]+){1,3})"\)')
+        if($m.Success){$Version=$m.Groups[1].Value}
+    }
+}
 $parts=$Version.Split('.')
 $stamp=@()
 $stamp+='// 由 tools/build.ps1 生成，请勿手工修改。'
@@ -28,7 +40,6 @@ $stamp+='        internal const int Major = '+$parts[0]+';'
 $stamp+='        internal const int Minor = '+$parts[1]+';'
 $stamp+='    }'
 $stamp+='}'
-$stampPath=Join-Path $root 'src\License\LicenseBuild.cs'
 [IO.File]::WriteAllText($stampPath, ($stamp -join "`r`n") + "`r`n", (New-Object System.Text.UTF8Encoding($true)))
 
 $csc=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
