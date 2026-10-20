@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using G=SolidEdgeGeometry;
 using P=SolidEdgePart;
@@ -10,6 +10,7 @@ namespace TianGongCadSuite {
         public string PartName = "";
         public P.Hole Hole;                  // 要改 HoleData 的孔特征
         public P.Pattern Pattern;            // 点到的是阵列里的孔时为这个阵列，否则 null
+        public P.UserDefinedPattern Multi;   // 点到的是多孔孔特征里的孔时为这个特征（Hole = 它的种子孔），否则 null
         public P.FeatureGroup Group;         // 孔（或阵列）所在的组，没有为 null
         public string GroupName = "";
         public int GroupCount;               // 组代表的孔数（阵列按实例数算）
@@ -22,7 +23,8 @@ namespace TianGongCadSuite {
         public string Label {
             get {
                 string where = Group != null ? "「" + GroupName + "」" : "「" + HoleGrouping.NameOf(Hole) + "」";
-                string what = Pattern != null ? "（阵列里的孔 → 改种子孔，整排跟着变）" : "";
+                string what = Pattern != null ? "（阵列里的孔 → 改种子孔，整排跟着变）"
+                            : Multi != null ? "（多孔孔特征「" + HoleGrouping.NameOf(Multi) + "」里的孔 → 整个特征 " + HoleCombine.CountOf(Multi) + " 个孔一起变）" : "";
                 return PartName + "：" + where + what + "　现在：" + (Spec == null ? "?" : Spec.Summary);
             }
         }
@@ -38,6 +40,10 @@ namespace TianGongCadSuite {
     //     遇到就拒绝并说明，不去删了重建（会打乱特征树和编组）；
     //   · 把原来那个 HoleData 对象赋回去 + 补写孔径就完全复原（X4）—— 撤销靠这个；
     //   · 阵列的种子孔改了，阵列跟着变（X6）。
+    //   · 多孔孔特征（0.7.9，UserDefinedPattern）：换种子孔的 HoleData 整个特征的几何一起变；换别的输入孔也是整个特征一起变（J3）——
+    //     所以多孔特征里"只改点中的那个孔"做不到，改的永远是整个特征。
+    //     但插件的换法（螺纹孔两步换 + 补写螺纹描述）只换种子孔时，其余输入孔回读的还是旧螺纹（EditPatternE2E 实测，出图会标错），
+    //     所以多孔特征的**每个输入孔**都换一遍。
     public static class HoleEditCad {
         const double MmToM = 0.001;
         const double ParallelSin = 0.02, CoaxialM = 0.00005;   // 认孔：轴线夹角 ≈1°、径向 0.05mm
@@ -69,6 +75,15 @@ namespace TianGongCadSuite {
                 if (seed == null) throw new ArgumentException("点到的孔在阵列「" + HoleGrouping.NameOf(p) + "」里，但这个阵列的源特征不是孔，没法改孔型。");
                 return At(Fill(new EditableHole { Part = part, Hole = seed, Pattern = p }, model), sh);
             }
+            int uc = 0; try { uc = model.UserDefinedPatterns.Count; } catch { }
+            for (int i = 1; i <= uc; i++) {
+                P.UserDefinedPattern u = null;
+                try { u = model.UserDefinedPatterns.Item(i); } catch { }
+                if (u == null || !Owns(u, c, ax)) continue;
+                var seed = HoleCombine.SeedOf(u);
+                if (seed == null) throw new ArgumentException("点到的孔在「" + HoleGrouping.NameOf(u) + "」里，但读不到它的孔特征，没法改孔型。");
+                return At(Fill(new EditableHole { Part = part, Hole = seed, Multi = u }, model), sh);
+            }
             throw new ArgumentException("这个孔不是孔特征打出来的（可能是拉伸切除或别的特征），没法改孔型。");
         }
 
@@ -82,7 +97,10 @@ namespace TianGongCadSuite {
                     if (h != null) { list.Add(Fill(new EditableHole { Part = kv.Key, Hole = h }, model)); continue; }
                     var p = FindPattern(model, kv.Value);
                     var seed = p == null ? null : SeedOf(p);
-                    if (seed != null) list.Add(Fill(new EditableHole { Part = kv.Key, Hole = seed, Pattern = p }, model));
+                    if (seed != null) { list.Add(Fill(new EditableHole { Part = kv.Key, Hole = seed, Pattern = p }, model)); continue; }
+                    var u = HoleUndo.FindMulti(model, kv.Value);
+                    var useed = u == null ? null : HoleCombine.SeedOf(u);
+                    if (useed != null) list.Add(Fill(new EditableHole { Part = kv.Key, Hole = useed, Multi = u }, model));
                 } catch (Exception e) { Log.Write("HoleEditFromCreated", e); notes.Add("有一个孔没找回来：" + e.Message); }
             }
             return list;
@@ -96,7 +114,7 @@ namespace TianGongCadSuite {
         // 改完以后名字、规格都变了：按 SystemName 重新读一遍（位置留着）
         public static List<EditableHole> Refresh(IList<EditableHole> targets, List<string> notes){
             var created = new List<KeyValuePair<P.PartDocument, string>>();
-            foreach (var t in targets) created.Add(new KeyValuePair<P.PartDocument, string>(t.Part, t.Pattern != null ? HoleGrouping.Sys(t.Pattern) : t.Sys));
+            foreach (var t in targets) created.Add(new KeyValuePair<P.PartDocument, string>(t.Part, t.Pattern != null ? HoleGrouping.Sys(t.Pattern) : t.Multi != null ? HoleGrouping.Sys(t.Multi) : t.Sys));
             var fresh = FromCreated(created, notes);
             for (int i = 0; i < fresh.Count && i < targets.Count; i++) {
                 if (fresh[i].Sys != targets[i].Sys) continue;
@@ -107,7 +125,7 @@ namespace TianGongCadSuite {
 
         static EditableHole Fill(EditableHole e, P.Model model){
             try { e.PartName = e.Part.Name; } catch { }
-            e.Group = GroupOf(model, e.Pattern != null ? (object)e.Pattern : e.Hole);
+            e.Group = GroupOf(model, e.Pattern != null ? (object)e.Pattern : e.Multi != null ? (object)e.Multi : e.Hole);
             if (e.Group == null && e.Pattern != null) e.Group = GroupOf(model, e.Hole);
             if (e.Group != null) {
                 try { e.GroupName = e.Group.Name; } catch { }
@@ -156,7 +174,8 @@ namespace TianGongCadSuite {
             var seen = new HashSet<string>(StringComparer.Ordinal);
             var list = new List<P.Hole>();
             foreach (var t in targets) {
-                var holes = new List<P.Hole>{ t.Hole };
+                var holes = t.Multi != null ? HoleCombine.Inputs(t.Multi) : new List<P.Hole>{ t.Hole };
+                if (holes.Count == 0) holes.Add(t.Hole);
                 if (wholeGroup && t.Group != null) holes = GroupHoles(t.Group);
                 foreach (var h in holes) {
                     string key = PartKey(t.Part) + "|" + HoleGrouping.Sys(h);
@@ -224,6 +243,7 @@ namespace TianGongCadSuite {
             var failed = new List<P.Hole>();
             foreach (var h in changed) if (!FeatureOk(h)) failed.Add(h);
             foreach (var t in targets) if (t.Pattern != null && !FeatureOk(t.Pattern) && !failed.Contains(t.Hole) && changed.Contains(t.Hole)) failed.Add(t.Hole);
+            foreach (var t in targets) if (t.Multi != null && !FeatureOk(t.Multi)) foreach (var x in HoleCombine.Inputs(t.Multi)) if (!failed.Contains(x) && changed.Contains(x)) failed.Add(x);
             if (failed.Count > 0) {
                 foreach (var h in failed) {
                     o.Notes.Add(partName + "：「" + HoleGrouping.NameOf(h) + "」改成" + HoleNaming.Short(spec) + "后 CAD 报特征失败，已恢复原样。");
@@ -239,10 +259,21 @@ namespace TianGongCadSuite {
                 if (note.Length > 0) o.Notes.Add(partName + "：「" + HoleGrouping.NameOf(h) + "」" + note);
             }
             Rename(model, part, targets, changed, spec, wholeGroup, o);
+            var counted = new HashSet<string>(StringComparer.Ordinal);
             foreach (var h in changed) {
                 int extra = 0;
+                P.UserDefinedPattern multi = null;
                 foreach (var t in targets) if (t.Pattern != null && ReferenceEquals(t.Hole, h)) extra = HoleGrouping.PatternExtra(t.Pattern);
                 foreach (var p in PatternsOf(model, h)) extra = Math.Max(extra, HoleGrouping.PatternExtra(p));
+                foreach (var t in targets) if (t.Multi != null && HoleCombine.Inputs(t.Multi).Contains(h)) multi = t.Multi;
+                if (multi == null) multi = MultiOf(model, h);
+                if (multi != null) {
+                    if (!counted.Add(HoleGrouping.Sys(multi))) continue;   // 多孔特征的每个输入孔都换过，只算一次
+                    int n = HoleCombine.CountOf(multi);
+                    o.Changed += n;
+                    o.Items.Add(new ResultList.Item(ResultList.Kind.Done, partName + "：" + HoleGrouping.NameOf(multi) + "（多孔孔特征 " + n + " 个孔）"));
+                    continue;
+                }
                 o.Changed += 1 + extra;
                 o.Items.Add(new ResultList.Item(ResultList.Kind.Done, partName + "：" + HoleGrouping.NameOf(h) + (extra > 0 ? "（连同阵列 " + extra + " 个）" : "")));
             }
@@ -290,26 +321,44 @@ namespace TianGongCadSuite {
                     var members = Members(t.Group);
                     bool allChanged = true;
                     foreach (var m in members) { var mh = m as P.Hole; if (mh != null && !changed.Contains(mh)) allChanged = false; }
+                    foreach (var m in members) { var mu = m as P.UserDefinedPattern; if (mu != null) foreach (var x in HoleCombine.Inputs(mu)) if (!changed.Contains(x)) allChanged = false; }
                     if (!allChanged) { o.Notes.Add("「" + t.GroupName + "」里有孔没改成，组名和孔名保持原样。"); continue; }
                     if (HoleGrouping.ReadTag(t.Group).Length == 0) {
                         foreach (var m in members) RecordAndTag(o, part, m, key);
                         continue;   // 用户自己编的组：只换孔型，不改名
                     }
-                    foreach (var m in members) { o.Undo.Named(part, m); taken.Remove(HoleGrouping.NameOf(m)); }
+                    foreach (var m in members) {
+                        o.Undo.Named(part, m); taken.Remove(HoleGrouping.NameOf(m));
+                        foreach (var x in HoleGrouping.InputsOf(m)) { o.Undo.Named(part, x); taken.Remove(HoleGrouping.NameOf(x)); }
+                    }
                     o.Undo.Named(part, t.Group); taken.Remove(HoleGrouping.NameOf(t.Group));
                     int holes = 0; foreach (var m in members) if (m is P.Hole) holes++;
                     var names = HoleNaming.Members(spec, holes, taken);
                     int k = 0;
                     foreach (var m in members) {
+                        HoleGrouping.Tag(m, key);
+                        var mu = m as P.UserDefinedPattern;
+                        if (mu != null) { HoleGrouping.NameMulti(spec, mu, taken); foreach (var x in HoleGrouping.InputsOf(mu)) HoleGrouping.Tag(x, key); continue; }
                         string want = m is P.Hole ? names[k++] : HoleNaming.Unique(HoleNaming.PatternName(spec), taken);
                         if (HoleGrouping.TryName(m, want)) taken.Add(want);
-                        HoleGrouping.Tag(m, key);
                     }
                     string gname = HoleNaming.Unique(HoleNaming.Group(spec, CountOf(t.Group)), taken);
                     if (HoleGrouping.TryName(t.Group, gname)) taken.Add(gname);
                     HoleGrouping.Tag(t.Group, key);
                 } else {
                     if (!changed.Contains(t.Hole) || !done.Add(HoleGrouping.Sys(t.Hole))) continue;
+                    if (t.Multi != null) {
+                        // 多孔特征整个换了规格：特征名「规格 ×N」、输入孔「规格-序号」都按新规格重起（用户自己起的名字不动）
+                        if (HoleGrouping.ReadTag(t.Multi).Length > 0) {
+                            o.Undo.Named(part, t.Multi);
+                            foreach (var x in HoleGrouping.InputsOf(t.Multi)) o.Undo.Named(part, x);
+                            HoleGrouping.NameMulti(spec, t.Multi, taken);
+                            HoleGrouping.Tag(t.Multi, key);
+                            foreach (var x in HoleGrouping.InputsOf(t.Multi)) HoleGrouping.Tag(x, key);
+                        }
+                        if (t.Group != null) o.Notes.Add("只改了「" + t.GroupName + "」里的「" + HoleGrouping.NameOf(t.Multi) + "」，组名没改（组里其它孔还是原来的规格）。");
+                        continue;
+                    }
                     var feats = new List<object>{ t.Hole };
                     if (t.Pattern != null) feats.Add(t.Pattern);
                     foreach (var f in feats) {
@@ -364,6 +413,15 @@ namespace TianGongCadSuite {
             } catch (Exception e) { Log.Write("HoleEditSeed", e); }
             return null;
         }
+        // hole 是哪个多孔特征的输入孔（不是的返回 null）
+        static P.UserDefinedPattern MultiOf(P.Model model, P.Hole hole){
+            string sys = HoleGrouping.Sys(hole);
+            int n = 0; try { n = model.UserDefinedPatterns.Count; } catch { }
+            for (int i = 1; i <= n; i++) {
+                try { var u = model.UserDefinedPatterns.Item(i); foreach (var h in HoleCombine.Inputs(u)) if (ReferenceEquals(h, hole) || HoleGrouping.Sys(h) == sys) return u; } catch { }
+            }
+            return null;
+        }
         // 以 hole 为种子的阵列
         static List<P.Pattern> PatternsOf(P.Model model, P.Hole hole){
             var list = new List<P.Pattern>();
@@ -397,6 +455,8 @@ namespace TianGongCadSuite {
             foreach (var m in Members(g)) {
                 var h = m as P.Hole;
                 if (h != null) { if (!list.Contains(h)) list.Add(h); continue; }
+                var u = m as P.UserDefinedPattern;
+                if (u != null) { foreach (var x in HoleCombine.Inputs(u)) if (!list.Contains(x)) list.Add(x); continue; }
                 var p = m as P.Pattern;
                 var s = p == null ? null : SeedOf(p);
                 if (s != null && !list.Exists(x => HoleGrouping.Sys(x) == HoleGrouping.Sys(s))) list.Add(s);
@@ -405,10 +465,7 @@ namespace TianGongCadSuite {
         }
         static int CountOf(P.FeatureGroup g){
             int n = 0;
-            foreach (var m in Members(g)) {
-                if (m is P.Hole) n++;
-                else { var p = m as P.Pattern; if (p != null) n += HoleGrouping.PatternExtra(p); }
-            }
+            foreach (var m in Members(g)) n += HoleGrouping.HolesIn(m);
             return n;
         }
         internal static bool FeatureOk(object feature){
@@ -416,6 +473,7 @@ namespace TianGongCadSuite {
                 object d;
                 var h = feature as P.Hole; if (h != null) return (int)h.GetStatusEx(out d) == (int)P.FeatureStatusConstants.igFeatureOK;
                 var p = feature as P.Pattern; if (p != null) return (int)p.GetStatusEx(out d) == (int)P.FeatureStatusConstants.igFeatureOK;
+                var u = feature as P.UserDefinedPattern; if (u != null) return (int)u.GetStatusEx(out d) == (int)P.FeatureStatusConstants.igFeatureOK;
             } catch { }
             return false;
         }
@@ -426,6 +484,7 @@ namespace TianGongCadSuite {
             try {
                 var h = feature as P.Hole; if (h != null) faces = h.get_Faces(G.FeatureTopologyQueryTypeConstants.igQueryAll);
                 var p = feature as P.Pattern; if (p != null) faces = p.get_Faces(G.FeatureTopologyQueryTypeConstants.igQueryAll);
+                var u = feature as P.UserDefinedPattern; if (u != null) faces = u.get_Faces(G.FeatureTopologyQueryTypeConstants.igQueryAll);
             } catch { return false; }
             var fs = faces as G.Faces;
             if (fs == null) return false;

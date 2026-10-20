@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -80,6 +80,21 @@ class EditPatternE2E {
             if (Math.Abs(Math.Abs(D(n,2)) - 1) < 1e-6 && Math.Abs(D(p,2) - z) < 1e-9) return f;
         }
         return null;
+    }
+    // 多孔孔特征（UserDefinedPattern）的输入孔 / 名字[孔数]
+    static List<P.Hole> Inputs(P.Model m){
+        var l = new List<P.Hole>();
+        for (int i = 1; i <= m.UserDefinedPatterns.Count; i++) {
+            Array arr = new object[0];
+            m.UserDefinedPatterns.Item(i).GetInputFeatures(ref arr);
+            foreach (object o in arr) { var h = o as P.Hole; if (h != null) l.Add(h); }
+        }
+        return l;
+    }
+    static string Multis(P.Model m){
+        var l = new List<string>();
+        for (int i = 1; i <= m.UserDefinedPatterns.Count; i++) { var u = m.UserDefinedPatterns.Item(i); l.Add(u.Name + "[" + u.NumberInputFeatures + "]"); }
+        return string.Join(" | ", l.ToArray());
     }
     static G.Edge CircleEdgeAt(P.Model m, double x, double y, double z){
         G.Edge best = null; double bestR = double.MaxValue;
@@ -283,7 +298,7 @@ class EditPatternE2E {
 
     // ================= ④ 逐个打的孔，从批量排孔「改孔型…」带进来 =================
     static void Individual(string outDir, string st){
-        L(""); L("④ 逐个打 3 个 M6 过孔 → 「改孔型…」带进来 → 整组改成 M8 螺纹孔");
+        L(""); L("④ 逐个打 3 个 M6 过孔（0.7.9 起合成一个多孔孔特征）→ 「改孔型…」带进来 → 整个改成 M8 螺纹孔");
         var r = NewPart(); Plate(r, 0, 0, 0.12, 0.06, 0.01); string pr = Save(r, outDir, "EpR_" + st + ".par");
         var asm = NewAsm();
         AutoHolePatternForm pf = null; HoleEditForm ef = null;
@@ -304,24 +319,23 @@ class EditPatternE2E {
             count.Value = 3; Pump(4);
             Retry(delegate { pf.DrillForTest(); }, "开始打孔"); Pump(8);
             L("   RESULT: " + (pf.LastResult ?? "").Replace("\r\n", " ⏎ "));
-            Check(m.Holes.Count == 3 && m.Patterns.Count == 0, "逐个打：3 个孔特征、没有阵列");
+            Check(m.Holes.Count == 0 && m.Patterns.Count == 0 && m.UserDefinedPatterns.Count == 1 && Inputs(m).Count == 3, "逐个打：合成 1 个多孔孔特征（3 个孔）、没有阵列（" + Multis(m) + "）");
             var created = pf.LastCreatedForTest;
-            Check(created != null && created.Count == 3, "「改孔型…」能带过去刚打的 3 个孔");
+            Check(created != null && created.Count == 1, "「改孔型…」能带过去刚打的多孔孔特征");
             Retry(delegate { ef = new HoleEditForm(app, asm); }, "打开改孔型");
             ef.SuppressDialogs = true;
             Retry(delegate { ef.Show(); }, "显示"); Pump(4);
             Retry(delegate { ef.Preload(created); }, "带入"); Pump(4);
-            Check(ef.TargetCount == 3, "带进来 3 个孔");
+            Check(ef.TargetCount == 1, "带进来 1 个（多孔孔特征，改它的种子孔）");
             ef.SetSpecForTest(HoleKind.Tapped, "M8", 0); Pump(2);
             Retry(delegate { ef.ApplyForTest(); }, "应用"); Pump(8);
             L("   RESULT: " + (ef.LastResult ?? "").Replace("\r\n", " ⏎ "));
-            var g = Groups(m);
-            var names = FeatureNames(m);
-            L("   特征组：" + string.Join(" | ", g.ToArray()) + "　孔：" + string.Join(" | ", names.ToArray()));
-            Check(g.Count == 1 && g[0] == "M8 螺纹孔（螺纹全长） ×3[3]", "组名改成「M8 螺纹孔（螺纹全长） ×3」");
+            var names = Inputs(m).Select(h => h.Name).ToList();
+            L("   多孔孔特征：" + Multis(m) + "　孔：" + string.Join(" | ", names.ToArray()));
+            Check(Groups(m).Count == 0 && Multis(m) == "M8 螺纹孔（螺纹全长） ×3[3]", "多孔孔特征改名「M8 螺纹孔（螺纹全长） ×3」");
             Check(names.SequenceEqual(new[]{ "M8 螺纹孔（螺纹全长）-1", "M8 螺纹孔（螺纹全长）-2", "M8 螺纹孔（螺纹全长）-3" }), "孔名改成 M8 …-1/-2/-3");
             int ok = 0;
-            for (int i = 1; i <= m.Holes.Count; i++) { var hd = (P.HoleData)m.Holes.Item(i).HoleData; if (hd.ThreadDescription.Contains("M8") && hd.Size == "M8") ok++; }
+            foreach (var h in Inputs(m)) { var hd = (P.HoleData)h.HoleData; if (hd.ThreadDescription.Contains("M8") && hd.Size == "M8") ok++; }
             Check(ok == 3, "3 个孔都回读 M8 螺纹（实 " + ok + "）");
             Check(Rel(vol0 - Vol(m), 3 * Cyl(6.647, 10)), "切除体积 = 3 个 M8 螺纹底孔 Φ6.647（实 " + Mm3(vol0 - Vol(m)) + " / 期 " + Mm3(3 * Cyl(6.647, 10)) + " mm³）");
             // 螺纹孔换螺纹孔、孔径变小（M8 Φ6.647 → M5 Φ4.134）：CAD 会按旧孔径查螺纹表，插件要分两步换
@@ -329,14 +343,14 @@ class EditPatternE2E {
             Retry(delegate { ef.ApplyForTest(); }, "再改成 M5"); Pump(8);
             L("   RESULT: " + (ef.LastResult ?? "").Replace("\r\n", " ⏎ "));
             int ok5 = 0;
-            for (int i = 1; i <= m.Holes.Count; i++) { var hd = (P.HoleData)m.Holes.Item(i).HoleData; if (hd.ThreadDescription.Contains("M5") && hd.Size == "M5") ok5++; }
-            L("   " + Dump(m));
+            foreach (var h in Inputs(m)) { var hd = (P.HoleData)h.HoleData; if (hd.ThreadDescription.Contains("M5") && hd.Size == "M5") ok5++; }
+            L("   " + Multis(m));
             Check(ok5 == 3, "再改成 M5：3 个孔都回读 M5 螺纹（实 " + ok5 + "）");
             Check(Rel(vol0 - Vol(m), 3 * Cyl(4.134, 10)), "切除体积 = 3 个 M5 螺纹底孔 Φ4.134（实 " + Mm3(vol0 - Vol(m)) + " / 期 " + Mm3(3 * Cyl(4.134, 10)) + " mm³）");
             // 换过 HoleData 的孔 SystemName 会变：批量排孔窗口的「撤销本次打孔」仍要删得掉
             Retry(delegate { pf.UndoForTest(); }, "撤销本次打孔"); Pump(8);
             L("   撤销本次打孔：" + (pf.LastResult ?? "").Replace("\r\n", " ⏎ "));
-            Check(m.Holes.Count == 0 && m.FeatureGroups.Count == 0 && Math.Abs(Vol(m) - vol0) < 1e-12, "改过孔型再「撤销本次打孔」：3 个孔都删掉、体积复原");
+            Check(m.Holes.Count == 0 && m.UserDefinedPatterns.Count == 0 && m.FeatureGroups.Count == 0 && Math.Abs(Vol(m) - vol0) < 1e-12, "改过孔型再「撤销本次打孔」：多孔孔特征删掉、体积复原");
         } finally {
             if (ef != null) try { ef.Close(); } catch { }
             if (pf != null) try { pf.Close(); } catch { }

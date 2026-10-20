@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -76,6 +76,21 @@ class CheckPatternE2E {
         prof.End(P.ProfileValidationType.igProfileClosed);
         Array arr = new object[]{ prof };
         return part.Models.AddFiniteExtrudedProtrusion(1, ref arr, P.FeaturePropertyConstants.igRight, len);
+    }
+    // 多孔孔特征（UserDefinedPattern）的输入孔 / 名字[孔数]
+    static List<P.Hole> Inputs(P.Model m){
+        var l = new List<P.Hole>();
+        for (int i = 1; i <= m.UserDefinedPatterns.Count; i++) {
+            Array arr = new object[0];
+            m.UserDefinedPatterns.Item(i).GetInputFeatures(ref arr);
+            foreach (object o in arr) { var h = o as P.Hole; if (h != null) l.Add(h); }
+        }
+        return l;
+    }
+    static string Multis(P.Model m){
+        var l = new List<string>();
+        for (int i = 1; i <= m.UserDefinedPatterns.Count; i++) { var u = m.UserDefinedPatterns.Item(i); l.Add(u.Name + "[" + u.NumberInputFeatures + "]"); }
+        return string.Join(" | ", l.ToArray());
     }
     static G.Face FaceAtZ(P.Model m, double z){
         foreach (G.Face f in (G.Faces)((G.Body)m.Body).get_Faces(G.FeatureTopologyQueryTypeConstants.igQueryAll)) {
@@ -209,12 +224,11 @@ class CheckPatternE2E {
                 Pump(8);
                 L("   RESULT: " + (pf.LastResult ?? "").Replace("\r\n", " ⏎ "));
                 Check((pf.LastResult ?? "").Contains("排孔完成：4 / 4"), "排孔 4 / 4");
-                Check((pf.LastResult ?? "").Contains("M6 螺纹孔（螺纹全长） ×4"), "结果写明特征组「M6 螺纹孔（螺纹全长） ×4」");
-                var g1 = new List<string>(); foreach (P.FeatureGroup fg in modelQ.FeatureGroups) g1.Add(fg.Name + "[" + fg.Count + "]");
-                Check(g1.Contains("M6 螺纹孔（螺纹全长） ×4[4]"), "Q 上一个特征组「…×4」含 4 个孔（实 " + string.Join(" | ", g1.ToArray()) + "）");
+                Check((pf.LastResult ?? "").Contains("M6 螺纹孔（螺纹全长） ×4"), "结果写明孔特征「M6 螺纹孔（螺纹全长） ×4」");
+                Check(Multis(modelQ) == "M6 螺纹孔（螺纹全长） ×4[4]" && modelQ.Holes.Count == 0, "Q 上 4 个孔合成一个多孔孔特征「…×4」（实 " + Multis(modelQ) + "，单孔 " + modelQ.Holes.Count + "）");
                 int stdOk = 0, full = 0;
-                for (int i = 1; i <= modelQ.Holes.Count; i++) {
-                    var hd = (P.HoleData)modelQ.Holes.Item(i).HoleData;
+                foreach (var h in Inputs(modelQ)) {
+                    var hd = (P.HoleData)h.HoleData;
                     if (hd.Standard == "GB Metric" && hd.SubType == "标准螺纹" && hd.Size == "M6") stdOk++;
                     if (hd.ThreadDepthMethod.ToString() == "igThroughAll") full++;
                 }
@@ -233,8 +247,9 @@ class CheckPatternE2E {
                 Check((pf.LastResult ?? "").Contains("排孔完成：2 / 2"), "第二批排孔 2 / 2（再点同一个面不再报错）");
                 var g2 = new List<string>(); foreach (P.FeatureGroup fg in modelQ.FeatureGroups) g2.Add(fg.Name + "[" + fg.Count + "]");
                 L("   特征组：" + string.Join(" | ", g2.ToArray()));
-                Check(g2.Count == 1 && g2.Contains("M6 螺纹孔（螺纹全长） ×6[6]"), "并成一个组「M6 螺纹孔（螺纹全长） ×6」");
-                var names = new List<string>(); for (int i = 1; i <= modelQ.Holes.Count; i++) names.Add(modelQ.Holes.Item(i).Name);
+                L("   多孔孔特征：" + Multis(modelQ));
+                Check(g2.Count == 1 && g2.Contains("M6 螺纹孔（螺纹全长） ×6[2]"), "两批的多孔孔特征编成一组「M6 螺纹孔（螺纹全长） ×6」");
+                var names = new List<string>(); foreach (var h in Inputs(modelQ)) names.Add(h.Name);
                 Check(names.Contains("M6 螺纹孔（螺纹全长）-5") && names.Contains("M6 螺纹孔（螺纹全长）-6"), "第二批接着编号 -5、-6");
                 double cut = vol0 - ((G.Body)modelQ.Body).Volume, want = 6 * Math.PI * Math.Pow(0.004917 / 2, 2) * 0.01;
                 Check(Math.Abs(cut - want) / want < 0.01, "Q 切除体积 = 6 个 M6 螺纹孔（实 " + (cut * 1e9).ToString("0.#") + " / 期 " + (want * 1e9).ToString("0.#") + " mm³）");

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 
@@ -33,6 +33,10 @@ namespace TianGongCadSuite {
         // 打孔时据此记下"这个孔照哪个零件上的哪个孔配的"，参考零件挪了以后才能把孔跟回去（HoleLink）。
         public object Owner;
         public Transform Placement;
+        // 天工原生关联（HoleNativeLink）用：用户点选时的那个选择引用（带着实例路径），
+        // 以及零件间复制的来源面（孔壁圆柱面，或面扫描时点的那张平面；零件文档里的 G.Face）。
+        public object Pick;
+        public object SourceFace;
         public bool Stepped { get { return MouthDiameterMm - DiameterMm > HoleScan.StepToleranceMm; } }
         public string Note {
             get {

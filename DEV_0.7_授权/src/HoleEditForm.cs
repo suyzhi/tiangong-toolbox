@@ -221,7 +221,11 @@ namespace TianGongCadSuite {
                 if (!hs.Through) { try { bad = HoleEditCad.ThroughToBlind(targets, wholeGroup.Checked, hs); } catch { } }
                 if (bad > 0) { preview.Text = "⚠ 有 " + bad + " 个是贯通孔，天工不支持把贯通孔直接改成盲孔。"; preview.ForeColor = Ui.Bad; }
                 else {
-                    preview.Text = "要改 " + n + " 个孔特征 → " + HoleNaming.Short(hs) + "\r\n" + hs.Summary;
+                    // 多孔孔特征：点中的是其中一个孔，改的是整个特征（每个输入孔都换）
+                    var multis = new HashSet<string>(StringComparer.Ordinal);
+                    foreach (var t in targets) if (t.Multi != null) multis.Add(HoleGrouping.Sys(t.Multi));
+                    string what = multis.Count > 0 ? n + " 个孔（" + multis.Count + " 个多孔孔特征，整个一起改）" : n + " 个孔特征";
+                    preview.Text = "要改 " + what + " → " + HoleNaming.Short(hs) + "\r\n" + hs.Summary;
                     preview.ForeColor = Ui.Ok; ok = true;
                 }
             }

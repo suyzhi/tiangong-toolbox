@@ -14,7 +14,7 @@ using S=SolidEdgeFrameworkSupport;
 //   X2 装配草图里 IncludeEdge(A 零件孔口圆边的装配引用) + Hole2d 同心约束：挪 A 以后 B 的孔会不会自己跟着走
 //   X3 盲孔 / 改 HoleData（改孔型）在装配驱动孔上能不能用
 // 夹具都是新建文档，落在输出目录里。
-class AsmDrivenHoleProbe {
+partial class AsmDrivenHoleProbe {
     static object M = Type.Missing;
     static string Out = ".";
     static F.Application app;
@@ -24,13 +24,32 @@ class AsmDrivenHoleProbe {
     static double D(Array a, int i){ return Convert.ToDouble(a.GetValue(i)); }
     static string Mm(double m){ return (m * 1000.0).ToString("0.###"); }
 
+    [STAThread]
     static int Main(string[] args){
+        ProbeFilter.Register();
         Out = args.Length > 0 ? args[0] : ".";
         Directory.CreateDirectory(Out);
         app = (F.Application)Marshal.GetActiveObject("SolidEdge.Application");
         Say("CAD " + app.Version);
         try { app.DisplayAlerts = false; } catch { }
-        Run("X 装配驱动零件孔", X);
+        string mode = args.Length > 1 ? args[1] : "X";
+        if (mode.Contains("M")) Run("M 一个轮廓多个 Hole2d", Multi);
+        if (mode.Contains("Y")) Run("Y 原位编辑 + IncludeEdge", Y);
+        if (mode.Contains("Z")) Run("Z 零件间复制 + 孔挂在复制圆边上", Z);
+        if (mode == "L4" || mode == "L5") { Run(mode + " 同一草图集挂复制圆边合成多孔特征", () => LS(mode)); Say("PROBE DONE"); return 0; }
+        if (mode == "L1" || mode == "L2" || mode == "L3") { Run(mode + " 原生关联的孔合成多孔特征", () => LZ(mode)); Say("PROBE DONE"); return 0; }
+        if (mode.StartsWith("J")) { Run(mode + " 多孔 UDP 接插件前的细节", () => J(mode)); Say("PROBE DONE"); return 0; }
+        if (mode.StartsWith("H")) { Run(mode + " 用户定义阵列造多孔特征", () => H(mode)); Say("PROBE DONE"); return 0; }
+        if (mode == "U") Run("U 建板留着", U);
+        if (mode == "I") Run("I 读活动零件的孔特征结构", I);
+        if (mode.Contains("E")) Run("E 建好以后往孔轮廓里补 Hole2d", E);
+        if (mode.Contains("K")) Run("K 孔心连起来再 End", K);
+        if (mode.Contains("R")) Run("R 子装配里的零件间复制", R);
+        if (mode.Contains("S")) Run("S 扫 Training 里的多孔孔特征", Scan);
+        if (mode.Contains("Q")) Run("Q 草图集的 FeatureCommand / ValidationCriteria", Q);
+        if (mode.Contains("N")) Run("N End 后多出来的 Hole2d 去哪了", N);
+        if (mode.Contains("W")) Run("W 零件间复制换来源", W);
+        if (mode.Contains("X")) Run("X 装配驱动零件孔", X);
         Say("PROBE DONE");
         return 0;
     }

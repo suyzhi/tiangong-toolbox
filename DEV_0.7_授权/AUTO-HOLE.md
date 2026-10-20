@@ -17,6 +17,61 @@
 
 ---
 
+# 2026-10-20（0.7.9）：天工原生关联孔（锁链）· 一个孔特征里多个孔
+
+## 原生关联（`src/HoleNativeLink.cs`、`HoleNativeLinkMath.cs`）
+「保持与参考孔关联」现在用天工自己的跨零件关联，特征树里带锁链，参考零件挪了天工自己把孔带过去（真机结论见下面 0.7.8 一节的表）：
+* 每个打孔面：认实例链（`Reference.GetOccurrencesInPath`，不遍历装配）→ 一级级原位编辑（`StartCommand(57872)` / `40013`）→
+  零件间复制参考孔所在的面（改名「孔位链接-参考零件名」、隐藏、排在孔前面）→ 孔草图 `IncludeEdge` 复制来的圆边 + Hole2d 圆心约束 + 圆改构造线 → 打孔 → 退出原位。
+* 挂不上的孔（斜孔、认不出实例）退回 0.7.3 的属性集关联；「同步孔位」先 `UpdateAll`（= 天工「更新所有链接」）。
+* 撤销打孔连零件间复制一起删。真机 `NativeLinkE2E`：顶层 / 子装配（两级原位）、挪参考零件后孔跟过去、第二批并组、撤销。
+
+## 一个孔特征里多个孔（多孔合一，`src/HoleCombine.cs`）
+用户：「一个特征里放多个孔，彻底解决」。天工「孔」命令点多个孔建出来的是 **`UserDefinedPattern`**：输入 = N 个单孔 Hole，
+草图集 1 个、里面 N 个轮廓，`Model.Holes` 里不再有它们。用 `UserDefinedPatterns.AddByProfiles` 照这个结构造。
+
+真机探针（`tools/hole-feature-probe/AsmLinkProbe10~15.cs`，结果 `artifacts/udp-*`）：
+
+| 实验 | 结果 |
+| --- | --- |
+| H3 种子孔用第 1 个轮廓建，轮廓数组 = 全部（含种子孔自己的） | **1 个 UDP、Holes=0、3 个孔位置孔径都对**，CAD 没崩 |
+| H1/H2/H6 轮廓数组里没有种子孔自己的轮廓 | 种子孔留在外面、实体读不出来（COMException） |
+| H4 种子给 HoleData | E_FAIL |
+| J1 每个轮廓各在自己的草图集里 | 一样能成 |
+| J2 盲孔 6mm + M6 螺纹 | 3 个输入孔都带上 |
+| J3 换种子孔的 HoleData（Φ6→Φ9） | 整个特征的几何一起变；单换第 2 个输入孔也是整个一起变；贯通改盲孔失败（同 X5） |
+| J4 改名 / 挂属性 / 两个 UDP 编组 / 散组 / 删 UDP | 都行；删 UDP 连输入孔一起删，草图集留下 |
+| J5/J6/J8 插件顺序：先打种子孔（甚至先打全单孔、删掉）、后建其余轮廓 | 都行 |
+| J7 同上 + M6 螺纹孔 | 合成后 **igFeatureWarned，重算一次就 OK**、几何正确 |
+| J9 一张基准面上的孔全删光 | **基准面被 CAD 连带删掉**，再在上面建轮廓 0x800401FD |
+| JA–JC 轮廓里画构造圆 + 圆心约束（不进装配模拟原生关联） | 重算后 OK |
+| L1/L2 原位编辑 + 零件间复制：每个孔各自草图集、各挂各的复制圆边 | 种子孔 OK，**其余输入孔 igFeatureWarned、挪参考零件后不跟**（在原位里合成、退出原位再合成都一样） |
+| L3 同上，第 2 个轮廓不挂圆边 | UDP OK，但第 2 个孔当然不跟 |
+| L5 同一个草图集里分别 `Profiles.Add`、各挂各的圆边 | 第 2 个仍 igFeatureWarned |
+| **L4 一个轮廓里放全部 Hole2d、IncludeEdge 全部圆边、各自约束到圆心，End 拆成 N 个轮廓** | **UDP OK，挪参考零件后两个孔都跟过去** —— 天工自己的结构 |
+
+插件做法（`HoleCombine.Run`，在 `AutoHoleWriter.Organize` 里每个规格一批、≥2 个孔时做）：
+1. 孔照旧逐个打（每个孔位都验过、打孔方向试出来了、原生关联挂上了）；
+2. 同一张基准面上建一个共享轮廓：N 个孔心，挂关联的各自 IncludeEdge 圆边 + 圆心约束 → End 拆成 N 个；
+3. 删第 1 个单孔（其余单孔还在，基准面不会被连带删）→ 在拆出来的第 1 个轮廓上按这张面已知的方向打种子孔（只能试一次）；
+4. 删其余单孔 → `AddByProfiles(N, 全部轮廓, 种子孔)` → 核对（状态 OK、输入孔数、每个孔位上都有孔），不 OK 就重算再核对一次；
+5. 任何一步不对退回单孔：删 UDP（连种子孔）/ 种子孔、删共享轮廓，重取模型和基准面后按原位置重打（结果里说明「没能合成」）。
+
+连带改动：
+* 命名：多孔特征叫「规格 ×N」，里面的孔「规格-序号」；**不再建组**。同一张面再打一批（又一个多孔特征）时两个编成一组「规格 ×总数」（`HoleGrouping`）。
+* 靠属性集关联（插件自己的「同步孔位」）的孔不合 —— 那套记录按 `Model.Holes` 找孔。
+* 撤销打孔：删多孔特征（`HoleUndo`，按 COM 引用找，SystemName 会跟孔型变）。
+* 改孔型：点多孔特征里的任一个孔 = 改整个特征（J3：天工里本来就是整个一起变）；**每个输入孔都换一遍** HoleData ——
+  只换种子孔时其余输入孔回读还是旧螺纹（EditPatternE2E 实测，出图会标错）。改名跟着改「新规格 ×N」「新规格-序号」。
+* 批量排孔「不建成阵列」时也走这条路（和自动打孔共用 `DrillRequests`）。
+* `AutoHoleWriter.CombineHoles = false` 可以关掉（测试用），回到 0.7.8 的单孔 + 编组。
+
+## 其它
+* 排队脚本 `tools/hole-feature-probe/run-cad-queue.ps1`：自己起的 CAD 会派生 TianGong 子进程，以前被当成"用户打开了天工"而中止，现在按父进程排除。
+* `tests/LicensePolicyTests.cs`：跑前快照、跑后恢复真实激活（开发版 PanelTests 以前会把真实激活删掉）。
+
+---
+
 # 2026-10-20（0.7.8）：点命令不再卡 · 「CAD 正忙」的真正原因 · 原生关联孔探针
 
 ## 点命令卡很久、左下角在扫文件
@@ -35,17 +90,29 @@
   * 只有 0x80010001 / 0x8001010A 才等待重试（最多 20×250ms）；断开/未注册不再重试；
   * 每一侧都新建轮廓；记住每张基准面上打成的那一侧，后面的孔先试那一侧（省掉每个孔先撞一次错侧的 1 秒多）。
 
-## 原生关联孔（锁链）/ 一个孔特征多个孔：本轮探针（`tools/hole-feature-probe/AsmDrivenHoleProbe.cs`，结果 `artifacts/asm-driven-hole-probe`）
+## 原生关联孔（锁链）/ 一个孔特征多个孔：真机探针（2026-10-20，`tools/hole-feature-probe/AsmDrivenHoleProbe.cs` + `AsmLinkProbe*.cs`，结果 `artifacts/asm-link-probe-*`）
+
+### 原生跨零件关联：**走通了**
 | 实验 | 结果 |
 | --- | --- |
-| 零件/装配轮廓里连加 3 个 `Holes2d.Add` | 加的时候 Count 1→2→3，**`Profile.End` 之后变回 1** —— 以前"一个特征只切出一个孔"就卡在这一步，不是孔特征本身不支持 |
-| 装配草图 `IncludeEdge(参考零件孔口圆边的装配引用)` | **成功**（零件草图里同样的调用是 0x80040224），`Keypoint(Hole2d, 圆心)` 约束也成功 |
-| `AssemblyDrivenPartFeaturesHoles.Add`（装配驱动零件孔，贯通/盲孔、左右两侧） | 调用不报错，但特征状态 E_FAIL、零件里没切出孔；保存重开后零件 `Holes.Count=0` |
-| `AssemblyFeaturesHoles.Add`（纯装配特征孔） | 调用不报错（装配特征不改零件体积，本轮没法判断切没切） |
+| 不进原位，零件草图 `IncludeEdge(另一个零件的边)` | 0x80040224（以前 T7 的结论，开 `seApplicationGlobalAllowInterPart` 也一样） |
+| 原位编辑目标零件：选中实例 + `StartCommand(57872)`（= 在装配里双击零件） | **能进**，`ActiveDocument` 变成目标零件，`InPlaceActivated=True`；`StartCommand(40013)` 关闭并返回 |
+| 原位里 `IncludeEdge(另一个零件的边)`（装配引用 / 零件边 / CreateReference2） | 仍是 0x80040224 —— 直接包含别的零件的边这条路不通 |
+| 原位里 `Constructions.InterpartConstructions.Add(装配引用)`（零件间复制） | 引用**孔壁圆柱面**或**孔所在的平面**：`igFeatureOK`，复制出来的圆边在目标零件局部坐标里；引用边：建出来失败；不在原位：E_FAIL / E_UNEXPECTED |
+| 孔草图 `IncludeEdge(复制出来的圆边)` + `Keypoint(Hole2d, 圆心)` + 圆改构造线 → 建孔 | **成功**；零件 `HasInterpartLinks=True` |
+| 挪参考零件 +5mm → `UpdateAll` | **孔自己跟到 (35,40)**；保存重开还在。不调 UpdateAll 时不动 |
+| 参考孔在子装配里（引用 = 子装配里 CreateReference 再在顶层包一层） | 一样成功；`CreateReference2(SubOccurrence, 面)` 报 E_NOINTERFACE |
+| 打孔零件在子装配里 | 选中实例直接 57872 进不去；**先原位编辑子装配、再在里面原位编辑零件（两级）** 就能进，结果同上 |
+| 零件间复制改名 / 隐藏 | 都行；挪到特征树最前面（RefPlane 前）E_FAIL |
 
-结论与下一步：天工原生"锁链"关联要走"装配草图 IncludeEdge → 装配驱动零件孔"，前半段已通，后半段（建出来 E_FAIL）还没找到原因；
-多孔合一要查 `Profile.End` 为什么合并 Hole2d（试：不调 End、调 End 前加关系、换 ValidationType）。这两条都没接进插件，
-插件里的关联仍是 0.7.3 的属性集关联 + 「同步孔位」。
+### 一个特征多个孔：**找到天工自己的存法**
+* 零件草图里不管怎么放（加约束、连构造线、换 ValidationType、FeatureCommand 设不进去），`Profile.End` 都把 N 个 Hole2d 拆成同一草图集里的 N 个轮廓；
+  一个轮廓放多个 Hole2d 不调 End，建孔直接失败。`Hole.SetProfiles(N)` 建好以后再改 → igFeatureFailed。
+* 在私有桌面上用天工自己的「孔」命令手工点 3 个孔（鼠标实测），回读结构：
+  * 特征树里那一项（「3-10 钻头大小 孔 1」）**不是 Hole，是 `UserDefinedPattern`**（`Model.Holes.Count=0`，`Model.UserDefinedPatterns.Count=1`，`HoleGeometries.Count=3`）；
+  * 它的输入特征是 3 个 Hole（「10 钻头大小 孔 1/2/3」），草图集 1 个、里面 3 个轮廓、每个轮廓 1 个 Hole2d —— 和 End 拆出来的一模一样。
+  * 结论：天工的"多孔孔特征" = N 个单孔 Hole 被一个用户定义阵列包成一项。下一步：用 `UserDefinedPatterns.AddByProfiles` 按这个结构造
+    （0.7.5 那次 AddByProfiles 把 CAD 搞崩，传的是 1 个轮廓 + 种子孔；这次要对照天工自己的输入再试）。
 
 ---
 

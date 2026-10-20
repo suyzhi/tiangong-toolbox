@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Security.Cryptography;
 using TianGongCadSuite.Licensing;
@@ -31,6 +31,10 @@ namespace PanelTests {
             LicenseTestHooks.GateOverride = 0;
             LicenseTestHooks.FingerprintOverride = fingerprint;
 
+            // 这些用例会 Deactivate、清注册表 —— 动的是**本机真实的激活记录**。
+            // 2026-10-20 实际踩到：在开发机上跑了一次 PanelTests，把用户自己的激活删掉了。
+            // 所以先拍快照，跑完原样放回去（激活文件两份 + HKCU\Software\TianGongCadSuite 下的值）。
+            var snapshot = RealState.Take();
             try{
                 Plans(check);
                 Activation(check);
@@ -47,6 +51,40 @@ namespace PanelTests {
                 LicenseTestHooks.Reset();
                 LicenseLibrary.Deactivate();
                 CleanRegistry();
+                snapshot.Restore();
+                LicenseLibrary.ResetCache();
+            }
+        }
+
+        // 本机真实授权状态的快照（测试前拍、测试后还原）
+        sealed class RealState {
+            byte[] primary, shadow;
+            readonly System.Collections.Generic.Dictionary<string, object> values = new System.Collections.Generic.Dictionary<string, object>();
+            bool hadKey;
+            internal static RealState Take(){
+                var s = new RealState();
+                try{ if(File.Exists(LicenseStore.PrimaryPath))s.primary = File.ReadAllBytes(LicenseStore.PrimaryPath); }catch(Exception){ }
+                try{ if(File.Exists(LicenseStore.ShadowPath))s.shadow = File.ReadAllBytes(LicenseStore.ShadowPath); }catch(Exception){ }
+                try{
+                    using(var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\TianGongCadSuite")){
+                        if(key != null){ s.hadKey = true; foreach(string n in key.GetValueNames())s.values[n] = key.GetValue(n); }
+                    }
+                }catch(Exception){ }
+                return s;
+            }
+            internal void Restore(){
+                Put(LicenseStore.PrimaryPath, primary);
+                Put(LicenseStore.ShadowPath, shadow);
+                if(!hadKey)return;
+                try{
+                    using(var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(@"Software\TianGongCadSuite")){
+                        foreach(var kv in values)key.SetValue(kv.Key, kv.Value);
+                    }
+                }catch(Exception){ }
+            }
+            static void Put(string path, byte[] bytes){
+                if(bytes == null)return;
+                try{ Directory.CreateDirectory(Path.GetDirectoryName(path)); File.WriteAllBytes(path, bytes); }catch(Exception){ }
             }
         }
 

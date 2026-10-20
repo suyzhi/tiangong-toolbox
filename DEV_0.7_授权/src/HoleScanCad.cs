@@ -292,6 +292,7 @@ namespace TianGongCadSuite {
             hole.Center = pg.Transform.Point(hole.Center);
             hole.Axis = pg.Transform.Vector(hole.Axis).Unit();
             hole.Owner = part; hole.Placement = pg.Transform;
+            hole.Pick = selection; hole.SourceFace = wallFace;
             hole.Source = "孔口圆边";
             return hole;
         }
@@ -314,6 +315,7 @@ namespace TianGongCadSuite {
                 h.Center = target.Placement.Point(h.Center);
                 h.Axis = target.Placement.Vector(h.Axis).Unit();
                 h.Owner = target.Part; h.Placement = target.Placement;
+                h.Pick = target.Pick; h.SourceFace = target.Face;
                 h.Source = target.Label;
             }
             if (!byLoops) how = "这个 CAD 版本读不到面的环信息，识别结果里可能混进轮廓圆角或凸台";
@@ -378,6 +380,7 @@ namespace TianGongCadSuite {
             hole.Center = pg.Transform.Point(hole.Center);
             hole.Axis = pg.Transform.Vector(hole.Axis).Unit();
             hole.Owner = part; hole.Placement = pg.Transform;
+            hole.Pick = selection; hole.SourceFace = face;
             hole.Source = label;
             return hole;
         }

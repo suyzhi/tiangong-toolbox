@@ -19,7 +19,7 @@ namespace TianGongCadSuite {
                     "沉孔/锥沉/倒角孔口会自动取孔口**下面**那个孔径来配做（否则 Φ11 的沉孔会被当成 M10 过孔，配错）。\n" +
                     "孔型和规格自动从每个参考孔反推：螺纹底孔配沉孔，过孔配螺纹孔；投影落在面外的自动跳过。\n" +
                     "螺纹孔按螺纹内小径建模、以装饰螺纹显示，螺纹默认全长，也可指定深度；盲孔默认平底，要钻尖就选 V 型底。\n" +
-                    "同规格的孔编成一个特征组并按规格命名（如「M6 螺纹孔（螺纹全长） ×4」）。\n" +
+                    "同一张面上同规格的孔合成一个孔特征（和天工「孔」命令点多个孔一样），按规格命名（如「M6 螺纹孔（螺纹全长） ×4」）。\n" +
                     "打出来的孔会记住参考孔：参考零件挪动后，窗口底部「同步孔位」一键把孔对准。",
                     context.HasEditableContext,
                     () => { var doc = context.RequireEditableAssembly(); context.Show(() => new AutoHoleForm(context.Application, doc), f => ((AutoHoleForm)f).StartPicking()); });

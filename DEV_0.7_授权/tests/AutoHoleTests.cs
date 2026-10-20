@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -139,7 +139,7 @@ namespace TianGongCadSuite {
                 Assert(FindButton(form, "移除") != null && FindButton(form, "清空") != null, "参考孔/打孔面卡片上有移除、清空按钮");
                 var sync = FindButton(form, "同步孔位");
                 Assert(sync != null && !sync.Enabled, "有「同步孔位」按钮，没有装配时不可用");
-                Assert(FindButton(form, "重新检查") != null, "有「重新检查」关联孔按钮");
+                Assert(FindButton(form, "检查") != null, "有「检查」关联孔按钮（0.7.8 起不再自动查，要点它）");
                 var keep = Chk(all, "保持与参考孔关联");
                 Assert(keep != null && keep.Checked && form.KeepLink, "「保持与参考孔关联」默认勾选");
 

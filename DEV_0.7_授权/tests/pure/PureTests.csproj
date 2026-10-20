@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
   <!--
     脱离天工 CAD 的纯逻辑测试，Mac / Linux / Windows 上都能跑：
       在本目录执行 dotnet run
@@ -27,6 +27,7 @@
     <Compile Include="../../src/HoleNaming.cs" />
     <Compile Include="../../src/HoleSpecRead.cs" />
     <Compile Include="../../src/HoleLink.cs" />
+    <Compile Include="../../src/HoleNativeLinkMath.cs" />
     <Compile Include="../../src/HoleStandard.cs" />
     <Compile Include="../../src/FormatConvertCore.cs" />
     <Compile Include="../../src/HoleRules.cs" />

@@ -14,6 +14,38 @@ namespace TianGongCadSuite {
             LinkSolvePure();
             StandardPure();
             CheckChainPure();
+            NativeLinkPure();
+        }
+
+        // 0.7.8 天工原生关联的纯逻辑：子装配矩阵串接、认实例、在零件间复制来的圆边里挑"就是这个孔"的那条。
+        static void NativeLinkPure(){
+            // 串接：子装配平移 (10,0,0)mm，里面的零件再平移 (0,20,0)mm 并绕 z 转 90°
+            var outer = Transform.Frame(new V3(0.01, 0, 0), new V3(1, 0, 0), new V3(0, 1, 0), new V3(0, 0, 1));
+            var inner = Transform.Frame(new V3(0, 0.02, 0), new V3(0, 1, 0), new V3(-1, 0, 0), new V3(0, 0, 1));
+            var both = NativeLinkMath.Compose(outer, inner);
+            var p = both.Point(new V3(0.001, 0, 0));      // 零件局部 x=1mm → 转 90° 成 y=1mm → +(0,20)+(10,0)
+            Assert((p - new V3(0.01, 0.021, 0)).Length < 1e-12, "子装配矩阵串接：先内后外");
+            Assert(NativeLinkMath.Same(both, NativeLinkMath.Compose(outer, inner)), "同一个变换 Same=true");
+            Assert(!NativeLinkMath.Same(both, outer), "不同变换 Same=false");
+            Assert(NativeLinkMath.Same(NativeLinkMath.Compose(null, inner), inner), "没有父级时就是自己");
+
+            // 挑圆边：打孔面法向 z，要打的孔心 (30,40,0)mm
+            var want = new V3(0.03, 0.04, 0); var n = new V3(0, 0, 1);
+            var circles = new List<NativeLinkMath.Circle> {
+                new NativeLinkMath.Circle(new V3(0.07, 0.04, -0.02), new V3(0, 0, 1), 0.005),    // 另一个孔
+                new NativeLinkMath.Circle(new V3(0.03, 0.04, -0.02), new V3(0, 0, -1), 0.005),   // 就是它（轴线反向也算平行，在别的高度也行：约束的是投影圆心）
+                new NativeLinkMath.Circle(new V3(0.03, 0.04, -0.01), new V3(1, 0, 0), 0.005),    // 圆心对得上但轴线不平行：不是孔口圆
+            };
+            double off;
+            Assert(NativeLinkMath.Match(circles, want, n, out off) == 1 && off < 1e-12, "挑中同轴的那条圆边");
+            Assert(NativeLinkMath.Match(circles, new V3(0.03, 0.0401, 0), n, out off) == -1, "差 0.1mm 不认（容差 0.05mm）");
+            Assert(NativeLinkMath.Match(circles, new V3(0.03, 0.04002, 0), n, out off) == 1, "差 0.02mm 认（浮点 / 建模误差）");
+            circles.Add(new NativeLinkMath.Circle(new V3(0.03, 0.04001, 0.0), new V3(0, 0, 1), 0.0055));
+            Assert(NativeLinkMath.Match(circles, want, n, out off) == 1, "几条都对得上取投影误差最小的");
+            Assert(NativeLinkMath.Match(null, want, n, out off) == -1, "没有圆边 → -1");
+            // 斜孔不走原生关联
+            Assert(NativeLinkMath.Perpendicular(new V3(0, 0, -1), n), "孔轴线 ∥ 面法向（反向）：可以");
+            Assert(!NativeLinkMath.Perpendicular(new V3(0, Math.Sin(0.05), Math.Cos(0.05)), n), "斜 3° 的孔：不走原生关联");
         }
 
         // 配孔检查（2026-10-13 复查修的两处）：

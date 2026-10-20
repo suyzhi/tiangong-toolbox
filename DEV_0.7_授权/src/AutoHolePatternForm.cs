@@ -506,7 +506,7 @@ namespace TianGongCadSuite {
                     else {
                         var a = HolePatternSolver.Angles(Spec());
                         previewText.Text = "在 R" + Num(circleRadiusMm) + " 的分度圆上均布 " + a.Length + " 个孔，起始 " + Num(Spec().StartAngleDeg) + "°，间隔 " + Num(360.0 / Spec().Count) + "°。\r\n"
-                                         + HoleNaming.Short(hs) + "　·　" + (asPattern.Checked ? "种子孔 + 圆周阵列" : "同规格的孔编成一组");
+                                         + HoleNaming.Short(hs) + "　·　" + (asPattern.Checked ? "种子孔 + 圆周阵列" : "同规格的孔合成一个孔特征");
                         previewText.ForeColor = Ui.Ok; ok = true;
                     }
                 } else {
@@ -516,7 +516,7 @@ namespace TianGongCadSuite {
                     previewText.Text = HolePatternSolver.Describe(frame.LengthMm, Spec())
                                      + (latMode.SelectedIndex == 1 ? "，孔心离方向边 " + Num((double)lateral.Value) + "mm" : "，横向居中") + "\r\n"
                                      + (SlotMode ? "腰孔 " + Num((double)slotLen.Value) + "×" + Num((double)slotWidth.Value) + "（通切）"
-                                                 : HoleNaming.Short(hs) + "　·　" + (asPattern.Checked ? "种子孔 + 阵列" : "同规格的孔编成一组"));
+                                                 : HoleNaming.Short(hs) + "　·　" + (asPattern.Checked ? "种子孔 + 阵列" : "同规格的孔合成一个孔特征"));
                     previewText.ForeColor = Ui.Ok; ok = true;
                 }
             } catch (Exception e) { previewText.Text = e.Message; previewText.ForeColor = Ui.Bad; }

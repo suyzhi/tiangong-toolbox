@@ -424,19 +424,25 @@ namespace TianGongCadSuite {
     // 然后每个孔 Make 一条；认不出实例的孔返回 null 并说明原因 —— 孔照打，只是不关联。
     public static class HoleLinkFactory {
         public sealed class Session {
+            public A.AssemblyDocument Assembly;
             public OccurrenceIndex Index;
             public readonly Dictionary<string, List<HoleFeatures.Entry>> RefHoles =
                 new Dictionary<string, List<HoleFeatures.Entry>>(StringComparer.OrdinalIgnoreCase);
         }
 
+        // 实例索引要遍历整个装配（会把所有零件加载一遍，大装配很慢），所以**用到时才建**：
+        // 0.7.8 起孔优先走天工原生关联，只有原生关联挂不上的孔才需要这份索引。
         public static Session Begin(A.AssemblyDocument asm){
             var s = new Session();
-            try { s.Index = OccurrenceIndex.Build(asm); } catch (Exception e) { Log.Write("HoleLinkBegin", e); s.Index = new OccurrenceIndex(); }
+            s.Assembly = asm;
             return s;
         }
 
         public static HoleLink Make(Session s, ScannedHole r, TargetFace t, out string why){
             why = "";
+            if (s != null && s.Index == null && s.Assembly != null) {
+                try { s.Index = OccurrenceIndex.Build(s.Assembly); } catch (Exception e) { Log.Write("HoleLinkBegin", e); s.Index = new OccurrenceIndex(); }
+            }
             if (s == null || s.Index == null) { why = "没有装配实例索引"; return null; }
             var refPart = r == null ? null : r.Owner as P.PartDocument;
             if (refPart == null || r.Placement == null) { why = "参考孔读不到所在零件"; return null; }
