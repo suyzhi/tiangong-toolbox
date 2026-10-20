@@ -17,6 +17,38 @@
 
 ---
 
+# 2026-10-20（0.7.8）：点命令不再卡 · 「CAD 正忙」的真正原因 · 原生关联孔探针
+
+## 点命令卡很久、左下角在扫文件
+* 原因：「自动打孔」窗口一打开就自动「检查关联孔」（`HoleSync.Scan` → `OccurrenceIndex.Build`），要取装配里**每个**实例的
+  `OccurrenceDocument`，天工会把轻量化/未激活的零件逐个真正加载进来。打完孔、撤销以后也各查一遍。
+* 修法：不再自动查，只在点「检查」或「同步孔位」时查（`AutoHoleForm`）。
+  另外功能区刷新按钮状态（`OnCommandUpdateUI`，很频繁）在原位编辑时会走 `ToolContext.EditingAssembly`，
+  原来也取 `OccurrenceDocument`，现在只比 `OccurrenceFileName`（字符串，不加载零件）。
+
+## 「CAD 正忙，正在重试」然后打孔失败
+* 查了两份 panel.log 共 994 条 `AutoHoleRetry`：**没有一条是真正的"忙"**（0x80010001 / 0x8001010A 一次都没出现）。
+  全部是：第 1 次 `Holes.AddFinite/AddThroughAll` 报 0x80010108「系统无法找到指定的资源」（这一侧方向不对等真实建孔失败），
+  CAD 同时把轮廓作废，第 2～6 次重试的是死对象（0x80010108 / 0x800401FB / 0x800401FD）。
+  更糟的是**另一侧也拿同一个死轮廓去试** —— 本来换一侧就能打成的孔也失败了。
+* 修法（`AutoHoleWriter.Attempt` / `DrillOne`）：
+  * 只有 0x80010001 / 0x8001010A 才等待重试（最多 20×250ms）；断开/未注册不再重试；
+  * 每一侧都新建轮廓；记住每张基准面上打成的那一侧，后面的孔先试那一侧（省掉每个孔先撞一次错侧的 1 秒多）。
+
+## 原生关联孔（锁链）/ 一个孔特征多个孔：本轮探针（`tools/hole-feature-probe/AsmDrivenHoleProbe.cs`，结果 `artifacts/asm-driven-hole-probe`）
+| 实验 | 结果 |
+| --- | --- |
+| 零件/装配轮廓里连加 3 个 `Holes2d.Add` | 加的时候 Count 1→2→3，**`Profile.End` 之后变回 1** —— 以前"一个特征只切出一个孔"就卡在这一步，不是孔特征本身不支持 |
+| 装配草图 `IncludeEdge(参考零件孔口圆边的装配引用)` | **成功**（零件草图里同样的调用是 0x80040224），`Keypoint(Hole2d, 圆心)` 约束也成功 |
+| `AssemblyDrivenPartFeaturesHoles.Add`（装配驱动零件孔，贯通/盲孔、左右两侧） | 调用不报错，但特征状态 E_FAIL、零件里没切出孔；保存重开后零件 `Holes.Count=0` |
+| `AssemblyFeaturesHoles.Add`（纯装配特征孔） | 调用不报错（装配特征不改零件体积，本轮没法判断切没切） |
+
+结论与下一步：天工原生"锁链"关联要走"装配草图 IncludeEdge → 装配驱动零件孔"，前半段已通，后半段（建出来 E_FAIL）还没找到原因；
+多孔合一要查 `Profile.End` 为什么合并 Hole2d（试：不调 End、调 End 前加关系、换 ValidationType）。这两条都没接进插件，
+插件里的关联仍是 0.7.3 的属性集关联 + 「同步孔位」。
+
+---
+
 # 2026-10-14（0.7.6）：批量排孔改成「种子孔 + 阵列」· 改孔型（命令 9）
 
 用户：「在一个孔特征里打多个孔……打错孔了也方便直接调整孔型，也方便后续修改」。

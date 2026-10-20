@@ -81,7 +81,7 @@ namespace TianGongCadSuite {
         readonly Panel linkBar = new Panel();
         readonly Label linkLabel = new Label();
         readonly Button syncButton = Ui.Primary("同步孔位", 96, 26);
-        readonly Button rescanButton = Ui.Secondary("重新检查", 84, 26);
+        readonly Button rescanButton = Ui.Secondary("检查", 84, 26);
         SyncReport lastLinks;
 
         // "正在编辑谁 / 规格怎么来的"两行字（原来是单独一张大半空着的卡片）
@@ -151,11 +151,12 @@ namespace TianGongCadSuite {
             BuildLayout();
             WireEvents();
             RefreshAll();
-            ShowLinkReport(null, assembly == null ? "（没有打开装配，不检查关联孔）" : "正在检查关联孔…");
+            ShowLinkReport(null, assembly == null ? "（没有打开装配，不检查关联孔）" : NotScanned);
 
             FormClosed += (s, e) => Cleanup();
-            // 窗口出来以后再查关联孔：大装配要遍历一遍零件，别让窗口迟迟不出来
-            Shown += (s, e) => { if (assembly != null) BeginInvoke((Action)(() => ScanLinks(false))); };
+            // 关联孔**不再自动查**（0.7.8）：查一遍要取装配里每个实例的 OccurrenceDocument，
+            // 天工会把轻量化/未激活的零件逐个真正加载进来 —— 用户看到的就是「点了命令卡很久、左下角在扫文件」。
+            // 现在只在用户点「检查」或「同步孔位」时才查。
             // StartPicking 由宿主 ToolContext.Show 的启动回调调用，这里不能重复调，
             // 否则第二次 command.Start() 会触发 Terminate() 把窗口关掉。
         }
@@ -980,6 +981,8 @@ namespace TianGongCadSuite {
         }
 
         // ---------------- 关联孔位 ----------------
+        const string NotScanned = "点「检查」查看本装配里的关联孔（要遍历全部零件，所以不自动查）";
+
         void ShowLinkReport(SyncReport report, string fallback){
             lastLinks = report;
             if (report == null) {
@@ -1215,7 +1218,7 @@ namespace TianGongCadSuite {
                           failed > 0 ? Ui.Warn : Ui.Ok);
                 busy = false; run.Text = "开始打孔"; UseWaitCursor = false;
                 if (hadCommand) { try { StartPicking(); } catch (Exception ex) { SetStatus(ex.Message, Ui.Warn); } }
-                if (made > 0) ScanLinks(false);
+                if (made > 0 && lastLinks != null) ShowLinkReport(null, NotScanned);
                 RefreshPreview();
             } catch (Exception e) {
                 Log.Write("AutoHoleDrill", e);
@@ -1272,7 +1275,7 @@ namespace TianGongCadSuite {
                 ShowResults(true);
                 LastResult = outcome.Summary + (outcome.Notes.Count > 0 ? "\r\n· " + string.Join("\r\n· ", outcome.Notes.ToArray()) : "");
                 SetStatus(outcome.Summary + "　参考孔还在，重新点一个打孔面就能再打。", outcome.Failed > 0 ? Ui.Warn : Ui.Ok);
-                ScanLinks(false);
+                if (lastLinks != null) ShowLinkReport(null, NotScanned);
             } catch (Exception e) {
                 Log.Write("AutoHoleUndo", e);
                 SetStatus("撤销没有完成：" + e.Message, Ui.Bad);

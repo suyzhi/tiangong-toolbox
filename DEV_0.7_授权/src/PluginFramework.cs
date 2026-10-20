@@ -69,10 +69,10 @@ namespace TianGongCadSuite {
                     var assembly=Application.Documents.Item(i) as A.AssemblyDocument;
                     if(assembly==null)continue;
                     try{
+                        // 只比文件名（OccurrenceFileName 是字符串，不加载零件）。原来取 OccurrenceDocument：
+                        // 功能区刷新按钮状态时（OnCommandUpdateUI，很频繁）每次都会把装配里的零件逐个加载一遍。
                         foreach(A.Occurrence occurrence in assembly.Occurrences){
-                            var occurrencePart=occurrence.OccurrenceDocument as P.PartDocument;
-                            if(occurrencePart==null)continue;
-                            string name=null;try{name=occurrencePart.FullName;}catch{}
+                            string name=null;try{name=occurrence.OccurrenceFileName;}catch{}
                             if(string.Equals(name,partName,StringComparison.OrdinalIgnoreCase))return assembly;
                         }
                     }catch{}

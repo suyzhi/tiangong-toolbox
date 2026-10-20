@@ -107,29 +107,30 @@ namespace TianGongCadSuite {
         const double MmToM = 0.001;
         static object M = Type.Missing;
 
-        // CAD 正忙的时候，COM 调用会被直接拒绝：
-        //   RPC_E_CALL_REJECTED  (0x80010001) / CO_E_OBJNOTCONNECTED (0x800401FD) / RPC_E_SERVERCALL_RETRYLATER
-        // 这类是**瞬态**的，等一下重试就好。实测"开始打孔"第一次经常撞上，
-        // 不重试就会给用户报一个假的"打孔失败"。
-        // 最近一次用到的 Application，重试前拿它泵一下消息（CAD 靠消息循环推进内部状态）。
+        // 只有"CAD 真的在忙"才值得等一下再试：
+        //   RPC_E_CALL_REJECTED (0x80010001) / RPC_E_SERVERCALL_RETRYLATER (0x8001010A)
+        //
+        // 2026-10-20 查日志（panel.log 两份，共 994 条 AutoHoleRetry）：**一条都不是**真正的"忙"。
+        // 全部是这一个模式 ——
+        //   #1  Holes.AddFinite 0x80010108「系统无法找到指定的资源」  ← CAD 建孔失败（这一侧方向不对、孔底在空气里…）
+        //   #2～#6  0x80010108 / 0x800401FB / 0x800401FD「对象已断开 / 没有注册」 ← 失败时 CAD 已经把轮廓吃掉了，重试的是个死对象
+        // 原来把断开/未注册也当"忙"去重试：每个孔每一侧白等 6 次，状态栏一直报"CAD 正忙，正在重试"，
+        // 而另一侧拿的也是同一个死轮廓 —— 本来换一侧就能打成的孔也跟着失败。
+        // 现在：断开/未注册一律不重试，交给 DrillOne 换新轮廓、换一侧再建（见 DrillOne）。
         static F.Application LastApp;
 
-        static bool Transient(Exception e){
+        static bool Busy(Exception e){
             int hr = e.HResult;
             return hr == unchecked((int)0x80010001)   // RPC_E_CALL_REJECTED      调用被拒（CAD 忙）
-                || hr == unchecked((int)0x800401FD)   // CO_E_OBJNOTCONNECTED     对象连接已断开
-                || hr == unchecked((int)0x800401FB)   // CO_E_OBJNOTREG           对象刚建好还没注册
-                || hr == unchecked((int)0x8001010A)   // RPC_E_SERVERCALL_RETRYLATER
-                || hr == unchecked((int)0x80010108)   // RPC_E_DISCONNECTED
-                || (hr == unchecked((int)0x80004005) && e.Message != null && e.Message.Contains("拒绝"));
+                || hr == unchecked((int)0x8001010A);  // RPC_E_SERVERCALL_RETRYLATER
         }
         // 重试要等，但界面不能看起来像死了：每等一小段就把进度报给界面（AutoHoleForm 把它
-        // 写进状态栏并 DoEvents 一次）。总计仍然是最多约 2.4 秒，和原来同一量级。
+        // 写进状态栏并 DoEvents 一次）。
         public static Action<string> Progress;
         static void Report(string s){ var p = Progress; if (p != null) { try { p(s); } catch { } } }
 
-        const int RetryCount = 6;
-        const int RetrySleepMs = 400;
+        const int RetryCount = 20;
+        const int RetrySleepMs = 250;
 
         internal static T Attempt<T>(string what, Func<T> f){
             Exception last = null;
@@ -137,9 +138,9 @@ namespace TianGongCadSuite {
                 try { return f(); }
                 catch (Exception e) {
                     last = e;
-                    if (!Transient(e)) throw;
+                    if (!Busy(e)) throw;
                     Log.Write("AutoHoleRetry " + what + " #" + (i + 1), e);
-                    Report("CAD 正忙（" + what + "），正在重试 " + (i + 1) + "/" + (RetryCount) + "…");
+                    if (i >= 2) Report("CAD 正忙（" + what + "），稍等…");
                     try { if (LastApp != null) LastApp.DoIdle(); } catch { }
                     System.Threading.Thread.Sleep(RetrySleepMs);
                 }
@@ -648,28 +649,47 @@ namespace TianGongCadSuite {
             // 盲孔会整段切在空气里 → CAD 只回一个含糊的 COM 错误。先把这件事说出来，省得又去猜。
             double planeGapMm = PlaneGap(plane, localCentre) * 1000.0;
             if (planeGapMm > 0.001) Info("注意：打孔基准面偏离孔心 " + planeGapMm.ToString("0.###") + "mm");
-            P.Profile profile = null; object profileSet = null;
+            bool blind = depthMm > 1e-9;
+            // 哪一侧能打成跟基准面走：同一张面上第一个孔试出来以后，后面的孔直接先试那一侧，
+            // 不用每个孔都先撞一次错的那一侧（撞错一侧 CAD 要花 1 秒多才回错误）。
+            string sideKey = SideKey(plane);
+            var order = new List<P.FeaturePropertyConstants>(Sides);
+            P.FeaturePropertyConstants known;
+            if (sideKey.Length > 0 && GoodSide.TryGetValue(sideKey, out known) && order.Remove(known)) order.Insert(0, known);
             try {
-                profile = Attempt("建轮廓", () => { var ps = part.ProfileSets.Add(); profileSet = ps; return ps.Profiles.Add(plane); });
-                double x2 = 0, y2 = 0;
-                Attempt("轮廓坐标", () => { profile.Convert3DCoordinate(localCentre.X, localCentre.Y, localCentre.Z, out x2, out y2); return 0; });
-                Attempt("孔心", () => { profile.Holes2d.Add(x2, y2); return 0; });
-                if (Attempt("闭合检查", () => profile.End(P.ProfileValidationType.igProfileClosed)) != 0) { why = "孔轮廓未通过闭合检查"; return false; }
-                bool blind = depthMm > 1e-9;
-
-                foreach (var side in Sides){
-                    P.Hole h = null;
+                foreach (var side in order){
+                    // 每一侧都用**新的**轮廓：建孔失败时 CAD 会把传进去的轮廓一起作废，
+                    // 拿同一个轮廓去试另一侧只会得到"对象已断开"（现场日志里成百条的那个）。
+                    P.Profile profile = null; object profileSet = null; P.Hole h = null;
                     try {
-                        var sideLocal = side;
-                        h = Attempt("打孔", () => blind ? model.Holes.AddFinite(profile, sideLocal, depthMm * MmToM, data)
-                                                        : model.Holes.AddThroughAll(profile, sideLocal, data));
-                    } catch (Exception e) { why = "打孔失败：" + Friendly(e); continue; }
-                    if (h == null) { why = "打孔失败：CAD 未返回孔特征"; continue; }
-                    object desc = null;
-                    var st = h.GetStatusEx(out desc);
-                    if ((int)st == (int)P.FeatureStatusConstants.igFeatureOK) { created = h; return true; }
-                    try { h.Delete(); } catch {}
-                    why = "打孔失败，状态 " + st + (desc == null ? "" : "（" + desc + "）");
+                        profile = Attempt("建轮廓", () => { var ps = part.ProfileSets.Add(); profileSet = ps; return ps.Profiles.Add(plane); });
+                        double x2 = 0, y2 = 0;
+                        Attempt("轮廓坐标", () => { profile.Convert3DCoordinate(localCentre.X, localCentre.Y, localCentre.Z, out x2, out y2); return 0; });
+                        Attempt("孔心", () => { profile.Holes2d.Add(x2, y2); return 0; });
+                        if (Attempt("闭合检查", () => profile.End(P.ProfileValidationType.igProfileClosed)) != 0) { why = "孔轮廓未通过闭合检查"; return false; }
+                        var sideLocal = side; var prof = profile;
+                        h = Attempt("打孔", () => blind ? model.Holes.AddFinite(prof, sideLocal, depthMm * MmToM, data)
+                                                        : model.Holes.AddThroughAll(prof, sideLocal, data));
+                        if (h == null) { why = "打孔失败：CAD 未返回孔特征"; continue; }
+                        object desc = null;
+                        var st = h.GetStatusEx(out desc);
+                        if ((int)st == (int)P.FeatureStatusConstants.igFeatureOK) {
+                            created = h;
+                            if (sideKey.Length > 0) GoodSide[sideKey] = side;
+                            return true;
+                        }
+                        try { h.Delete(); } catch {}
+                        h = null;
+                        why = "打孔失败，状态 " + st + (desc == null ? "" : "（" + desc + "）");
+                    } catch (Exception e) {
+                        why = "打孔失败：" + Friendly(e);
+                        Log.Write("AutoHoleSide " + side, e.GetType().Name + " 0x" + e.HResult.ToString("X8") + " " + e.Message);
+                    } finally {
+                        if (profile != null) { try { profile.Visible = false; } catch {} }
+                        // 没建成孔：把这次建的空轮廓删掉。留着它会夹在前后两个孔特征之间，
+                        // 特征组只收连续的一段 —— 这批孔就编不成组了（现场"编组失败"的来源之一）。
+                        if (h == null && created == null) DropProfile(profile, profileSet);
+                    }
                 }
                 if (why.Length == 0) why = "打孔失败";
                 if (blind) {
@@ -682,12 +702,21 @@ namespace TianGongCadSuite {
             } catch (Exception e) {
                 why = Friendly(e);
                 return false;
-            } finally {
-                if (profile != null) { try { profile.Visible = false; } catch {} }
-                // 没建成孔：把这次建的空轮廓删掉。留着它会夹在前后两个孔特征之间，
-                // 特征组只收连续的一段 —— 这批孔就编不成组了（现场"编组失败"的来源之一）。
-                if (created == null) DropProfile(profile, profileSet);
             }
+        }
+
+        // 基准面 → 上次打成的那一侧。键用基准面的根点 + 法向（对象引用会失效，数据不会）。
+        static readonly Dictionary<string, P.FeaturePropertyConstants> GoodSide = new Dictionary<string, P.FeaturePropertyConstants>();
+        static string SideKey(P.RefPlane plane){
+            try {
+                Array rr = new double[3], rn = new double[3];
+                plane.GetRootPoint(ref rr); plane.GetNormal(ref rn);
+                string doc = ""; try { doc = ((P.PartDocument)plane.Parent).FullName; } catch { }
+                var ci = CultureInfo.InvariantCulture;
+                if (GoodSide.Count > 500) GoodSide.Clear();
+                return doc + "|" + V3.From(rr).X.ToString("0.######", ci) + "," + V3.From(rr).Y.ToString("0.######", ci) + "," + V3.From(rr).Z.ToString("0.######", ci)
+                     + "|" + V3.From(rn).X.ToString("0.####", ci) + "," + V3.From(rn).Y.ToString("0.####", ci) + "," + V3.From(rn).Z.ToString("0.####", ci);
+            } catch { return ""; }
         }
 
         static void DropProfile(P.Profile profile, object profileSet){
