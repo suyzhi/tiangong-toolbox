@@ -39,7 +39,8 @@ namespace TianGongCadSuite {
                 local.Add(lp);
             }
             int busy = 0;
-            foreach (var lp in local) { double d; if (AutoHoleWriter.ExistingHoleAt(plane, part, lp, out d)) busy++; }
+            var spots = AutoHoleWriter.ScanSpots(part); var normal = AutoHoleWriter.PlaneNormal(plane);
+            foreach (var lp in local) { double d; if (spots.At(lp, normal, out d)) busy++; }
             if (busy > 0) return Fallback(target, spec, centres, "有 " + busy + " 个位置本来就有孔，这一排改成逐个打孔（阵列要求每个位置都是空的）。");
 
             Layout layout;
@@ -177,7 +178,8 @@ namespace TianGongCadSuite {
                 if ((int)st != (int)P.FeatureStatusConstants.igFeatureOK) return "阵列状态 " + st + (desc == null ? "" : "（" + desc + "）");
             } catch (Exception e) { return "读不到阵列状态（" + AutoHoleWriter.Friendly(e) + "）"; }
             int missing = 0;
-            foreach (var lp in local) { double d; if (!AutoHoleWriter.ExistingHoleAt(plane, part, lp, out d)) missing++; }
+            var spots = AutoHoleWriter.ScanSpots(part); var normal = AutoHoleWriter.PlaneNormal(plane);
+            foreach (var lp in local) { double d; if (!spots.At(lp, normal, out d)) missing++; }
             return missing == 0 ? "" : missing + " 个孔位上没有孔";
         }
     }

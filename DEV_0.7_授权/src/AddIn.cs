@@ -71,6 +71,7 @@ diagnostics=new Diagnostics(context.Application,()=>Run(registry.Find(1)),()=>Ru
         public void StartTableTests(string output){Result="";dispatcher.BeginInvoke((Action)(()=>{Result=RunTestsMode(output,"--table-cad");}));}
         public void StartLineupTests(string output){Result="";dispatcher.BeginInvoke((Action)(()=>{Result=RunTestsMode(output,"--lineup");}));}
         public void StartLineupReopenTests(string fixture){Result="";dispatcher.BeginInvoke((Action)(()=>{Result=RunTestsMode(fixture,"--lineup-reopen");}));}
+        public void StartSpeedTests(string output){Result="";dispatcher.BeginInvoke((Action)(()=>{Result=RunTestsMode(output,"--autohole-speed");}));}   // 0.7.10 打孔计时（进程内）
 #endif
         public void OpenPanel(){dispatcher.BeginInvoke(Open);}
         public void OpenActivation(){dispatcher.BeginInvoke((Action)(()=>TianGongCadSuite.Licensing.LicenseActivation.OpenStatus()));}

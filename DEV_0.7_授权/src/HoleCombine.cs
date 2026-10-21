@@ -16,25 +16,68 @@ namespace TianGongCadSuite {
     //   · 每个孔各自一个草图集、各挂各的圆边 → 只有种子孔那个行，其余输入孔 igFeatureWarned、参考零件挪了也不跟（L1/L2/L5）；
     //   · 一个轮廓里放全部 Hole2d、IncludeEdge 全部圆边、各自约束到圆心，End 拆成 N 个轮廓（同一个草图集）→ UDP OK、
     //     挪参考零件后**每个孔都跟过去**（L4）。这也正是天工自己的结构，所以不管挂没挂关联，一律这样建轮廓。
-    // 做法：孔照旧逐个打（每个孔位都验过、打孔方向试出来了、原生关联都挂上了）→ 同一张基准面上建一个共享轮廓（N 个孔心 + 圆边）
-    //   → 删第 1 个单孔（别的单孔还在，基准面不会被连带删掉）→ 用拆出来的第 1 个轮廓按已知方向打种子孔 → 删其余单孔 → AddByProfiles。
-    // 任何一步不对都退回单孔：UDP 删掉（种子孔跟着没了）→ 没了的孔按原位置重打。
-    // 注意：一张基准面上的孔全删光，CAD 连基准面一起删（J9：之后在它上面建轮廓 0x800401FD），重打前要重建基准面（调用方 redrill 里做）。
+    // 做法（0.7.10）：**不先打单孔**，直接在打孔基准面上建一个共享轮廓（N 个孔心 + 圆边）→ 用拆出来的第 1 个轮廓打种子孔
+    //   （这一侧打不成就删掉整套轮廓、换另一侧重建）→ AddByProfiles → 核对。CAD 只建 2 个特征（种子孔 + UDP）。
+    //   0.7.9 是先逐个打 N 个单孔、再删掉、再合成：2N+2 次特征重算，20 个孔进程外实测 25 秒（DrillSpeedE2E）。
+    // 任何一步不对：UDP（连种子孔）删掉、轮廓删掉，调用方（AutoHoleWriter.DrillRequests）逐个打 —— 每个孔位单独验、单独报错。
+    // 注意：一张基准面上的孔全删光，CAD 连基准面一起删（J9：之后在它上面建轮廓 0x800401FD），所以删过东西（touched）调用方要重建基准面。
     public static class HoleCombine {
-        // holes：刚打好的同规格单孔；locals：孔心（零件局部）；anchors：原生关联的圆边（没挂的为 null）。
-        // drillSeed(轮廓)：在拆出来的第 1 个轮廓上打种子孔（只能试一次：失败时 CAD 会把轮廓作废）。
-        // redrill(k)：退回单孔时重打第 k 个孔，返回新孔（打不上为 null）。
-        // after：最后每个孔位对应的孔（合成了 = UDP 的输入孔；没合成 = 单孔，重打过的是新对象）。
-        public static P.UserDefinedPattern Run(P.PartDocument part, P.Model model, P.RefPlane plane, IList<P.Hole> holes, IList<V3> locals,
-                                               IList<NativeAnchor> anchors, Func<P.Profile, P.Hole> drillSeed, Func<int, P.Hole> redrill,
-                                               out List<P.Hole> after, out string why){
-            after = new List<P.Hole>(holes); why = "";
-            int n = holes.Count;
-            if (n < 2) return null;
+        // 直接建一个多孔孔特征（0.7.10）。
+        // locals：孔心（零件局部）；anchors：原生关联的圆边（不挂关联的为 null）；data / depthMm：这批孔的规格；sides：种子孔试打的顺序。
+        // inputs：合成后每个孔位对应的输入孔（和 locals 一一对应）。
+        // touched：失败前在模型里建过又删过特征 —— CAD 可能把手里的模型/基准面对象作废了，调用方要重取再逐个打。
+        public static P.UserDefinedPattern Build(P.PartDocument part, P.Model model, P.RefPlane plane, IList<V3> locals, IList<NativeAnchor> anchors,
+                                                 P.HoleData data, double depthMm, IList<P.FeaturePropertyConstants> sides,
+                                                 out List<P.Hole> inputs, out string why, out bool touched){
+            inputs = null; why = ""; touched = false;
+            int n = locals.Count;
+            if (n < 2) { why = "不到 2 个孔"; return null; }
+            var sw = System.Diagnostics.Stopwatch.StartNew(); Timing = "";
+            foreach (var side in sides) {
+                P.ProfileSet set; List<P.Profile> profiles;
+                if (!SharedProfiles(part, plane, locals, anchors, out set, out profiles, out why)) return null;
+                Mark(sw, "轮廓");
+                // 种子孔：拆出来的第 1 个轮廓。只能试一次 —— 这一侧打不成时 CAD 把轮廓作废，删掉这套轮廓、换另一侧重建
+                var seed = AutoHoleWriter.DrillOnProfile(model, profiles[0], data, depthMm, side);
+                if (seed == null) { DeleteSet(set); why = "种子孔打不成"; continue; }
+                AutoHoleWriter.Learned(plane, side);
+                Mark(sw, "种子孔");
+                P.UserDefinedPattern u = null;
+                try {
+                    Array arr = profiles.ToArray();
+                    u = AutoHoleWriter.Attempt("合成孔特征", () => model.UserDefinedPatterns.AddByProfiles(n, arr, seed));
+                    if (u == null) why = "CAD 没有返回孔特征";
+                } catch (Exception e) { Log.Write("HoleCombineAdd", e); why = "合成失败（" + AutoHoleWriter.Friendly(e) + "）"; }
+                Mark(sw, "合成");
+                if (u != null) {
+                    if (Verify(u, part, plane, locals, out inputs, out why)) { Mark(sw, "核对"); return u; }
+                    // 螺纹孔合成后 CAD 先报 igFeatureWarned，重算一次就是 igFeatureOK、几何也对（真机 J7）—— 重算后再核对一次
+                    try { AutoHoleWriter.Attempt("合成·重算", () => model.Recompute()); } catch (Exception e) { Log.Write("HoleCombineRecompute", e); }
+                    string first = why;
+                    if (Verify(u, part, plane, locals, out inputs, out why)) { Log.Write("HoleCombine", "重算后通过（重算前：" + first + "）"); return u; }
+                }
+                // 合不成：UDP（连种子孔）或单独的种子孔删掉、轮廓删掉，交给调用方逐个打
+                touched = true;
+                if (u != null) { try { u.Delete(); } catch (Exception e) { Log.Write("HoleCombineUndo", e); } }
+                else { try { seed.Delete(); } catch (Exception e) { Log.Write("HoleCombineUndo", e); } }
+                DeleteSet(set);
+                inputs = null;
+                return null;
+            }
+            return null;
+        }
 
-            // ① 共享轮廓：N 个孔心（挂关联的孔各自约束到圆边）→ End 拆成 N 个轮廓。删孔之前出错什么都没动
-            P.ProfileSet set = null;
-            List<P.Profile> profiles;
+        // 计时（AutoHoleTiming 日志）
+        public static string Timing = "";
+        static void Mark(System.Diagnostics.Stopwatch sw, string what){ Timing += what + " " + sw.ElapsedMilliseconds + "ms "; sw.Restart(); }
+        public static long AttachMs, IncludeMs, KeypointMs;
+
+        // 共享轮廓：一个轮廓里放 N 个孔心（挂关联的各自约束到复制来的圆边圆心，真机 L4）→ End 拆成同一个草图集里的 N 个轮廓，按孔位排好。
+        // 有一个孔挂不上关联就整个不合（返回 false）：调用方逐个打，挂不上的那个在 DrillOne 里退回属性集关联。
+        static bool SharedProfiles(P.PartDocument part, P.RefPlane plane, IList<V3> locals, IList<NativeAnchor> anchors,
+                                   out P.ProfileSet set, out List<P.Profile> profiles, out string why){
+            set = null; profiles = null; why = "";
+            int n = locals.Count;
             try {
                 set = AutoHoleWriter.Attempt("合成·草图集", () => part.ProfileSets.Add());
                 var ps = set;
@@ -45,9 +88,13 @@ namespace TianGongCadSuite {
                     var h2d = AutoHoleWriter.Attempt("合成·孔心", () => prof.Holes2d.Add(x2, y2));
                     if (anchors != null && anchors[k] != null) {
                         string awhy;
-                        if (!NativeHoleLink.Attach(prof, h2d, anchors[k], out awhy)) throw new InvalidOperationException("第 " + (k + 1) + " 个孔挂不上原生关联：" + awhy);
+                        var aw = System.Diagnostics.Stopwatch.StartNew();
+                        bool ok = NativeHoleLink.Attach(prof, h2d, anchors[k], out awhy);
+                        AttachMs += aw.ElapsedMilliseconds;
+                        if (!ok) throw new InvalidOperationException("第 " + (k + 1) + " 个孔挂不上原生关联：" + awhy);
                     }
                 }
+                Timing += "（挂关联 " + AttachMs + "ms：包含圆边 " + IncludeMs + "ms，约束 " + KeypointMs + "ms）";
                 if (AutoHoleWriter.Attempt("合成·闭合", () => prof.End(P.ProfileValidationType.igProfileClosed)) != 0) throw new InvalidOperationException("轮廓没通过闭合检查");
                 var split = new List<P.Profile>();
                 int pc = ps.Profiles.Count;
@@ -55,61 +102,16 @@ namespace TianGongCadSuite {
                 if (split.Count != n) throw new InvalidOperationException("轮廓拆成了 " + split.Count + " 个，应为 " + n);
                 profiles = OrderProfiles(split, locals);
                 if (profiles == null) throw new InvalidOperationException("拆出来的轮廓和孔位对不上");
+                return true;
             } catch (Exception e) {
                 Log.Write("HoleCombineProfile", e);
-                DeleteSet(set);
+                DeleteSet(set); set = null;
                 why = "建轮廓失败（" + AutoHoleWriter.Friendly(e) + "）";
-                return null;
+                return false;
             }
-
-            // ② 删第 1 个单孔 → 在第 1 个轮廓上打种子孔（同一根轴线上已有孔时 CAD 会拒绝，所以先删）
-            var gone = new List<int>();
-            P.Hole seed = null;
-            try { holes[0].Delete(); gone.Add(0); }
-            catch (Exception e) { Log.Write("HoleCombineDelete", e); why = "删单孔失败（" + AutoHoleWriter.Friendly(e) + "）"; }
-            if (why.Length == 0) {
-                try { seed = drillSeed(profiles[0]); } catch (Exception e) { Log.Write("HoleCombineSeed", e); }
-                if (seed == null) why = "种子孔没打成";
-            }
-            // ③ 删其余单孔
-            for (int k = 1; k < n && why.Length == 0; k++) {
-                try { holes[k].Delete(); gone.Add(k); }
-                catch (Exception e) { Log.Write("HoleCombineDelete", e); why = "删单孔失败（" + AutoHoleWriter.Friendly(e) + "）"; }
-            }
-
-            // ④ 合成
-            P.UserDefinedPattern u = null;
-            if (why.Length == 0) {
-                try {
-                    Array arr = profiles.ToArray();
-                    var s0 = seed;
-                    u = AutoHoleWriter.Attempt("合成孔特征", () => model.UserDefinedPatterns.AddByProfiles(n, arr, s0));
-                    if (u == null) why = "CAD 没有返回孔特征";
-                } catch (Exception e) { Log.Write("HoleCombineAdd", e); why = "合成失败（" + AutoHoleWriter.Friendly(e) + "）"; }
-            }
-            List<P.Hole> inputs = null;
-            if (u != null && Verify(u, part, plane, locals, out inputs, out why)) { after = inputs; return u; }
-            // 螺纹孔合成后 CAD 先报 igFeatureWarned，重算一次就是 igFeatureOK、几何也对（真机 J7）—— 重算后再核对一次
-            if (u != null) {
-                try { AutoHoleWriter.Attempt("合成·重算", () => model.Recompute()); } catch (Exception e) { Log.Write("HoleCombineRecompute", e); }
-                string first = why;
-                if (Verify(u, part, plane, locals, out inputs, out why)) { Log.Write("HoleCombine", "重算后通过（重算前：" + first + "）"); after = inputs; return u; }
-            }
-
-            // ⑤ 退回单孔：UDP（连种子孔）或单独的种子孔删掉、共享轮廓删掉，删掉的单孔按原位置重打
-            if (u != null) { try { u.Delete(); } catch (Exception e) { Log.Write("HoleCombineUndo", e); } }
-            else if (seed != null) { try { seed.Delete(); } catch (Exception e) { Log.Write("HoleCombineUndo", e); } }
-            DeleteSet(set);
-            foreach (int k in gone) {
-                P.Hole again = null;
-                try { again = redrill(k); } catch (Exception e) { Log.Write("HoleCombineRedrill", e); }
-                after[k] = again;
-            }
-            Log.Write("HoleCombine", "退回单孔：" + why + "（重打 " + gone.Count + " 个）");
-            return null;
         }
 
-        // 合成后核对：特征 OK、输入孔数 = N、每个孔位上都有孔；输入孔按孔位排好（和 locals 一一对应）
+        // 合成后核对：特征 OK、输入孔数 = N、每个孔位上都有孔（实体圆边读一遍，见 HoleSpots）；输入孔按孔位排好（和 locals 一一对应）
         static bool Verify(P.UserDefinedPattern u, P.PartDocument part, P.RefPlane plane, IList<V3> locals, out List<P.Hole> inputs, out string why){
             inputs = null; why = "";
             try {
@@ -119,9 +121,11 @@ namespace TianGongCadSuite {
             } catch (Exception e) { why = "读不到合成后的特征状态（" + AutoHoleWriter.Friendly(e) + "）"; return false; }
             var all = Inputs(u);
             if (all.Count != locals.Count) { why = "合成后输入孔 " + all.Count + " 个，应为 " + locals.Count; return false; }
+            var spots = AutoHoleWriter.ScanSpots(part);
+            var normal = AutoHoleWriter.PlaneNormal(plane);
             for (int k = 0; k < locals.Count; k++) {
                 double dia;
-                if (!AutoHoleWriter.ExistingHoleAt(plane, part, locals[k], out dia)) { why = "合成后第 " + (k + 1) + " 个孔位上没有孔"; return false; }
+                if (!spots.At(locals[k], normal, out dia)) { why = "合成后第 " + (k + 1) + " 个孔位上没有孔"; return false; }
             }
             inputs = Order(all, locals);
             return true;
@@ -143,19 +147,12 @@ namespace TianGongCadSuite {
 
         // 输入孔按孔心对到 locals 上（读不出孔心就按原顺序）
         static List<P.Hole> Order(List<P.Hole> inputs, IList<V3> locals){
+            var centres = new List<V3?>();
+            foreach (var h in inputs) { V3 c; centres.Add(CentreOf(h, out c) ? (V3?)c : null); }   // 每个孔只读一次（原来两层循环里反复读）
+            var pick = HoleSpots.Assign(centres, locals, HoleSpots.RadialTolM);
             var result = new P.Hole[locals.Count];
             var used = new bool[inputs.Count];
-            for (int k = 0; k < locals.Count; k++) {
-                int best = -1; double bestD = 0.0005;
-                for (int i = 0; i < inputs.Count; i++) {
-                    if (used[i]) continue;
-                    V3 c;
-                    if (!CentreOf(inputs[i], out c)) continue;
-                    double dd = (c - locals[k]).Length;
-                    if (dd < bestD) { bestD = dd; best = i; }
-                }
-                if (best >= 0) { result[k] = inputs[best]; used[best] = true; }
-            }
+            for (int k = 0; k < locals.Count; k++) if (pick[k] >= 0) { result[k] = inputs[pick[k]]; used[pick[k]] = true; }
             for (int k = 0, i = 0; k < result.Length; k++) {
                 if (result[k] != null) continue;
                 while (i < inputs.Count && used[i]) i++;
@@ -174,17 +171,11 @@ namespace TianGongCadSuite {
         }
         // 拆出来的轮廓按孔心对到 locals 上（第 k 个轮廓 = 第 k 个孔位）；对不上返回 null
         static List<P.Profile> OrderProfiles(List<P.Profile> split, IList<V3> locals){
+            var centres = new List<V3?>();
+            foreach (var pr in split) { V3 c; centres.Add(ProfileCentre(pr, out c) ? (V3?)c : null); }
+            var pick = HoleSpots.Assign(centres, locals, HoleSpots.RadialTolM);
             var result = new P.Profile[locals.Count];
-            var used = new bool[split.Count];
-            for (int k = 0; k < locals.Count; k++) {
-                for (int j = 0; j < split.Count; j++) {
-                    if (used[j]) continue;
-                    V3 c;
-                    if (!ProfileCentre(split[j], out c) || (c - locals[k]).Length > 0.0005) continue;
-                    result[k] = split[j]; used[j] = true; break;
-                }
-                if (result[k] == null) return null;
-            }
+            for (int k = 0; k < locals.Count; k++) { if (pick[k] < 0) return null; result[k] = split[pick[k]]; }
             return new List<P.Profile>(result);
         }
         static bool ProfileCentre(P.Profile prof, out V3 c){

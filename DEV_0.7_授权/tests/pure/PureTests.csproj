@@ -28,6 +28,7 @@
     <Compile Include="../../src/HoleSpecRead.cs" />
     <Compile Include="../../src/HoleLink.cs" />
     <Compile Include="../../src/HoleNativeLinkMath.cs" />
+    <Compile Include="../../src/HoleSpots.cs" />
     <Compile Include="../../src/HoleStandard.cs" />
     <Compile Include="../../src/FormatConvertCore.cs" />
     <Compile Include="../../src/HoleRules.cs" />

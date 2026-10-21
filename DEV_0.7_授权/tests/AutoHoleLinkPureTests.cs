@@ -15,6 +15,34 @@ namespace TianGongCadSuite {
             StandardPure();
             CheckChainPure();
             NativeLinkPure();
+            HoleSpotsPure();
+        }
+
+        // 0.7.10 打孔提速：实体圆边读一遍、孔位在内存里比（HoleSpots），判定口径必须和原来逐个读边的 ExistingHoleAt 一样。
+        static void HoleSpotsPure(){
+            var n = new V3(0, 0, 1);
+            var s = new HoleSpots();
+            s.Add(new V3(0.03, 0.04, 0.01), new V3(0, 0, -1), 0.0033);      // 竖孔孔口（轴线反向也算平行）
+            s.Add(new V3(0.08, 0.04, 0.005), new V3(1, 0, 0), 0.0025);      // 横孔：圆心恰好在 (80,40) 的轴线上，但不是竖孔
+            s.Add(new V3(0.05, 0.05, 0), new V3(0, 0, 1), 0);                // 半径 0 的不收
+            double d;
+            Assert(s.Count == 2, "半径 0 的圆不收（实 " + s.Count + "）");
+            Assert(s.At(new V3(0.03, 0.04, 0), n, out d) && Math.Abs(d - 6.6) < 1e-9, "同轴（不同高度）的竖孔认出来，给出孔口直径 6.6");
+            Assert(s.At(new V3(0.0304, 0.04, 0), n, out d), "径向差 0.4mm 仍算同一个孔位（容差 0.5mm）");
+            Assert(!s.At(new V3(0.0306, 0.04, 0), n, out d), "径向差 0.6mm 不算");
+            Assert(!s.At(new V3(0.08, 0.04, 0), n, out d), "横孔不算这里已经有孔（围栏 FenceHoleE2E 第 4 条）");
+            Assert(s.At(new V3(0.07, 0.04, 0.005), new V3(1, 0, 0), out d), "沿 x 打孔、孔心在横孔轴线上时就算");
+            s.Plan(new V3(0.1, 0.1, 0), n, 5);
+            Assert(s.At(new V3(0.1, 0.1, 0.002), n, out d) && Math.Abs(d - 5) < 1e-9, "这批准备打的孔：同一位置后面的请求算已经有孔");
+            Assert(!new HoleSpots().At(new V3(0, 0, 0), n, out d) && d == 0, "空表：没有孔");
+
+            // 配对：输入孔 / 拆出来的轮廓按孔心一一配到孔位上
+            var found = new List<V3?> { new V3(0.02, 0, 0), null, new V3(0.01, 0, 0), new V3(0.0101, 0, 0) };
+            var want = new List<V3> { new V3(0.01, 0, 0), new V3(0.02, 0, 0), new V3(0.03, 0, 0) };
+            var pick = HoleSpots.Assign(found, want, HoleSpots.RadialTolM);
+            Assert(pick[0] == 2 && pick[1] == 0 && pick[2] == -1, "按最近配、读不出的跳过、超出容差的不配（实 " + string.Join(",", pick.Select(x => x.ToString()).ToArray()) + "）");
+            pick = HoleSpots.Assign(found, new List<V3> { new V3(0.01, 0, 0), new V3(0.01, 0, 0) }, HoleSpots.RadialTolM);
+            Assert(pick[0] == 2 && pick[1] == 3, "一个孔心只配一次：第二个孔位拿次近的");
         }
 
         // 0.7.8 天工原生关联的纯逻辑：子装配矩阵串接、认实例、在零件间复制来的圆边里挑"就是这个孔"的那条。

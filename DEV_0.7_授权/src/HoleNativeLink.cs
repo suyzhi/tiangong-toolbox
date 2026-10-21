@@ -22,17 +22,43 @@ namespace TianGongCadSuite {
     // 走不通的情况（不在顶层装配上下文、实例认不出、进不了原位、斜孔……）一律退回 0.7.3 的属性集关联 + 「同步孔位」，结果里说明。
     public sealed class NativeAnchor {
         public P.InterpartConstruction Copy;
+        public CopyCircles Circles; // 同一个复制的锚点共用的圆边表（null = 每次现读）
         public V3 Centre;   // 要打的孔心（打孔零件局部）
         public V3 Normal;   // 打孔面法向（打孔零件局部）
         public string Label = "";
 
-        // 复制来的圆边里"就是这个孔"的那条。每次现取：打完孔以后旧的边对象可能失效。
+        // 复制来的圆边里"就是这个孔"的那条
         public G.Edge Edge(){
             if (Copy == null) return null;
-            var edges = new List<G.Edge>(); var circles = new List<NativeLinkMath.Circle>();
+            return (Circles ?? new CopyCircles(Copy)).Match(Centre, Normal);
+        }
+    }
+
+    // 一个零件间复制上的全部圆边（0.7.10）：读一遍，这个复制上的所有孔共用。
+    // 原来每个孔（Begin 里一次、Attach 里一次）都把复制的全部边从 CAD 读一遍 —— 20 个孔 × 几十条边 × 每条 3 次 COM 调用。
+    // 对不上时重读一次再比：刚建的复制偶尔还没算完、圆边缺一条（NativeLinkE2E 实测）；打完孔后旧的边对象也可能失效（Attach 包含失败时 Reset）。
+    public sealed class CopyCircles {
+        public readonly P.InterpartConstruction Copy;
+        List<G.Edge> edges; List<NativeLinkMath.Circle> circles;
+        public CopyCircles(P.InterpartConstruction copy){ Copy = copy; }
+        public void Reset(){ edges = null; circles = null; }
+
+        public G.Edge Match(V3 centre, V3 normal){
+            bool justRead = edges == null;
+            if (justRead) Read();
+            double off;
+            int i = NativeLinkMath.Match(circles, centre, normal, out off);
+            if (i >= 0 || justRead) return i < 0 ? null : edges[i];
+            Reset(); Read();
+            i = NativeLinkMath.Match(circles, centre, normal, out off);
+            return i < 0 ? null : edges[i];
+        }
+
+        void Read(){
+            edges = new List<G.Edge>(); circles = new List<NativeLinkMath.Circle>();
             object all = null;
-            try { all = Copy.get_Edges(G.FeatureTopologyQueryTypeConstants.igQueryAll); } catch (Exception e) { Log.Write("NativeAnchorEdges", e); return null; }
-            if (all == null) return null;
+            try { all = Copy.get_Edges(G.FeatureTopologyQueryTypeConstants.igQueryAll); } catch (Exception e) { Log.Write("NativeAnchorEdges", e); return; }
+            if (all == null) return;
             foreach (object o in (System.Collections.IEnumerable)all) {
                 var e = o as G.Edge; if (e == null) continue;
                 G.Circle c = null; try { c = e.Geometry as G.Circle; } catch { }
@@ -41,9 +67,6 @@ namespace TianGongCadSuite {
                 try { c.GetCircleData(ref cc, ref ax, out r); } catch { continue; }
                 edges.Add(e); circles.Add(new NativeLinkMath.Circle(V3.From(cc), V3.From(ax), r));
             }
-            double off;
-            int i = NativeLinkMath.Match(circles, Centre, Normal, out off);
-            return i < 0 ? null : edges[i];
         }
     }
 
@@ -194,6 +217,7 @@ namespace TianGongCadSuite {
             readonly F.Application app; readonly A.AssemblyDocument top;
             readonly Dictionary<string, object> refs = new Dictionary<string, object>(StringComparer.Ordinal);
             readonly Dictionary<string, P.InterpartConstruction> copies = new Dictionary<string, P.InterpartConstruction>(StringComparer.OrdinalIgnoreCase);
+            readonly List<CopyCircles> circleTables = new List<CopyCircles>();
             public readonly List<string> Notes = new List<string>();
             public int CopiesMade;
             public Session(F.Application application, A.AssemblyDocument assembly){ app = application; top = assembly; }
@@ -202,6 +226,7 @@ namespace TianGongCadSuite {
 
             public InPlace Begin(TargetFace t, IList<AutoHoleWriter.HoleRequest> requests, HoleUndo undo){
                 if (t == null || t.Part == null || requests == null || requests.Count == 0) return null;
+                var sw = System.Diagnostics.Stopwatch.StartNew();
                 // ① 参考孔 → 装配引用（进原位之前做：引用都对着顶层装配造）
                 var need = new List<KeyValuePair<AutoHoleWriter.HoleRequest, string>>();
                 foreach (var r in requests) {
@@ -224,6 +249,7 @@ namespace TianGongCadSuite {
                     if (refs[key] != null) need.Add(new KeyValuePair<AutoHoleWriter.HoleRequest, string>(r, key));
                 }
                 if (need.Count == 0) return null;
+                long refsMs = sw.ElapsedMilliseconds;
 
                 // ② 进原位编辑打孔零件（已经在原位编辑它了就不用进）
                 InPlace s = null;
@@ -241,6 +267,7 @@ namespace TianGongCadSuite {
                     return null;
                 }
                 var part = s.Part ?? t.Part;
+                long enterMs = sw.ElapsedMilliseconds;
 
                 // ③ 零件间复制（同一个打孔零件 + 同一个来源只建一次）+ 每个孔配上圆边
                 V3 normalLocal;
@@ -252,7 +279,7 @@ namespace TianGongCadSuite {
                     var copy = CopyFor(part, kv.Value, r.From, undo, out made);
                     if (copy == null) continue;
                     if (made) s.Made.Add(copy);
-                    var anchor = new NativeAnchor { Copy = copy, Centre = t.Placement.InversePoint(r.Centre), Normal = normalLocal, Label = r.Source };
+                    var anchor = new NativeAnchor { Copy = copy, Circles = TableFor(copy), Centre = t.Placement.InversePoint(r.Centre), Normal = normalLocal, Label = r.Source };
                     G.Edge e = null;
                     try { e = anchor.Edge(); } catch { }
                     // 子装配里两级原位编辑时，刚建的零件间复制偶尔还没算完、圆边缺一条（NativeLinkE2E 实测一次）：等 CAD 空闲一下再取
@@ -260,8 +287,16 @@ namespace TianGongCadSuite {
                     if (e == null) { Note("零件间复制里找不到和孔心对得上的圆边（孔心要在参考孔轴线上）"); continue; }
                     r.Anchor = anchor; anchored++;
                 }
+                Log.Write("AutoHoleTiming", "关联准备：参考孔引用 " + refsMs + "ms，进原位 " + (enterMs - refsMs) + "ms，零件间复制 + 圆边 " + (sw.ElapsedMilliseconds - enterMs) + "ms");
                 if (anchored == 0) { Leave(app, s); return null; }
                 return s;
+            }
+
+            CopyCircles TableFor(P.InterpartConstruction copy){
+                foreach (var t in circleTables) if (ReferenceEquals(t.Copy, copy)) return t;
+                var n = new CopyCircles(copy);
+                circleTables.Add(n);
+                return n;
             }
 
             public void End(InPlace s){ End(s, null); }
@@ -275,6 +310,7 @@ namespace TianGongCadSuite {
                         if (used) continue;
                         try { c.Delete(); } catch (Exception e) { Log.Write("NativeCopyUnused", e); continue; }
                         foreach (var kv in new List<KeyValuePair<string, P.InterpartConstruction>>(copies)) if (ReferenceEquals(kv.Value, c)) copies.Remove(kv.Key);
+                        circleTables.RemoveAll(t => ReferenceEquals(t.Copy, c));
                         CopiesMade--;
                     }
                 }
@@ -349,8 +385,18 @@ namespace TianGongCadSuite {
             if (edge == null) { why = "零件间复制里找不到这个孔的圆边"; return false; }
             object inc = null;
             int circles = Count(() => profile.Circles2d.Count), arcs = Count(() => profile.Arcs2d.Count), lines = Count(() => profile.Lines2d.Count);
+            var iw = System.Diagnostics.Stopwatch.StartNew();
             try { profile.IncludeEdge(edge, out inc); }
-            catch (Exception e) { why = "包含圆边失败（" + Friendly(e) + "）"; return false; }
+            catch (Exception e) {
+                // 圆边表里的边对象可能已经失效（复制重算过）：重读一遍再包含一次
+                if (anchor.Circles == null) { why = "包含圆边失败（" + Friendly(e) + "）"; return false; }
+                anchor.Circles.Reset();
+                edge = anchor.Edge();
+                if (edge == null) { why = "包含圆边失败（" + Friendly(e) + "）"; return false; }
+                try { profile.IncludeEdge(edge, out inc); }
+                catch (Exception e2) { why = "包含圆边失败（" + Friendly(e2) + "）"; return false; }
+            }
+            HoleCombine.IncludeMs += iw.ElapsedMilliseconds;
             object curve = null;
             int key = (int)SolidEdgeConstants.KeypointIndexConstants.igCircleCenter;
             try { if (profile.Circles2d.Count > circles) curve = profile.Circles2d.Item(profile.Circles2d.Count); } catch { }
@@ -359,7 +405,8 @@ namespace TianGongCadSuite {
             }
             if (curve == null && inc != null) curve = inc;
             if (curve == null) { why = "包含进来的圆边读不到"; Clean(profile, inc, circles, arcs, lines); return false; }
-            try { ((S.Relations2d)profile.Relations2d).AddKeypoint(hole2d, 0, curve, key, M); }
+            var kw = System.Diagnostics.Stopwatch.StartNew();
+            try { ((S.Relations2d)profile.Relations2d).AddKeypoint(hole2d, 0, curve, key, M); HoleCombine.KeypointMs += kw.ElapsedMilliseconds; }
             catch (Exception e) {
                 why = "孔心约束到圆心失败（" + Friendly(e) + "）";
                 Clean(profile, inc, circles, arcs, lines);

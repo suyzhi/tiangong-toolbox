@@ -17,6 +17,36 @@
 
 ---
 
+# 2026-10-21（0.7.10）：打孔提速
+
+用户：「打孔耗时太长，至少 20 个孔要在 5s 内打完」。计时用 `tools/hole-feature-probe/DrillSpeedE2E.cs`（进程外，场景在 `tests/AutoHoleSpeedTests.cs`），
+插件日志里每张面一行 `AutoHoleTiming` 分段计时。
+
+| 场景（20 个孔，进程外计时） | 0.7.9 | 0.7.10 |
+| --- | --- | --- |
+| 一个零件，保持关联（默认） | 25.6 s | 3.9 s |
+| 一个零件，不关联 | 8.1 s | 1.1 s |
+| 一个零件，两种规格（12+8），保持关联 | 25.4 s | 4.0 s |
+| 4 个零件各 5 孔，保持关联 | — | 9.7 s（每个零件进原位 ~0.9 s + 退出 ~0.7 s，是天工自己的开销） |
+
+改了什么：
+* **多孔孔特征直接建**（`HoleCombine.Build`）：N 个孔心画进一个共享轮廓 → 种子孔 → `AddByProfiles`，CAD 只建 2 个特征。
+  0.7.9 是先逐个打 N 个单孔、再删 N 个、再合成（2N+2 次特征重算）。合不成才删干净、逐个打（每个孔位单独验、单独报错）。
+* **已有孔只读一遍实体**（`HoleSpots`）：原来每个孔前后各把实体全部边读一遍（O(孔数×边数) 次 COM），合成后核对又每孔一遍。
+* 同规格只造一个 HoleData；原生关联的圆边按零件间复制缓存（`CopyCircles`）；拆出来的轮廓/输入孔配对先读孔心再在内存里配。
+* 种子孔/新面先试上次打成的那一侧（`SideOrder`）。
+* **打孔期间关掉 CAD 屏幕刷新**（`AutoHoleForm.ScreenUpdating`，finally 里恢复）：单零件保持关联 6.3 s → 3.9 s。
+* 修了一个老 bug：一批打到几个零件上时「撤销本次打孔」删不掉第一个零件的孔 —— `HoleUndo` 的引用表只按 SystemName 存，
+  不同零件里的 SystemName 一样，被覆盖了。现在键 = 零件 + SystemName（bars4 实测撤销干净）。
+
+没做完（下次接着）：
+* **进程内计时**：`PanelTests.exe --autohole-speed` + `Diagnostics.StartSpeedTests`（开发构建）+ 驱动 `tools/hole-feature-probe/SpeedInProc.exe`
+  （要先把开发构建注册成加载项，跑完再装回正式版）。驱动已补上"先建空装配插件才连上"，还没跑出结果。
+* 多零件（每个零件进出原位 ~1.6 s）还超 5 s：可以研究不退回装配直接切到下一个零件原位编辑、或少等一点。
+* 其它打孔回归（NativeLinkE2E / CheckPatternE2E / EditPatternE2E / NewFeaturesE2E / LinkSyncE2E）已对新 DLL 编好（%TEMP%\tgspeed-new），还没跑。
+
+---
+
 # 2026-10-20（0.7.9）：天工原生关联孔（锁链）· 一个孔特征里多个孔
 
 ## 原生关联（`src/HoleNativeLink.cs`、`HoleNativeLinkMath.cs`）

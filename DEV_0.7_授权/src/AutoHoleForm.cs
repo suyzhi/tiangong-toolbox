@@ -1145,6 +1145,10 @@ namespace TianGongCadSuite {
                 var outcomes = new List<ResultList.Item>();
                 var batchUndo = new HoleUndo();
                 var resolved0 = new List<TargetFace>();   // 这一批真正打过的零件（收尾时作废它们的圆缓存）
+                // 打孔期间关掉 CAD 的屏幕刷新：共享轮廓里每加一个孔心、包含一条圆边、加一个约束 CAD 都要重画一次（0.7.10 计时），
+                // 打完（含出错）一定恢复成原来的样子
+                bool screenWas = ScreenUpdating(false);
+                try {
                 for (int ti = 0; ti < targets.Count; ti++) {
                     var t = ResolvedFace(ti);
                     var partName = t.PartName != null && t.PartName.Length > 0 ? t.PartName : "零件";
@@ -1164,6 +1168,7 @@ namespace TianGongCadSuite {
                     if (requests.Count == 0) continue;
                     // 天工原生关联：进原位编辑这个零件、建零件间复制、给每个孔配圆边（挂不上的孔 Anchor 为空）
                     NativeHoleLink.InPlace inPlace = null;
+                    var faceClock = System.Diagnostics.Stopwatch.StartNew();
                     if (native != null) {
                         SetStatus("正在给「" + partName + "」建立与参考孔的关联…", Ui.Accent);
                         try { inPlace = native.Begin(t, requests, batchUndo); }
@@ -1180,9 +1185,12 @@ namespace TianGongCadSuite {
                     // 打孔在主进程内完成。实测（2026-09-27）：进程内、跨进程都能写模型；
                     // 真正会失败的是"往已经有孔的位置再打"——那由 Friendly() 和预检给出人话提示。
                     resolved0.Add(t);   // 打完要作废这些零件的圆缓存（见下）
+                    long prepMs = faceClock.ElapsedMilliseconds, drillMs = 0;
                     DrillResult res;
-                    try { res = AutoHoleWriter.DrillRequests(t, requests); }
+                    try { res = AutoHoleWriter.DrillRequests(t, requests); drillMs = faceClock.ElapsedMilliseconds - prepMs; }
                     finally { if (inPlace != null) { try { native.End(inPlace, requests); } catch (Exception e) { Log.Write("AutoHoleNativeEnd", e); } } }
+                    Log.Write("AutoHoleTiming", partName + " " + requests.Count + " 个孔：关联准备 " + prepMs + "ms，打孔 " + drillMs
+                              + "ms，退出原位 " + (faceClock.ElapsedMilliseconds - prepMs - drillMs) + "ms，合计 " + faceClock.ElapsedMilliseconds + "ms");
                     made += res.Created; failed += res.Failures.Count; already += res.AlreadyOk; linked += res.Linked;
                     nativeLinked += res.NativeLinked; nativeMissed += res.NativeMissed;
                     foreach (var note in res.Notes) AddProblem(problems, note);
@@ -1192,6 +1200,7 @@ namespace TianGongCadSuite {
                     outcomes.AddRange(res.Outcomes);
                     batchUndo.Absorb(res.Undo);
                 }
+                } finally { ScreenUpdating(screenWas); }
                 foreach (var why in unlinked) AddProblem(problems, "有的孔没能关联参考孔：" + why + "（孔照常打好了，只是参考零件挪动后不会自动跟上）");
                 if (native != null) foreach (var n in native.Notes) AddProblem(problems, "天工原生关联：" + n + "（这些孔改用插件自己的关联记录，参考零件挪动后点「同步孔位」）");
                 if (nativeMissed > 0) AddProblem(problems, nativeMissed + " 个孔没能挂上天工原生关联（孔照常打好了）");
@@ -1258,6 +1267,14 @@ namespace TianGongCadSuite {
                 LastResult = "打孔中断：" + e.Message;
                 if (!SuppressDialogs) MessageBox.Show(this, e.Message, "自动打孔", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+        }
+
+        // 设 CAD 的屏幕刷新开关，返回原来的值（读不到当作开着）
+        bool ScreenUpdating(bool on){
+            bool was = true;
+            try { was = app.ScreenUpdating; } catch { }
+            try { if (was != on) app.ScreenUpdating = on; } catch (Exception e) { Log.Write("AutoHoleScreen", e.Message); }
+            return was;
         }
 
         // 改配做规则：保存后，已经点好的参考孔按新规则重推规格（用户改过的深度/倒角/螺纹深度保留）

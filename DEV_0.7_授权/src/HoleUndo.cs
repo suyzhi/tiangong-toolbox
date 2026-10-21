@@ -36,8 +36,10 @@ namespace TianGongCadSuite {
         }
 
         readonly List<Entry> entries = new List<Entry>();
-        // 新建孔特征的 COM 引用（SystemName → 孔）。孔被「改孔型」换过 HoleData 以后 SystemName 会变（真机实测），
+        // 新建孔特征的 COM 引用（零件 + SystemName → 孔）。孔被「改孔型」换过 HoleData 以后 SystemName 会变（真机实测），
         // 按旧 SystemName 找不到时用引用兜底，免得"改过孔型再撤销本次打孔"删不掉。
+        // 键必须带零件：不同零件里的特征 SystemName 是一样的（都从「… 孔 1」编起）。0.7.10 以前只按 SystemName 存，
+        // 一批打到几个零件上时后一个零件把前一个的引用覆盖掉，撤销时第一个零件的孔删不掉（DrillSpeedE2E bars4 实测）。
         readonly Dictionary<string, P.Hole> refs = new Dictionary<string, P.Hole>(StringComparer.Ordinal);
         // 多孔特征同理：SystemName 跟着孔型走（「3-6 简单孔 1」），改过孔型就按引用找
         readonly Dictionary<string, P.UserDefinedPattern> multiRefs = new Dictionary<string, P.UserDefinedPattern>(StringComparer.Ordinal);
@@ -59,7 +61,7 @@ namespace TianGongCadSuite {
             try { return part.Name ?? ""; } catch { return ""; }
         }
 
-        public void Hole(P.PartDocument part, P.Hole hole){ string s = Sys(hole); if (s.Length > 0) { For(part).Holes.Add(s); refs[s] = hole; } }
+        public void Hole(P.PartDocument part, P.Hole hole){ string s = Sys(hole); if (s.Length > 0) { For(part).Holes.Add(s); refs[RefKey(part, s)] = hole; } }
         public void Copy(P.PartDocument part, P.InterpartConstruction copy){ string s = SysOf(copy); if (s.Length > 0) For(part).Copies.Add(s); }
         public void Cutout(P.PartDocument part, P.ExtrudedCutout cut){ string s = SysOf(cut); if (s.Length > 0) For(part).Cutouts.Add(s); }
         public void Group(P.PartDocument part, P.FeatureGroup group){ string s = SysOf(group); if (s.Length > 0) For(part).Groups.Add(s); }
@@ -71,11 +73,11 @@ namespace TianGongCadSuite {
         // 多孔合一以后：这批单孔不再单独记 —— 合成了记多孔特征；退回单孔记重打出来的孔（种子孔没动的照旧）
         public void Combined(P.PartDocument part, IList<string> oldSys, P.UserDefinedPattern multi, IList<P.Hole> now){
             var e = For(part);
-            foreach (var s in oldSys) { e.Holes.Remove(s); refs.Remove(s); }
+            foreach (var s in oldSys) { e.Holes.Remove(s); refs.Remove(RefKey(part, s)); }
             if (multi != null) {
                 string s = HoleGrouping.Sys(multi);
                 if (s.Length == 0) return;
-                e.Multis.Add(s); e.MultiHoles += now.Count; multiRefs[s] = multi;
+                e.Multis.Add(s); e.MultiHoles += now.Count; multiRefs[RefKey(part, s)] = multi;
                 return;
             }
             foreach (var h in now) if (h != null) Hole(part, h);
@@ -97,9 +99,9 @@ namespace TianGongCadSuite {
         public List<KeyValuePair<P.PartDocument, string>> Created(){
             var list = new List<KeyValuePair<P.PartDocument, string>>();
             foreach (var e in entries) {
-                foreach (var s in e.Holes) list.Add(new KeyValuePair<P.PartDocument, string>(e.Part, Current(s)));
+                foreach (var s in e.Holes) list.Add(new KeyValuePair<P.PartDocument, string>(e.Part, Current(e.Part, s)));
                 foreach (var s in e.Patterns) list.Add(new KeyValuePair<P.PartDocument, string>(e.Part, s));
-                foreach (var s in e.Multis) list.Add(new KeyValuePair<P.PartDocument, string>(e.Part, CurrentMulti(s)));
+                foreach (var s in e.Multis) list.Add(new KeyValuePair<P.PartDocument, string>(e.Part, CurrentMulti(e.Part, s)));
             }
             return list;
         }
@@ -148,7 +150,7 @@ namespace TianGongCadSuite {
                 // ①b 删多孔特征（输入孔跟着一起删）
                 int perMulti = e.Multis.Count == 0 ? 0 : e.MultiHoles / e.Multis.Count;
                 for (int i = e.Multis.Count - 1; i >= 0; i--) {
-                    var u = MultiRef(e.Multis[i]) ?? FindMulti(model, e.Multis[i]);
+                    var u = MultiRef(e.Part, e.Multis[i]) ?? FindMulti(model, e.Multis[i]);
                     if (u == null) { o.Missing += perMulti; continue; }
                     int count = HoleCombine.CountOf(u);
                     try { u.Delete(); o.Removed += count; }
@@ -165,7 +167,7 @@ namespace TianGongCadSuite {
                 }
                 // ③ 删新孔、新腰孔（倒着删：后建的先删）
                 for (int i = e.Holes.Count - 1; i >= 0; i--) {
-                    var h = Ref(e.Holes[i]) ?? FindHole(model, e.Holes[i]);
+                    var h = Ref(e.Part, e.Holes[i]) ?? FindHole(model, e.Holes[i]);
                     if (h == null) { o.Missing++; continue; }
                     try { h.Delete(); o.Removed++; }
                     catch (Exception ex) { o.Failed++; Log.Write("HoleUndoDelete", ex); o.Notes.Add(e.PartName + "：有一个孔没能删除（" + AutoHoleWriter.Friendly(ex) + "）"); }
@@ -210,9 +212,10 @@ namespace TianGongCadSuite {
             for (int i = 1; i <= n; i++) { try { var h = model.Holes.Item(i); if (Sys(h) == sys) return h; } catch { } }
             return null;
         }
-        P.Hole Ref(string sys){ P.Hole h; return refs.TryGetValue(sys, out h) && HoleEditUndo.Alive(h) ? h : null; }
+        static string RefKey(P.PartDocument part, string sys){ return Key(part) + "|" + sys; }
+        P.Hole Ref(P.PartDocument part, string sys){ P.Hole h; return refs.TryGetValue(RefKey(part, sys), out h) && HoleEditUndo.Alive(h) ? h : null; }
         // 记下时的 SystemName → 现在的（孔被改过孔型就变了）
-        string Current(string sys){ var h = Ref(sys); return h == null ? sys : Sys(h); }
+        string Current(P.PartDocument part, string sys){ var h = Ref(part, sys); return h == null ? sys : Sys(h); }
         static P.Pattern FindPattern(P.Model model, string sys){
             int n = 0; try { n = model.Patterns.Count; } catch { }
             for (int i = 1; i <= n; i++) { try { var p = model.Patterns.Item(i); if (HoleGrouping.Sys(p) == sys) return p; } catch { } }
@@ -223,8 +226,8 @@ namespace TianGongCadSuite {
             for (int i = 1; i <= n; i++) { try { var u = model.UserDefinedPatterns.Item(i); if (HoleGrouping.Sys(u) == sys) return u; } catch { } }
             return null;
         }
-        P.UserDefinedPattern MultiRef(string sys){ P.UserDefinedPattern u; return multiRefs.TryGetValue(sys, out u) && HoleGrouping.Sys(u).Length > 0 ? u : null; }
-        string CurrentMulti(string sys){ var u = MultiRef(sys); return u == null ? sys : HoleGrouping.Sys(u); }
+        P.UserDefinedPattern MultiRef(P.PartDocument part, string sys){ P.UserDefinedPattern u; return multiRefs.TryGetValue(RefKey(part, sys), out u) && HoleGrouping.Sys(u).Length > 0 ? u : null; }
+        string CurrentMulti(P.PartDocument part, string sys){ var u = MultiRef(part, sys); return u == null ? sys : HoleGrouping.Sys(u); }
         static P.FeatureGroup FindGroup(P.Model model, string sys){
             int n = 0; try { n = model.FeatureGroups.Count; } catch { }
             for (int i = 1; i <= n; i++) { try { var g = model.FeatureGroups.Item(i); if (SysOf(g) == sys) return g; } catch { } }
