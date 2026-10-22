@@ -662,12 +662,23 @@ namespace TianGongCadSuite {
         // 加一个打孔面（老行为）。known 非空时不再重复解析面片。
         void AddTargetFace(object selected, TargetFace known){
             var t = known != null ? known : AutoHoleReader.ReadTarget(selected);
-            foreach (var existing in targets) {
+            for (int i = 0; i < targets.Count; i++) {
+                bool same = false;
                 try {
-                    var old = AutoHoleReader.ReadTarget(existing);
-                    if (old.Part == t.Part && old.Face.ID == t.Face.ID) throw new ArgumentException("这个面已经选过了。");
-                } catch (ArgumentException) { throw; }
-                catch { }    // 老面片已经失效（打完孔了）：判断不了就当它不是重复的
+                    var old = AutoHoleReader.ReadTarget(targets[i]);
+                    same = old.Part == t.Part && old.Face.ID == t.Face.ID;
+                } catch { }    // 老面片已经失效（打完孔了）：判断不了就当它不是重复的
+                if (!same) continue;
+                // 同一张面再点一次 = 用新点的这次换掉旧的（0.7.13 现场：打孔失败提示"请重新点一次这个面"，
+                // 用户照做却被"这个面已经选过了"挡回去，后面每次都拿旧的面数据重试，一直失败）
+                targets[i] = selected;
+                targetLabels[i] = FaceLabel(t);
+                while (resolved.Count <= i) resolved.Add(null);
+                resolved[i] = t;
+                drilledOnce = false;
+                RefreshAll();
+                SetStatus("已重新读取打孔面：" + FaceLabel(t), Ui.Ok);
+                return;
             }
             targets.Add(selected);
             targetLabels.Add(FaceLabel(t));
@@ -1299,6 +1310,8 @@ namespace TianGongCadSuite {
                 RefreshPreview();
             } catch (Exception e) {
                 Log.Write("AutoHoleDrill", e);
+                // 中途失败也可能已经进出过原位编辑：面片缓存作废，下次从用户点的引用重读（不然每次重试都拿同一份旧面数据）
+                resolved.Clear();
                 busy = false; run.Text = "开始打孔"; UseWaitCursor = false;
                 try { if (hadCommand && command == null) StartPicking(); } catch { }
                 SetStatus(e.Message, Ui.Bad);

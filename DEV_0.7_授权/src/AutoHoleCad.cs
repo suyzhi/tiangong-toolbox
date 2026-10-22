@@ -323,8 +323,11 @@ namespace TianGongCadSuite {
             }
 
             // ② 已有的基准面里找共面的（用户自己建的基准面、或平行于默认基准面的情况）
-            var existing = FindCoplanar(part, fpt, fnv);
-            if (usable(existing)) { PlaneCache[key] = existing; return existing; }
+            //    要看**所有**共面的，不能只看第一张：0.7.13 现场 02-23 的打孔面正好在零件基准面 x=0 上，
+            //    基准面法向扎进材料（不能用）；上一次打孔建的那张（朝外、能用）排在后面。只看第一张就会去 ③ 再建一张，
+            //    而面上已经有一张重合的基准面时 ③ 建出来的是死对象（读不了位置、删不掉）——打一次、撤销、再打就一直失败。
+            var existing = FindCoplanar(part, fpt, fnv, usable);
+            if (existing != null) { PlaneCache[key] = existing; return existing; }
 
             // ③ 直接拿面片建（距离给 0）：位置天然精确，法向跟着面片的外法向走 —— 首选。
             //    实测面片建出来的这张：位置偏差 0mm、法向与面片外法向点积 = 1，不论
@@ -379,6 +382,10 @@ namespace TianGongCadSuite {
                     }
                 }
             }
+            Info("建不出基准面：零件 " + SafeName(part) + " 实体 " + target.Body + "/" + PartBodies.Count(part)
+                 + "，面(局部) " + fpt + " 法向 " + fnv + "，外法向 " + outward + (knowReversed ? "" : "（问不出，猜的）")
+                 + "，平行基准面 " + (parallel == null ? "无" : "有") + "，基准面共 " + SafeCount(part) + " 张（与面重合 "
+                 + CountCoplanar(part, fpt, fnv) + " 张）");
             throw new InvalidOperationException("无法在所选面上建立打孔基准面（位置/朝向都不对）。请重新点一次这个面再打。");
         }
 
@@ -393,7 +400,10 @@ namespace TianGongCadSuite {
             return why.Contains("0x80010108") || why.Contains("断开") || why.Contains("0x800401FD")
                 || why.Contains("0x800401FB") || why.Contains("RPC_E_DISCONNECTED") || why.Contains("CO_E_OBJNOT");
         }
-        internal static void Info(string s){ Console.WriteLine("INFO " + s); }
+        // 也写进 panel.log：插件在天工里面跑时控制台谁也看不到（0.7.13 现场"位置/朝向都不对"就是因为这几行没留下来，查不出是哪条没过）
+        internal static void Info(string s){ Console.WriteLine("INFO " + s); Log.Write("AutoHoleInfo", s); }
+        static string SafeName(P.PartDocument part){ try { return part.Name; } catch { return "?"; } }
+        static int SafeCount(P.PartDocument part){ try { return part.RefPlanes.Count; } catch { return -1; } }
 
         // 把 COM 错误翻译成用户看得懂的话（原始 HRESULT 照样保留在日志里）
         public static string Friendly(Exception e){
@@ -549,14 +559,20 @@ namespace TianGongCadSuite {
             }
         }
 
-        static P.RefPlane FindCoplanar(P.PartDocument part, V3 point, V3 normal){
+        static int CountCoplanar(P.PartDocument part, V3 point, V3 normal){
+            int n = 0;
+            FindCoplanar(part, point, normal, rp => { n++; return false; });
+            return n;
+        }
+
+        static P.RefPlane FindCoplanar(P.PartDocument part, V3 point, V3 normal, Func<P.RefPlane, bool> accept){
             foreach (var rp in AllPlanes(part)) {
                 try {
                     Array rn = new double[3], rr = new double[3];
                     rp.GetNormal(ref rn); rp.GetRootPoint(ref rr);
                     var rnv = V3.From(rn).Unit();
                     if (Math.Abs(Math.Abs(rnv.Dot(normal)) - 1) > 1e-6) continue;         // 不平行
-                    if (Math.Abs((V3.From(rr) - point).Dot(normal)) < 1e-6) return rp;      // 共面（0.001mm 容差）
+                    if (Math.Abs((V3.From(rr) - point).Dot(normal)) < 1e-6 && accept(rp)) return rp;   // 共面（0.001mm 容差）且能用
                 } catch { }
             }
             return null;
@@ -1112,7 +1128,10 @@ namespace TianGongCadSuite {
                     double distance=Math.Abs((V3.From(point)-localPoint).Dot(localNormal));
                     if(distance<best){best=distance;face=candidate;}
                 }
-                if(face==null||best>1e-6)return target;                      // 找不到同一张面：别硬换
+                if(face==null||best>1e-6){                                   // 找不到同一张面：别硬换
+                    Info("原位编辑：在「"+targetName+"」实体 "+bodyIndex+"/"+PartBodies.Count(active)+" 里找不到所选的面（最近 "+(face==null?"无":(best*1000.0).ToString("0.###")+"mm")+"），沿用装配里的面");
+                    return target;
+                }
                 var anchored=new TargetFace();
                 anchored.Plane=target.Plane;
                 anchored.Face=face;

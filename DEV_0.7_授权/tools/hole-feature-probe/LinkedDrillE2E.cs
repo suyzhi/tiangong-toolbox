@@ -98,7 +98,7 @@ class LinkedDrillE2E {
         TianGongCadSuite.Licensing.LicenseTestHooks.GateOverride = 0;
         DrillFilter.Register();
         string asmPath = args[1], want = args[2];
-        int max = args.Length > 3 ? int.Parse(args[3]) : 2;
+        int max = 2; if (args.Length > 3 && !int.TryParse(args[3], out max)) max = 2;
         try { app = (F.Application)Marshal.GetActiveObject("SolidEdge.Application"); }
         catch (Exception e) { L("连不上 CAD：" + e.Message); return 2; }
         try { app.DisplayAlerts = false; } catch { }
@@ -112,7 +112,19 @@ class LinkedDrillE2E {
             List<string> warn; List<HoleRecord> shafts; List<AssemblyPart> parts;
             var holes = AutoHoleWriter.CollectAssemblyHoles(asm, out warn, out shafts, out parts);
             L("零件实例 " + parts.Count + "，孔 " + holes.Count);
-            var target = want == "*" ? AutoPick(asm, parts, holes) : parts.FirstOrDefault(p => { try { return p.Part.FullName.IndexOf(want, StringComparison.OrdinalIgnoreCase) >= 0; } catch { return false; } });
+            // ref=<参考零件实例名关键字>（0.7.13 现场「支撑条.par:8 → 02-23.par:1」）：只用这个零件上的孔，
+            // 目标按实例名（含子装配路径）匹配，几个实例都匹配时取参考孔穿过最多的那个
+            string refWant = args.Skip(3).Where(a => a.StartsWith("ref=")).Select(a => a.Substring(4)).FirstOrDefault();
+            if (refWant != null) {
+                holes = holes.Where(h => h.PartName.IndexOf(refWant, StringComparison.OrdinalIgnoreCase) >= 0 || h.PartName.IndexOf(want, StringComparison.OrdinalIgnoreCase) >= 0).ToList();
+                L("参考零件「" + refWant + "」上的孔 " + holes.Count(h => h.PartName.IndexOf(refWant, StringComparison.OrdinalIgnoreCase) >= 0) + " 个");
+                foreach (var h in holes.Where(h => h.PartName.IndexOf(refWant, StringComparison.OrdinalIgnoreCase) >= 0)) L("   " + h);
+            }
+            var matches = parts.Where(p => p.Name.IndexOf(want, StringComparison.OrdinalIgnoreCase) >= 0).ToList();
+            if (refWant != null) foreach (var m in matches) L("   目标候选 " + m.Name);
+            var target = want == "*" ? AutoPick(asm, parts, holes)
+                : refWant != null ? matches.OrderByDescending(m => holes.Count(h => h.PartName != m.Name && h.Selection != null && Crosses(m, h))).FirstOrDefault()
+                : parts.FirstOrDefault(p => { try { return p.Part.FullName.IndexOf(want, StringComparison.OrdinalIgnoreCase) >= 0; } catch { return false; } });
             if (target == null) { L("找不到含「" + want + "」的零件；装配里的零件："); foreach (var p in parts.Take(80)) L("   " + p.Name); return 3; }
             bool has = false; try { target.Part.HasInterpartLinks(ref has); } catch { }
             string ctx = ""; try { target.Part.GetInContextAssemblyNameForInterpartLinks(ref ctx); } catch { }
@@ -131,7 +143,7 @@ class LinkedDrillE2E {
             }
             L("轴线穿过目标零件平面的参考孔 " + cands.Count + " 个");
             int tried = 0;
-            if (args.Length > 4 && args[4] == "multi") {
+            if (args.Skip(3).Contains("multi")) {
                 // 一次打一批（现场是 17 个孔一次打）：按落在哪张面分组，取孔最多的那张面，最多 20 个、轴线不重复
                 var byFace = new Dictionary<int, List<HoleRecord>>();
                 foreach (var h in cands) {
@@ -145,10 +157,12 @@ class LinkedDrillE2E {
                 }
                 var best = byFace.OrderByDescending(kv => kv.Value.Count).FirstOrDefault();
                 L("一批打：面 " + best.Key + " 上 " + (best.Value == null ? 0 : best.Value.Count) + " 个参考孔（共 " + byFace.Count + " 张面）");
+                if (args.Skip(3).Contains("stale") && best.Value != null) { Stale(asm, best.Value, target, targetFull); tried++; cands.Clear(); best = default(KeyValuePair<int, List<HoleRecord>>); }
                 foreach (var keep in new[]{ true, false }) {
                     if (best.Value == null) break;
                     parts = AssemblyPart.List(asm, new List<string>());
-                    target = parts.First(p => { try { return string.Equals(p.Part.FullName, targetFull, StringComparison.OrdinalIgnoreCase); } catch { return false; } });
+                    string targetName = target.Name;
+                    target = parts.FirstOrDefault(p => p.Name == targetName) ?? parts.First(p => { try { return string.Equals(p.Part.FullName, targetFull, StringComparison.OrdinalIgnoreCase); } catch { return false; } });
                     G.Face face = null; try { face = TargetFace(target, best.Value[0]); } catch { }
                     if (face == null) { L("面找不回来了"); fail++; break; }
                     tried++;
@@ -221,6 +235,47 @@ class LinkedDrillE2E {
         }
         return null;
     }
+
+    // 0.7.13 现场：窗口 A 先点好面，期间同一个零件被别的操作改过（进出原位编辑、打孔、撤销），A 再打。
+    // 看 A 用旧的面数据打会不会报「建不出基准面」，以及 A 重新点一次同一个面以后能不能打上。
+    static void Stale(A.AssemblyDocument asm, List<HoleRecord> hs, AssemblyPart ap, string targetFull){
+        L(""); L("── 旧面数据：窗口 A 先点面，窗口 B 在同一个零件上打孔 + 撤销，A 再打");
+        G.Face face = TargetFace(ap, hs[0]);
+        var formA = new AutoHoleForm(app, asm);
+        formA.SuppressDialogs = true; formA.Show(); Pump(6); formA.KeepLink = true;
+        foreach (var h in hs) { formA.AcceptPick(h.Selection); Pump(2); }
+        formA.ScanFaceOnPick = false; formA.AcceptPick(ap.Reference(face)); Pump(4); formA.ScanFaceOnPick = true;
+        L("   A: " + formA.UiSummary());
+        try {
+            Drill(asm, hs, ap, face, true, 1);     // 窗口 B：打 + 撤销
+            int before = HoleCount(ap.Part);
+            long mark = LogLen();
+            formA.DrillForTest(); Pump(10);
+            string r1 = formA.LastResult ?? "";
+            L("   A 用旧面数据打：孔 " + before + " → " + HoleCount(ap.Part) + "　RESULT: " + r1.Replace("\r\n", " ⏎ "));
+            LogSince(mark);
+            bool ok1 = r1.IndexOf("共打孔") >= 0 && HoleCount(ap.Part) > before;
+            if (ok1) { formA.UndoForTest(); Pump(8); }
+            // 按提示重新点一次同一个面再打
+            var parts = AssemblyPart.List(asm, new List<string>());
+            string targetName = ap.Name;
+            var ap2 = parts.FirstOrDefault(p => p.Name == targetName);
+            G.Face face2 = TargetFace(ap2, hs[0]);
+            formA.ScanFaceOnPick = false; formA.AcceptPick(ap2.Reference(face2)); Pump(4); formA.ScanFaceOnPick = true;
+            L("   A 重新点面后: " + formA.UiSummary());
+            before = HoleCount(ap2.Part); mark = LogLen();
+            formA.DrillForTest(); Pump(10);
+            string r2 = formA.LastResult ?? "";
+            L("   A 重新点面再打：孔 " + before + " → " + HoleCount(ap2.Part) + "　RESULT: " + r2.Replace("\r\n", " ⏎ "));
+            LogSince(mark);
+            Check(r2.IndexOf("共打孔") >= 0 && HoleCount(ap2.Part) > before, "旧面数据：重新点一次同一个面以后打上了孔");
+            if (HoleCount(ap2.Part) > before) { formA.UndoForTest(); Pump(8); }
+        } catch (Exception e) {
+            L("   异常：" + e.GetType().Name + " 0x" + e.HResult.ToString("X8") + " " + e.Message + "\r\n" + e.StackTrace); fail++;
+        } finally { try { formA.Close(); } catch { } Pump(4); }
+    }
+
+    static bool Crosses(AssemblyPart ap, HoleRecord h){ try { return TargetFace(ap, h) != null; } catch { return false; } }
 
     static void Drill(A.AssemblyDocument asm, List<HoleRecord> hs, AssemblyPart ap, G.Face face, bool keep, int n){
         L(""); L("── 第 " + n + " 次（" + (keep ? "保持关联" : "不保持关联") + "）：参考孔 " + hs.Count + " 个（" + string.Join("；", hs.Take(4).Select(x => x.ToString()).ToArray()) + (hs.Count > 4 ? "…" : "") + "）→ " + ap.Name);
