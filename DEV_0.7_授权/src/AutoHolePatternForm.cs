@@ -766,7 +766,7 @@ namespace TianGongCadSuite {
         void Cleanup(){ if (closing) return; closing = true; StopCommand(); try { tips.Dispose(); } catch { } }
 
         public new void MouseClick(short b, short s, double x, double y, double z, object w, int k, object g){
-            if (b == 1) { if (g == null) { SetStatus("这里没有捕捉到对象。", Ui.Warn); return; } AcceptPick(g); }
+            if (b == 1) { if (g == null) { SetStatus("这里没有捕捉到对象。零件没激活（重开大装配后常见）时，先在天工里右键它选「激活」。", Ui.Warn); return; } AcceptPick(g); }
             else if (b == 2) Close();
         }
         public new void MouseDown(short b, short s, double x, double y, double z, object w, int k, object g){ }

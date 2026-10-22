@@ -124,6 +124,13 @@ $key.CreateSubKey('Environment Categories\{26618395-09D6-11D1-BA07-080036230602}
 foreach($category in @('{26618396-09D6-11D1-BA07-080036230602}','{26618398-09D6-11D1-BA07-080036230602}','{08244193-B78D-11D2-9216-00C04F79BE98}','{D9B0BB85-3A6C-4086-A0BB-88A1AAD57A58}','{9CBF2809-FF80-4DBC-98F2-B82DABF3530F}')){$key.CreateSubKey('Environment Categories\'+$category).Dispose()}
 $server=$key.CreateSubKey('InprocServer32')
 $server.SetValue('','mscoree.dll');$server.SetValue('ThreadingModel','Both')
+# InprocServer32 下面每装一个版本留一个"版本号子键"（0.7.2.0 … 0.7.10.0），而 CLR 加载的是**版本号最大**那个子键的 CodeBase，
+# 主注册（默认值）指向谁不算数 —— 2026-10-21 从 0.7.10 装回 0.7.9，注册"成功"了，CAD 却照样加载 0.7.10（实锤，见 HANDOVER-0.7.10.md）。
+# 所以只留这次装的这一个版本子键，别的全删（升级、降级都一样）。
+$keepVersion=$assembly.Version.ToString()
+foreach($old in @($server.GetSubKeyNames())){
+    if($old -ne $keepVersion){ $server.DeleteSubKeyTree($old,$false); Write-Output ('已删除旧版本注册子键：' + $old) }
+}
 foreach($target in @($server,$server.CreateSubKey($assembly.Version.ToString()))){
     $target.SetValue('Assembly',$assembly.FullName);$target.SetValue('Class','TianGongCadSuite.PanelAddIn')
     $target.SetValue('RuntimeVersion','v4.0.30319');$target.SetValue('CodeBase','file:///'+$dll.Replace('\','/'))

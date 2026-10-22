@@ -14,6 +14,9 @@
 | `HoleMultiProbe.cs` | （2026-10-14，已跑，结论见 AUTO-HOLE.md）一个孔特征放多个孔的第二轮：同一草图集多轮廓 + SetProfiles、AddSync、用户定义阵列、矩形阵列、已建孔换 HoleData 改孔型；编组失败的猜测 G1 空轮廓 / G2 基准面 / G3 两规格交错，以及 Reorder、ByRange 能不能救 |
 | `HoleEditProbe.cs` | （2026-10-14）改孔型和阵列的接口事实：换 HoleData 孔径不跟着变（要补写孔径）、贯通孔改不成盲孔、赋回原 HoleData；矩形/圆周阵列的角度单位与方向、阵列编组。参数 `ext` 跑第二轮（补写孔径、翻面、盲孔改贯通、圆周阵列） |
 | `EditPatternE2E.cs` | （0.7.6）走窗口的真实路径：批量排孔种子孔 + 矩形阵列、两批并组与撤销、点阵列里的孔改孔型（整组）与撤销、贯通改盲孔被拒、逐个打的孔「改孔型…」带入、螺纹孔改小径、改过孔型再撤销打孔、圆周阵列 |
+| `LinkCensus.cs` / `LinkedDrillE2E.cs` | （0.7.11/0.7.12）装配里每个零件的链接属于哪个装配；走「自动打孔」窗口真实路径给带链接的零件打孔（`multi` = 一张面一批），核对多孔特征、原生关联、回到顶层、看得见的窗口不变多 |
+| `BusyDocE2E.cs` | （0.7.12）实例链上的子装配在别的窗口里也开着：必须拒绝、不搅乱天工；回到子装配里照常打 |
+| `WindowStateProbe.cs` / `WindowCloseProbe.cs` / `WindowHideProbe.cs` / `InPlaceDirectProbe.cs` | （0.7.12）原位编辑留下的窗口：是什么、关掉会丢改动、藏起来没事；`SubOccurrence.Reference` 一步进原位 |
 
 ## 编译（x64，.NET Framework csc）
 

@@ -21,7 +21,28 @@ namespace TianGongCadSuite {
             circles.Add(new NativeLinkMath.Circle(centre, axis.Unit(), radius));
         }
         // 这批里准备打的孔：后面同一位置的请求算"已经有孔"
-        public void Plan(V3 centre, V3 normal, double diameterMm){ Add(centre, normal, diameterMm / 2000.0); }
+        public void Plan(V3 centre, V3 normal, double diameterMm){
+            Add(centre, normal, diameterMm / 2000.0);
+            if (diameterMm > 0 && centre.Finite && normal.Length > 1e-12) planned.Add(new NativeLinkMath.Circle(centre, normal.Unit(), diameterMm / 2000.0));
+        }
+        readonly List<NativeLinkMath.Circle> planned = new List<NativeLinkMath.Circle>();
+
+        // 和这批里已经准备打的某个孔**重叠**（不是同一个位置，但两个圆相交）（0.7.12）：
+        // 这样的两个孔放进同一个多孔特征，天工的轮廓过不了闭合检查，整批合不成、逐个打也一个个失败
+        // （副本上 -4.par：两个 Φ20 参考孔心距 4mm，其实是一条腰孔的两头）。重叠返回 true 和对方直径。
+        public const double OverlapTolM = 0.00005;
+        public bool Overlaps(V3 localCentre, V3 normal, double diameterMm, out double otherMm){
+            otherMm = 0;
+            V3 n = normal.Length > 1e-12 ? normal.Unit() : new V3(0, 0, 1);
+            double r = diameterMm / 2000.0;
+            foreach (var c in planned) {
+                if (Math.Abs(c.Axis.Dot(n)) < 0.99) continue;
+                V3 delta = c.Centre - localCentre;
+                double radial = (delta - n * delta.Dot(n)).Length;
+                if (radial >= RadialTolM && radial < r + c.Radius - OverlapTolM) { otherMm = c.Radius * 2000.0; return true; }
+            }
+            return false;
+        }
 
         // 孔心 localCentre、打孔方向 normal 上有没有孔；有的话给出（按读到的顺序第一条）圆的直径 mm
         public bool At(V3 localCentre, V3 normal, out double diameterMm){

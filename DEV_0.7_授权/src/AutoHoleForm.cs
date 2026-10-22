@@ -1118,6 +1118,10 @@ namespace TianGongCadSuite {
                     string tp = g.Spec == null ? "" : g.Spec.ThreadProblem;
                     if (tp.Length > 0) { SetStatus(g.Head + "：" + tp, Ui.Warn); return; }
                 }
+                // 参考孔的零件 / 面对象还活着吗：天工重新加载过那个文档（比如关掉了原位编辑留下的那个零件窗口）以后，
+                // 原来点的对象全部"对象已断开"（WindowCloseProbe 实测）。与其每个孔失败一次，不如先说清楚、让用户重选。
+                string dead = DeadReference();
+                if (dead.Length > 0) { SetStatus(dead, Ui.Warn); LastResult = "打孔中断：" + dead; return; }
                 // 原位编辑（双击零件进入）**不是**错误：CAD 只在"正在编辑的那个零件文档"里允许写模型，
                 // 所以这里放开它。只读装配仍然拒绝。
                 if (assembly.ReadOnly) throw new InvalidOperationException("装配是只读打开的，无法打孔。请用可写方式打开装配后再试。");
@@ -1133,11 +1137,11 @@ namespace TianGongCadSuite {
                 int stepped = 0;
                 foreach (var h in refs) if (h.MouthDiameterMm - h.DiameterMm > HoleScan.StepToleranceMm) stepped++;
 
-                // 保持关联（0.7.8）：优先用天工原生关联（零件间复制 + 孔心挂在复制来的圆边上，特征树里带锁链，
-                // 参考零件挪了天工自己带着孔走，见 HoleNativeLink）；原生关联挂不上的孔退回属性集关联（「同步孔位」）。
-                HoleLinkFactory.Session linkSession = linkCheck.Checked ? HoleLinkFactory.Begin(assembly) : null;
+                // 保持关联：只用天工原生关联（零件间复制 + 孔心挂在复制来的圆边上，特征树里带锁链，
+                // 参考零件挪了天工自己带着孔走，见 HoleNativeLink）。
+                // 0.7.12 起不再退回属性集关联（「同步孔位」那套）：那条路的孔合不进一个多孔特征、只能单孔 + 编组，
+                // 还要给整个装配建实例索引（大装配里现场一等 100 秒）—— 用户明确不要。挂不上原生关联的孔照样进同一个多孔特征，结果里说明原因。
                 NativeHoleLink.Session native = linkCheck.Checked ? new NativeHoleLink.Session(app, assembly) : null;
-                var unlinked = new List<string>();
 
                 int made = 0, skipped = 0, failed = 0, already = 0, linked = 0, nativeLinked = 0, nativeMissed = 0;
                 var problems = new List<string>(); var methods = new List<string>(); var audits = new List<string>();
@@ -1145,9 +1149,9 @@ namespace TianGongCadSuite {
                 var outcomes = new List<ResultList.Item>();
                 var batchUndo = new HoleUndo();
                 var resolved0 = new List<TargetFace>();   // 这一批真正打过的零件（收尾时作废它们的圆缓存）
-                // 打孔期间关掉 CAD 的屏幕刷新：共享轮廓里每加一个孔心、包含一条圆边、加一个约束 CAD 都要重画一次（0.7.10 计时），
-                // 打完（含出错）一定恢复成原来的样子
-                bool screenWas = ScreenUpdating(false);
+                object startDoc = null; try { startDoc = app.ActiveDocument; } catch { }
+                // 0.7.10 打孔期间关过 CAD 的屏幕刷新（提速）。0.7.12 去掉：和原位编辑的进出叠在一起时，现场打完孔天工窗口不刷新、像卡死。
+                // 速度现在不是指标，可靠第一。打完在 finally 里确认回到了顶层装配、刷新一次视图。
                 try {
                 for (int ti = 0; ti < targets.Count; ti++) {
                     var t = ResolvedFace(ti);
@@ -1166,6 +1170,16 @@ namespace TianGongCadSuite {
                         requests.Add(req);
                     }
                     if (requests.Count == 0) continue;
+                    // 要原位编辑（保持关联，或零件带链接）时：实例链上的子装配/零件在别的窗口里也开着，就不碰这一面（见 NativeHoleLink.OpenElsewhere）
+                    string busyDoc = native != null || NativeHoleLink.HasLinks(t.Part) ? NativeHoleLink.TargetOpenElsewhere(app, assembly, t) : "";
+                    if (busyDoc.Length > 0) {
+                        failed += requests.Count;
+                        foreach (var r in requests)
+                            outcomes.Add(new ResultList.Item(ResultList.Kind.Fail, r.Source + "：没有打 ——「" + busyDoc + "」在另一个窗口里也开着，先关掉它").At(r.Centre, r.Spec == null ? 6 : r.Spec.HoleDiameter));
+                        AddProblem(problems, partName + "：" + NativeHoleLink.OpenElsewhereMessage(busyDoc));
+                        Log.Write("AutoHoleBusyDoc", partName + "：" + busyDoc + " 在别的窗口里开着，这一面不打");
+                        continue;
+                    }
                     // 天工原生关联：进原位编辑这个零件、建零件间复制、给每个孔配圆边（挂不上的孔 Anchor 为空）
                     NativeHoleLink.InPlace inPlace = null;
                     var faceClock = System.Diagnostics.Stopwatch.StartNew();
@@ -1174,21 +1188,46 @@ namespace TianGongCadSuite {
                         try { inPlace = native.Begin(t, requests, batchUndo); }
                         catch (Exception e) { Log.Write("AutoHoleNativeBegin", e); }
                     }
-                    if (linkSession != null) {
-                        foreach (var req in requests) {
-                            if (req.Anchor != null) continue;
-                            string why;
-                            req.Link = HoleLinkFactory.Make(linkSession, req.From, t, out why);
-                            if (req.Link == null && why.Length > 0 && !unlinked.Contains(why)) unlinked.Add(why);
-                        }
+                    // 带零件间链接的零件（0.7.11）：在原位编辑里打，和天工自己的孔命令一样（双击零件再打孔）。
+                    // 用户现场：这类零件在装配里直接改，每个孔两侧都是 0x80010108「系统无法找到指定的资源」，断开链接后才打得上；
+                    // 现场日志里打不上的那几批全都是在装配上下文里打的（原生关联没挂上 → 退出原位 → 在装配里打）。
+                    if (inPlace == null && NativeHoleLink.HasLinks(t.Part)) {
+                        string ewhy;
+                        inPlace = NativeHoleLink.EnterTarget(app, assembly, t, out ewhy);
+                        if (inPlace == null) Log.Write("AutoHoleLinkedEnter", partName + "：" + ewhy);
                     }
                     // 打孔在主进程内完成。实测（2026-09-27）：进程内、跨进程都能写模型；
                     // 真正会失败的是"往已经有孔的位置再打"——那由 Friendly() 和预检给出人话提示。
                     resolved0.Add(t);   // 打完要作废这些零件的圆缓存（见下）
                     long prepMs = faceClock.ElapsedMilliseconds, drillMs = 0;
                     DrillResult res;
-                    try { res = AutoHoleWriter.DrillRequests(t, requests); drillMs = faceClock.ElapsedMilliseconds - prepMs; }
-                    finally { if (inPlace != null) { try { native.End(inPlace, requests); } catch (Exception e) { Log.Write("AutoHoleNativeEnd", e); } } }
+                    try {
+                        res = AutoHoleWriter.DrillRequests(t, requests);
+                        // 有孔因为"对象已断开"没打上：换个编辑环境（装配里 ↔ 原位编辑里）把没打上的再打一次
+                        if (res.Disconnected > 0) {
+                            var left = requests.FindAll(r => !r.Done);
+                            string where = inPlace != null ? "装配里" : "原位编辑里";
+                            Log.Write("AutoHoleRetryContext", partName + "：" + res.Disconnected + " 个孔 CAD 报对象已断开，换到" + where + "再打 " + left.Count + " 个");
+                            NativeHoleLink.InPlace retryIn = null;
+                            bool switched = true;
+                            if (inPlace != null) { EndInPlace(native, inPlace, requests); inPlace = null; }
+                            else {
+                                string ewhy;
+                                retryIn = NativeHoleLink.EnterTarget(app, assembly, t, out ewhy);
+                                if (retryIn == null) { switched = false; Log.Write("AutoHoleRetryContext", "进不了原位：" + ewhy); }
+                            }
+                            if (switched) {
+                                foreach (var r in left) r.Anchor = null;   // 原生关联的圆边属于上一个环境，补打的孔退回属性集关联
+                                try {
+                                    var again = AutoHoleWriter.DrillRequests(t, left);
+                                    AutoHoleWriter.MergeRetry(res, again);
+                                    if (again.Created > 0) res.Notes.Add(again.Created + " 个孔第一次没打上（CAD 报对象已断开），已换到" + where + "补打上。");
+                                } finally { if (retryIn != null) NativeHoleLink.Leave(app, retryIn); }
+                            }
+                        }
+                        drillMs = faceClock.ElapsedMilliseconds - prepMs;
+                    }
+                    finally { if (inPlace != null) EndInPlace(native, inPlace, requests); }
                     Log.Write("AutoHoleTiming", partName + " " + requests.Count + " 个孔：关联准备 " + prepMs + "ms，打孔 " + drillMs
                               + "ms，退出原位 " + (faceClock.ElapsedMilliseconds - prepMs - drillMs) + "ms，合计 " + faceClock.ElapsedMilliseconds + "ms");
                     made += res.Created; failed += res.Failures.Count; already += res.AlreadyOk; linked += res.Linked;
@@ -1200,9 +1239,8 @@ namespace TianGongCadSuite {
                     outcomes.AddRange(res.Outcomes);
                     batchUndo.Absorb(res.Undo);
                 }
-                } finally { ScreenUpdating(screenWas); }
-                foreach (var why in unlinked) AddProblem(problems, "有的孔没能关联参考孔：" + why + "（孔照常打好了，只是参考零件挪动后不会自动跟上）");
-                if (native != null) foreach (var n in native.Notes) AddProblem(problems, "天工原生关联：" + n + "（这些孔改用插件自己的关联记录，参考零件挪动后点「同步孔位」）");
+                } finally { NativeHoleLink.BackTo(app, startDoc); }
+                if (native != null) foreach (var n in native.Notes) AddProblem(problems, "天工原生关联：" + n);
                 if (nativeMissed > 0) AddProblem(problems, nativeMissed + " 个孔没能挂上天工原生关联（孔照常打好了）");
 
                 string msg = "共打孔 " + made + " 个";
@@ -1216,7 +1254,7 @@ namespace TianGongCadSuite {
                 if (nativeLinked > 0)
                     msg += "\r\n\r\n天工原生关联 " + nativeLinked + " 个孔：特征树里的「孔位链接-…」带锁链，参考零件挪动后天工自己把孔带过去"
                          + "（没跟上时点「同步孔位」或天工里「更新所有链接」）。";
-                if (linkSession != null && linked > 0)
+                if (linked > 0)
                     msg += "\r\n\r\n插件关联 " + linked + " 个孔：参考零件挪动后，点窗口底部的「同步孔位」，孔会重新对准。";
                 if (audits.Count > 0) msg += "\r\n\r\n自检：" + string.Join("；", audits.ToArray());
                 msg += "\r\n\r\n请保存装配。";
@@ -1234,7 +1272,7 @@ namespace TianGongCadSuite {
                 if (skipped > 0) items.Add(new ResultList.Item(ResultList.Kind.Info, skipped + " 个参考孔的投影不落在所选面上，已跳过（参考孔只对着其中一部分面时是正常的）。"));
                 if (stepped > 0) items.Add(new ResultList.Item(ResultList.Kind.Info, stepped + " 个参考孔是沉孔/锥沉/倒角孔口，按孔口下面的孔径配做。"));
                 if (nativeLinked > 0) items.Add(new ResultList.Item(ResultList.Kind.Info, "天工原生关联 " + nativeLinked + " 个孔（特征树「孔位链接-…」带锁链）：参考零件挪动后天工自己把孔带过去。"));
-                if (linkSession != null && linked > 0) items.Add(new ResultList.Item(ResultList.Kind.Info, "插件关联 " + linked + " 个孔：参考零件挪动后点底部「同步孔位」。"));
+                if (linked > 0) items.Add(new ResultList.Item(ResultList.Kind.Info, "插件关联 " + linked + " 个孔：参考零件挪动后点底部「同步孔位」。"));
                 if (made > 0) items.Add(new ResultList.Item(ResultList.Kind.Info, "记得保存装配。打错了点「撤销本次打孔」。"));
                 string head = "打孔 " + made + " 个" + (already > 0 ? " · 本来就有孔 " + already : "") + (skipped > 0 ? " · 跳过 " + skipped : "") + (failed > 0 ? " · 失败 " + failed : "");
                 results.SetResult(head, failed > 0 || audits.Count > 0 ? Ui.Bad : (made > 0 ? Ui.Ok : Ui.Warn), items);
@@ -1269,12 +1307,26 @@ namespace TianGongCadSuite {
             }
         }
 
-        // 设 CAD 的屏幕刷新开关，返回原来的值（读不到当作开着）
-        bool ScreenUpdating(bool on){
-            bool was = true;
-            try { was = app.ScreenUpdating; } catch { }
-            try { if (was != on) app.ScreenUpdating = on; } catch (Exception e) { Log.Write("AutoHoleScreen", e.Message); }
-            return was;
+        // 参考孔里第一个已经失效的零件/面：返回给用户看的说明，都活着返回 ""
+        string DeadReference(){
+            foreach (var g in groups) foreach (var h in g.Holes) {
+                if (h == null) continue;
+                string part = h.Where != null && h.Where.Length > 0 ? h.Where : "参考孔所在的零件";
+                try { if (h.Owner != null) { var n = (string)((dynamic)h.Owner).FullName; } if (h.SourceFace != null) { var id = ((dynamic)h.SourceFace).ID; } }
+                catch (Exception e) {
+                    Log.Write("AutoHoleDeadRef", part + "：" + e.Message);
+                    return "参考孔（" + part + "）所在的文档被天工重新加载过（比如关掉过它的窗口），原来点的参考孔已经失效。请点「全部重选」，重新点参考孔和打孔面。";
+                }
+            }
+            return "";
+        }
+
+        // 退出这一面的原位编辑：原生关联建的（顺带删掉没用上的零件间复制）走 Session.End，带链接零件自己进的直接退
+        void EndInPlace(NativeHoleLink.Session native, NativeHoleLink.InPlace inPlace, IList<AutoHoleWriter.HoleRequest> requests){
+            try {
+                if (native != null) native.End(inPlace, requests);
+                else NativeHoleLink.Leave(app, inPlace);
+            } catch (Exception e) { Log.Write("AutoHoleNativeEnd", e); }
         }
 
         // 改配做规则：保存后，已经点好的参考孔按新规则重推规格（用户改过的深度/倒角/螺纹深度保留）
@@ -1362,7 +1414,7 @@ namespace TianGongCadSuite {
         }
 
         public new void MouseClick(short b, short s, double x, double y, double z, object w, int k, object g){
-            if (b == 1) { if (g == null) { SetStatus("这里没有捕捉到对象。请点到孔口的圆边，或零件平面上。", Ui.Warn); return; } AcceptPick(g); }
+            if (b == 1) { if (g == null) { SetStatus("这里没有捕捉到对象。请点到孔口的圆边，或零件平面上；零件没激活（重开大装配后常见）时，先在天工里右键它选「激活」。", Ui.Warn); return; } AcceptPick(g); }
             else if (b == 2) Close();
         }
         public new void MouseDown(short b, short s, double x, double y, double z, object w, int k, object g){ }

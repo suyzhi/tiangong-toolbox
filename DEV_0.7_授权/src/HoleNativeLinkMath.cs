@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 
 namespace TianGongCadSuite {
@@ -58,6 +58,18 @@ namespace TianGongCadSuite {
         // 参考孔轴线和打孔面法向是不是平行到可以走原生关联
         public static bool Perpendicular(V3 holeAxis, V3 faceNormal){
             try { return Math.Abs(holeAxis.Unit().Dot(faceNormal.Unit())) >= ParallelCos; } catch { return false; }
+        }
+
+        // 两个文件路径是不是同一个文件（不分大小写、/ 和 \ 一样、末尾空白不算）。
+        // 零件「建链装配」（GetInContextAssemblyNameForInterpartLinks）和当前装配 FullName 比较用。
+        public static bool SamePath(string a, string b){
+            if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return false;
+            return string.Equals(NormPath(a), NormPath(b), StringComparison.OrdinalIgnoreCase);
+        }
+        static string NormPath(string p){
+            p = p.Trim().Replace('/', '\\');
+            try { p = System.IO.Path.GetFullPath(p); } catch { }
+            return p.TrimEnd('\\');
         }
     }
 }

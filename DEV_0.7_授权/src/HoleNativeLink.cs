@@ -19,7 +19,8 @@ namespace TianGongCadSuite {
     //   4) 参考零件挪了以后 UpdateAll（或天工里「更新所有链接」），孔自己跟过去；保存重开还在。
     // 直接 IncludeEdge 另一个零件的边（不管在不在原位）一律 0x80040224 —— 所以必须经过零件间复制这一步。
     //
-    // 走不通的情况（不在顶层装配上下文、实例认不出、进不了原位、斜孔……）一律退回 0.7.3 的属性集关联 + 「同步孔位」，结果里说明。
+    // 走不通的情况（链接属于别的装配、实例认不出、进不了原位、斜孔……）孔照样打（照样一个多孔特征），只是不挂关联，结果里说明原因。
+    // （0.7.11 以前退回属性集关联 +「同步孔位」，只能单孔 + 编组，0.7.12 起不再用。）
     public sealed class NativeAnchor {
         public P.InterpartConstruction Copy;
         public CopyCircles Circles; // 同一个复制的锚点共用的圆边表（null = 每次现读）
@@ -178,20 +179,66 @@ namespace TianGongCadSuite {
             }
         }
         static string FullName(object doc){ try { return (string)((dynamic)doc).FullName ?? ""; } catch { return ""; } }
+        static object SafeActive(F.Application app){ try { return app.ActiveDocument; } catch { return null; } }
         static bool IsActive(F.Application app, string full){
             try { return string.Equals(FullName(app.ActiveDocument), full, StringComparison.OrdinalIgnoreCase); } catch { return false; }
         }
 
+        // 实例链上的子装配 / 零件在别的窗口（标签页）里作为顶层文档开着：返回它的文件名，没有返回 ""。
+        // 0.7.12 真机（OwnerCtxE2E、WindowStateProbe）：在装配 X 里原位编辑、实例链经过的子装配 T 自己也开着窗口 ——
+        // 天工把原位编辑"借"到 T 的窗口里（问它顶层是谁，答 T 不答 X），最后一级关闭并返回等不到，
+        // 之后这个零件上打孔一律"对象已断开"（CO_E_OBJNOTCONNECTED / 0x80010108），关掉 X 也恢复不了。现场 08:40 那次
+        // （进原位 85 秒、建复制 E_UNEXPECTED、退原位两次 15 秒超时）就是这个样子。所以进原位之前先查，有就不进、让用户先关掉那个窗口。
+        // 原位编辑自己留下的子文档窗口不在 app.Documents 里（只列顶层打开的文档），不算。
+        public static string OpenElsewhere(F.Application app, A.AssemblyDocument top, OccChain chain){
+            if (app == null || chain == null) return "";
+            var open = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try {
+                foreach (object d in app.Documents) {
+                    if (ReferenceEquals(d, top)) continue;
+                    string fn = FullName(d);
+                    if (fn.Length > 0 && !NativeLinkMath.SamePath(fn, FullName(top))) open.Add(System.IO.Path.GetFullPath(fn));
+                }
+            } catch (Exception e) { Log.Write("NativeOpenElsewhere", e.Message); return ""; }
+            if (open.Count == 0) return "";
+            foreach (var occ in chain.Items) {
+                string fn = ""; try { fn = occ.OccurrenceFileName ?? ""; } catch { }
+                if (fn.Length == 0) continue;
+                try { fn = System.IO.Path.GetFullPath(fn); } catch { }
+                if (open.Contains(fn)) return System.IO.Path.GetFileName(fn);
+            }
+            return "";
+        }
+        public static string OpenElsewhereMessage(string name){
+            return "「" + name + "」在另一个窗口（标签页）里也开着 —— 天工不能同时在两个窗口里编辑它（硬来会把天工搅乱，之后这个零件怎么打孔都报\"对象已断开\"）。"
+                 + "这一面没有打孔：请先关掉「" + name + "」的那个窗口，再点开始打孔";
+        }
+        // 打孔面所在零件的实例链是否被别的窗口占着（见 OpenElsewhere）；认不出实例链时返回 ""（交给后面照常处理）
+        public static string TargetOpenElsewhere(F.Application app, A.AssemblyDocument top, TargetFace t){
+            if (app == null || top == null || t == null || t.Part == null) return "";
+            string why;
+            var chain = ChainOf(top, t.Pick, t.Part, t.Placement, out why);
+            return chain == null ? "" : OpenElsewhere(app, top, chain);
+        }
+
         public static InPlace Enter(F.Application app, A.AssemblyDocument top, OccChain chain, out string why){
             why = "";
+            string busy = OpenElsewhere(app, top, chain);
+            if (busy.Length > 0) { why = OpenElsewhereMessage(busy); Log.Write("NativeEnter", why); return null; }
             var s = new InPlace();
             for (int i = 0; i < chain.Items.Count; i++) {
                 var occ = chain.Items[i];
                 string want = ""; try { want = occ.OccurrenceFileName ?? ""; } catch { }
+                var sw = System.Diagnostics.Stopwatch.StartNew();
                 try { app.ActiveSelectSet.RemoveAll(); } catch { }
                 try { occ.Select(true); } catch (Exception e) { why = "选不中实例（" + e.Message + "）"; break; }
+                long selMs = sw.ElapsedMilliseconds;
                 try { app.StartCommand((F.SolidEdgeCommandConstants)CmdEditInPlace); } catch (Exception e) { why = "进不了原位编辑（" + e.Message + "）"; break; }
-                if (!Pump(app, () => IsActive(app, want), 15000)) { why = "等了 15 秒还没进入原位编辑"; break; }
+                long cmdMs = sw.ElapsedMilliseconds;
+                bool ok = Pump(app, () => IsActive(app, want), 15000);
+                Log.Write("NativeEnter", "第 " + (i + 1) + "/" + chain.Items.Count + " 级 " + System.IO.Path.GetFileName(want) + "：选中 " + selMs + "ms，命令 " + (cmdMs - selMs)
+                          + "ms，等待 " + (sw.ElapsedMilliseconds - cmdMs) + "ms，活动文档 " + System.IO.Path.GetFileName(FullName(SafeActive(app))) + (ok ? "" : "（超时）"));
+                if (!ok) { why = "等了 15 秒还没进入原位编辑"; break; }
                 s.Levels++;
             }
             if (s.Levels < chain.Items.Count) { Leave(app, s); return null; }
@@ -200,14 +247,127 @@ namespace TianGongCadSuite {
             return s;
         }
 
+        // 原位编辑打孔面所在的零件（= 在装配里双击它）。已经在原位编辑它了就不再进（Levels=0，退出时也不退）；
+        // 正在原位编辑别的零件时不动（那是用户自己的状态）。
+        public static InPlace EnterTarget(F.Application app, A.AssemblyDocument top, TargetFace t, out string why){
+            why = "";
+            if (app == null || top == null || t == null || t.Part == null) { why = "读不到打孔零件"; return null; }
+            if (IsActive(app, FullName(t.Part)) && InPlaceUnder(t.Part, top)) return new InPlace { Levels = 0, Part = app.ActiveDocument as P.PartDocument };
+            object active = null; try { active = app.ActiveDocument; } catch { }
+            if (!ReferenceEquals(active, top) && !NativeLinkMath.SamePath(FullName(active), FullName(top))) { why = "现在正在原位编辑别的零件，没法原位编辑「" + SafeName(t.Part) + "」"; return null; }
+            var chain = ChainOf(top, t.Pick, t.Part, t.Placement, out why);
+            if (chain == null) { why = "打孔面：" + why; return null; }
+            var s = Enter(app, top, chain, out why);
+            if (s == null) { why = "没能原位编辑「" + SafeName(t.Part) + "」：" + why; return null; }
+            // 活动文档是这个零件还不够：现场 0.7.11 进原位"成功"后建零件间复制 E_UNEXPECTED（真机表：不在原位时就是这个错）。
+            // 问天工它是不是真的在原位编辑、顶层是不是这个装配；不是就等一会儿再问，还不是就退出来报错。
+            if (!Pump(app, () => InPlaceUnder(s.Part, top), 10000)) {
+                object topDoc = null, occ = null;
+                try { s.Part.GetTopDocumentAndSubOccurrenceOfIPADoc(out topDoc, out occ); } catch { }
+                Log.Write("NativeEnter", "活动文档是「" + SafeName(s.Part) + "」但天工不认为它在「" + SafeName(top) + "」里原位编辑（InPlaceActivated=" + InPlaceFlag(s.Part)
+                          + "，天工说顶层是「" + SafeName(topDoc) + "」）");
+                why = "没能原位编辑「" + SafeName(t.Part) + "」：天工没有进入原位编辑状态";
+                Leave(app, s);
+                return null;
+            }
+            return s;
+        }
+
+        // 零件正在原位编辑、而且顶层文档就是 top
+        static bool InPlaceUnder(P.PartDocument part, A.AssemblyDocument top){
+            if (part == null || top == null) return false;
+            try {
+                if (!part.InPlaceActivated) return false;
+                object topDoc = null, occ = null;
+                part.GetTopDocumentAndSubOccurrenceOfIPADoc(out topDoc, out occ);
+                return ReferenceEquals(topDoc, top) || NativeLinkMath.SamePath(FullName(topDoc), FullName(top));
+            } catch (Exception e) { Log.Write("NativeInPlaceState", e.Message); return true; }   // 问不出来就不拦（老版本天工可能没有这两个接口）
+        }
+        static string InPlaceFlag(P.PartDocument part){ try { return part.InPlaceActivated.ToString(); } catch (Exception e) { return "?" + e.Message; } }
+
+        // 零件有没有零件间链接（零件间复制、原位设计时包含/投影的别的零件的边……天工都算）
+        public static bool HasLinks(P.PartDocument part){
+            if (part == null) return false;
+            bool has = false;
+            try { part.HasInterpartLinks(ref has); } catch { return false; }
+            return has;
+        }
+
         public static void Leave(F.Application app, InPlace s){
             if (s == null) return;
             for (; s.Levels > 0; s.Levels--) {
                 object before = null; try { before = app.ActiveDocument; } catch { }
+                string beforeName = FullName(before);
+                var sw = System.Diagnostics.Stopwatch.StartNew();
                 try { app.StartCommand((F.SolidEdgeCommandConstants)CmdCloseAndReturn); } catch (Exception e) { Log.Write("NativeLeave", e); }
-                Pump(app, () => !ReferenceEquals(app.ActiveDocument, before), 15000);
+                long cmdMs = sw.ElapsedMilliseconds;
+                bool ok = Pump(app, () => !ReferenceEquals(app.ActiveDocument, before), 15000);
+                Log.Write("NativeLeave", "退一级 " + System.IO.Path.GetFileName(beforeName) + " → " + System.IO.Path.GetFileName(FullName(SafeActive(app)))
+                          + "：命令 " + cmdMs + "ms，等待 " + (sw.ElapsedMilliseconds - cmdMs) + "ms" + (ok ? "" : "（超时）"));
             }
             try { app.ActiveSelectSet.RemoveAll(); } catch { }
+            HideLeftovers(app);
+        }
+
+        // 原位编辑留下的子文档窗口藏起来（0.7.12）。
+        // 真机（WindowStateProbe / WindowCloseProbe / WindowHideProbe）：每进一次原位编辑，天工给实例链上的子装配和零件各开一个窗口，
+        // 关闭并返回以后**还在**，看得见（标签页）。用户关掉它 = 天工把那个文档重新加载，**刚打的孔没保存就没了**，
+        // 插件手里的对象也全部"对象已断开"；零件窗口还会抢走活动窗口，看上去像天工卡住不刷新。
+        // 藏起来（Visible=false）：改动都在、下次原位编辑照常而且复用这些窗口、活动窗口还是装配。
+        // 只藏"文档不在 app.Documents 里"的窗口 —— 用户自己打开的文档都在 Documents 里，不碰。
+        public static void HideLeftovers(F.Application app){
+            if (app == null) return;
+            object active = SafeActive(app);
+            bool inPlace = false; try { inPlace = (bool)((dynamic)active).InPlaceActivated; } catch { }
+            if (inPlace) return;   // 还在原位编辑里：等退干净再藏
+            var open = new List<object>();
+            try { foreach (object d in app.Documents) open.Add(d); } catch (Exception e) { Log.Write("NativeHide", e.Message); return; }
+            var windows = new List<object>();
+            try { foreach (object w in app.Windows) windows.Add(w); } catch (Exception e) { Log.Write("NativeHide", e.Message); return; }
+            foreach (var w in windows) {
+                try {
+                    dynamic x = w;
+                    if (!(bool)x.Visible) continue;
+                    object doc = x.Parent;
+                    if (doc == null) continue;
+                    bool user = false;
+                    foreach (var d in open) if (ReferenceEquals(d, doc) || NativeLinkMath.SamePath(FullName(d), FullName(doc))) { user = true; break; }
+                    if (user) continue;
+                    x.Visible = false;
+                    Log.Write("NativeHide", "藏起原位编辑留下的窗口「" + (string)x.Caption + "」");
+                } catch (Exception e) { Log.Write("NativeHide", e.Message); }
+            }
+        }
+
+        // 一批打完（含出错）：活动文档必须回到开始打孔时的那个（一般是顶层装配）。
+        // 现场 0.7.11：退出原位等了两次 15 秒都没等到活动文档变化，插件就当退完了 —— 天工停在零件原位编辑里、窗口不刷新，像卡死。
+        // 这里逐级"关闭并返回"直到回去（最多 6 级），然后让天工刷新一次视图。
+        public static void BackTo(F.Application app, object startDoc){
+            if (app == null || startDoc == null) return;
+            for (int k = 0; k < 8; k++) {
+                object now = SafeActive(app);
+                if (now == null || ReferenceEquals(now, startDoc) || NativeLinkMath.SamePath(FullName(now), FullName(startDoc))) break;
+                bool inPlace = false; try { inPlace = (bool)((dynamic)now).InPlaceActivated; } catch { }
+                if (inPlace) {
+                    Log.Write("NativeBackTo", "还在原位编辑 " + System.IO.Path.GetFileName(FullName(now)) + "，关闭并返回（第 " + (k + 1) + " 次）");
+                    try { app.StartCommand((F.SolidEdgeCommandConstants)CmdCloseAndReturn); } catch (Exception e) { Log.Write("NativeBackTo", e.Message); }
+                } else {
+                    // 别的窗口（在建链装配的窗口里打的孔）：切回开始时的窗口，不关任何东西
+                    Log.Write("NativeBackTo", "活动窗口是 " + System.IO.Path.GetFileName(FullName(now)) + "，切回 " + System.IO.Path.GetFileName(FullName(startDoc)));
+                    try { ((dynamic)startDoc).Activate(); } catch (Exception e) { Log.Write("NativeBackTo", e.Message); break; }
+                }
+                Pump(app, () => !ReferenceEquals(app.ActiveDocument, now), 20000);
+            }
+            try { app.ActiveSelectSet.RemoveAll(); } catch { }
+            HideLeftovers(app);
+            Refresh(app);
+        }
+
+        // 让天工把当前窗口重画一遍（打完孔窗口停在旧画面的保险）
+        public static void Refresh(F.Application app){
+            try { System.Windows.Forms.Application.DoEvents(); } catch { }
+            try { app.DoIdle(); } catch { }
+            try { ((dynamic)app.ActiveWindow).View.Update(); } catch (Exception e) { Log.Write("NativeRefresh", e.Message); }
         }
 
         // ---------------- 一批孔：准备关联 ----------------
@@ -222,11 +382,25 @@ namespace TianGongCadSuite {
             public int CopiesMade;
             public Session(F.Application application, A.AssemblyDocument assembly){ app = application; top = assembly; }
 
-            void Note(string s){ if (!Notes.Contains(s)) Notes.Add(s); }
+            void Note(string s){ if (!Notes.Contains(s)) { Notes.Add(s); Log.Write("NativeNote", s); } }
 
             public InPlace Begin(TargetFace t, IList<AutoHoleWriter.HoleRequest> requests, HoleUndo undo){
                 if (t == null || t.Part == null || requests == null || requests.Count == 0) return null;
                 var sw = System.Diagnostics.Stopwatch.StartNew();
+                // ⓪ 打孔零件已经有零件间链接、而且是在**别的装配**里建的：天工只允许一个零件的链接属于一个装配，
+                //     在这里建零件间复制一律 E_FAIL（0.7.11 用户现场：YF25.07G01-L1-M30-02-2.par 的链接属于 YF25.07G01-L1-M30-02.asm，
+                //     在下一级的 YF25.07底部…小车.asm 里打孔；LinkedDrillE2E 在副本上复现，换到建链的那个装配里就建得出来）。
+                //     所以最先问清楚。孔照样打（原位编辑里、一个多孔特征），只是不挂关联，结果里说清楚去哪个装配打才能关联。
+                //     （0.7.12 试过自动切到建链装配去建关联：建链装配一般是当前装配的上一级，那条实例链要经过当前装配自己 ——
+                //      它开着自己的窗口，天工在别的窗口里原位编辑它会把两个窗口搅乱，之后这个零件上打孔全部"对象已断开"。OwnerCtxE2E 实测，放弃。）
+                string otherAsm;
+                if (LinksBelongElsewhere(t.Part, top, out otherAsm)) {
+                    string on = System.IO.Path.GetFileName(otherAsm);
+                    Note("「" + SafeName(t.Part) + "」已有零件间链接，属于「" + on + "」—— 天工只允许一个零件的链接属于一个装配，在「" + SafeName(top)
+                         + "」里挂不了新的关联。孔已经打好（没关联）；要关联请打开「" + on + "」在那里打孔");
+                    return null;
+                }
+
                 // ① 参考孔 → 装配引用（进原位之前做：引用都对着顶层装配造）
                 var need = new List<KeyValuePair<AutoHoleWriter.HoleRequest, string>>();
                 foreach (var r in requests) {
@@ -252,20 +426,9 @@ namespace TianGongCadSuite {
                 long refsMs = sw.ElapsedMilliseconds;
 
                 // ② 进原位编辑打孔零件（已经在原位编辑它了就不用进）
-                InPlace s = null;
-                string tgtFull = FullName(t.Part);
-                if (IsActive(app, tgtFull)) {
-                    s = new InPlace { Levels = 0, Part = app.ActiveDocument as P.PartDocument };
-                } else if (ReferenceEquals(app.ActiveDocument, top)) {
-                    string why;
-                    var chain = ChainOf(top, t.Pick, t.Part, t.Placement, out why);
-                    if (chain == null) { Note("打孔面：" + why); return null; }
-                    s = Enter(app, top, chain, out why);
-                    if (s == null) { Note("没能原位编辑「" + SafeName(t.Part) + "」：" + why); return null; }
-                } else {
-                    Note("现在正在原位编辑别的零件，没法给「" + SafeName(t.Part) + "」建天工原生关联");
-                    return null;
-                }
+                string ewhy;
+                InPlace s = EnterTarget(app, top, t, out ewhy);
+                if (s == null) { Note(ewhy); return null; }
                 var part = s.Part ?? t.Part;
                 long enterMs = sw.ElapsedMilliseconds;
 
@@ -288,7 +451,9 @@ namespace TianGongCadSuite {
                     r.Anchor = anchor; anchored++;
                 }
                 Log.Write("AutoHoleTiming", "关联准备：参考孔引用 " + refsMs + "ms，进原位 " + (enterMs - refsMs) + "ms，零件间复制 + 圆边 " + (sw.ElapsedMilliseconds - enterMs) + "ms");
-                if (anchored == 0) { Leave(app, s); return null; }
+                // 一个孔都没挂上也**不退出原位**（0.7.11）：孔就在原位编辑里打（不挂关联）。原来退回装配里打 ——
+                // 用户现场 0.7.9 13:41 那批：零件间复制 E_FAIL → 退出原位 → 装配里打，17 个孔全部 0x80010108。
+                // 没用上的零件间复制照样在 End 里删掉。
                 return s;
             }
 
@@ -335,7 +500,10 @@ namespace TianGongCadSuite {
                         return null;
                     }
                 } catch (Exception e) {
-                    Log.Write("NativeCopy", e);
+                    string ctx = ""; bool has = false;
+                    try { part.HasInterpartLinks(ref has); if (has) part.GetInContextAssemblyNameForInterpartLinks(ref ctx); } catch { }
+                    Log.Write("NativeCopy", "零件 " + SafeName(part) + " 有链接=" + has + " 建链装配=" + System.IO.Path.GetFileName(ctx ?? "") + " 顶层=" + SafeName(top)
+                              + " 活动文档=" + System.IO.Path.GetFileName(FullName(SafeActive(app))) + "：" + Friendly(e));
                     Note("零件间复制建不出来（" + Friendly(e) + "）");
                     return null;
                 }
@@ -357,6 +525,22 @@ namespace TianGongCadSuite {
                 if (undo != null) undo.Copy(part, c);
                 return c;
             }
+        }
+
+        // 零件的零件间链接属于别的装配（不是当前顶层装配）。没有链接、读不出来时都当"不属于别处"，照常试原生关联。
+        public static bool LinksBelongElsewhere(P.PartDocument part, A.AssemblyDocument top, out string owner){
+            owner = "";
+            if (part == null || top == null) return false;
+            bool has = false;
+            try { part.HasInterpartLinks(ref has); } catch (Exception e) { Log.Write("NativeLinkOwner", e.Message); return false; }
+            if (!has) return false;
+            string ctx = "";
+            try { part.GetInContextAssemblyNameForInterpartLinks(ref ctx); } catch (Exception e) { Log.Write("NativeLinkOwner", e.Message); return false; }
+            ctx = (ctx ?? "").Trim();
+            if (ctx.Length == 0) return false;
+            if (NativeLinkMath.SamePath(ctx, FullName(top))) return false;
+            owner = ctx;
+            return true;
         }
 
         static string SourceKey(ReferenceHole h){

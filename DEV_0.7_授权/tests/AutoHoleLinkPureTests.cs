@@ -35,6 +35,15 @@ namespace TianGongCadSuite {
             s.Plan(new V3(0.1, 0.1, 0), n, 5);
             Assert(s.At(new V3(0.1, 0.1, 0.002), n, out d) && Math.Abs(d - 5) < 1e-9, "这批准备打的孔：同一位置后面的请求算已经有孔");
             Assert(!new HoleSpots().At(new V3(0, 0, 0), n, out d) && d == 0, "空表：没有孔");
+            // 0.7.12 这批里互相重叠的孔（腰孔两头当成两个参考孔）
+            var o = new HoleSpots();
+            o.Plan(new V3(-0.692, 0, 0), n, 20);
+            Assert(o.Overlaps(new V3(-0.688, 0, 0), n, 20, out d) && Math.Abs(d - 20) < 1e-9, "两个 Φ20 心距 4mm：重叠（副本 -4.par）");
+            Assert(!o.Overlaps(new V3(-0.671, 0, 0), n, 20, out d), "两个 Φ20 心距 21mm：不重叠");
+            Assert(!o.Overlaps(new V3(-0.692, 0, 0.003), n, 20, out d), "同一个孔位不算重叠（那是「已经有孔」）");
+            Assert(!o.Overlaps(new V3(-0.688, 0, 0), new V3(1, 0, 0), 20, out d), "方向不平行的不比");
+            s.Add(new V3(0.2, 0.2, 0), n, 0.01);
+            Assert(!s.Overlaps(new V3(0.205, 0.2, 0), n, 10, out d), "零件上已有的孔不算重叠（只比这批准备打的）");
 
             // 配对：输入孔 / 拆出来的轮廓按孔心一一配到孔位上
             var found = new List<V3?> { new V3(0.02, 0, 0), null, new V3(0.01, 0, 0), new V3(0.0101, 0, 0) };
@@ -74,6 +83,10 @@ namespace TianGongCadSuite {
             // 斜孔不走原生关联
             Assert(NativeLinkMath.Perpendicular(new V3(0, 0, -1), n), "孔轴线 ∥ 面法向（反向）：可以");
             Assert(!NativeLinkMath.Perpendicular(new V3(0, Math.Sin(0.05), Math.Cos(0.05)), n), "斜 3° 的孔：不走原生关联");
+            // 0.7.11 零件的链接属于哪个装配：路径比较
+            Assert(NativeLinkMath.SamePath(@"H:\桌面\YF25.07\焊接台车\YF25.07G01-L1-M30-02.asm", @"h:/桌面/YF25.07/焊接台车/yf25.07g01-l1-m30-02.ASM "), "同一个装配：大小写、斜杠、空白不算");
+            Assert(!NativeLinkMath.SamePath(@"H:\桌面\YF25.07\焊接台车\YF25.07G01-L1-M30-02.asm", @"H:\桌面\YF25.07\焊接台车\YF25.07底部水冷兼容短刀模组堆叠小车.asm"), "别的装配：不同");
+            Assert(!NativeLinkMath.SamePath("", @"H:\a.asm") && !NativeLinkMath.SamePath(null, null), "空路径不算同一个");
         }
 
         // 配孔检查（2026-10-13 复查修的两处）：
