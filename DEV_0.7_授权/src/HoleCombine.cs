@@ -38,7 +38,7 @@ namespace TianGongCadSuite {
                 if (!SharedProfiles(part, plane, locals, anchors, out set, out profiles, out why)) return null;
                 Mark(sw, "轮廓");
                 // 种子孔：拆出来的第 1 个轮廓。只能试一次 —— 这一侧打不成时 CAD 把轮廓作废，删掉这套轮廓、换另一侧重建
-                var seed = AutoHoleWriter.DrillOnProfile(model, profiles[0], data, depthMm, side);
+                var seed = AutoHoleWriter.DrillOnProfile(part, model, profiles[0], data, depthMm, side);
                 if (seed == null) { DeleteSet(set); why = "种子孔打不成"; continue; }
                 AutoHoleWriter.Learned(plane, side);
                 Mark(sw, "种子孔");
@@ -50,11 +50,11 @@ namespace TianGongCadSuite {
                 } catch (Exception e) { Log.Write("HoleCombineAdd", e); why = "合成失败（" + AutoHoleWriter.Friendly(e) + "）"; }
                 Mark(sw, "合成");
                 if (u != null) {
-                    if (Verify(u, part, plane, locals, out inputs, out why)) { Mark(sw, "核对"); return u; }
+                    if (Verify(u, model, plane, locals, out inputs, out why)) { Mark(sw, "核对"); return u; }
                     // 螺纹孔合成后 CAD 先报 igFeatureWarned，重算一次就是 igFeatureOK、几何也对（真机 J7）—— 重算后再核对一次
                     try { AutoHoleWriter.Attempt("合成·重算", () => model.Recompute()); } catch (Exception e) { Log.Write("HoleCombineRecompute", e); }
                     string first = why;
-                    if (Verify(u, part, plane, locals, out inputs, out why)) { Log.Write("HoleCombine", "重算后通过（重算前：" + first + "）"); return u; }
+                    if (Verify(u, model, plane, locals, out inputs, out why)) { Log.Write("HoleCombine", "重算后通过（重算前：" + first + "）"); return u; }
                 }
                 // 合不成：UDP（连种子孔）或单独的种子孔删掉、轮廓删掉，交给调用方逐个打
                 touched = true;
@@ -114,7 +114,7 @@ namespace TianGongCadSuite {
         }
 
         // 合成后核对：特征 OK、输入孔数 = N、每个孔位上都有孔（实体圆边读一遍，见 HoleSpots）；输入孔按孔位排好（和 locals 一一对应）
-        static bool Verify(P.UserDefinedPattern u, P.PartDocument part, P.RefPlane plane, IList<V3> locals, out List<P.Hole> inputs, out string why){
+        static bool Verify(P.UserDefinedPattern u, P.Model model, P.RefPlane plane, IList<V3> locals, out List<P.Hole> inputs, out string why){
             inputs = null; why = "";
             try {
                 object d;
@@ -123,7 +123,7 @@ namespace TianGongCadSuite {
             } catch (Exception e) { why = "读不到合成后的特征状态（" + AutoHoleWriter.Friendly(e) + "）"; return false; }
             var all = Inputs(u);
             if (all.Count != locals.Count) { why = "合成后输入孔 " + all.Count + " 个，应为 " + locals.Count; return false; }
-            var spots = AutoHoleWriter.ScanSpots(part);
+            var spots = AutoHoleWriter.ScanSpots(model);
             var normal = AutoHoleWriter.PlaneNormal(plane);
             for (int k = 0; k < locals.Count; k++) {
                 double dia;

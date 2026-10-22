@@ -17,6 +17,21 @@
 
 ---
 
+# 2026-10-22（0.7.13）：多实体零件打孔
+
+用户：「YF25.07G01-L1-M30-02-07 …尝试使用自动打孔功能，为什么我总是提示错误，该位置已经有了一个孔？」
+过程见 [HANDOVER-0.7.13.md](HANDOVER-0.7.13.md)，探针 `tools/hole-feature-probe/PartDrillProbe.cs`、`MultiBodyE2E.cs`。
+
+| 真机事实（零件副本） | 做法 |
+| --- | --- |
+| 这个零件有 **39 个设计体**（`part.Models.Count = 39`，39 个复制构造 + 切换为设计体）；插件一律用 `Models.Item(1)` | `PartBodies`：所选面的 `Body.Tag` 对上哪个 Model 就用哪个（`TargetFace.Body`）；读圆边查已有孔、找回面片、原位锚定都只看这个实体 |
+| `Holes.AddThroughAll / AddFinite` 在这种零件上**对哪个实体都打不上**（0x80010108 / 0x800401FD），实体 1 也不行，`MakeActive` 也没用 | 实体不止一个时建孔走 `Holes.AddMultiBody(…, BodyArray = { 目标实体的 Body })`（放 Model 是 E_FAIL；错的一侧照样 igFeatureFailed，所以照旧两侧试） |
+| 多孔合一（`UserDefinedPatterns.AddByProfiles`）、矩形阵列、特征组在指定实体上都能建；`Holes` / `FeatureGroups` 是整个零件共用的（每个 Model 都看得到全部孔） | 找孔、编组、撤销、改孔型照旧 |
+| 腰孔（`ExtrudedCutouts.AddThroughAll`）老写法就能切，`AddThroughAllMultiBody` 反而 igFeatureFailed | 腰孔只换成目标实体的 Model |
+| 0x80010108 / 0x800401FB 只说明「CAD 拒绝建孔」，插件却一律翻译成「这个位置已经有一个孔了」——现场每个孔都这么报，其实一个孔都没有 | `Friendly()` 改成如实说「CAD 拒绝建孔」+ 常见原因；真有孔的情况本来就由预检单独报 |
+
+---
+
 # 2026-10-22（0.7.12）：链接打孔可用、不再卡住
 
 用户：「有链接打孔总是失败，然后回退老逻辑分组放单个孔，我不要……打孔都打完了天工窗口还是卡住没刷新……唯一的指标是让链接打孔可用，耗时先不管。」

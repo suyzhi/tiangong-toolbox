@@ -54,8 +54,10 @@ class LinkedDrillE2E {
     static G.Face TargetFace(AssemblyPart ap, HoleRecord h){
         V3 c = ap.Placement.InversePoint(h.Center), ax = ap.Placement.InverseNormal(h.Axis).Unit();
         G.Face best = null; double bestT = double.MaxValue;
-        var body = (G.Body)((P.Model)ap.Part.Models.Item(1)).Body;
-        foreach (G.Face f in (G.Faces)body.get_Faces(G.FeatureTopologyQueryTypeConstants.igQueryAll)) {
+        // 0.7.13：多实体零件每个实体的面都看（PartBodies）
+        var faces = new List<G.Face>();
+        foreach (var m in PartBodies.All(ap.Part)) foreach (G.Face f0 in (G.Faces)((G.Body)m.Body).get_Faces(G.FeatureTopologyQueryTypeConstants.igQueryAll)) faces.Add(f0);
+        foreach (G.Face f in faces) {
             var pl = f.Geometry as G.Plane; if (pl == null) continue;
             Array p = new double[3], n = new double[3]; pl.GetPlaneData(ref p, ref n);
             var nv = V3.From(n).Unit();

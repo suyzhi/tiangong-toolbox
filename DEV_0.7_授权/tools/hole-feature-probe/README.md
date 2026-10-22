@@ -17,6 +17,8 @@
 | `LinkCensus.cs` / `LinkedDrillE2E.cs` | （0.7.11/0.7.12）装配里每个零件的链接属于哪个装配；走「自动打孔」窗口真实路径给带链接的零件打孔（`multi` = 一张面一批），核对多孔特征、原生关联、回到顶层、看得见的窗口不变多 |
 | `BusyDocE2E.cs` | （0.7.12）实例链上的子装配在别的窗口里也开着：必须拒绝、不搅乱天工；回到子装配里照常打 |
 | `WindowStateProbe.cs` / `WindowCloseProbe.cs` / `WindowHideProbe.cs` / `InPlaceDirectProbe.cs` | （0.7.12）原位编辑留下的窗口：是什么、关掉会丢改动、藏起来没事；`SubOccurrence.Reference` 一步进原位 |
+| `PartDrillProbe.cs` | （0.7.13）多实体零件：零件概况（实体数、特征树）；老写法每个实体打一个孔（默认）/ 先 MakeActive 再打（`active`）/ `Holes.AddMultiBody`（`multi`）/ 面片→实体、Holes 归属、盲孔、多孔合一、阵列、特征组、腰孔（`facts`） |
+| `MultiBodyE2E.cs` | （0.7.13）多实体零件上走插件真实接口：一批 3 孔合成、同位置重打、盲孔、批量排孔 + 撤销、实体 1 单孔、腰孔；可选单实体零件回归 |
 
 ## 编译（x64，.NET Framework csc）
 

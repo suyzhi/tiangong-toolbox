@@ -27,6 +27,8 @@ namespace TianGongCadSuite {
         public object Pick;           // 用户点的选择引用（带实例路径，原生关联进原位编辑时用）
         public string Label = "";
         public string PartName = "";
+        // 面在零件的第几个实体上（part.Models 里，1 起；0 = 还没认，AutoHoleWriter.ModelFor 现认）。多实体零件见 PartBodies
+        public int Body;
         // 面内包围盒缓存（FaceFrameReader.Bounds 填）。实时预览每改一次参数都要判 N×M 个
         // 孔心是否落在面内，而算包围盒要走一遍面的边（COM），所以算一次存这里。
         public FaceFrameReader.FaceBounds Bounds;
@@ -74,6 +76,7 @@ namespace TianGongCadSuite {
             };
             try { tf.PartName = part.Name; } catch { tf.PartName = "零件"; }
             tf.Label = "平面 " + face.ID;
+            tf.Body = PartBodies.IndexOf(part, face, V3.From(p), V3.From(n).Unit());   // 面片这时还是活的，现在认最准
             return tf;
         }
 
@@ -178,8 +181,7 @@ namespace TianGongCadSuite {
             // 装配里刚加载/刚激活的零件，COM 可能还没完全就绪（实测第一写操作为 CO_E_OBJNOTREG）。
             // 泵一次消息循环，成本几乎为零，能挡掉这类假失败。
             try { if (LastApp != null) { LastApp.DoIdle(); } } catch { }
-            P.Model model = null;
-            if (part.Models.Count >= 1) model = part.Models.Item(1);
+            P.Model model = ModelFor(target);
             if (model == null) throw new InvalidOperationException("目标零件没有可用的实体模型。");
 
             P.HoleData data = BuildHoleData(part, spec, result);
@@ -216,7 +218,7 @@ namespace TianGongCadSuite {
                     DropCache(part);
                     try {
                         plane = FindOrCreatePlane(part, target);
-                        if (plane != null && part.Models.Count >= 1) model = part.Models.Item(1);
+                        if (plane != null) model = ModelFor(target) ?? model;
                         if (plane != null && DrillOne(part, model, plane, lp, data, depth, out why, out created)) {
                             result.Created++;
                             result.Undo.Hole(part, created);
@@ -268,6 +270,8 @@ namespace TianGongCadSuite {
             if (!havePlane) throw new InvalidOperationException("读不到所选面的平面信息，请重新点一次这个面。");
 
             string key = PlaneKey(part, fpt, fnv);
+            // 多实体零件：两个实体贴在一起时共面的两张面外法向相反，各记各的
+            if (target.Body > 1) key += "|体" + target.Body;
             TrimCache();
             // 同一批打孔里不必反复清；隔一会儿查一次就够了
             if ((DateTime.UtcNow - lastPrune).TotalSeconds > 5) { lastPrune = DateTime.UtcNow; PruneCache(LastApp); }
@@ -291,7 +295,7 @@ namespace TianGongCadSuite {
             G.Face planeFace = target.Face;
             knowReversed = ParamReversed(planeFace, out reversed);
             if (!knowReversed) {
-                var fresh = FindModelFace(part, fpt, fnv);
+                var fresh = FindModelFace(ModelFor(target), fpt, fnv);
                 if (fresh != null) { planeFace = fresh; knowReversed = ParamReversed(fresh, out reversed); }
             }
             V3 outward = fnv;
@@ -396,12 +400,11 @@ namespace TianGongCadSuite {
             if (e == null) return "";
             string m = e.Message;
             int hr = e.HResult;
-            if (hr == unchecked((int)0x800401FB))
-                return "CAD 没能在孔心上建出孔特征。常见原因：这个位置**已经有一个孔**了"
-                     + "（同一根轴线上重复打孔），或者孔心落在材料外面。请检查该位置后再点「开始打孔」。";
-            if (hr == unchecked((int)0x80010108) || m.Contains("0x80010108") || m.Contains("断开"))
-                return "CAD 没能在孔心上建出孔特征（对象在创建过程中失效了）。"
-                     + "常见原因：这个位置**已经有一个孔**了。请检查该位置后重新点一次「开始打孔」。";
+            // 0.7.13：这两个错误码只说明"CAD 拒绝建这个孔"，不说明为什么。原来一律说"这个位置已经有一个孔了"，
+            // 现场多实体零件（PartBodies）每个孔都这么报、其实一个孔都没有 —— 真有孔的情况 DrillOne 之前的预检已经挡掉、单独报了。
+            if (hr == unchecked((int)0x800401FB) || hr == unchecked((int)0x80010108) || m.Contains("0x80010108") || m.Contains("断开"))
+                return "CAD 拒绝在孔心上建孔特征。常见原因：孔心不在所选面的材料上、孔比面还宽、和旁边的孔重叠，"
+                     + "或者零件刚被关掉/重新加载过。请检查该位置后重新点一次「开始打孔」。";
             if (hr == unchecked((int)0x800401FD))
                 return "目标零件暂时不可用，请再点一次开始打孔。";
             if (hr == unchecked((int)0x80010001) || m.Contains("拒绝"))
@@ -414,19 +417,20 @@ namespace TianGongCadSuite {
         // 而且它只报一个含糊的 COM 错误（CO_E_OBJNOTREG / RPC_E_DISCONNECTED）。
         // 这里用"圆边圆心到孔心的径向距离"判断：径向距离≈0 就认为这个位置已经有孔。
         // 只问一个孔位时用；一批孔位先 ScanSpots 一次再在内存里比（见 HoleSpots）
-        internal static bool ExistingHoleAt(P.RefPlane plane,P.PartDocument part,V3 localCentre,out double diameterMm){
-            return ScanSpots(part).At(localCentre,PlaneNormal(plane),out diameterMm);
+        internal static bool ExistingHoleAt(P.RefPlane plane,P.Model model,V3 localCentre,out double diameterMm){
+            return ScanSpots(model).At(localCentre,PlaneNormal(plane),out diameterMm);
         }
 
         static long scanMs, addMs;   // 计时（AutoHoleTiming 日志）：读实体圆边、CAD 建孔
         static int lastSideHr;       // DrillOne / DrillOnProfile 最近一次建孔抛出的 HRESULT（0 = 没抛）
         // 实体上全部圆边读一遍（零件局部坐标）。读失败的边跳过；整个读不出来时返回空表（= 当作没有孔，交给 CAD 判）。
-        internal static HoleSpots ScanSpots(P.PartDocument part){
+        // 多实体零件只读目标面所在的那个实体：叠在一起的另一块板上同轴的孔不算"这里已经有孔"
+        internal static HoleSpots ScanSpots(P.Model model){
             var spots=new HoleSpots();
             var sw=System.Diagnostics.Stopwatch.StartNew();
             try{
-                if(part.Models.Count<1)return spots;
-                var body=(G.Body)((P.Model)part.Models.Item(1)).Body;
+                if(model==null)return spots;
+                var body=(G.Body)model.Body;
                 foreach(G.Edge edge in (G.Edges)body.get_Edges(G.FeatureTopologyQueryTypeConstants.igQueryAll)){
                     var circle=edge.Geometry as G.Circle;
                     if(circle==null)continue;
@@ -604,10 +608,10 @@ namespace TianGongCadSuite {
 
         // 按平面数据（点 + 法向，零件局部）在实体现有面里找回同一张平面面。
         // 用途：用户点的面片对象打完孔以后会失效，但外法向/建面都还需要一张能用的面片。
-        static G.Face FindModelFace(P.PartDocument part, V3 point, V3 normal){
+        static G.Face FindModelFace(P.Model model, V3 point, V3 normal){
             try {
-                if (part.Models.Count < 1) return null;
-                var body = (G.Body)((P.Model)part.Models.Item(1)).Body;
+                if (model == null) return null;
+                var body = (G.Body)model.Body;
                 G.Face best = null; double bestD = PlaneOnTolM;
                 foreach (G.Face f in (G.Faces)body.get_Faces(G.FeatureTopologyQueryTypeConstants.igQueryAll)) {
                     var pl = f.Geometry as G.Plane;
@@ -675,7 +679,7 @@ namespace TianGongCadSuite {
             bool anchorBroken = false;
             // 先把"这个位置已经有孔"挡在前头，别让 CAD 报一个含糊的 COM 错误。
             double existingDiameter;
-            if (checkExisting && ExistingHoleAt(plane, part, localCentre, out existingDiameter)) {
+            if (checkExisting && ExistingHoleAt(plane, model, localCentre, out existingDiameter)) {
                 why = "这个位置已经有孔了（Φ" + existingDiameter.ToString("0.##") + "），已跳过 —— 同一根轴线上重复打孔 CAD 会拒绝。";
                 return false;
             }
@@ -717,8 +721,7 @@ namespace TianGongCadSuite {
                         var sideLocal = side; var prof = profile;
                         var addClock = System.Diagnostics.Stopwatch.StartNew();
                         try {
-                        h = Attempt("打孔", () => blind ? model.Holes.AddFinite(prof, sideLocal, depthMm * MmToM, data)
-                                                        : model.Holes.AddThroughAll(prof, sideLocal, data));
+                        h = Attempt("打孔", () => AddHole(part, model, prof, sideLocal, depthMm, data));
                         } finally { addMs += addClock.ElapsedMilliseconds; }
                         if (h == null) { why = "打孔失败：CAD 未返回孔特征"; continue; }
                         object desc = null;
@@ -780,13 +783,11 @@ namespace TianGongCadSuite {
         }
 
         // 在已经建好的轮廓上按指定的一侧打一个孔（多孔合一的种子孔，见 HoleCombine）。只能试一次 —— 建孔失败时 CAD 把轮廓一起作废。
-        internal static P.Hole DrillOnProfile(P.Model model, P.Profile prof, P.HoleData data, double depthMm, P.FeaturePropertyConstants side){
-            bool blind = depthMm > 1e-9;
+        internal static P.Hole DrillOnProfile(P.PartDocument part, P.Model model, P.Profile prof, P.HoleData data, double depthMm, P.FeaturePropertyConstants side){
             P.Hole h = null;
             var addClock = System.Diagnostics.Stopwatch.StartNew();
             try {
-                h = Attempt("打种子孔", () => blind ? model.Holes.AddFinite(prof, side, depthMm * MmToM, data)
-                                                   : model.Holes.AddThroughAll(prof, side, data));
+                h = Attempt("打种子孔", () => AddHole(part, model, prof, side, depthMm, data));
             } catch (Exception e) {
                 lastSideHr = e.HResult;
                 Log.Write("AutoHoleSide " + side, e.GetType().Name + " 0x" + e.HResult.ToString("X8") + " " + e.Message);
@@ -798,6 +799,29 @@ namespace TianGongCadSuite {
             try { h.Delete(); } catch (Exception e) { Log.Write("AutoHoleSeedDelete", e); }
             return null;
         }
+        // 建一个孔特征。单实体零件走 AddThroughAll / AddFinite（老路）；
+        // 多实体零件这两个对哪个实体都打不上，要走 AddMultiBody、显式给目标实体的 Body（见 PartBodies）。
+        static P.Hole AddHole(P.PartDocument part, P.Model model, P.Profile prof, P.FeaturePropertyConstants side, double depthMm, P.HoleData data){
+            bool blind = depthMm > 1e-9;
+            if (!PartBodies.Multi(part))
+                return blind ? model.Holes.AddFinite(prof, side, depthMm * MmToM, data) : model.Holes.AddThroughAll(prof, side, data);
+            Array bodies = new object[]{ model.Body };
+            var keyPoint = P.KeyPointExtentConstants.igTangentNormal;
+            return model.Holes.AddMultiBody(prof, side, blind ? P.FeaturePropertyConstants.igFinite : P.FeaturePropertyConstants.igThroughAll,
+                                            blind ? depthMm * MmToM : 0.0, M, ref keyPoint, M, M, data, 1, ref bodies);
+        }
+
+        // 目标面所在实体的 Model（单实体零件就是第 1 个）。还没认过的现认一次、记进 target.Body
+        internal static P.Model ModelFor(TargetFace target){
+            if (target == null || target.Part == null) return null;
+            if (target.Body < 1) {
+                V3 p = new V3(), n = new V3(0, 0, 1);
+                try { p = target.Placement.InversePoint(target.Plane.Point); n = target.Placement.InverseNormal(target.Plane.Normal).Unit(); } catch { }
+                target.Body = PartBodies.IndexOf(target.Part, target.Face, p, n);
+            }
+            return PartBodies.Model(target.Part, target.Body);
+        }
+
         static string SideKey(P.RefPlane plane){
             try {
                 Array rr = new double[3], rn = new double[3];
@@ -1072,7 +1096,9 @@ namespace TianGongCadSuite {
             if(!string.Equals(activeName,targetName,StringComparison.OrdinalIgnoreCase))return target;
             try{
                 if(active.Models.Count<1)return target;
-                var model=(P.Model)active.Models.Item(1);
+                ModelFor(target);                                            // 没认过实体的现在认（记进 target.Body）
+                int bodyIndex=Math.Max(1,target.Body);
+                var model=PartBodies.Model(active,bodyIndex);   // 同一个零件文件，实体的序号不变
                 V3 localPoint=target.Placement.InversePoint(target.Plane.Point);
                 V3 localNormal=target.Placement.InverseNormal(target.Plane.Normal).Unit();
                 G.Face face=null;double best=double.MaxValue;
@@ -1094,6 +1120,7 @@ namespace TianGongCadSuite {
                 anchored.Placement=target.Placement;
                 anchored.Pick=target.Pick;
                 anchored.Bounds=target.Bounds;
+                anchored.Body=bodyIndex;
                 try{anchored.PartName=Name(active);}catch{anchored.PartName=target.PartName;}
                 anchored.Label="平面 "+face.ID;
                 return anchored;
@@ -1109,7 +1136,7 @@ namespace TianGongCadSuite {
             target = AnchorToActivePart(target);   // 原位编辑时把面锚定到正在编辑的文档（见上）
             result.Requested = requests.Count;
             var part = target.Part;
-            P.Model model = part.Models.Count >= 1 ? part.Models.Item(1) : null;
+            P.Model model = ModelFor(target);
             if (model == null) throw new InvalidOperationException("目标零件没有可用的实体模型。");
             P.RefPlane plane = FindOrCreatePlane(part, target);
             if (plane == null) throw new InvalidOperationException("无法在所选面上建立打孔基准面。");
@@ -1125,7 +1152,7 @@ namespace TianGongCadSuite {
             var madeLocal = new V3[requests.Count];
             var multis = new Dictionary<string, P.UserDefinedPattern>(StringComparer.Ordinal);   // 规格键 → 这次合成的多孔孔特征
             // 这张面上已经有哪些孔：读一遍实体（见 HoleSpots），之后每个孔位只在内存里比
-            var spots = ScanSpots(part);
+            var spots = ScanSpots(model);
             V3 normal = PlaneNormal(plane);
             // 同一规格只造一个 HoleData（原来每个孔各造一个，HoleDataCollection 里留下一堆一模一样的）
             var dataBySpec = new Dictionary<string, P.HoleData>(StringComparer.Ordinal);
@@ -1204,7 +1231,7 @@ namespace TianGongCadSuite {
                     // 合成失败时删过特征：CAD 可能把手里的模型/基准面对象一起作废了（一张面上的孔全删光时连基准面一起删，真机 J9），重取
                     if (touched) {
                         DropCache(part);
-                        try { if (part.Models.Count >= 1) model = part.Models.Item(1); } catch (Exception e) { Log.Write("HoleCombineModel", e); }
+                        try { model = ModelFor(target) ?? model; } catch (Exception e) { Log.Write("HoleCombineModel", e); }
                         try { plane = FindOrCreatePlane(part, target) ?? plane; } catch (Exception e) { Log.Write("HoleCombinePlane", e); }
                     }
                 }
@@ -1216,7 +1243,7 @@ namespace TianGongCadSuite {
                         DropCache(part);
                         try {
                             plane = FindOrCreatePlane(part, target);
-                            if (part.Models.Count >= 1) model = part.Models.Item(1);
+                            model = ModelFor(target) ?? model;
                         } catch (Exception e) { Info("重建基准面失败：" + Friendly(e)); }
                     }
                     bool anyLeft = false;
@@ -1253,7 +1280,7 @@ namespace TianGongCadSuite {
                 result.Outcomes.Add(new ResultList.Item(ResultList.Kind.Fail, whyByRequest[i]).At(requests[i].Centre, requests[i].Spec == null ? 6 : requests[i].Spec.HoleDiameter));
             }
             result.Method = methods.Count > 0 ? string.Join("／", methods.ToArray()) : "—";
-            try { if (part.Models.Count >= 1) model = part.Models.Item(1); } catch { }
+            try { model = ModelFor(target) ?? model; } catch { }
             long drilledMs = clock.ElapsedMilliseconds;
             Organize(part, model, requests, made, madeLocal, multis, result);
             Log.Write("AutoHoleTiming", requests.Count + " 个孔：打孔 " + drilledMs + "ms，命名/编组 " + (clock.ElapsedMilliseconds - drilledMs)
@@ -1401,7 +1428,7 @@ namespace TianGongCadSuite {
             if (lengthMm <= widthMm) { why = "腰孔总长必须大于槽宽。"; return false; }
             if (widthMm <= 0) { why = "槽宽必须大于 0。"; return false; }
             var part = target.Part;
-            P.Model model = part.Models.Count >= 1 ? part.Models.Item(1) : null;
+            P.Model model = ModelFor(target);   // 腰孔是拉伸切除：多实体零件上老写法就能切（实测），只要用对实体
             if (model == null) { why = "目标零件没有可用实体。"; return false; }
             P.Profile profile = null;
             try {
@@ -1474,7 +1501,7 @@ namespace TianGongCadSuite {
             var result = new DrillResult { Requested = localCentres == null ? 0 : localCentres.Count, Method = "腰孔（通切）" };
             if (localCentres == null || localCentres.Count == 0) return result;
             var part = target.Part;
-            P.Model model = part.Models.Count >= 1 ? part.Models.Item(1) : null;
+            P.Model model = ModelFor(target);
             if (model == null) throw new InvalidOperationException("目标零件没有可用的实体模型。");
             var plane = FindOrCreatePlane(part, target);
             if (plane == null) throw new InvalidOperationException("无法在所选面上建立基准面。");

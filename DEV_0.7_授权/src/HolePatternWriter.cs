@@ -27,7 +27,7 @@ namespace TianGongCadSuite {
             if (centres == null || centres.Count < 2) return Fallback(target, spec, centres, null);
             target = AutoHoleWriter.AnchorToActivePart(target);
             var part = target.Part;
-            P.Model model = part.Models.Count >= 1 ? part.Models.Item(1) : null;
+            P.Model model = AutoHoleWriter.ModelFor(target);   // 多实体零件：目标面所在的实体（PartBodies；阵列在指定实体上实测能建）
             if (model == null) throw new InvalidOperationException("目标零件没有可用的实体模型。");
             P.RefPlane plane = AutoHoleWriter.FindOrCreatePlane(part, target);
             if (plane == null) throw new InvalidOperationException("无法在所选面上建立打孔基准面。");
@@ -39,7 +39,7 @@ namespace TianGongCadSuite {
                 local.Add(lp);
             }
             int busy = 0;
-            var spots = AutoHoleWriter.ScanSpots(part); var normal = AutoHoleWriter.PlaneNormal(plane);
+            var spots = AutoHoleWriter.ScanSpots(model); var normal = AutoHoleWriter.PlaneNormal(plane);
             foreach (var lp in local) { double d; if (spots.At(lp, normal, out d)) busy++; }
             if (busy > 0) return Fallback(target, spec, centres, "有 " + busy + " 个位置本来就有孔，这一排改成逐个打孔（阵列要求每个位置都是空的）。");
 
@@ -62,7 +62,7 @@ namespace TianGongCadSuite {
                     AutoHoleWriter.DropCache(part);
                     try {
                         plane = AutoHoleWriter.FindOrCreatePlane(part, target);
-                        if (part.Models.Count >= 1) model = part.Models.Item(1);
+                        model = AutoHoleWriter.ModelFor(target) ?? model;
                         if (!Plan(plane, local, layout.Circular ? (V3?)layout.Axis : null, out layout, out why)) return Fallback(target, spec, centres, why);
                         data = AutoHoleWriter.BuildHoleData(part, spec, result);
                     } catch (Exception e) { seedWhy = AutoHoleWriter.Friendly(e); continue; }
@@ -80,7 +80,7 @@ namespace TianGongCadSuite {
                 try { made = Create(model, plane, seed, layout, turn); }
                 catch (Exception e) { patWhy = AutoHoleWriter.Friendly(e); continue; }
                 if (made == null) { patWhy = "CAD 未返回阵列特征"; continue; }
-                string bad = Verify(made, plane, part, local);
+                string bad = Verify(made, plane, model, local);
                 if (bad.Length == 0) { pattern = made; break; }
                 patWhy = bad;
                 AutoHoleWriter.Info("阵列核对不通过（" + bad + "），删掉换方向");
@@ -171,14 +171,14 @@ namespace TianGongCadSuite {
         }
 
         // 阵列建好以后：状态 OK，而且每个孔心位置上都真的有孔（零件实体上的圆边）
-        static string Verify(P.Pattern pattern, P.RefPlane plane, P.PartDocument part, IList<V3> local){
+        static string Verify(P.Pattern pattern, P.RefPlane plane, P.Model model, IList<V3> local){
             try {
                 object desc;
                 var st = pattern.GetStatusEx(out desc);
                 if ((int)st != (int)P.FeatureStatusConstants.igFeatureOK) return "阵列状态 " + st + (desc == null ? "" : "（" + desc + "）");
             } catch (Exception e) { return "读不到阵列状态（" + AutoHoleWriter.Friendly(e) + "）"; }
             int missing = 0;
-            var spots = AutoHoleWriter.ScanSpots(part); var normal = AutoHoleWriter.PlaneNormal(plane);
+            var spots = AutoHoleWriter.ScanSpots(model); var normal = AutoHoleWriter.PlaneNormal(plane);
             foreach (var lp in local) { double d; if (!spots.At(lp, normal, out d)) missing++; }
             return missing == 0 ? "" : missing + " 个孔位上没有孔";
         }
