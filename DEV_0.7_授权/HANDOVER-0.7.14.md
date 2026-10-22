@@ -40,7 +40,8 @@
 * 副本真机（开发构建）：`e2e-support-0223-fix`、`-final` —— 打 + 撤销以后，A 用旧面数据打上 2 个孔，重新点面再打也打上 2 个；
   `-regress` —— 新开副本保持关联 / 不保持关联各一次都打上，原生关联 2/2。
 * `MultiBodyE2E`（02-07 + 02-2 副本，`artifacts/e2e-multibody-0714`）15/15。
-* 安装：`toolsuild-install.ps1` → `buildelease-20261022-200952`（正式构建），删掉 0.7.13.0 子键；
+* 安装：`tools\build-install.ps1` → `build\release-20261022-200952`（正式构建），删掉 0.7.13.0 子键；
+elease-20261022-200952`（正式构建），删掉 0.7.13.0 子键；
   私有桌面起 CAD 打开装配后：`AddInConnect … release-20261022-200952 … ver=0.7.14.0`（`artifacts/addin-check-0714b`，同一轮 02-23 打 + 撤销 + 再打也全过）。
   注意：只起 CAD、不开文档时插件不连接，日志里没有 AddInConnect —— 查版本要开一个文档。
 
