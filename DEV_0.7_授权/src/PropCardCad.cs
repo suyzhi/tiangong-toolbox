@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using F = SolidEdgeFramework;
 using A = SolidEdgeAssembly;
@@ -12,11 +13,15 @@ namespace TianGongCadSuite {
     // 不打开文档、不加载几何，一个文件几十毫秒。它在天工进程里运行，加密（DLP）文件照样能读写 ——
     // 同一个组件放在 Python 这类外部进程里就打不开加密文件。
     //
-    // 已经在 CAD 内存里的文件（打开着的文档、装配里加载着的零件）要多想一步（真机实测）：
-    //   · 装配里加载着的零件：属性组件照样写得进磁盘，但内存里那份还是旧属性 —— 之后用户改了这个零件再保存，
-    //     会把新属性冲掉。所以写完磁盘，内存里那份也照写一遍（它因此变成"已修改"，跟着装配一起保存，值是一样的）；
-    //   · 当前打开的文档本身（比如正开着的装配）：属性组件打不开（文件被占用），只写进内存，**不替用户保存** ——
-    //     从插件里保存装配会弹对话框把 CAD 卡住（真机），让用户自己 Ctrl+S。
+    // 已经在 CAD 内存里的文件（打开着的文档、装配里加载着的零件、工程图引用的模型）只写内存那份，绝不碰磁盘（真机实测）：
+    //   · 先写磁盘再改内存（0.8.0 / 0.8.1 的做法）：天工发现文件"加载后已被其他用户修改"，拒绝给写权限，
+    //     每个文件弹一个对话框（0.8.1 现场，写 64 个文件）；
+    //   · 只写磁盘不改内存：内存里还是旧值，工程图标题栏照旧，用户之后改这个零件也会被同一个对话框拦住。
+    //   所以内存里的文件一律写内存，**不替用户保存**（从插件里保存装配会弹对话框把 CAD 卡住，真机），让用户自己 Ctrl+S。
+    //
+    // 两边的属性集合是同一个接口类型、成员编号却不一样：.NET 的 dynamic 按接口类型缓存调用方式，
+    // 在一边用过 dynamic，另一边的调用就会调错成员（0.8.1 现场：碰过内存文档之后，属性组件的 Add 全报 TargetParameterCountException）。
+    // 所以属性组件一律按名字后期绑定（Late，每次现查编号），内存文档一律按接口类型调，两边都不用 dynamic。
     public sealed class PropCardCad {
         public const string SaveHint = "提示：已写进 CAD 里打开着的文件，请在 CAD 里保存";
         readonly F.Application app;
@@ -91,19 +96,22 @@ namespace TianGongCadSuite {
 
         public PropCardRow Read(string path){
             var row = new PropCardRow { Path = path };
-            dynamic sets = null;
+            object sets = null;
             try {
                 sets = NewFileProperties();
-                sets.Open(path, true);
-                foreach (var pair in ReadCustom(sets.Item("Custom"), FileBase)) row.Original[pair.Key] = pair.Value;
-                try { row.Material = Convert.ToString(sets.Item("MechanicalModeling").Item("Material").Value); } catch { }
+                Late.Call(sets, "Open", path, true);
+                object custom = Late.Get(sets, "Item", "Custom");
+                foreach (var pair in FileNames(custom)) row.Original[pair.Key] = Convert.ToString(Late.Get(Late.Get(custom, "Item", pair.Value), "Value"));
+                try { row.Material = Convert.ToString(Late.Get(Late.Get(Late.Get(sets, "Item", "MechanicalModeling"), "Item", "Material"), "Value")); } catch { }
             } catch (Exception e) {
                 // 读不了文件（打开着的加密文件就读不了）：退回已打开的文档
                 var doc = LoadedDocument(path);
                 if (doc == null) { row.Problem = "读不了：" + e.Message; Log.Write("PropCardRead " + path, e); }
                 else {
-                    try { foreach (var pair in ReadCustom(DocCustom(doc), DocBase)) row.Original[pair.Key] = pair.Value; }
-                    catch (Exception e2) { row.Problem = "读不了：" + e2.Message; Log.Write("PropCardReadDoc " + path, e2); }
+                    try {
+                        var custom = DocCustom(doc);
+                        foreach (var pair in DocNames(custom)) row.Original[pair.Key] = Convert.ToString(custom.Item(pair.Value).get_Value());
+                    } catch (Exception e2) { row.Problem = "读不了：" + e2.Message; Log.Write("PropCardReadDoc " + path, e2); }
                 }
             } finally { Close(sets); }
             return row;
@@ -112,80 +120,80 @@ namespace TianGongCadSuite {
         // 下标起点写死，绝不"试一下"：属性组件的集合从 0 数；文档的 Properties 从 1 数，
         // 而且在文档集合上取越界的下标（Item(0)）不是报错，是 FWKAUTO.DLL 里直接访问冲突、天工整个崩掉
         // （0.8.0 现场：打开加密零件点本命令就崩，.NET 拦不住这种异常）。按名字取不存在的属性也不碰，先列出已有的名字。
-        const int FileBase = 0, DocBase = 1;
-
-        static Dictionary<string, string> ReadCustom(dynamic custom, int start){
-            var map = new Dictionary<string, string>();
-            int count = (int)custom.Count;
-            for (int i = start; i < start + count; i++) {
-                try {
-                    dynamic p = custom.Item(i);
-                    string name = Convert.ToString(p.Name);
-                    object value = null;
-                    try { value = p.Value; } catch { }
-                    if (!string.IsNullOrEmpty(name)) map[name] = Convert.ToString(value);
-                } catch { }
+        // 返回 名字 → 下标（重名取第一个）
+        static Dictionary<string, int> FileNames(object custom){
+            var at = new Dictionary<string, int>();
+            int count = Convert.ToInt32(Late.Get(custom, "Count"));
+            for (int i = 0; i < count; i++) {
+                try { Index(at, Convert.ToString(Late.Get(Late.Get(custom, "Item", i), "Name")), i); } catch { }
             }
-            return map;
+            return at;
         }
+        static Dictionary<string, int> DocNames(F.Properties custom){
+            var at = new Dictionary<string, int>();
+            int count = custom.Count;
+            for (int i = 1; i <= count; i++) {
+                try { Index(at, custom.Item(i).Name, i); } catch { }
+            }
+            return at;
+        }
+        static void Index(Dictionary<string, int> at, string name, int index){ if (!string.IsNullOrEmpty(name) && !at.ContainsKey(name)) at[name] = index; }
 
         // ---------- 写 ----------
 
-        // 返回空串 = 写好并已存盘；SaveHint = 只写进了打开着的文档（要用户自己保存）；其他 = 失败原因
+        // 返回空串 = 写好并已存盘；SaveHint = 写进了 CAD 内存里的文档（要用户自己保存）；其他 = 失败原因
         public string Write(PropCardRow row, List<KeyValuePair<string, string>> writes){
             if (writes.Count == 0) return "";
             object doc = LoadedDocument(row.Path);
-            dynamic sets = null;
-            Exception fileError = null;
+            if (doc != null) {
+                try { PutDoc(DocCustom(doc), writes); return SaveHint; }
+                // 内存那份写不进（比如只读打开）：退回写磁盘，磁盘上的才算数
+                catch (Exception e) { Log.Write("PropCardWriteDoc " + row.Path, e); }
+            }
+            object sets = null;
             try {
                 sets = NewFileProperties();
-                sets.Open(row.Path, false);
-                Put(sets.Item("Custom"), writes, false);
-                sets.Save();
-            } catch (Exception e) { fileError = e; } finally { Close(sets); }
-
-            if (fileError == null) {
-                // 磁盘写好了；内存里那份同步一下，失败不影响结果（磁盘上已经是新值）
-                if (doc != null) try { Put(DocProperties(doc).Item("Custom"), writes, true); } catch (Exception e) { Log.Write("PropCardMirror " + row.Path, e); }
+                Late.Call(sets, "Open", row.Path, false);
+                PutFile(Late.Get(sets, "Item", "Custom"), writes);
+                Late.Call(sets, "Save");
                 return "";
-            }
-            if (doc == null) { Log.Write("PropCardWrite " + row.Path, fileError); return "写不进去：" + fileError.Message; }
-            Log.Write("PropCardWrite 改写内存里的文档 " + row.Path, fileError.Message);
-            try {
-                Put(DocProperties(doc).Item("Custom"), writes, true);
-                return SaveHint;
-            } catch (Exception e) { Log.Write("PropCardWriteDoc " + row.Path, e); return "写不进去：" + e.Message; }
+            } catch (Exception e) {
+                Log.Write("PropCardWrite " + row.Path, e);
+                return "写不进去：" + Message(e);
+            } finally { Close(sets); }
         }
 
-        // typed：打开着的文档的属性集合要按接口类型调 Add（dynamic 调报 DISP_E_NOTACOLLECTION，真机）；
-        // 属性组件那边反过来，只能 dynamic（按接口类型转会转成功、一调就 DISP_E_MEMBERNOTFOUND）
-        static void Put(dynamic custom, List<KeyValuePair<string, string>> writes, bool typed){
-            // 先按下标列出已有的属性（名字 → 下标），只对已有的按下标改值；没有的才 Add（不靠"取一下看报不报错"）
-            int start = typed ? DocBase : FileBase, count = (int)custom.Count;
-            var at = new Dictionary<string, int>();
-            for (int i = start; i < start + count; i++) {
-                try { string name = Convert.ToString(custom.Item(i).Name); if (!string.IsNullOrEmpty(name) && !at.ContainsKey(name)) at[name] = i; } catch { }
-            }
+        // 已有的属性按下标改值，没有的才 Add（不靠"取一下看报不报错"）
+        static void PutFile(object custom, List<KeyValuePair<string, string>> writes){
+            var at = FileNames(custom);
             foreach (var pair in writes) {
                 int index;
-                if (at.TryGetValue(pair.Key, out index)) {
-                    try { dynamic p = custom.Item(index); p.Value = pair.Value; continue; }
-                    catch (Exception e) { throw new InvalidOperationException("「" + pair.Key + "」写不进去（原来不是文字属性？）：" + e.Message); }
-                }
-                if (typed) ((F.Properties)custom).Add(pair.Key, pair.Value);
-                else custom.Add(pair.Key, pair.Value);
+                if (!at.TryGetValue(pair.Key, out index)) { Late.Call(custom, "Add", pair.Key, pair.Value); continue; }
+                try { Late.Set(Late.Get(custom, "Item", index), "Value", pair.Value); }
+                catch (Exception e) { throw new InvalidOperationException("「" + pair.Key + "」写不进去（原来不是文字属性？）：" + Message(e)); }
             }
         }
+        static void PutDoc(F.Properties custom, List<KeyValuePair<string, string>> writes){
+            var at = DocNames(custom);
+            foreach (var pair in writes) {
+                int index;
+                if (!at.TryGetValue(pair.Key, out index)) { custom.Add(pair.Key, pair.Value); continue; }
+                object value = pair.Value;
+                try { custom.Item(index).set_Value(ref value); }
+                catch (Exception e) { throw new InvalidOperationException("「" + pair.Key + "」写不进去（原来不是文字属性？）：" + e.Message); }
+            }
+        }
+
+        // 后期绑定的异常包在 TargetInvocationException 里，取里面那层的话
+        static string Message(Exception e){ return (e is TargetInvocationException && e.InnerException != null ? e.InnerException : e).Message; }
 
         // ---------- 已打开的文档 ----------
 
-        // 文档的属性集合按接口类型取：从 Documents.Item / OccurrenceDocument 拿到的是裸 IDispatch，
-        // 在它上面用 dynamic 调 Properties.Item("Custom") 会报 DISP_E_NOTACOLLECTION（真机，打开着的装配）
-        static F.PropertySets DocProperties(object doc){
-            object sets = doc.GetType().InvokeMember("Properties", System.Reflection.BindingFlags.GetProperty, null, doc, null);
-            return (F.PropertySets)sets;
+        // 文档的属性集合按接口类型取：从 Documents.Item / OccurrenceDocument 拿到的是裸 IDispatch
+        static F.Properties DocCustom(object doc){
+            object sets = doc.GetType().InvokeMember("Properties", BindingFlags.GetProperty, null, doc, null);
+            return ((F.PropertySets)sets).Item("Custom");
         }
-        static F.Properties DocCustom(object doc){ return DocProperties(doc).Item("Custom"); }
 
         // 文件在不在 CAD 内存里：打开着的文档、当前工程图引用的模型、当前装配里引用它的实例
         // （加密文件在内存里时属性组件写不进去，只能写内存里那份 —— 工程图引用的零件就是这样，0.8.0 现场）
@@ -219,17 +227,25 @@ namespace TianGongCadSuite {
 
         // ---------- 属性组件 ----------
 
-        static dynamic NewFileProperties(){
+        static object NewFileProperties(){
             var type = Type.GetTypeFromProgID("SolidEdge.FileProperties");
             if (type == null) throw new InvalidOperationException("找不到天工属性组件 SolidEdge.FileProperties。");
             return Activator.CreateInstance(type);
         }
 
         // 及时关掉并释放：不释放的话文件句柄留在 CAD 进程里，后面保存这个文件会报占用
-        static void Close(dynamic sets){
+        static void Close(object sets){
             if (sets == null) return;
-            try { sets.Close(); } catch { }
-            try { Marshal.FinalReleaseComObject((object)sets); } catch { }
+            try { Late.Call(sets, "Close"); } catch { }
+            try { Marshal.FinalReleaseComObject(sets); } catch { }
+        }
+
+        // 按名字后期绑定（IDispatch 每次现查成员编号，不像 dynamic 那样按接口类型缓存，见文件头）
+        static class Late {
+            const BindingFlags Read = BindingFlags.InvokeMethod | BindingFlags.GetProperty;
+            public static object Get(object o, string name, params object[] args){ return o.GetType().InvokeMember(name, Read, null, o, args); }
+            public static void Call(object o, string name, params object[] args){ o.GetType().InvokeMember(name, BindingFlags.InvokeMethod, null, o, args); }
+            public static void Set(object o, string name, object value){ o.GetType().InvokeMember(name, BindingFlags.SetProperty, null, o, new[] { value }); }
         }
     }
 }

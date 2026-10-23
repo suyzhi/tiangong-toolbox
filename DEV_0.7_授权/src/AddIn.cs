@@ -83,6 +83,35 @@ diagnostics=new Diagnostics(context.Application,()=>Run(registry.Find(1)),()=>Ru
             var back=cad.Read(path);
             return "result=["+result+"] writes="+writes.Count+" ms="+sw.ElapsedMilliseconds+" back["+field+"]="+(back.Has(field)?back.Original[field]:"<missing>")+" missingAfter="+Missing(back);
         }
+        // 直接用属性组件对一个文件做一步：add=加一个属性 / set=改第 0 个属性的值；save 决定存不存
+        public string PropCardRaw(string path,string op,string name,string value,bool save){
+            var sb=new System.Text.StringBuilder();dynamic sets=null;
+            Func<Exception,string> hr=e=>{var c=e as System.Runtime.InteropServices.COMException;var i=e.InnerException as System.Runtime.InteropServices.COMException;return e.GetType().Name+" 0x"+((c??i)!=null?((c??i).ErrorCode).ToString("X8"):"?")+" "+e.Message;};
+            try{sets=Activator.CreateInstance(Type.GetTypeFromProgID("SolidEdge.FileProperties"));sets.Open(path,false);sb.Append("open ok;");
+                dynamic c=sets.Item("Custom");sb.Append("count="+c.Count+";");
+                try{if(op=="add")c.Add(name,value);else{dynamic p=c.Item(0);sb.Append("p0="+p.Name+";");p.Value=value;}sb.Append(op+" ok;");}catch(Exception e){sb.Append(op+" FAIL "+hr(e)+";");}
+                if(save){try{sets.Save();sb.Append("save ok;");}catch(Exception e){sb.Append("save FAIL "+hr(e)+";");}}
+            }catch(Exception e){sb.Append("EXC "+hr(e));}
+            finally{if(sets!=null){try{sets.Close();}catch{}try{System.Runtime.InteropServices.Marshal.FinalReleaseComObject((object)sets);}catch{}}}
+            return sb.ToString();
+        }
+        // 0.8.1 的旧顺序复现：先取实例文档（加载）→ 属性组件写盘 → 再改内存那份
+        public void StartPropCardOldOrder(string path){Result="";dispatcher.BeginInvoke((Action)(()=>{try{Result=PropCardOldOrder(path);}catch(Exception e){Result="EXC "+e;}}));}
+        string PropCardOldOrder(string path){
+            object doc=FindOccurrenceDoc((SolidEdgeAssembly.AssemblyDocument)Host.ActiveDocument,path);
+            if(doc==null)return "no occurrence";
+            string disk=PropCardRaw(path,"set","","旧顺序",true);
+            var sets=(F.PropertySets)doc.GetType().InvokeMember("Properties",System.Reflection.BindingFlags.GetProperty,null,doc,null);
+            object v="旧顺序";
+            try{sets.Item("Custom").Item(1).set_Value(ref v);return disk+" mem ok";}catch(Exception e){return disk+" mem FAIL "+e.Message;}
+        }
+        static object FindOccurrenceDoc(SolidEdgeAssembly.AssemblyDocument asm,string path){
+            foreach(SolidEdgeAssembly.Occurrence o in asm.Occurrences){
+                if(string.Equals(o.OccurrenceFileName,path,StringComparison.OrdinalIgnoreCase))return o.OccurrenceDocument;
+                if(o.Subassembly){var hit=FindOccurrenceDoc((SolidEdgeAssembly.AssemblyDocument)o.OccurrenceDocument,path);if(hit!=null)return hit;}
+            }
+            return null;
+        }
         static string Missing(PropCardRow r){var l=new System.Collections.Generic.List<string>();foreach(var f in PropCardFields.Default)if(!r.Has(f))l.Add(f);return string.Join(",",l.ToArray());}
         public string PropCardFormShot(string png){
             var form=new PropCardForm(Host);

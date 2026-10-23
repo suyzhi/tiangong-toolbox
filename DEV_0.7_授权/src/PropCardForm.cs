@@ -275,7 +275,7 @@ namespace TianGongCadSuite {
             } finally { Cursor = Cursors.Default; }
             Rebuild();
             status.Text = "写好 " + ok + " / " + total + " 个文件"
-                + (unsaved > 0 ? "；其中 " + unsaved + " 个在 CAD 里开着，请在 CAD 里保存（Ctrl+S）" : "")
+                + (unsaved > 0 ? "；其中 " + unsaved + " 个在 CAD 里开着，写进了 CAD，请回 CAD 按 Ctrl+S 保存（装配 / 工程图里的零件会一起保存）" : "")
                 + (problems.Count > 0 ? "；" + problems.Count + " 个没写进去" : "");
             status.ForeColor = problems.Count > 0 || unsaved > 0 ? Ui.Warn : Ui.Ok;
             lastProblems = problems;
