@@ -16,5 +16,16 @@ namespace TianGongCadSuite {
         public static string Stamp(DateTime now){ return now.ToString("yyyyMMdd_HHmmss"); }
         public static string BatchDirectoryName(string stamp,string token){ return BatchPrefix + stamp + "_" + token; }
         public static string FileName(string stamp,int index){ return Prefix + stamp + "_" + index.ToString("D3") + ".par"; }
+
+        // 这次生成往哪个目录写（0.7.15）。原来 autopanel.tsv 只记一个全局的输出目录：在装配 A 里生成过一次，
+        // 换到装配 B 里生成，板子照样写进 A 的目录 —— B 引用着别的项目文件夹里的零件，拷走 / 打包 B 时板子就丢了。
+        // 现在连同"是给哪个装配选的"一起记：记下的目录只在同一个装配上沿用，换了装配回到它自己所在的目录。
+        // assemblyPath 为空（新装配还没保存）时没法比，记下的目录也不用，生成前让用户选。
+        public static string OutputDirFor(string assemblyPath,string rememberedDir,string rememberedFor){
+            if(string.IsNullOrEmpty(assemblyPath)) return "";
+            if(!string.IsNullOrEmpty(rememberedDir)&&!string.IsNullOrEmpty(rememberedFor)
+               &&string.Equals(rememberedFor,assemblyPath,StringComparison.OrdinalIgnoreCase)) return rememberedDir;
+            return System.IO.Path.GetDirectoryName(assemblyPath)??"";
+        }
     }
 }

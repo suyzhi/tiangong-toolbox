@@ -19,6 +19,9 @@
 | `WindowStateProbe.cs` / `WindowCloseProbe.cs` / `WindowHideProbe.cs` / `InPlaceDirectProbe.cs` | （0.7.12）原位编辑留下的窗口：是什么、关掉会丢改动、藏起来没事；`SubOccurrence.Reference` 一步进原位 |
 | `PartDrillProbe.cs` | （0.7.13）多实体零件：零件概况（实体数、特征树）；老写法每个实体打一个孔（默认）/ 先 MakeActive 再打（`active`）/ `Holes.AddMultiBody`（`multi`）/ 面片→实体、Holes 归属、盲孔、多孔合一、阵列、特征组、腰孔（`facts`） |
 | `MultiBodyE2E.cs` | （0.7.13）多实体零件上走插件真实接口：一批 3 孔合成、同位置重打、盲孔、批量排孔 + 撤销、实体 1 单孔、腰孔；可选单实体零件回归 |
+| `MultiBodyCheckE2E.cs` | （0.7.15）多实体零件上面扫描 / 点孔口圆边认孔 / 配孔检查读全部实体：实体 6 上打沉孔后扫面认配做孔径、装配里配孔检查读到各实体的孔、射线表穿过实体 6；可选再给一个零件试打孔。会**存盘**零件副本 |
+| `CheckCompare.cs` | （0.7.15）整套配孔检查（和窗口同一路径），只读。新旧两个开发构建各编一份在同一装配副本上跑，比较报告 |
+| `MissProbe.cs` | （0.7.15）配孔检查报的"漏打孔"是不是真的：一条装配坐标的轴线穿过某零件每个实体的哪些面、离孔多远 |
 
 ## 编译（x64，.NET Framework csc）
 

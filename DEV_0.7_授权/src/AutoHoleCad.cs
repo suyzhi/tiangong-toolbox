@@ -1573,10 +1573,11 @@ namespace TianGongCadSuite {
             var result = new List<HoleRecord>();
             parts = AssemblyPart.List(assembly, warnings);
             var byBucket = new Dictionary<string, List<HoleRecord>>(StringComparer.Ordinal);
-            foreach (var ap in parts) {
+            foreach (var ap in parts)
+            foreach (var body in ap.Bodies) {           // 多实体零件每个实体都要看（0.7.15）
                 string partName = ap.Name;
                 object rawEdges;
-                try { rawEdges = ap.Body.get_Edges(G.FeatureTopologyQueryTypeConstants.igQueryAll); }
+                try { rawEdges = body.get_Edges(G.FeatureTopologyQueryTypeConstants.igQueryAll); }
                 catch (Exception e) { warnings.Add(partName + " 读取边失败：" + e.Message); continue; }
                 foreach (G.Edge edge in (G.Edges)rawEdges) {
                     G.Circle circle = null;
@@ -1643,8 +1644,12 @@ namespace TianGongCadSuite {
                     Transform placement;
                     try { placement = ap.Placement; }
                     catch (Exception e) { Log.Write("AutoHoleCheckMatrix " + ap.Name, e); continue; }   // 读不到变换宁可不判，也不按原点瞎判
-                    var b = ap.Body;
-                    index.Add(PartRayTarget.WithBoxes(ap.Name, placement, (o, d) => CastBoxes(b, o, d)));
+                    var bodies = ap.Bodies;
+                    index.Add(PartRayTarget.WithBoxes(ap.Name, placement, (o, d) => {
+                        var all = new List<Box3>();
+                        foreach (var b in bodies) all.AddRange(CastBoxes(b, o, d));   // 多实体零件：哪个实体的材料都算
+                        return all;
+                    }));
                 }
                 return index;
             }

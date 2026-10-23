@@ -159,6 +159,12 @@ namespace TianGongCadSuite {
         }
 
         // ---------------- 设置（记住上次的输入）----------------
+        string savedDir = "", savedFor = "";
+        string AssemblyPath(){
+            try { string f = assembly.FullName; if (!string.IsNullOrEmpty(f) && File.Exists(f)) return f; } catch { }
+            return "";
+        }
+
         void LoadSettings(){
             loading = true;
             try {
@@ -168,14 +174,13 @@ namespace TianGongCadSuite {
                     if (r[0] == "thickness" && decimal.TryParse(r[1], NumberStyles.Float, CultureInfo.InvariantCulture, out d)) thickness.Value = Ui.Clamp(d, thickness.Minimum, thickness.Maximum);
                     else if (r[0] == "gap" && decimal.TryParse(r[1], NumberStyles.Float, CultureInfo.InvariantCulture, out d)) gap.Value = Ui.Clamp(d, gap.Minimum, gap.Maximum);
                     else if (r[0] == "material") material.Text = r[1];
-                    else if (r[0] == "outputDir" && Directory.Exists(r[1])) outputDir = r[1];
+                    else if (r[0] == "outputDir" && Directory.Exists(r[1])) savedDir = r[1];
+                    else if (r[0] == "outputFor") savedFor = r[1];
                 }
             } catch (Exception e) { Log.Write("AutoPanelSettings", e); }
             finally { loading = false; }
-            if (outputDir.Length == 0) {
-                // 默认：装配所在目录（新装配还没保存时没有目录，生成前会让用户选）
-                try { string f = assembly.FullName; if (!string.IsNullOrEmpty(f) && File.Exists(f)) outputDir = Path.GetDirectoryName(f); } catch { }
-            }
+            // 记下的目录只在同一个装配上沿用；默认是装配所在目录（新装配还没保存时没有目录，生成前会让用户选）
+            outputDir = PanelNaming.OutputDirFor(AssemblyPath(), savedDir, savedFor);
             ShowOutputDir();
         }
 
@@ -184,7 +189,7 @@ namespace TianGongCadSuite {
                 var ci = CultureInfo.InvariantCulture;
                 SettingsFile.Write(SettingsFile.PathOf(SettingsName), new List<string[]>{
                     new[]{ "thickness", thickness.Value.ToString(ci) }, new[]{ "gap", gap.Value.ToString(ci) },
-                    new[]{ "material", material.Text.Trim() }, new[]{ "outputDir", outputDir } },
+                    new[]{ "material", material.Text.Trim() }, new[]{ "outputDir", outputDir }, new[]{ "outputFor", AssemblyPath() } },
                     "天工工具箱 · 型材自动填充上次的输入");
             } catch (Exception e) { Log.Write("AutoPanelSettingsSave", e); }
         }

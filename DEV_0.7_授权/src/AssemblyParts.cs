@@ -16,10 +16,13 @@ namespace TianGongCadSuite {
     //     「型材自动填充」读子装配里的型材就是这么做的（FrameReader，真机用过）；引用自带"零件 → 顶层装配"的矩阵，
     //     变换直接从引用里取，不自己乘矩阵（嵌套矩阵的约定没有单独验证过，见 HoleLinkCad 里的说明）。
     // 名字用路径「子装配名/零件名」：不同子装配里同名的实例不会混在一起。
+    // 多实体零件（0.7.15）：Bodies 是全部设计体，Body = 第 1 个。原来只读第 1 个实体，
+    // 第 2 个以后的实体上的孔配孔检查看不到，轴线穿过它们也判不出漏打孔（见 PartBodies）。
     public sealed class AssemblyPart {
         public string Name = "";                 // 顶层：实例名；子装配里：路径
         public P.PartDocument Part;
         public G.Body Body;
+        public List<G.Body> Bodies = new List<G.Body>();
         public bool Nested;
         public A.Occurrence Top;                 // 顶层实例（Nested=false）
         public A.SubOccurrence Sub;              // 子装配里的实例（Nested=true）
@@ -42,10 +45,11 @@ namespace TianGongCadSuite {
                 if (placement != null) return placement;
                 if (!Nested) { Array m = new double[16]; Top.GetMatrix(ref m); placement = new Transform(m); return placement; }
                 // 子装配里的实例：拿任意一条边建个引用，矩阵就是它的放置
-                foreach (G.Edge e in (G.Edges)Body.get_Edges(G.FeatureTopologyQueryTypeConstants.igQueryAll)) {
-                    placement = PickGeometry.Unwrap(Reference(e)).Transform;
-                    return placement;
-                }
+                foreach (var b in Bodies)
+                    foreach (G.Edge e in (G.Edges)b.get_Edges(G.FeatureTopologyQueryTypeConstants.igQueryAll)) {
+                        placement = PickGeometry.Unwrap(Reference(e)).Transform;
+                        return placement;
+                    }
                 throw new InvalidOperationException(Name + " 没有边，取不到放置矩阵。");
             }
         }
@@ -67,9 +71,9 @@ namespace TianGongCadSuite {
                 }
                 var part = Doc(occ.OccurrenceDocument);
                 if (part == null) continue;
-                var body = BodyOf(part, name, warnings);
-                if (body == null) continue;
-                result.Add(new AssemblyPart { Name = name, Part = part, Body = body, Top = occ, assembly = assembly });
+                var bodies = BodiesOf(part, name, warnings);
+                if (bodies.Count == 0) continue;
+                result.Add(new AssemblyPart { Name = name, Part = part, Body = bodies[0], Bodies = bodies, Top = occ, assembly = assembly });
             }
             return result;
         }
@@ -93,18 +97,19 @@ namespace TianGongCadSuite {
                 P.PartDocument part = null;
                 try { part = Doc(s.SubOccurrenceDocument); } catch { }
                 if (part == null) continue;
-                var body = BodyOf(part, name, warnings);
-                if (body == null) continue;
-                result.Add(new AssemblyPart { Name = name, Part = part, Body = body, Nested = true, Sub = s, assembly = assembly });
+                var bodies = BodiesOf(part, name, warnings);
+                if (bodies.Count == 0) continue;
+                result.Add(new AssemblyPart { Name = name, Part = part, Body = bodies[0], Bodies = bodies, Nested = true, Sub = s, assembly = assembly });
             }
         }
 
         static P.PartDocument Doc(object doc){ return doc as P.PartDocument; }
-        static G.Body BodyOf(P.PartDocument part, string name, List<string> warnings){
+        static List<G.Body> BodiesOf(P.PartDocument part, string name, List<string> warnings){
+            var list = new List<G.Body>();
             try {
-                if (part.Models.Count < 1) return null;
-                return (G.Body)((P.Model)part.Models.Item(1)).Body;
-            } catch (Exception e) { Warn(warnings, name + " 读取实体失败：" + e.Message); return null; }
+                foreach (var m in PartBodies.All(part)) { var b = PartBodies.Body(m); if (b != null) list.Add(b); }
+            } catch (Exception e) { Warn(warnings, name + " 读取实体失败：" + e.Message); }
+            return list;
         }
         static void Warn(List<string> warnings, string s){ if (warnings != null) warnings.Add(s); }
     }

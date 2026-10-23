@@ -19,7 +19,12 @@ namespace TianGongCadSuite {
         public static void Invalidate(P.PartDocument part){
             string key = Key(part);
             if (key.Length == 0) { circles.Clear(); stamps.Clear(); walls.Clear(); wallStamps.Clear(); return; }
-            circles.Remove(key); stamps.Remove(key); walls.Remove(key); wallStamps.Remove(key);
+            // 缓存键是「零件|实体」，这个零件的每个实体都要清
+            foreach (var d in new System.Collections.IDictionary[]{ circles, stamps, walls, wallStamps }) {
+                var drop = new List<string>();
+                foreach (string k in d.Keys) if (k == key || k.StartsWith(key + "|", StringComparison.Ordinal)) drop.Add(k);
+                foreach (var k in drop) d.Remove(k);
+            }
         }
         static string Key(P.PartDocument part){
             if (part == null) return "";
@@ -28,9 +33,17 @@ namespace TianGongCadSuite {
             return "";
         }
 
-        public static G.Body BodyOf(P.PartDocument part){
+        // 选中的面 / 边所在的那个实体（多实体零件，0.7.15）。原来一律取第 1 个实体：第 2 个以后的实体上点面扫孔，
+        // 沉孔下面的孔径、"孔还是凸台"都拿第 1 个实体的几何去比，认错或认不出。读不到时退回第 1 个实体。
+        public static G.Body BodyOf(P.PartDocument part, object topology){
+            if (topology != null) { try { var b = ((dynamic)topology).Body as G.Body; if (b != null) return b; } catch { } }
             try { if (part != null && part.Models.Count >= 1) return (G.Body)((P.Model)part.Models.Item(1)).Body; } catch { }
             return null;
+        }
+        static string Key(P.PartDocument part, G.Body body){
+            string key = Key(part);
+            if (key.Length == 0 || !PartBodies.Multi(part)) return key;
+            try { return key + "|" + body.Tag; } catch { return key; }
         }
 
         // 一条边 -> 一个圆候选（读不到 / 半径 0 就返回 null）。
@@ -113,8 +126,9 @@ namespace TianGongCadSuite {
         }
 
         // 零件实体上所有整圆（局部坐标，缓存）。
-        public static List<CircleCandidate> BodyCircles(P.PartDocument part){
-            string key = Key(part);
+        public static List<CircleCandidate> BodyCircles(P.PartDocument part, object topology){
+            var body = BodyOf(part, topology);
+            string key = Key(part, body);
             DateTime stamp;
             if (key.Length > 0 && circles.ContainsKey(key) && stamps.TryGetValue(key, out stamp)
                 && (DateTime.UtcNow - stamp).TotalSeconds < CacheSeconds)
@@ -122,7 +136,6 @@ namespace TianGongCadSuite {
 
             var list = new List<CircleCandidate>();
             try {
-                var body = BodyOf(part);
                 if (body != null) {
                     foreach (G.Edge e in (G.Edges)body.get_Edges(G.FeatureTopologyQueryTypeConstants.igQueryAll)) {
                         var c = Circle(e);
@@ -191,7 +204,7 @@ namespace TianGongCadSuite {
             if (part == null || planarFace == null || mouth == null) return true;
             V3 outward = OutwardOf(planarFace);
             if (!outward.Finite || outward.Length < 0.5) return true;
-            var wall = WallFaceOf(part, mouth);
+            var wall = WallFaceOf(part, BodyOf(part, planarFace), mouth);
             if (wall == null) return true;
             Array lo = new double[3], hi = new double[3];
             try { wall.GetRange(ref lo, ref hi); } catch { return true; }
@@ -224,8 +237,8 @@ namespace TianGongCadSuite {
         static readonly Dictionary<string, List<WallFace>> walls = new Dictionary<string, List<WallFace>>();
         static readonly Dictionary<string, DateTime> wallStamps = new Dictionary<string, DateTime>();
 
-        static List<WallFace> WallFaces(P.PartDocument part){
-            string key = Key(part);
+        static List<WallFace> WallFaces(P.PartDocument part, G.Body body){
+            string key = Key(part, body);
             DateTime stamp;
             if (key.Length > 0 && walls.ContainsKey(key) && wallStamps.TryGetValue(key, out stamp)
                 && (DateTime.UtcNow - stamp).TotalSeconds < CacheSeconds)
@@ -233,7 +246,6 @@ namespace TianGongCadSuite {
 
             var list = new List<WallFace>();
             try {
-                var body = BodyOf(part);
                 if (body != null) {
                     foreach (G.Face f in (G.Faces)body.get_Faces(G.FeatureTopologyQueryTypeConstants.igQueryAll)) {
                         object geometry = null;
@@ -255,9 +267,9 @@ namespace TianGongCadSuite {
             return list;
         }
 
-        static G.Face WallFaceOf(P.PartDocument part, CircleCandidate mouth){
+        static G.Face WallFaceOf(P.PartDocument part, G.Body body, CircleCandidate mouth){
             try {
-                foreach (var w in WallFaces(part)) {
+                foreach (var w in WallFaces(part, body)) {
                     foreach (var rim in w.Rims) {
                         if (Math.Abs(rim.RadiusMm - mouth.RadiusMm) > 0.01) continue;
                         if (!HoleScan.Parallel(rim.Axis, mouth.Axis)) continue;
@@ -286,7 +298,7 @@ namespace TianGongCadSuite {
             G.Face wallFace;
             mouth.Wall = WallOf(edge, null, out wallFace);
             if (WallSaysHole(wallFace) == 0) throw new ArgumentException(BossWallMessage);
-            var all = part != null ? BodyCircles(part) : new List<CircleCandidate>();
+            var all = part != null ? BodyCircles(part, edge) : new List<CircleCandidate>();
             var hole = HoleScan.FromCircle(mouth, all);
             if (hole == null) throw new ArgumentException("这条边读不出孔径，请重新点一次孔口的圆形边线。");
             hole.Center = pg.Transform.Point(hole.Center);
@@ -301,7 +313,7 @@ namespace TianGongCadSuite {
         public static List<ScannedHole> ScanFace(TargetFace target, out string how, out int skippedCount){
             how = ""; skippedCount = 0;
             if (target == null || target.Face == null) return new List<ScannedHole>();
-            var all = BodyCircles(target.Part);
+            var all = BodyCircles(target.Part, target.Face);
             bool byLoops;
             var mouths = FaceCircles(target.Face, true, out byLoops);
             // 内环上的整圆里仍然可能混进"圆凸台的底圆"（实测它同样长在内环上），逐个判一遍。
@@ -335,7 +347,7 @@ namespace TianGongCadSuite {
             try { part = face.Document as P.PartDocument; } catch { }
             if (part == null) throw new ArgumentException("这个面不属于零件文档，请在装配里直接点零件上的孔内壁。");
 
-            var all = BodyCircles(part);
+            var all = BodyCircles(part, face);
             var geometry = face.Geometry;
             CircleCandidate mouth = null;
 

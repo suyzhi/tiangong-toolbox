@@ -19,6 +19,13 @@ namespace TianGongCadSuite {
             Check(dir1=="自动填充_20260929_130306_c32ff3b2","批次目录名：" + dir1);
             Check(dir1!=PanelNaming.BatchDirectoryName(s1,"712fa478"),"同秒两批目录仍不同（随机后缀）");
             Check(PanelNaming.FileName(s1,0)=="填充板_20260929_130306_000.par","序号从 0 开始也是三位固定宽");
+            // 输出目录（0.7.15）：记下的目录只在同一个装配上沿用
+            string a=@"H:\项目A\总装.asm", b=@"D:\项目B\围栏.asm";
+            Check(PanelNaming.OutputDirFor(a,@"H:\项目A\板子",a)==@"H:\项目A\板子","同一个装配：沿用上次选的目录");
+            Check(PanelNaming.OutputDirFor(a,@"H:\项目A\板子",a.ToUpperInvariant())==@"H:\项目A\板子","装配路径大小写不同也算同一个");
+            Check(PanelNaming.OutputDirFor(b,@"H:\项目A\板子",a)==@"D:\项目B","换了装配：回到它自己所在的目录，不往别的项目里写");
+            Check(PanelNaming.OutputDirFor(b,@"H:\项目A","")==@"D:\项目B","老设置文件没记是哪个装配：用装配所在目录");
+            Check(PanelNaming.OutputDirFor("",@"H:\项目A\板子",a)=="","新装配还没保存：不猜，生成前让用户选");
             Console.WriteLine("PANEL NAMING ASSERTIONS OK");
         }
     }

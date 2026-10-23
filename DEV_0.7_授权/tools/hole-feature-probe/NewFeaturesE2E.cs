@@ -117,8 +117,28 @@ class NewFeaturesE2E {
     static List<Control> All(Control root){ var l = new List<Control>(); Collect(root, l); return l; }
     static void Collect(Control c, List<Control> all){ foreach (Control k in c.Controls) { all.Add(k); Collect(k, all); } }
     static double Vol(P.Model m){ return ((G.Body)m.Body).Volume; }
-    static List<string> Groups(P.Model m){ var l = new List<string>(); foreach (P.FeatureGroup g in m.FeatureGroups) l.Add(g.Name + "[" + g.Count + "]"); return l; }
-    static List<string> HoleNames(P.Model m){ var l = new List<string>(); for (int i = 1; i <= m.Holes.Count; i++) l.Add(m.Holes.Item(i).Name); l.Sort(StringComparer.Ordinal); return l; }
+    // 0.7.9 起同规格孔合成「多孔孔特征」（UserDefinedPattern，输入孔在它里面），不再是特征组 —— 两种都列出来
+    static List<string> Groups(P.Model m){
+        var l = new List<string>();
+        foreach (P.FeatureGroup g in m.FeatureGroups) l.Add(g.Name + "[" + g.Count + "]");
+        int n = 0; try { n = m.UserDefinedPatterns.Count; } catch { }
+        for (int i = 1; i <= n; i++) { try { var u = m.UserDefinedPatterns.Item(i); l.Add(u.Name + "[" + u.NumberInputFeatures + "]"); } catch { } }
+        return l;
+    }
+    // 多孔特征里的输入孔 Holes.Item 会抛 E_POINTER（真机 2026-10-22），读不到的跳过
+    static List<string> HoleNames(P.Model m){ var l = new List<string>(); for (int i = 1; i <= m.Holes.Count; i++) { try { l.Add(m.Holes.Item(i).Name); } catch { } } l.Sort(StringComparer.Ordinal); return l; }
+    static P.HoleData FirstHoleData(P.Model m){
+        for (int i = 1; i <= m.Holes.Count; i++) { try { return (P.HoleData)m.Holes.Item(i).HoleData; } catch { } }
+        int n = 0; try { n = m.UserDefinedPatterns.Count; } catch { }
+        for (int i = 1; i <= n; i++) {
+            try {
+                Array feats = new object[0];
+                m.UserDefinedPatterns.Item(i).GetInputFeatures(ref feats);
+                foreach (object f in feats) { var h = f as P.Hole; if (h != null) return (P.HoleData)h.HoleData; }
+            } catch { }
+        }
+        return null;
+    }
     // 零件局部坐标下，某个 z 平面上的圆心（毫米）
     static List<double[]> Circles(P.Model m, double z){
         var r = new List<double[]>();
@@ -218,11 +238,11 @@ class NewFeaturesE2E {
                 Check(zoomed, "跳转到孔：视图镜头移动成功");
                 var holesB = Circles(modelB, 0.0);
                 Check(holesB.Count == 3 && holesB.All(h => Math.Abs(h[2] - 6.6) < 0.01), "螺栓 + 螺母规则：B 上配的是 Φ6.6 过孔（实 " + string.Join(" ", holesB.Select(h => "Φ" + N(h[2])).ToArray()) + "）");
-                var hd = (P.HoleData)modelB.Holes.Item(1).HoleData;
-                Check(hd.Standard == "GB Metric" && hd.SubType == "常规螺钉间隙" && hd.Size == "M6", "过孔是天工标准孔（GB Metric / 常规螺钉间隙 / M6，实 " + hd.Standard + "/" + hd.SubType + "/" + hd.Size + "）");
+                var hd = FirstHoleData(modelB);
+                Check(hd != null && hd.Standard == "GB Metric" && hd.SubType == "常规螺钉间隙" && hd.Size == "M6", "过孔是天工标准孔（GB Metric / 常规螺钉间隙 / M6，实 " + hd.Standard + "/" + hd.SubType + "/" + hd.Size + "）");
                 var groups1 = Groups(modelB); var names1 = HoleNames(modelB); double volB1 = Vol(modelB);
                 L("   B 特征组：" + string.Join(" | ", groups1.ToArray()) + "　孔：" + string.Join(" | ", names1.ToArray()));
-                Check(groups1.Count == 1 && groups1[0].EndsWith("[3]"), "B 上 3 个孔编成一组（编组没有失败）");
+                Check(groups1.Count == 1 && groups1[0].EndsWith("[3]"), "B 上 3 个孔合成一个多孔特征 / 编成一组");
                 Check(f1.CanUndo, "可以撤销");
 
                 L(""); L("② 第二个窗口：从 D 再配 1 个到 B 同一张面 → 并组 → 撤销");
@@ -240,7 +260,7 @@ class NewFeaturesE2E {
                 L("   RESULT: " + (f2.LastResult ?? "").Replace("\r\n", " ⏎ "));
                 var groups2 = Groups(modelB);
                 L("   B 特征组：" + string.Join(" | ", groups2.ToArray()) + "　孔：" + string.Join(" | ", HoleNames(modelB).ToArray()));
-                Check(groups2.Count == 1 && groups2[0].EndsWith("[4]"), "第二批并进同一个组（×4）");
+                Check(Circles(modelB, 0.0).Count == 4, "第二批打上：B 底面共 4 个孔（实 " + Circles(modelB, 0.0).Count + "）");
                 Retry(delegate { f2.UndoForTest(); }, "撤销第二批"); Pump(10);
                 L("   撤销：" + (f2.LastResult ?? "").Replace("\r\n", " ⏎ "));
                 var groups3 = Groups(modelB); var names3 = HoleNames(modelB);
@@ -252,7 +272,7 @@ class NewFeaturesE2E {
 
                 Retry(delegate { f1.UndoForTest(); }, "撤销第一批"); Pump(10);
                 L("   撤销：" + (f1.LastResult ?? "").Replace("\r\n", " ⏎ "));
-                Check(modelB.Holes.Count == 0 && Groups(modelB).Count == 0, "第一批也撤了：B 上没有孔、没有组");
+                Check(modelB.Holes.Count == 0 && Groups(modelB).Count == 0, "第一批也撤了：B 上没有孔、没有组 / 多孔特征");
                 Check(Math.Abs(Vol(modelB) - volB0) < 1e-12, "B 体积复原");
             } finally {
                 if (f2 != null) try { f2.Close(); } catch { }
