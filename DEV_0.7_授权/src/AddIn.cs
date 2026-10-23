@@ -21,7 +21,7 @@ namespace TianGongCadSuite {
             try{Log.Write("AddInConnect","dll="+typeof(PanelAddIn).Assembly.Location+" ver="+typeof(PanelAddIn).Assembly.GetName().Version+" cad="+((F.Application)application).Version);}catch{}
             try{addin=instance;context=new ToolContext((F.Application)application);registry=ModuleCatalog.Create(context);
                 // GuiVersion 变了 CAD 才会按新的组名重建功能区按钮（firstTime=true）；改组名/增删按钮时要跟着加一。
-                addin.Description=Product.Name+" "+Product.Version;addin.GuiVersion=44;addin.Visible=true;
+                addin.Description=Product.Name+" "+Product.Version;addin.GuiVersion=45;addin.Visible=true;
                 events=new Connection(addin.AddInEvents,typeof(F.ISEAddInEvents),this);
                 // 按命令 ID 取（不要用下标：命令 1/4 已从功能区下线，下标会错位）
 diagnostics=new Diagnostics(context.Application,()=>Run(registry.Find(1)),()=>Run(registry.Find(2)),()=>Run(registry.Find(3)));addin.Object=diagnostics;
@@ -72,6 +72,30 @@ diagnostics=new Diagnostics(context.Application,()=>Run(registry.Find(1)),()=>Ru
         public void StartLineupTests(string output){Result="";dispatcher.BeginInvoke((Action)(()=>{Result=RunTestsMode(output,"--lineup");}));}
         public void StartLineupReopenTests(string fixture){Result="";dispatcher.BeginInvoke((Action)(()=>{Result=RunTestsMode(fixture,"--lineup-reopen");}));}
         public void StartSpeedTests(string output){Result="";dispatcher.BeginInvoke((Action)(()=>{Result=RunTestsMode(output,"--autohole-speed");}));}   // 0.7.10 打孔计时（进程内）
+        // 0.8.0 属性卡填写的真机探针（在 CAD 进程里跑：加密文件、装配里加载着的零件只有这里才测得到）
+        public string PropCardCollect(){var cad=new PropCardCad(Host);string source;var list=cad.Collect(out source);return source+"\n"+string.Join("\n",list.ToArray());}
+        public string PropCardRead(string path){var r=new PropCardCad(Host).Read(path);var sb=new System.Text.StringBuilder("problem="+r.Problem+"\nmaterial="+r.Material+"\n");foreach(var p in r.Original)sb.Append(p.Key+"="+p.Value+"\n");return sb.ToString();}
+        public string PropCardWriteTest(string path,string field,string value,bool fillMissing){
+            var cad=new PropCardCad(Host);string source;cad.Collect(out source);
+            var r=cad.Read(path);if(r.Problem.Length>0)return "READ FAIL "+r.Problem;
+            r.Set(field,value);var writes=r.Writes(new System.Collections.Generic.List<string>(PropCardFields.Default),fillMissing);
+            var sw=System.Diagnostics.Stopwatch.StartNew();string result=cad.Write(r,writes);sw.Stop();
+            var back=cad.Read(path);
+            return "result=["+result+"] writes="+writes.Count+" ms="+sw.ElapsedMilliseconds+" back["+field+"]="+(back.Has(field)?back.Original[field]:"<missing>")+" missingAfter="+Missing(back);
+        }
+        static string Missing(PropCardRow r){var l=new System.Collections.Generic.List<string>();foreach(var f in PropCardFields.Default)if(!r.Has(f))l.Add(f);return string.Join(",",l.ToArray());}
+        public string PropCardFormShot(string png){
+            var form=new PropCardForm(Host);
+            try{form.Show();form.LoadActive();form.TestEditSome();Application.DoEvents();
+                using(var bmp=new System.Drawing.Bitmap(form.Width,form.Height)){form.DrawToBitmap(bmp,new System.Drawing.Rectangle(0,0,form.Width,form.Height));bmp.Save(png);}
+                return "ok";}
+            finally{form.TestForceClose();}
+        }
+        public string PropCardFormTest(string field,string value,int rowCount){
+            string text="";var form=new PropCardForm(Host);
+            try{form.Show();form.LoadActive();text=form.TestFillAndWrite(field,value,rowCount);}finally{form.TestForceClose();}
+            return text;
+        }
 #endif
         public void OpenPanel(){dispatcher.BeginInvoke(Open);}
         public void OpenActivation(){dispatcher.BeginInvoke((Action)(()=>TianGongCadSuite.Licensing.LicenseActivation.OpenStatus()));}

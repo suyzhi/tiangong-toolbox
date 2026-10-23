@@ -35,6 +35,7 @@
     <Compile Include="../../src/SettingsFile.cs" />
     <Compile Include="../../src/PatternPresets.cs" />
     <Compile Include="../../src/Log.cs" />
+    <Compile Include="../../src/PropCardData.cs" />
     <Compile Include="../AutoHolePureTests.cs" />
     <Compile Include="../AutoHoleScanPureTests.cs" />
     <Compile Include="../AutoHoleLinkPureTests.cs" />
@@ -42,6 +43,7 @@
     <Compile Include="../PanelNamingPureTests.cs" />
     <Compile Include="../PanelPlatesPureTests.cs" />
     <Compile Include="../RulesPatternPureTests.cs" />
+    <Compile Include="../PropCardPureTests.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Stubs.cs" />
   </ItemGroup>
