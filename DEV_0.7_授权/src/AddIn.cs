@@ -91,6 +91,9 @@ diagnostics=new Diagnostics(context.Application,()=>Run(registry.Find(1)),()=>Ru
                 return "ok";}
             finally{form.TestForceClose();}
         }
+        // 异步版：像点功能区按钮一样在 CAD 自己的消息循环里跑（同步版是在外部 COM 调用里跑，
+        // CAD 正忙着处理这次调用，嵌套调用文档会被消息筛选器拒绝 RPC_E_SERVERCALL_RETRYLATER）。跑完读 Result。
+        public void StartPropCardFormTest(string field,string value,int rowCount){Result="";dispatcher.BeginInvoke((Action)(()=>{try{Result=PropCardFormTest(field,value,rowCount);}catch(Exception e){Result="EXC "+e;}}));}
         public string PropCardFormTest(string field,string value,int rowCount){
             string text="";var form=new PropCardForm(Host);
             try{form.Show();form.LoadActive();text=form.TestFillAndWrite(field,value,rowCount);}finally{form.TestForceClose();}
