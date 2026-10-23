@@ -16,7 +16,19 @@ namespace TianGongCadSuite {
     //   · 结果卡片：标题行上四个可点的筛选胶囊（漏打孔 3 · 孔偏了 1 · 配错孔 0 · 孤孔 12），点一下显示/隐藏；
     //   · 选中一条，下面的「详情」列出涉及的每个孔（零件、孔径、位置），模型里同时高亮。
     // 孤孔原来要先勾"忽略孤孔"再重新检查才能切换；现在检查时一律算出来，显示与否只是筛选。
-    public sealed class AutoHoleCheckForm : Form {
+    public sealed class AutoHoleCheckForm : Form, IBusyTool {
+        // 处理中不让关（Esc、关闭按钮、标题栏 ×、CAD 里按 Esc / 右键都会走到这里）：见 IBusyTool
+        public bool Busy { get { return busy; } }
+        public string BusyWhat { get { return "检查"; } }
+        protected override void OnFormClosing(FormClosingEventArgs e){
+            if (busy && e.CloseReason == CloseReason.UserClosing) {
+                e.Cancel = true;
+                try { status.Text = "正在检查，做完再关。"; status.ForeColor = Ui.Warn; } catch { }
+                return;
+            }
+            base.OnFormClosing(e);
+        }
+
         readonly F.Application app;
         readonly A.AssemblyDocument assembly;
         F.HighlightSet highlights;
@@ -182,7 +194,15 @@ namespace TianGongCadSuite {
                 var warnings = new List<string>();
                 List<HoleRecord> shafts;
                 List<AssemblyPart> parts;
-                var holes = AutoHoleWriter.CollectAssemblyHoles(assembly, out warnings, out shafts, out parts);
+                // 大装配要读一分多钟：期间隔一会儿刷一下状态栏、泵一次消息（不然 Windows 把天工判成"未响应"，用户以为卡死去强关）
+                var tick = System.Diagnostics.Stopwatch.StartNew();
+                Action<string, int, int> pulse = (what, i, n) => {
+                    if (tick.ElapsedMilliseconds < 300) return;
+                    tick.Restart();
+                    SetStatus(what + " " + i + " / " + n + " …", Ui.Accent);
+                    try { status.Update(); Application.DoEvents(); } catch { }
+                };
+                var holes = AutoHoleWriter.CollectAssemblyHoles(assembly, out warnings, out shafts, out parts, (i, n) => pulse("正在读取零件", i, n));
                 var bodies = AutoHoleWriter.OccurrenceBodies.Build(parts);
                 var allNames = new List<string>();
                 foreach (var ap in parts) if (!allNames.Contains(ap.Name)) allNames.Add(ap.Name);
@@ -190,7 +210,7 @@ namespace TianGongCadSuite {
                 lastHoles = holes; lastShafts = shafts;
                 SetStatus("读到 " + holes.Count + " 个孔，正在配对…", Ui.Accent); Application.DoEvents();
                 // 孤孔一律算出来，显示与否交给筛选胶囊（不用为了看孤孔再检查一遍）
-                ShowIssues(HoleCheck.Run(holes, null, true, allNames, bodies, shafts), HoleCheck.Relevant(holes).Count, HoleCheck.CountGroups(holes));
+                ShowIssues(HoleCheck.Run(holes, null, true, allNames, bodies, shafts, (i, n) => pulse("正在配对同轴孔", i, n)), HoleCheck.Relevant(holes).Count, HoleCheck.CountGroups(holes));
                 failedParts = warnings.Count;
                 string s = summary.Text;
                 if (nested > 0) s += "　（含子装配里的 " + nested + " 个零件）";
@@ -320,6 +340,8 @@ namespace TianGongCadSuite {
         }
 
         void EditOptions(){
+            // 检查中（会泵消息）改口径：HoleCheck.Run 一半用旧口径一半用新口径，结果对不上
+            if (busy) { SetStatus("正在检查，做完再改判定口径。", Ui.Warn); return; }
             using (var f = new HoleCheckOptionsForm(HoleCheck.Options)) {
                 if (f.ShowDialog(this) != DialogResult.OK || f.Result == null) return;
                 HoleCheck.Options = f.Result;

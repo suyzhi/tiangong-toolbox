@@ -97,6 +97,7 @@ namespace TianGongCadSuite {
                 if(File.Exists(input)){ Add(items,seen,wanted,input,Path.GetDirectoryName(input)); continue; }
                 if(!Directory.Exists(input))continue;
                 string root=input;
+                var visited=new HashSet<string>(StringComparer.OrdinalIgnoreCase){ input };
                 var stack=new Stack<string>();stack.Push(input);
                 while(stack.Count>0){
                     string dir=stack.Pop();
@@ -109,6 +110,9 @@ namespace TianGongCadSuite {
                     foreach(string sub in subs){
                         string name=Path.GetFileName(sub);
                         if(name.StartsWith(".",StringComparison.Ordinal))continue;
+                        // 目录联接 / 符号链接不跟进去：指回上级目录的联接（用户目录里的 Application Data 之类）会让扫描永远转圈、内存涨满
+                        try{ if((File.GetAttributes(sub)&FileAttributes.ReparsePoint)!=0)continue; }catch{ continue; }
+                        if(!visited.Add(Path.GetFullPath(sub)))continue;
                         stack.Push(sub);
                     }
                 }

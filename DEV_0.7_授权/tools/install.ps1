@@ -115,8 +115,10 @@ if($StageDirectory){
 $assembly=[Reflection.AssemblyName]::GetAssemblyName($dll)
 $key=$reg.CreateSubKey($classPath)
 $key.SetValue('','TianGongCadSuite.SuiteDevAddIn')
-$key.SetValue('409','TianGong Toolbox (DEV 0.7.4)')
-$key.SetValue('804',[string]([char]0x5929)+[char]0x5DE5+[char]0x5DE5+[char]0x5177+[char]0x7BB1+' (DEV 0.7.4)')
+# 加载项管理器里显示的名字带上**实际装的版本**（原来写死 DEV 0.7.4，装哪个版本都显示 0.7.4，排查"到底加载了哪版"时误导人）
+$shownVersion=$assembly.Version.Major.ToString()+'.'+$assembly.Version.Minor+'.'+$assembly.Version.Build
+$key.SetValue('409','TianGong Toolbox '+$shownVersion)
+$key.SetValue('804',[string]([char]0x5929)+[char]0x5DE5+[char]0x5DE5+[char]0x5177+[char]0x7BB1+' '+$shownVersion)
 $key.SetValue('AutoConnect',1,[Microsoft.Win32.RegistryValueKind]::DWord)
 $key.CreateSubKey('Implemented Categories\{26B1D2D1-2B03-11D2-B589-080036E8B802}').Dispose()
 $key.CreateSubKey('Implemented Categories\{62C8FE65-4EBB-45e7-B440-6E39B2CDBF29}').Dispose()
@@ -150,7 +152,7 @@ $key.Dispose();$server.Dispose()
 # 只改这一个值：描述名、Cookie 原样保留；**绝不删除整条记录**（删了 CAD 只重建、不加载）。
 $ndsRoot='Software\NDS\TianGong\Version 225\AddIns'
 $ndsPath=$ndsRoot+'\'+$guid
-$display='天工工具箱 (DEV 0.7.4)'
+$display='天工工具箱 '+$shownVersion
 $nds=$reg.OpenSubKey($ndsPath,$true)
 if($nds -eq $null){
     # 本机还没有这条记录（从没成功加载过）：按 CAD 自己的格式预置一份。

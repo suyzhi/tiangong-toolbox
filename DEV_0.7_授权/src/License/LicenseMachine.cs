@@ -14,15 +14,27 @@ namespace TianGongCadSuite.Licensing {
         static string cached;
         static byte[] cachedFingerprint;
 
+        static string degraded; static DateTime degradedAt;
         internal static string Seed(){
             if(cached != null)return cached;
+            // 缺了一截的种子 1 分钟内直接复用：WMI 一直坏着时别让每次授权检查都白等几轮重试
+            if(degraded != null && (DateTime.UtcNow - degradedAt).TotalSeconds < 60)return degraded;
             string guid = RegistryValue(@"SOFTWARE\Microsoft\Cryptography", "MachineGuid", RegistryView.Registry64);
             if(guid == null)guid = RegistryValue(@"SOFTWARE\Microsoft\Cryptography", "MachineGuid", RegistryView.Registry32);
-            string volume = WmiValue("SELECT VolumeSerialNumber FROM Win32_LogicalDisk WHERE DeviceID='C:'", "VolumeSerialNumber");
-            string uuid = WmiValue("SELECT UUID FROM Win32_ComputerSystemProduct", "UUID");
-            if(uuid == null)uuid = WmiValue("SELECT SerialNumber FROM Win32_BIOS", "SerialNumber");
+            // WMI 偶尔会一时读不出来（开机后服务还没起好、WMI 仓库忙）。原来读不出就当空串、而且把这个缺了一截的种子
+            // 缓存到 CAD 关掉为止 —— 机器码整个变了，这一整次 CAD 里插件都说"激活记录属于另一台机器"，用户以为授权坏了。
+            // 现在读不出就重试几次；还缺就不缓存（下次调用再读），恢复以后自然就对了。
+            string volume = null, uuid = null;
+            for(int attempt = 0; attempt < 3; attempt++){
+                if(volume == null)volume = WmiValue("SELECT VolumeSerialNumber FROM Win32_LogicalDisk WHERE DeviceID='C:'", "VolumeSerialNumber");
+                if(uuid == null)uuid = WmiValue("SELECT UUID FROM Win32_ComputerSystemProduct", "UUID");
+                if(uuid == null)uuid = WmiValue("SELECT SerialNumber FROM Win32_BIOS", "SerialNumber");
+                if(volume != null && uuid != null)break;
+                System.Threading.Thread.Sleep(150);
+            }
             string seed = Normalize(guid) + "|" + Normalize(volume) + "|" + Normalize(uuid);
-            cached = seed;
+            if(guid != null && volume != null && uuid != null)cached = seed;
+            else { degraded = seed; degradedAt = DateTime.UtcNow; }
             return seed;
         }
 
@@ -67,7 +79,7 @@ namespace TianGongCadSuite.Licensing {
             using(SHA256 hash = SHA256.Create())digest = hash.ComputeHash(Encoding.UTF8.GetBytes(SeedSalt + "#" + Seed()));
             byte[] result = new byte[FingerprintSize];
             Buffer.BlockCopy(digest, 0, result, 0, FingerprintSize);
-            cachedFingerprint = result;
+            if(cached != null)cachedFingerprint = result;   // 种子是完整读到的才缓存（见 Seed）
             return (byte[])result.Clone();
         }
 

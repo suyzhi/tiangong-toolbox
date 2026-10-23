@@ -41,6 +41,9 @@ namespace TianGongCadSuite {
         string workRoot;
         string reportPath;
         DateTime startedAt;
+        // 本次转换的 worker 报上来的隐藏 CAD 进程号（READY 行第 3 列），和开始前就在跑的天工进程（用户的，绝不能杀）
+        readonly HashSet<int> workerCads=new HashSet<int>();
+        HashSet<int> cadsBefore=new HashSet<int>();
         int totalPlanned;
         IntPtr jobHandle=IntPtr.Zero;
 
@@ -211,6 +214,7 @@ namespace TianGongCadSuite {
             totalPlanned=items.Count;
             reportPath=Path.Combine(options.OutputRoot,"转换报告-"+DateTime.Now.ToString("yyyyMMdd-HHmmss")+".csv");
             startedAt=DateTime.Now;
+            workerCads.Clear();cadsBefore=WorkerChildren.Running();
             // 插件模式下当前进程是 TianGong.exe，Application.ExecutablePath 指向 CAD 本体，
             // 用它当 worker 会再拉起一个天工CAD（"找不到文件 --worker"）。必须解析转换器自身。
             string self=ConverterHost.Resolve();
@@ -246,9 +250,10 @@ namespace TianGongCadSuite {
         }
         void StopConversion(){
             AppendLog("正在停止……");
+            foreach(string statusFile in statusFiles)ReadStatus(statusFile);   // 先把 worker 报上来的 CAD 进程号读全
             NativeJob.Terminate(jobHandle);
             foreach(Process process in processes){ try{ if(!process.HasExited)process.Kill(); }catch{} }
-            WorkerChildren.Kill(startedAt,AppendLog);
+            WorkerChildren.Kill(startedAt,workerCads,cadsBefore,AppendLog);
         }
         void Poll(){
             bool running=false;
@@ -286,6 +291,7 @@ namespace TianGongCadSuite {
                     else AppendLog("失败 "+Path.GetFileName(row.Source)+"："+row.Error);
                 }
             }else if(parts[0]==ConvertProtocol.Ready){
+                int pid;if(parts.Length>2&&int.TryParse(parts[2],out pid)&&pid>0)workerCads.Add(pid);
                 AppendLog("工作进程就绪（CAD 启动 "+(parts.Length>1?parts[1]:"?")+" 秒）。");
             }else if(parts[0]=="FATAL"){
                 AppendLog("工作进程异常："+(parts.Length>1?parts[1]:""));
@@ -332,9 +338,10 @@ namespace TianGongCadSuite {
         protected override void OnFormClosing(FormClosingEventArgs e){
             if(timer.Enabled){
                 if(MessageBox.Show(this,"转换仍在进行，确定要停止并退出吗？","天工格式转换",MessageBoxButtons.YesNo,MessageBoxIcon.Warning)!=DialogResult.Yes){ e.Cancel=true; return; }
+                foreach(string statusFile in statusFiles)ReadStatus(statusFile);
                 NativeJob.Terminate(jobHandle);
                 foreach(Process process in processes){ try{ if(!process.HasExited)process.Kill(); }catch{} }
-                WorkerChildren.Kill(startedAt,AppendLog);
+                WorkerChildren.Kill(startedAt,workerCads,cadsBefore,AppendLog);
             }
             if(jobHandle!=IntPtr.Zero)NativeJob.Close(jobHandle);
             base.OnFormClosing(e);
@@ -403,16 +410,31 @@ namespace TianGongCadSuite {
         // 既不在作业对象里，也不能靠父进程认出来（实测父进程一直是 1432）。
         // 认它靠两条：命令行里有 /automation，且创建时间不早于本次转换开始前 60 秒。
         // 用户自己开的天工CAD 命令行里没有 /automation，不会被误杀。
-        public static int Kill(DateTime startedAt,Action<string> log){
+        // 现在在跑的天工进程号
+        public static HashSet<int> Running(){
+            var set=new HashSet<int>();
+            try{ foreach(var p in Process.GetProcessesByName("TianGong")){ set.Add(p.Id); p.Dispose(); } }catch{}
+            return set;
+        }
+        // 先杀 worker 自己报上来的那几个；再按 /automation + 创建时间兜底（worker 还没来得及报就被停掉的）。
+        // 兜底原来只看"转换开始前 60 秒以后创建"：用户在这 60 秒里、或转换期间从别的程序（PDM、脚本……）以自动化方式开的天工也会被一起杀掉，
+        // 没存的东西全没。现在开始前就在跑的一律不碰，兜底的时间窗也收到开始之后。
+        public static int Kill(DateTime startedAt,ICollection<int> known,ICollection<int> before,Action<string> log){
             int killed=0;
-            DateTime floor=startedAt.AddSeconds(-60);
+            var done=new HashSet<int>();
+            if(known!=null)foreach(int pid in known){
+                if(before!=null&&before.Contains(pid))continue;
+                try{ using(var child=Process.GetProcessById(pid)){ child.Kill(); child.WaitForExit(5000); } done.Add(pid); killed++; if(log!=null)log("已结束转换器拉起的隐藏 CAD（pid "+pid+"）。"); }catch{}
+            }
+            DateTime floor=startedAt.AddSeconds(-2);
             try{
                 var query=new ManagementObjectSearcher("SELECT ProcessId,Name,CommandLine,CreationDate FROM Win32_Process WHERE Name='TianGong.exe'");
                 foreach(ManagementBaseObject mo in query.Get()){
+                    int childPid=Convert.ToInt32(mo["ProcessId"]);
+                    if(done.Contains(childPid)||(before!=null&&before.Contains(childPid)))continue;
                     string command=Convert.ToString(mo["CommandLine"]);
                     if(command==null||command.IndexOf("/automation",StringComparison.OrdinalIgnoreCase)<0)continue;
                     if(!CreatedAfter(mo["CreationDate"],floor))continue;
-                    int childPid=Convert.ToInt32(mo["ProcessId"]);
                     try{
                         using(var child=Process.GetProcessById(childPid)){ child.Kill(); child.WaitForExit(5000); }
                         if(log!=null)log("已结束转换器拉起的隐藏 CAD（pid "+childPid+"）。");

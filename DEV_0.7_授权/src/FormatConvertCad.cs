@@ -25,9 +25,19 @@ namespace TianGongCadSuite {
             this.log=log==null?delegate(string s){}:log;
             this.lockRoot=lockRoot;
             var watch=Stopwatch.StartNew();
+            // 转换器要独占一个 CAD：下面会隐藏窗口、关掉提示、把撤销步数设成 0，每个文件转完还会**不保存**关掉全部文档。
+            // 万一 CreateInstance 连上的是用户正在用的那个天工（COM 服务器按多用户注册时就会这样），这些全落在用户头上。
+            // 所以先记下已经在跑的天工进程，连上以后核对进程号：是老进程就立刻放手，什么都不动。
+            var running=new HashSet<int>();
+            try{ foreach(var name in new[]{"TianGong","Edge"})foreach(var p in Process.GetProcessesByName(name)){ running.Add(p.Id); p.Dispose(); } }catch{}
             app=Retry(delegate(){ return (F.Application)Activator.CreateInstance(Type.GetTypeFromProgID("SolidEdge.Application")); },"启动天工CAD",600);
             BootSeconds=watch.Elapsed.TotalSeconds;
             try{ ProcessId=app.ProcessID; }catch{}
+            if(ProcessId!=0&&running.Contains(ProcessId)){
+                try{ Marshal.FinalReleaseComObject(app); }catch{}
+                app=null;
+                throw new InvalidOperationException("没能另起一个天工 CAD（连上的是已经打开的那个）。为免关掉你打开的文件，转换已停止：请先关掉天工 CAD 再转换，或直接用 TianGongConverter.exe。");
+            }
             Quiet(delegate(){ app.DisplayAlerts=false; },"DisplayAlerts");
             Quiet(delegate(){ app.ScreenUpdating=false; },"ScreenUpdating");
             Quiet(delegate(){ app.ShowStartupScreen=false; },"ShowStartupScreen");

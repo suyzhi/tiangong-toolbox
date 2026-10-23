@@ -76,14 +76,28 @@ namespace TianGongCadSuite {
     }
     public static class CadBuilder {
         public static string TemplatePath {get{return Path.Combine(CadInstallRoot,"Template","ISO Metric","iso metric part.par");}}
-        public static string CadInstallRoot {get{return Environment.GetEnvironmentVariable("TIANGONG_HOME")??@"C:\Program Files\NDS\TianGong 2025";}}
+        // 天工装在哪：原来写死 C:\Program Files\NDS\TianGong 2025 —— 同事把天工装在 D 盘或别的目录时，型材自动填充找不到零件模板、一块板都生成不了。
+        // 现在：环境变量 TIANGONG_HOME → 插件所在的 CAD 进程自己的位置（…\Program\TianGong.exe 的上一级）→ 默认目录
+        public static string CadInstallRoot {get{
+            string env=Environment.GetEnvironmentVariable("TIANGONG_HOME");
+            if(!string.IsNullOrEmpty(env))return env;
+            try{
+                string exe=System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
+                if(string.Equals(Path.GetFileName(exe),"TianGong.exe",StringComparison.OrdinalIgnoreCase)){
+                    var root=Path.GetDirectoryName(Path.GetDirectoryName(exe));
+                    if(!string.IsNullOrEmpty(root)&&Directory.Exists(Path.Combine(root,"Template")))return root;
+                }
+            }catch{}
+            return @"C:\Program Files\NDS\TianGong 2025";
+        }}
         public static P.PartDocument CreatePart(F.Application app,PanelSpec s){return CreatePart(app,s,null);}
         // props 不为空：把尺寸、材质写进零件文件（BOM、工程图明细栏直接能引用），写不上的记进 props.Problems，不影响建模。
         public static P.PartDocument CreatePart(F.Application app,PanelSpec s,PanelProps props){
             TianGongCadSuite.Licensing.LicenseGate.Require();
             P.PartDocument part=null;
             try {
-                part=(P.PartDocument)app.Documents.Add("SolidEdge.PartDocument",TemplatePath);
+                // 模板不在（天工装的是别的语言 / 模板目录被整理过）：用 CAD 自己的默认零件模板，别让整批板子都生成失败（接口一律按米，模板单位不影响尺寸）
+                part=(P.PartDocument)(File.Exists(TemplatePath)?app.Documents.Add("SolidEdge.PartDocument",TemplatePath):app.Documents.Add("SolidEdge.PartDocument"));
                 part.ModelingMode=P.ModelingModeConstants.seModelingModeOrdered;
                 // Build the profile in the native XY plane; occurrence placement maps it to the picked mid-plane.
                 P.RefPlane plane=null;
@@ -112,23 +126,23 @@ namespace TianGongCadSuite {
         // 材质用材料表 ApplyMaterial（材料库里要有这个名字）。两样都没在天工上单独验证过，所以失败只记一笔。
         static void WriteProps(F.Application app,P.PartDocument part,PanelSpec s,PanelProps props){
             var ci=System.Globalization.CultureInfo.InvariantCulture;
+            // 属性集合按接口类型写（PropCardCad.DocCustom / PutDoc）：原来用 dynamic —— 文档属性集合用 dynamic 调 Add 报
+            // DISP_E_NOTACOLLECTION（0.8.0 真机），而且 dynamic 按接口类型缓存调用方式，会连累同一进程里的属性卡填写（0.8.2）。
             try{
-                dynamic custom=((dynamic)part.Properties).Item("Custom");
-                PutProp(custom,"宽度mm",(s.Width*1000).ToString("0.###",ci));
-                PutProp(custom,"高度mm",(s.Height*1000).ToString("0.###",ci));
-                PutProp(custom,"厚度mm",(s.Thickness*1000).ToString("0.###",ci));
-                PutProp(custom,"每边间隙mm",(s.Gap*1000).ToString("0.###",ci));
-                PutProp(custom,"规格",(s.Width*1000).ToString("0.#",ci)+"×"+(s.Height*1000).ToString("0.#",ci)+"×"+(s.Thickness*1000).ToString("0.#",ci));
-                if(!string.IsNullOrEmpty(props.Material))PutProp(custom,"材质",props.Material);
-                PutProp(custom,"来源","天工工具箱 型材自动填充");
+                var w=new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<string,string>>();
+                System.Action<string,string> put=(k,v)=>w.Add(new System.Collections.Generic.KeyValuePair<string,string>(k,v));
+                put("宽度mm",(s.Width*1000).ToString("0.###",ci));
+                put("高度mm",(s.Height*1000).ToString("0.###",ci));
+                put("厚度mm",(s.Thickness*1000).ToString("0.###",ci));
+                put("每边间隙mm",(s.Gap*1000).ToString("0.###",ci));
+                put("规格",(s.Width*1000).ToString("0.#",ci)+"×"+(s.Height*1000).ToString("0.#",ci)+"×"+(s.Thickness*1000).ToString("0.#",ci));
+                if(!string.IsNullOrEmpty(props.Material))put("材质",props.Material);
+                put("来源","天工工具箱 型材自动填充");
+                PropCardCad.PutDoc(PropCardCad.DocCustom(part),w,null);
             }catch(Exception e){Log.Write("PanelProps",e);props.Problem("尺寸没能写进零件的自定义属性："+e.Message);}
             if(string.IsNullOrEmpty(props.Material))return;
             try{dynamic table=((dynamic)app).GetMaterialTable();table.ApplyMaterial(part,props.Material);}
             catch(Exception e){Log.Write("PanelMaterial",e);props.Problem("材质「"+props.Material+"」没能套用材料库（材料库里可能没有这个名字），已写进自定义属性「材质」。");}
-        }
-        static void PutProp(dynamic custom,string name,string value){
-            try{custom.Item(name).Value=value;return;}catch{}
-            custom.Add(name,value);
         }
         public static void CheckBody(G.Body body,double w,double h,double t){
             Array min=new double[3],max=new double[3];body.GetRange(ref min,ref max);var lo=V3.From(min);var hi=V3.From(max);

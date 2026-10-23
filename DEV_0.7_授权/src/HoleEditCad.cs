@@ -199,7 +199,7 @@ namespace TianGongCadSuite {
         public static Outcome Apply(IList<EditableHole> targets, HoleSpec spec, bool wholeGroup){
             var o = new Outcome();
             if (targets == null || targets.Count == 0) return o;
-            string problem = spec.ThreadProblem;
+            string problem = spec.SpecProblem;
             if (problem.Length > 0) throw new ArgumentException(problem);
             int bad = ThroughToBlind(targets, wholeGroup, spec);
             if (bad > 0) throw new InvalidOperationException("要改的孔里有 " + bad + " 个是贯通孔。天工接口不支持把贯通孔直接改成盲孔（实测会让孔失效）。要盲孔请撤销打孔后重新打，或者先改成贯通的其它孔型。");
@@ -221,11 +221,28 @@ namespace TianGongCadSuite {
             var model = ModelOf(part);
             var holes = Expand(targets, wholeGroup);
             var changed = new List<P.Hole>();
+            // 换成螺纹孔要先把几何孔径改过来、重算一次（见 SwapData）。原来每个孔各重算一次整个零件：
+            // 一组 20 个孔 = 20 次全零件重算。现在整组先换普通孔，**一次**重算，再逐个换螺纹数据。
+            bool tapped = spec.Kind == HoleKind.Tapped;
+            if (tapped) {
+                var ready = new List<P.Hole>();
+                foreach (var h in holes) {
+                    try { o.Undo.Hole(part, h); SwapPlain(part, h, spec); ready.Add(h); }
+                    catch (Exception e) {
+                        o.Failed++;
+                        o.Notes.Add(partName + "：「" + HoleGrouping.NameOf(h) + "」没改成（" + AutoHoleWriter.Friendly(e) + "）");
+                        Log.Write("HoleEditApply", e);
+                        o.Undo.RestoreOne(part, h);
+                    }
+                }
+                if (ready.Count > 0) { try { AutoHoleWriter.Attempt("重算", () => { model.Recompute(); return 0; }); } catch (Exception e) { Log.Write("HoleEditRecompute", e); } }
+                holes = ready;
+            }
             foreach (var h in holes) {
                 string name = HoleGrouping.NameOf(h);
                 try {
-                    o.Undo.Hole(part, h);
-                    SwapData(part, model, h, spec);
+                    if (!tapped) o.Undo.Hole(part, h);
+                    SwapFinal(part, h, spec);
                     bool through; ReadSpec(h, out through);
                     if (spec.Through && !through) AutoHoleWriter.Attempt("改贯通", () => { h.ExtentType = P.FeaturePropertyConstants.igThroughAll; return 0; });
                     else if (!spec.Through) AutoHoleWriter.Attempt("改深度", () => { h.Depth = spec.Depth * MmToM; return 0; });
@@ -288,13 +305,20 @@ namespace TianGongCadSuite {
         // 撤销（HoleEditUndo）走同一条路。
         internal static void SwapData(P.PartDocument part, P.Model model, P.Hole h, HoleSpec spec){
             if (spec.Kind == HoleKind.Tapped) {
-                var plain = spec.Clone();
-                plain.Kind = HoleKind.Through; plain.Chamfer = false;
-                var pd = AutoHoleWriter.BuildHoleData(part, plain, new DrillResult());
-                AutoHoleWriter.Attempt("先换孔径", () => { h.HoleData = pd; return 0; });
-                AutoHoleWriter.Attempt("写孔径", () => { ((P.HoleData)h.HoleData).HoleDiameter = spec.HoleDiameter * MmToM; return 0; });
+                SwapPlain(part, h, spec);
                 AutoHoleWriter.Attempt("重算", () => { model.Recompute(); return 0; });
             }
+            SwapFinal(part, h, spec);
+        }
+        // 螺纹孔第一步：换成同孔径的普通孔（几何孔径先改过来，调用方随后重算）
+        internal static void SwapPlain(P.PartDocument part, P.Hole h, HoleSpec spec){
+            var plain = spec.Clone();
+            plain.Kind = HoleKind.Through; plain.Chamfer = false;
+            var pd = AutoHoleWriter.BuildHoleData(part, plain, new DrillResult());
+            AutoHoleWriter.Attempt("先换孔径", () => { h.HoleData = pd; return 0; });
+            AutoHoleWriter.Attempt("写孔径", () => { ((P.HoleData)h.HoleData).HoleDiameter = spec.HoleDiameter * MmToM; return 0; });
+        }
+        internal static void SwapFinal(P.PartDocument part, P.Hole h, HoleSpec spec){
             var data = AutoHoleWriter.BuildHoleData(part, spec, new DrillResult());
             AutoHoleWriter.Attempt("换孔型", () => { h.HoleData = data; return 0; });
             AutoHoleWriter.Attempt("写孔径", () => { ((P.HoleData)h.HoleData).HoleDiameter = spec.HoleDiameter * MmToM; return 0; });

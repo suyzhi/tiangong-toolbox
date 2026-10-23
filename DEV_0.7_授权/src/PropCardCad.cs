@@ -146,7 +146,7 @@ namespace TianGongCadSuite {
             if (writes.Count == 0) return "";
             object doc = LoadedDocument(row.Path);
             if (doc != null) {
-                try { PutDoc(DocCustom(doc), writes); return SaveHint; }
+                try { PutDoc(DocCustom(doc), writes, row.Edited); return SaveHint; }
                 // 内存那份写不进（比如只读打开）：退回写磁盘，磁盘上的才算数
                 catch (Exception e) { Log.Write("PropCardWriteDoc " + row.Path, e); }
             }
@@ -154,7 +154,7 @@ namespace TianGongCadSuite {
             try {
                 sets = NewFileProperties();
                 Late.Call(sets, "Open", row.Path, false);
-                PutFile(Late.Get(sets, "Item", "Custom"), writes);
+                PutFile(Late.Get(sets, "Item", "Custom"), writes, row.Edited);
                 Late.Call(sets, "Save");
                 return "";
             } catch (Exception e) {
@@ -164,20 +164,23 @@ namespace TianGongCadSuite {
         }
 
         // 已有的属性按下标改值，没有的才 Add（不靠"取一下看报不报错"）
-        static void PutFile(object custom, List<KeyValuePair<string, string>> writes){
+        // edited：用户真改过的格子。其余的是「补齐」补的空值 —— 文件里其实已经有这个属性时（表里读到的和文件现在的不一致）绝不覆盖
+        static void PutFile(object custom, List<KeyValuePair<string, string>> writes, IDictionary<string, string> edited){
             var at = FileNames(custom);
             foreach (var pair in writes) {
                 int index;
                 if (!at.TryGetValue(pair.Key, out index)) { Late.Call(custom, "Add", pair.Key, pair.Value); continue; }
+                if (edited != null && !edited.ContainsKey(pair.Key)) continue;
                 try { Late.Set(Late.Get(custom, "Item", index), "Value", pair.Value); }
                 catch (Exception e) { throw new InvalidOperationException("「" + pair.Key + "」写不进去（原来不是文字属性？）：" + Message(e)); }
             }
         }
-        static void PutDoc(F.Properties custom, List<KeyValuePair<string, string>> writes){
+        internal static void PutDoc(F.Properties custom, List<KeyValuePair<string, string>> writes, IDictionary<string, string> edited){
             var at = DocNames(custom);
             foreach (var pair in writes) {
                 int index;
                 if (!at.TryGetValue(pair.Key, out index)) { custom.Add(pair.Key, pair.Value); continue; }
+                if (edited != null && !edited.ContainsKey(pair.Key)) continue;
                 object value = pair.Value;
                 try { custom.Item(index).set_Value(ref value); }
                 catch (Exception e) { throw new InvalidOperationException("「" + pair.Key + "」写不进去（原来不是文字属性？）：" + e.Message); }
@@ -190,7 +193,7 @@ namespace TianGongCadSuite {
         // ---------- 已打开的文档 ----------
 
         // 文档的属性集合按接口类型取：从 Documents.Item / OccurrenceDocument 拿到的是裸 IDispatch
-        static F.Properties DocCustom(object doc){
+        internal static F.Properties DocCustom(object doc){
             object sets = doc.GetType().InvokeMember("Properties", BindingFlags.GetProperty, null, doc, null);
             return ((F.PropertySets)sets).Item("Custom");
         }

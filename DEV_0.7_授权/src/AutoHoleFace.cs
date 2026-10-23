@@ -67,7 +67,17 @@ namespace TianGongCadSuite {
                 var p1 = target.Placement.Point(V3.From(sp));
                 var p2 = target.Placement.Point(V3.From(ep));
                 pts.Add(p1); pts.Add(p2);
-                if (!(e.Geometry is G.Line)) continue;
+                if (!(e.Geometry is G.Line)) {
+                    // 圆弧 / 整圆 / 样条：两个端点包不住鼓出去的那段（腰形面、两头半圆的面，最外沿在弧的中间）。
+                    // 只按端点算，面长少算一个半径，「起端边距」从错的地方量起，整排孔偏一个半径。弧上再采几个点
+                    try {
+                        Array data = new double[0], prm = new double[0]; int count;
+                        e.GetStrokeData(0.0001, out count, ref data, ref prm);
+                        for (int i = 0; i + 2 < data.Length; i += 3)
+                            pts.Add(target.Placement.Point(new V3(Convert.ToDouble(data.GetValue(i)), Convert.ToDouble(data.GetValue(i + 1)), Convert.ToDouble(data.GetValue(i + 2)))));
+                    } catch { }
+                    continue;
+                }
                 double len = (p2 - p1).Length;
                 if (len > bestLen) { bestLen = len; bestDir = p2 - p1; bestP1 = p1; }
             }

@@ -17,7 +17,21 @@ namespace TianGongCadSuite {
         public static List<string[]> Read(string path){
             var rows = new List<string[]>();
             if (string.IsNullOrEmpty(path) || !File.Exists(path)) return rows;
-            foreach (var raw in File.ReadAllLines(path, Encoding.UTF8)) {
+            // 共享读：文件头写着"Excel 能打开"——用户真用 Excel 开着它时，File.ReadAllLines 会因为占用直接抛，
+            // 属性卡填写 / 批量排孔的窗口就打不开了。读不了就当没有这个文件（用默认值），记一笔日志。
+            string[] lines;
+            try {
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                using (var reader = new StreamReader(fs, Encoding.UTF8, true)) {
+                    var all = new List<string>();
+                    string l;
+                    while ((l = reader.ReadLine()) != null) all.Add(l);
+                    lines = all.ToArray();
+                }
+            } catch (IOException e) { Unreadable(path, e); return rows; }
+            catch (UnauthorizedAccessException e) { Unreadable(path, e); return rows; }
+            lock (unreadable) unreadable.Remove(Path.GetFullPath(path));
+            foreach (var raw in lines) {
                 string line = raw.TrimEnd('\r');
                 if (line.Length == 0 || line.StartsWith("#", StringComparison.Ordinal)) continue;
                 var parts = line.Split('\t');
@@ -27,7 +41,19 @@ namespace TianGongCadSuite {
             return rows;
         }
 
+        // 这次读不出来的文件：调用方手里只有默认值，这时候按"整份重写"保存会把文件里原有的内容（排孔预设、列设置……）全冲掉。
+        // 重新读成功之前不许写。
+        static readonly HashSet<string> unreadable = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        static void Unreadable(string path, Exception e){
+            Log.Write("SettingsRead " + Path.GetFileName(path), e.Message);
+            lock (unreadable) unreadable.Add(Path.GetFullPath(path));
+        }
+
         public static void Write(string path, IEnumerable<string[]> rows, params string[] comments){
+            bool blocked;
+            lock (unreadable) blocked = unreadable.Contains(Path.GetFullPath(path));
+            if (blocked && File.Exists(path))
+                throw new IOException("设置文件「" + Path.GetFileName(path) + "」刚才读不出来（可能被 Excel 之类的程序开着），为免把里面原有的内容覆盖掉，这次没保存。关掉占用它的程序、重新打开窗口后再改。");
             var sb = new StringBuilder();
             if (comments != null) foreach (var c in comments) sb.Append("# ").Append(c ?? "").Append("\r\n");
             foreach (var r in rows) {

@@ -37,6 +37,7 @@
     <Compile Include="../../src/Log.cs" />
     <Compile Include="../../src/PropCardData.cs" />
     <Compile Include="../AutoHolePureTests.cs" />
+    <Compile Include="../HoleCheckSpeedPureTests.cs" />
     <Compile Include="../AutoHoleScanPureTests.cs" />
     <Compile Include="../AutoHoleLinkPureTests.cs" />
     <Compile Include="../FormatConvertTests.cs" />

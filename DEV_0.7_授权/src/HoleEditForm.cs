@@ -14,7 +14,19 @@ namespace TianGongCadSuite {
     //   ② 选新的孔型/规格 → ③「应用」。默认整组一起改（自动打孔、批量排孔打的同规格孔是一个特征组）。
     // 「自动打孔」「批量排孔」打完以后点「改孔型…」会把刚打的那批孔直接带进来。
     // 换孔型的做法和限制见 HoleEditCad（真机实测）；改错了点「撤销修改」恢复原孔型和原名字。
-    public sealed class HoleEditForm : Form, F.ISEMouseEvents, F.ISECommandEvents {
+    public sealed class HoleEditForm : Form, IBusyTool, F.ISEMouseEvents, F.ISECommandEvents {
+        // 处理中不让关（Esc、关闭按钮、标题栏 ×、CAD 里按 Esc / 右键都会走到这里）：见 IBusyTool
+        public bool Busy { get { return busy; } }
+        public string BusyWhat { get { return "改孔型"; } }
+        protected override void OnFormClosing(FormClosingEventArgs e){
+            if (busy && e.CloseReason == CloseReason.UserClosing) {
+                e.Cancel = true;
+                try { status.Text = "正在改孔型，做完再关。"; status.ForeColor = Ui.Warn; } catch { }
+                return;
+            }
+            base.OnFormClosing(e);
+        }
+
         readonly F.Application app;
         readonly A.AssemblyDocument assembly;
         F.ISECommand command; F.ISEMouse mouse; Connection mouseConnection, commandConnection;
@@ -70,7 +82,7 @@ namespace TianGongCadSuite {
             var holeCard = Ui.Card("① 要改的孔", 0, "在模型里点孔口圆边或孔内壁，可以连续点");
             var remove = Ui.Small("移除"); var clear = Ui.Small("清空");
             remove.Click += (s, e) => RemoveSelected();
-            clear.Click += (s, e) => { targets.Clear(); picked.Clear(); RefreshAll(); SetStatus("已清空。重新点要改的孔。", Ui.Accent); };
+            clear.Click += (s, e) => { if (busy) return; targets.Clear(); picked.Clear(); RefreshAll(); SetStatus("已清空。重新点要改的孔。", Ui.Accent); };
             holeCard.AddHeader(clear); holeCard.AddHeader(remove);
             var hb = new Panel { Dock = DockStyle.Fill, BackColor = Color.White };
             list.Dock = DockStyle.Fill; list.BorderStyle = BorderStyle.None; list.IntegralHeight = false; list.Font = Ui.F9;
@@ -213,7 +225,7 @@ namespace TianGongCadSuite {
 
             bool ok = false;
             if (targets.Count == 0) { preview.Text = "还没有选孔。"; preview.ForeColor = Ui.Muted; }
-            else if (hs.ThreadProblem.Length > 0) { preview.Text = "⚠ " + hs.ThreadProblem; preview.ForeColor = Ui.Bad; }
+            else if (hs.SpecProblem.Length > 0) { preview.Text = "⚠ " + hs.SpecProblem; preview.ForeColor = Ui.Bad; }
             else {
                 int n = 0;
                 try { n = HoleEditCad.Expand(targets, wholeGroup.Checked).Count; } catch { }
@@ -245,6 +257,7 @@ namespace TianGongCadSuite {
         }
 
         void RemoveSelected(){
+            if (busy) return;
             int i = list.SelectedIndex;
             if (i < 0 || i >= targets.Count) { SetStatus("先在列表里选一条。", Ui.Warn); return; }
             targets.RemoveAt(i);

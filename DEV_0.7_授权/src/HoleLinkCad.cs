@@ -28,12 +28,15 @@ namespace TianGongCadSuite {
         public readonly List<OccurrenceNode> Nodes = new List<OccurrenceNode>();
         const int MaxDepth = 8;
 
-        public static OccurrenceIndex Build(A.AssemblyDocument asm){
+        public static OccurrenceIndex Build(A.AssemblyDocument asm){ return Build(asm, null); }
+        // progress(第几个顶层实例, 共几个)：大装配要把每个零件加载一遍、一两分钟，窗口拿它刷状态栏、泵消息
+        public static OccurrenceIndex Build(A.AssemblyDocument asm, Action<int, int> progress){
             var idx = new OccurrenceIndex();
             if (asm == null) return idx;
             int n = 0;
             try { n = asm.Occurrences.Count; } catch (Exception e) { Log.Write("OccIndexCount", e); }
             for (int i = 1; i <= n; i++) {
+                if (progress != null) { try { progress(i, n); } catch { } }
                 A.Occurrence occ = null;
                 try { occ = asm.Occurrences.Item(i); } catch { }
                 if (occ == null) continue;
@@ -297,10 +300,11 @@ namespace TianGongCadSuite {
     // 挪孔用的是"改孔特征轮廓里的 Hole2d 圆心 + 重算"，真机实测孔特征照常 igFeatureOK、孔跟着走
     // （tools/hole-feature-probe T5 / R3）。挪完回读状态，失败的就地挪回原位，不留坏特征。
     public static class HoleSync {
-        public static SyncReport Scan(A.AssemblyDocument asm){
+        public static SyncReport Scan(A.AssemblyDocument asm){ return Scan(asm, null); }
+        public static SyncReport Scan(A.AssemblyDocument asm, Action<int, int> progress){
             var report = new SyncReport();
             if (asm == null) return report;
-            var idx = OccurrenceIndex.Build(asm);
+            var idx = OccurrenceIndex.Build(asm, progress);
             var refCache = new Dictionary<string, List<HoleFeatures.Entry>>(StringComparer.OrdinalIgnoreCase);
             foreach (var node in idx.DistinctParts()) {
                 List<HoleFeatures.Entry> holes;
@@ -399,6 +403,7 @@ namespace TianGongCadSuite {
                     try { ok = (int)it.Hole.GetStatusEx(out desc) == (int)P.FeatureStatusConstants.igFeatureOK; } catch { }
                     if (ok) {
                         report.Moved++;
+                        it.Current = it.Desired; it.OffsetMm = 0;   // 报告就地更新：调用方不用为了刷新界面再把整个装配扫一遍
                         it.Link.TgtCenter = it.Desired;
                         it.Link.RefCenter = it.RefCenterNow;
                         try { HoleLinkStore.Write(it.Hole, it.Link); } catch (Exception e) { Log.Write("HoleSyncWriteLink", e); }

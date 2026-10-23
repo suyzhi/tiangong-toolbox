@@ -10,7 +10,20 @@ namespace TianGongCadSuite {
         public V3 Axis;
         public double DiameterMm;
         public string PartName = "";
-        public object Selection;          // 用于结果窗口里高亮定位
+        // 用于结果窗口里高亮定位。配孔检查采集时不再给每条圆边都建装配引用（每条 2～4 次 COM 调用，
+        // 围栏上几千条边光这一步就要几十秒）：先记一个"要用时再建"的工厂，点到这一条时才建。
+        object selection;
+        public Func<object> MakeSelection;
+        public object Selection {
+            get {
+                if (selection == null && MakeSelection != null) {
+                    var make = MakeSelection; MakeSelection = null;
+                    try { selection = make(); } catch { }
+                }
+                return selection;
+            }
+            set { selection = value; MakeSelection = null; }
+        }
         // 孔沿自身轴线占的范围（相对 Center，米）。采集时同一个孔的上下两条圆边合并成一条记录，
         // 范围就从 [0,0] 扩成 [0, 孔深]。配孔检查靠它判"两个孔沿轴线挨不挨着"：
         // 同一条直线上隔着几百毫米的两个孔不是一对紧固孔，不能拿来互相比规格。
@@ -91,6 +104,10 @@ namespace TianGongCadSuite {
         public readonly Transform Placement;
         readonly Func<V3, V3, bool> castLocal;
         readonly Func<V3, V3, IList<Box3>> boxesLocal;
+        // 这个实例在装配坐标里的包围盒（读不到为 null）。配孔检查要拿每个孤孔去问"装配里每个零件"，
+        // 每问一次就是一次 get_FacesByRay（COM）—— 孤孔 × 零件数，围栏上几十万次。先用包围盒在内存里挡掉
+        // 根本够不着的零件（直线段离包围盒都远的，不可能碰到它的面），只对够得着的才去问 CAD。
+        public Box3? World;
         public PartRayTarget(string name, Transform placement, Func<V3, V3, bool> castLocal){
             if (placement == null) throw new ArgumentNullException("placement");
             Name = name ?? ""; Placement = placement; this.castLocal = castLocal;
@@ -114,8 +131,20 @@ namespace TianGongCadSuite {
             return castLocal(origin, dir) || castLocal(origin, dir * -1);
         }
         // 限距离：直线 origin + axis·t 只在 t ∈ [lo - tol, hi + tol]（米）这一段碰到零件才算。
+        // 直线 origin + axis·t（t ∈ [lo - tol, hi + tol]）这一段够不够得着包围盒（盒子四周放宽 tol）。
+        // 只用来"挡掉肯定碰不到的"：face 的包围盒都在实体包围盒里，段碰得到 face 就一定碰得到这个盒子。
+        public static bool NearBox(Box3 box, V3 origin, V3 axis, double lo, double hi, double tol){
+            if (!axis.Finite || axis.Length < 1e-12) return true;
+            V3 d = axis.Unit();
+            double pad = Math.Max(tol, 0) + 1e-6;
+            var grown = new Box3(new V3(box.Lo.X - pad, box.Lo.Y - pad, box.Lo.Z - pad), new V3(box.Hi.X + pad, box.Hi.Y + pad, box.Hi.Z + pad));
+            double t0, t1;
+            if (!grown.Clip(origin, d, out t0, out t1)) return false;
+            return t1 >= lo - tol && t0 <= hi + tol;
+        }
         public bool Hits(V3 originAssembly, V3 axisAssembly, double lo, double hi, double tol){
             if (boxesLocal == null) return Hits(originAssembly, axisAssembly);   // 没有包围盒信息：退回不限距离
+            if (World.HasValue && !NearBox(World.Value, originAssembly, axisAssembly, lo, hi, tol)) return false;
             var origin = Placement.InversePoint(originAssembly);
             var dir = Placement.InverseNormal(axisAssembly);
             if (!origin.Finite || !dir.Finite || dir.Length < 1e-12) return false;
@@ -428,7 +457,7 @@ namespace TianGongCadSuite {
         // 螺栓杆是天经地义的 —— 不能因此报"螺栓上漏打孔"（原来每个装了螺栓的孔都会这么误报一次）。
         public static List<HoleIssue> Run(IList<HoleRecord> holes, Func<HoleRecord, string, bool> rayHitsPart,
                                           bool reportUnpaired = false, IList<string> allParts = null,
-                                          PartRayIndex bodies = null, IList<HoleRecord> shafts = null){
+                                          PartRayIndex bodies = null, IList<HoleRecord> shafts = null, Action<int, int> progress = null){
             var issues = new List<HoleIssue>();
             if (holes == null) return issues;
             var relevant = Relevant(holes);
@@ -438,7 +467,9 @@ namespace TianGongCadSuite {
                 : (IList<string>)holes.Select(x => x.PartName).Distinct().ToList();
             double tol = CoaxialSpanTolMm / 1000.0;
 
+            int gi = 0;
             foreach (var g in groups) {
+                if (progress != null) { try { progress(++gi, groups.Count); } catch { } }
                 // 同一条轴线上被同一个零件"挡住"的几段孔，合成一条漏打孔（A、C 有孔、中间的 B 没孔 -> 只报 B 一次）
                 var missingByPart = new Dictionary<string, HoleIssue>(StringComparer.Ordinal);
                 var missingOrder = new List<string>();

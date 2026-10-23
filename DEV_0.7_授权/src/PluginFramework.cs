@@ -16,6 +16,9 @@ namespace TianGongCadSuite {
             Id=id;Title=title;Description=description;Help=help;CanExecute=canExecute;Execute=execute;
         }
     }
+    // 正在处理（打孔、检查……）的窗口：里面会泵消息（DoEvents），这期间用户还能点功能区按钮、按 Esc。
+    // 这时关掉窗口 = 一批孔打到一半、原位编辑进去了没退出来、窗口的列表在循环底下被清空（ObjectDisposed）。
+    public interface IBusyTool { bool Busy { get; } string BusyWhat { get; } }
     public interface IToolModule : IDisposable {
         string Id {get;}
         IEnumerable<ToolCommand> Commands {get;}
@@ -64,7 +67,28 @@ namespace TianGongCadSuite {
                 if(part==null){Log.Debug("ContextProbe","活动文档不是零件文档");return null;}
                 string partName=null;try{partName=part.FullName;}catch(Exception e){Log.Debug("ContextProbe","读活动零件 FullName 失败:"+e.Message);}
                 if(string.IsNullOrEmpty(partName)){Log.Debug("ContextProbe","活动零件 FullName 为空");return null;}
+                // 先直接问天工"这个零件在哪个装配里原位编辑"：O(1)，而且子装配里的零件（两级原位编辑）也认得出 ——
+                // 下面按顶层实例文件名找的老办法认不出子装配里的零件，打孔三个按钮在那种原位编辑里一直是灰的。
+                try{
+                    if(part.InPlaceActivated){
+                        object top=null,occ=null;part.GetTopDocumentAndSubOccurrenceOfIPADoc(out top,out occ);
+                        var asm=top as A.AssemblyDocument;if(asm!=null)return asm;
+                    }
+                }catch(Exception e){Log.Debug("ContextProbe","问原位编辑的顶层文档失败:"+e.Message);}
+                // 退路要遍历打开的装配的实例（一个实例一次 COM 调用）。功能区刷新按钮状态时三个打孔命令各问一遍、而且很频繁：
+                // 同一个零件、同样的打开文档数，2 秒内直接用上次的答案
                 int documents=Application.Documents.Count;
+                if(lastPart==partName&&lastDocs==documents&&(DateTime.UtcNow-lastAt).TotalSeconds<2)return lastHit;
+                var hit=ScanForPart(partName,documents);
+                lastPart=partName;lastDocs=documents;lastAt=DateTime.UtcNow;lastHit=hit;
+                if(hit!=null)return hit;
+            }catch(Exception e){Log.Write("EditingAssembly",e);}
+            Log.Debug("ContextProbe","打开的装配里没有匹配该零件的实例：" + SafeName(Application.ActiveDocument));
+            return null;
+        }
+        string lastPart;int lastDocs;DateTime lastAt;A.AssemblyDocument lastHit;
+        A.AssemblyDocument ScanForPart(string partName,int documents){
+            {
                 for(int i=1;i<=documents;i++){
                     var assembly=Application.Documents.Item(i) as A.AssemblyDocument;
                     if(assembly==null)continue;
@@ -77,8 +101,7 @@ namespace TianGongCadSuite {
                         }
                     }catch{}
                 }
-            }catch(Exception e){Log.Write("EditingAssembly",e);}
-            Log.Debug("ContextProbe","打开的装配里没有匹配该零件的实例：" + SafeName(Application.ActiveDocument));
+            }
             return null;
         }
         // 可用上下文 = 活动文档是装配，或者正在原位编辑装配里的某个零件。
@@ -104,6 +127,8 @@ namespace TianGongCadSuite {
         // All modeless tools share one selection session; switching tools closes the previous form.
         public void Show(Func<Form> create,Action<Form> start){
             TianGongCadSuite.Licensing.LicenseGate.Require();
+            var working=active as IBusyTool;
+            if(working!=null&&!active.IsDisposed&&working.Busy)throw new InvalidOperationException("「"+active.Text+"」正在"+working.BusyWhat+"，等它做完再点别的命令。");
             Dispose();var next=create();active=next;
             try{next.Show(new CadOwner(Application.ActiveFramehWnd));if(start!=null)start(next);}catch{Dispose();throw;}
         }

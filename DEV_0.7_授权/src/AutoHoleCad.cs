@@ -1449,18 +1449,21 @@ namespace TianGongCadSuite {
             var part = target.Part;
             P.Model model = ModelFor(target);   // 腰孔是拉伸切除：多实体零件上老写法就能切（实测），只要用对实体
             if (model == null) { why = "目标零件没有可用实体。"; return false; }
-            P.Profile profile = null;
+            P.Profile profile = null; object set = null; bool ok = false;
             try {
                 var plane = FindOrCreatePlane(part, target);
                 if (plane == null) { why = "无法在所选面上建立基准面。"; return false; }
-                profile = part.ProfileSets.Add().Profiles.Add(plane);
+                var ps = part.ProfileSets.Add(); set = ps;
+                profile = ps.Profiles.Add(plane);
                 P.ExtrudedCutout made;
-                return SlotProfile(part, model, profile, localCentre, localDirInPlane, lengthMm, widthMm, out why, out made);
+                ok = SlotProfile(part, model, profile, localCentre, localDirInPlane, lengthMm, widthMm, out why, out made);
+                return ok;
             } catch (Exception e) {
                 why = "腰孔异常：" + e.Message;
                 return false;
             } finally {
                 if (profile != null) { try { profile.Visible = false; } catch {} }
+                if (!ok) DropProfile(profile, set);
             }
         }
 
@@ -1519,6 +1522,7 @@ namespace TianGongCadSuite {
         public static DrillResult DrillSlots(TargetFace target, IList<V3> localCentres, IList<V3> localDirs, double lengthMm, double widthMm){
             var result = new DrillResult { Requested = localCentres == null ? 0 : localCentres.Count, Method = "腰孔（通切）" };
             if (localCentres == null || localCentres.Count == 0) return result;
+            target = AnchorToActivePart(target);   // 原位编辑时只认正在编辑的那份文档（和圆孔 DrillRequests 一样）
             var part = target.Part;
             P.Model model = ModelFor(target);
             if (model == null) throw new InvalidOperationException("目标零件没有可用的实体模型。");
@@ -1545,12 +1549,18 @@ namespace TianGongCadSuite {
             why = ""; made = null;
             if (lengthMm <= widthMm) { why = "腰孔总长必须大于槽宽。"; return false; }
             if (widthMm <= 0) { why = "槽宽必须大于 0。"; return false; }
-            P.Profile profile = null;
+            P.Profile profile = null; object set = null; bool ok = false;
             try {
-                profile = part.ProfileSets.Add().Profiles.Add(plane);
-                return SlotProfile(part, model, profile, localCentre, localDirInPlane, lengthMm, widthMm, out why, out made);
+                var ps = part.ProfileSets.Add(); set = ps;
+                profile = ps.Profiles.Add(plane);
+                ok = SlotProfile(part, model, profile, localCentre, localDirInPlane, lengthMm, widthMm, out why, out made);
+                return ok;
             } catch (Exception e) { why = "腰孔异常：" + e.Message; return false; }
-            finally { if (profile != null) { try { profile.Visible = false; } catch {} } }
+            finally {
+                if (profile != null) { try { profile.Visible = false; } catch {} }
+                // 没切成：空草图留在特征树里会夹在两个特征之间，后面的孔就编不成组（和 DrillOne 删空轮廓同一个道理）
+                if (!ok) DropProfile(profile, set);
+            }
         }
 
         // 全装配孔采集：遍历每个零件实例的所有圆形边，换算到装配坐标。
@@ -1568,12 +1578,26 @@ namespace TianGongCadSuite {
 
         // parts：装配里所有零件实例（含子装配里的，见 AssemblyPart）。配孔检查拿它建射线表、列零件名，只遍历一次。
         public static List<HoleRecord> CollectAssemblyHoles(A.AssemblyDocument assembly, out List<string> warnings, out List<HoleRecord> shafts, out List<AssemblyPart> parts){
+            return CollectAssemblyHoles(assembly, out warnings, out shafts, out parts, null);
+        }
+        // progress(第几个零件, 共几个)：每读完一个零件报一次（窗口拿它刷状态栏、泵消息，免得天工被 Windows 判成"未响应"）
+        public static List<HoleRecord> CollectAssemblyHoles(A.AssemblyDocument assembly, out List<string> warnings, out List<HoleRecord> shafts, out List<AssemblyPart> parts, Action<int, int> progress){
             warnings = new List<string>();
             shafts = new List<HoleRecord>();
             var result = new List<HoleRecord>();
             parts = AssemblyPart.List(assembly, warnings);
             var byBucket = new Dictionary<string, List<HoleRecord>>(StringComparer.Ordinal);
-            foreach (var ap in parts)
+            // 只有判定口径里的孔径（默认 3–25mm）会参与检查；螺栓杆/销只拿来和这些孔比同轴，比孔大的不可能穿过孔。
+            // 口径以外的圆边（圆管、大圆角、细小倒圆）原来也逐条判凸台、建引用 —— 每条五六次 COM 调用，白花。
+            double minHole = HoleCheck.MinDiameterMm - 0.001, maxHole = HoleCheck.MaxDiameterMm + 0.001;
+            double minShaft = HoleCheck.MinDiameterMm * 0.5, maxShaft = HoleCheck.MaxDiameterMm + 1.0;
+            int done = 0;
+            foreach (var ap in parts) {
+            if (progress != null) { try { progress(++done, parts.Count); } catch { } }
+            // 同一个实例里所有边共用一个"零件 → 装配"变换：读一次（原来每条圆边各建一个装配引用再取矩阵，2～4 次 COM 调用/边）
+            Transform placement;
+            try { placement = ap.Placement; }
+            catch (Exception e) { warnings.Add(ap.Name + " 读不到装配位置：" + e.Message); continue; }
             foreach (var body in ap.Bodies) {           // 多实体零件每个实体都要看（0.7.15）
                 string partName = ap.Name;
                 object rawEdges;
@@ -1586,23 +1610,20 @@ namespace TianGongCadSuite {
                     Array c = new double[3], ax = new double[3]; double r = 0;
                     try { circle.GetCircleData(ref c, ref ax, out r); } catch { continue; }
                     if (r <= 0) continue;
+                    double dia = r * 2000.0;
+                    bool holeSize = dia >= minHole && dia <= maxHole, shaftSize = dia >= minShaft && dia <= maxShaft;
+                    if (!holeSize && !shaftSize) continue;
+                    V3 centre, axis;
+                    try { centre = placement.Point(V3.From(c)); axis = placement.Vector(V3.From(ax)).Unit(); } catch { continue; }
+                    if (!centre.Finite) continue;
                     if (HoleScanCad.IsBossEdge(edge)) {           // 螺栓杆、销、圆凸台的外圆不是孔，单独记下
-                        try {
-                            var pgs = PickGeometry.Unwrap(ap.Reference(edge));
-                            shafts.Add(new HoleRecord { Center = pgs.Transform.Point(V3.From(c)), Axis = pgs.Transform.Vector(V3.From(ax)).Unit(),
-                                                        DiameterMm = r * 2000.0, PartName = partName });
-                        } catch { }
+                        if (shaftSize) shafts.Add(new HoleRecord { Center = centre, Axis = axis, DiameterMm = dia, PartName = partName });
                         continue;
                     }
-                    object sel = null; V3 centre = new V3(), axis = new V3(0,0,1);
-                    try {
-                        sel = ap.Reference(edge);
-                        var pg = PickGeometry.Unwrap(sel);
-                        centre = pg.Transform.Point(V3.From(c));
-                        axis = pg.Transform.Vector(V3.From(ax)).Unit();
-                    } catch { continue; }
-                    var rec = new HoleRecord { Center = centre, Axis = axis, DiameterMm = r*2000.0,
-                                               PartName = partName, Selection = sel };
+                    if (!holeSize) continue;
+                    var owner = ap; var picked = edge;
+                    var rec = new HoleRecord { Center = centre, Axis = axis, DiameterMm = dia, PartName = partName,
+                                               MakeSelection = () => owner.Reference(picked) };
                     // 通孔有上下两条圆边，同一个孔只保留一条记录。
                     // 去重原来是对全表线性扫描（O(E²)，E = 全装配圆边数）；SameHoleLine 要求
                     // "同一零件 + 直径相差 ≤0.01mm"，所以先按「零件名 + 直径取整到 0.1mm」分桶，
@@ -1616,6 +1637,7 @@ namespace TianGongCadSuite {
                     foreach (var existing in same) if (HoleCheck.SameHoleLine(existing, rec)) { existing.Extend(rec.Center); dup = true; break; }
                     if (!dup) { same.Add(rec); result.Add(rec); }
                 }
+            }
             }
             return result;
         }
@@ -1645,14 +1667,34 @@ namespace TianGongCadSuite {
                     try { placement = ap.Placement; }
                     catch (Exception e) { Log.Write("AutoHoleCheckMatrix " + ap.Name, e); continue; }   // 读不到变换宁可不判，也不按原点瞎判
                     var bodies = ap.Bodies;
-                    index.Add(PartRayTarget.WithBoxes(ap.Name, placement, (o, d) => {
+                    var target = PartRayTarget.WithBoxes(ap.Name, placement, (o, d) => {
                         var all = new List<Box3>();
                         foreach (var b in bodies) all.AddRange(CastBoxes(b, o, d));   // 多实体零件：哪个实体的材料都算
                         return all;
-                    }));
+                    });
+                    target.World = WorldBox(bodies, placement);
+                    index.Add(target);
                 }
                 return index;
             }
+        }
+
+        // 实例的全部实体在装配坐标里的包围盒（局部包围盒 8 个角变换过去再取范围）。任何一个实体读不到就返回 null（不预筛）
+        static Box3? WorldBox(IList<G.Body> bodies, Transform placement){
+            if (bodies == null || bodies.Count == 0 || placement == null) return null;
+            double[] lo = { double.MaxValue, double.MaxValue, double.MaxValue }, hi = { double.MinValue, double.MinValue, double.MinValue };
+            foreach (var b in bodies) {
+                Array mn = new double[3], mx = new double[3];
+                try { b.GetRange(ref mn, ref mx); } catch { return null; }
+                V3 a = V3.From(mn), z = V3.From(mx);
+                if (!a.Finite || !z.Finite) return null;
+                for (int k = 0; k < 8; k++) {
+                    var p = placement.Point(new V3((k & 1) == 0 ? a.X : z.X, (k & 2) == 0 ? a.Y : z.Y, (k & 4) == 0 ? a.Z : z.Z));
+                    lo[0] = Math.Min(lo[0], p.X); lo[1] = Math.Min(lo[1], p.Y); lo[2] = Math.Min(lo[2], p.Z);
+                    hi[0] = Math.Max(hi[0], p.X); hi[1] = Math.Max(hi[1], p.Y); hi[2] = Math.Max(hi[2], p.Z);
+                }
+            }
+            return new Box3(new V3(lo[0], lo[1], lo[2]), new V3(hi[0], hi[1], hi[2]));
         }
 
         // 零件坐标里这条**直线**碰到的面，各自的包围盒（零件坐标）。

@@ -14,6 +14,10 @@ namespace TianGongCadSuite {
         }
 
         public static string Generate(F.Application app, A.AssemblyDocument assembly, IList<PanelSpec> specs, string parent, PanelProps props){
+            return Generate(app, assembly, specs, parent, props, null);
+        }
+        // progress(第几块, 共几块)：一块板 2～3 秒，几十块要一两分钟，窗口拿它刷状态栏、泵消息
+        public static string Generate(F.Application app, A.AssemblyDocument assembly, IList<PanelSpec> specs, string parent, PanelProps props, Action<int, int> progress){
             if (specs == null || specs.Count == 0) throw new ArgumentException("没有待生成框口。");
             if (!Directory.Exists(parent)) throw new DirectoryNotFoundException(parent);
             // 文件名必须带批次时间戳（原因见 PanelNaming 的注释：CAD 会按文件名把装配目录里的旧同名零件插进来）。
@@ -24,6 +28,7 @@ namespace TianGongCadSuite {
             var created = new List<Tuple<A.Occurrence, string>>();
             try {
                 for (int i = 0; i < specs.Count; i++) {
+                    if (progress != null) { try { progress(i + 1, specs.Count); } catch { } }
                     string file = Path.Combine(directory, name(i + 1));
                     created.Add(Tuple.Create(CadBuilder.Generate(app, assembly, specs[i], file, props), file));
                 }
@@ -39,6 +44,8 @@ namespace TianGongCadSuite {
                     try { item.Item1.Delete(); File.Delete(item.Item2); }
                     catch (Exception e) { errors.Add(item.Item2 + ": " + e.Message); }
                 }
+                // 撤干净了就把空的批次目录也删掉：原来每失败一次就在输出目录里留一个空的「自动填充_…」文件夹，用户以为生成了
+                if (errors.Count == 0) { try { if (Directory.GetFileSystemEntries(directory).Length == 0) Directory.Delete(directory); } catch { } }
                 throw new InvalidOperationException("批量生成未完成：" + original.Message
                     + (errors.Count > 0 ? "\n部分结果未能撤回，请检查：\n" + string.Join("\n", errors) : "\n本批已插入的板子已撤回。")
                     + "\n批次目录：" + directory, original);

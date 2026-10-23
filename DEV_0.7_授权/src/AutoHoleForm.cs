@@ -19,7 +19,19 @@ namespace TianGongCadSuite {
     //   · 螺纹孔可选「全长 / 指定深度」（原来 CAD 默认只攻 2mm）；
     //   · 打出来的孔记住参考孔（HoleLink），参考零件挪了以后底部「同步孔位」一键跟回去；
     //   · 界面重排：左列选东西，右列定规格 + 看孔形状，底部预览/打孔/关联孔位。
-    public sealed class AutoHoleForm : Form, F.ISEMouseEvents, F.ISECommandEvents {
+    public sealed class AutoHoleForm : Form, IBusyTool, F.ISEMouseEvents, F.ISECommandEvents {
+        // 处理中不让关（Esc、关闭按钮、标题栏 ×、CAD 里按 Esc / 右键都会走到这里）：见 IBusyTool
+        public bool Busy { get { return busy; } }
+        public string BusyWhat { get { return "打孔"; } }
+        protected override void OnFormClosing(FormClosingEventArgs e){
+            if (busy && e.CloseReason == CloseReason.UserClosing) {
+                e.Cancel = true;
+                try { status.Text = "正在打孔，做完再关。"; status.ForeColor = Ui.Warn; } catch { }
+                return;
+            }
+            base.OnFormClosing(e);
+        }
+
         // 一组同直径的参考孔，共用一份可编辑的孔规格。
         sealed class RefGroup {
             public double DiameterMm;
@@ -234,7 +246,7 @@ namespace TianGongCadSuite {
             tips.SetToolTip(rulesButton, "参考孔是螺纹底孔/过孔时，目标件各配什么孔（沉头螺钉、螺钉头露在外面、锥形沉头、螺栓+螺母，或按规格自己定）。");
             var delRef = Ui.Small("移除"); var clrRef = Ui.Small("清空");
             delRef.Click += (s, e) => RemoveSelected();
-            clrRef.Click += (s, e) => { groups.Clear(); scannedPicks.Clear(); lastScanNote = ""; RefreshAll(); SetStatus("已清空参考孔。", Ui.Muted); };
+            clrRef.Click += (s, e) => { if (busy) return; groups.Clear(); scannedPicks.Clear(); lastScanNote = ""; RefreshAll(); SetStatus("已清空参考孔。", Ui.Muted); };
             refsCard.AddHeader(rulesButton); refsCard.AddHeader(delRef); refsCard.AddHeader(clrRef);
             refList.Dock = DockStyle.Fill; refList.IntegralHeight = false; refList.BorderStyle = BorderStyle.None;
             refList.DrawMode = DrawMode.OwnerDrawFixed; refList.ItemHeight = 46; refList.BackColor = Color.White;
@@ -250,7 +262,7 @@ namespace TianGongCadSuite {
             var facesCard = Ui.Card("② 打孔面", 170, "孔心沿参考孔轴线投到这些面上");
             var delFace = Ui.Small("移除"); var clrFace = Ui.Small("清空");
             delFace.Click += (s, e) => RemoveSelectedFace();
-            clrFace.Click += (s, e) => { targets.Clear(); targetLabels.Clear(); resolved.Clear(); drilledOnce = false; RefreshAll(); SetStatus("已清空打孔面。", Ui.Muted); };
+            clrFace.Click += (s, e) => { if (busy) return; targets.Clear(); targetLabels.Clear(); resolved.Clear(); drilledOnce = false; RefreshAll(); SetStatus("已清空打孔面。", Ui.Muted); };
             facesCard.AddHeader(delFace); facesCard.AddHeader(clrFace);
             faceList.Dock = DockStyle.Fill; faceList.IntegralHeight = false; faceList.BorderStyle = BorderStyle.None;
             faceList.DrawMode = DrawMode.OwnerDrawFixed; faceList.ItemHeight = 28; faceList.BackColor = Color.White;
@@ -424,7 +436,7 @@ namespace TianGongCadSuite {
                 if (HoleStandards.Resolve(cur) == null && editNote.ForeColor != Ui.Bad) editNote.ForeColor = Ui.Warn;
             }
             // 规格本身不成立（例如盲孔的螺纹深度超过孔深）：这一行改成红字说原因，开始打孔同时变灰
-            string problem = cur == null ? "" : cur.ThreadProblem;
+            string problem = cur == null ? "" : cur.SpecProblem;
             if (problem.Length > 0) { editNote.Text = "⚠ " + problem; editNote.ForeColor = Ui.Bad; }
             tips.SetToolTip(editNote, editNote.Text);
         }
@@ -481,10 +493,12 @@ namespace TianGongCadSuite {
             refList.SelectedIndexChanged += (s, e) => { if (!loading) LoadEditor(); };
             // 打孔重试期间 CAD 正忙，这里把重试进度写到状态栏并让界面刷一次，
             // 用户看到的就不是"卡死了"，而是"正在重试 2/6"。
-            AutoHoleWriter.Progress = msg => {
+            progress = msg => {
+                if (closing || IsDisposed) return;
                 SetStatus(msg, Ui.Warn);
                 try { status.Update(); System.Windows.Forms.Application.DoEvents(); } catch { }
             };
+            AutoHoleWriter.Progress = progress;
         }
 
         // ---------------- 列表绘制 ----------------
@@ -620,7 +634,9 @@ namespace TianGongCadSuite {
             HoleMatch match = null;
             if (isNew) { match = HoleMatcher.Match(r.DiameterMm); g = new RefGroup { DiameterMm = r.DiameterMm, Spec = match.Target }; groups.Add(g); }
             foreach (var old in g.Holes) {
-                if ((old.Center - r.Center).Length < 1e-6) {
+                // 同一根轴线就是同一个孔：原来只比孔心，点了孔口上沿再点下沿（或先扫面再点圆边）会加成两个参考孔，
+                // 投到打孔面上是同一个点 —— 结果里多一条"本来就有孔"，孔数也对不上
+                if ((old.Center - r.Center).Length < 1e-6 || SameAxis(old, r)) {
                     if (batch) return false;
                     throw new ArgumentException("这个孔已经选过了。");
                 }
@@ -635,6 +651,15 @@ namespace TianGongCadSuite {
                           isNew && match != null && match.Ambiguous ? Ui.Warn : Ui.Ok);
             }
             return true;
+        }
+
+        static bool SameAxis(ScannedHole a, ScannedHole b){
+            try {
+                var n = a.Axis.Unit();
+                if (Math.Abs(Math.Abs(n.Dot(b.Axis.Unit())) - 1) > 1e-4) return false;
+                var d = b.Center - a.Center;
+                return (d - n * d.Dot(n)).Length < 0.00005;   // 横向 0.05mm 以内
+            } catch { return false; }
         }
 
         // 点平面 + 勾着"自动认孔"：面上有孔就全认出来当参考孔（**不当打孔面**）；
@@ -879,6 +904,7 @@ namespace TianGongCadSuite {
         }
 
         void RemoveSelected(){
+            if (busy) return;   // 打孔中（状态栏刷新时会泵消息）删列表 = 循环底下的数据没了
             int i = refList.SelectedIndex;
             if (i < 0 || i >= groups.Count) { SetStatus("先在列表里选中一组参考孔。", Ui.Warn); return; }
             groups.RemoveAt(i);
@@ -886,6 +912,7 @@ namespace TianGongCadSuite {
             SetStatus("已移除一组参考孔。", Ui.Muted);
         }
         void RemoveSelectedFace(){
+            if (busy) return;
             int i = faceList.SelectedIndex;
             if (i < 0 || i >= targets.Count) { SetStatus("先在列表里选中一个打孔面。", Ui.Warn); return; }
             targets.RemoveAt(i); targetLabels.RemoveAt(i);
@@ -955,14 +982,14 @@ namespace TianGongCadSuite {
                 }
                 foreach (var g in groups) {
                     if (g.Spec == null) continue;
-                    string tp = g.Spec.ThreadProblem;
+                    string tp = g.Spec.SpecProblem;
                     if (tp.Length > 0) { s = "⚠ " + g.Head + "：" + tp + "　" + s; break; }
                 }
                 previewSub.Text = s;
             }
             tips.SetToolTip(previewSub, previewSub.Text);
             tips.SetToolTip(previewLine, previewLine.Text);
-            bool specOk = groups.All(g => g.Spec == null || g.Spec.ThreadProblem.Length == 0);
+            bool specOk = groups.All(g => g.Spec == null || g.Spec.SpecProblem.Length == 0);
             run.Enabled = total > 0 && !busy && !drilledOnce && specOk;
             if (highlights != null) {
                 try {
@@ -1023,18 +1050,31 @@ namespace TianGongCadSuite {
         }
 
         // 查一遍装配里的关联孔。manual = 用户点了「重新检查」（要在状态栏给回应）。
+        // 查关联孔要把装配里每个零件加载一遍（大装配一两分钟）：期间刷状态栏、泵消息，别让 Windows 把天工判成"未响应"。
+        // 泵消息时窗口按 busy 挡住关闭和改列表（IBusyTool），所以查的时候也要置 busy（原来「检查」不置 busy）
+        Action<int, int> LinkPulse(){
+            var tick = System.Diagnostics.Stopwatch.StartNew();
+            return (i, n) => {
+                if (tick.ElapsedMilliseconds < 300) return;
+                tick.Restart();
+                SetStatus("正在读取装配里的零件 " + i + " / " + n + " …", Ui.Accent);
+                try { status.Update(); System.Windows.Forms.Application.DoEvents(); } catch { }
+            };
+        }
         void ScanLinks(bool manual){
             if (assembly == null || closing) return;
             if (busy) return;
             try {
-                UseWaitCursor = true;
-                var report = HoleSync.Scan(assembly);
+                UseWaitCursor = true; busy = true; rescanButton.Enabled = false; syncButton.Enabled = false; run.Enabled = false;
+                var report = HoleSync.Scan(assembly, LinkPulse());
+                busy = false;
                 ShowLinkReport(report, "");
                 if (manual) SetStatus(report.Summary, report.Misplaced > 0 ? Ui.Warn : Ui.Ok);
             } catch (Exception e) {
+                busy = false;
                 Log.Write("AutoHoleLinkScan", e);
                 ShowLinkReport(null, "检查失败：" + e.Message);
-            } finally { UseWaitCursor = false; }
+            } finally { busy = false; UseWaitCursor = false; RefreshPreview(); }
         }
 
         // 一键同步：先重新查一遍（别拿着几分钟前的结果去改模型），再把错位的孔挪回去。
@@ -1047,7 +1087,7 @@ namespace TianGongCadSuite {
                 StopCommand();
                 // 天工原生关联的孔：让天工更新链接（= 天工里「更新所有链接」），孔自己跟上参考孔
                 try { NativeHoleLink.UpdateLinks(assembly); } catch (Exception e) { Log.Write("AutoHoleUpdateLinks", e); }
-                var report = HoleSync.Scan(assembly);
+                var report = HoleSync.Scan(assembly, LinkPulse());
                 int want = report.Misplaced;
                 if (want == 0) {
                     ShowLinkReport(report, "");
@@ -1065,7 +1105,8 @@ namespace TianGongCadSuite {
                     // 模型改过了：打孔面的面片缓存全部作废，下次用到时重读
                     resolved.Clear();
                     busy = false;
-                    ShowLinkReport(HoleSync.Scan(assembly), "");
+                    // Apply 已经把挪好的孔在报告里改成"同轴"：直接显示，不再整装配重扫一遍（建实例索引要把每个零件加载一遍，大装配上一分多钟）
+                    ShowLinkReport(report, "");
                 }
             } catch (Exception e) {
                 Log.Write("AutoHoleSync", e);
@@ -1086,7 +1127,7 @@ namespace TianGongCadSuite {
         public string LastResult = "";
         public void DrillForTest(){ RunDrill(); }
         public void ClearAllForTest(){ ClearAll(); }
-        void ClearAll(){ groups.Clear(); targets.Clear(); targetLabels.Clear(); resolved.Clear(); scannedPicks.Clear(); lastScanNote = ""; drilledOnce = false; RefreshAll(); SetStatus("已全部清空，重新点孔。", Ui.Accent); }
+        void ClearAll(){ if (busy) return; groups.Clear(); targets.Clear(); targetLabels.Clear(); resolved.Clear(); scannedPicks.Clear(); lastScanNote = ""; drilledOnce = false; RefreshAll(); SetStatus("已全部清空，重新点孔。", Ui.Accent); }
         public void SyncForTest(){ SyncLinks(); }
         public SyncReport LinkReportForTest(){ ScanLinks(false); return lastLinks; }
         public bool KeepLink { get { return linkCheck.Checked; } set { linkCheck.Checked = value; } }
@@ -1114,6 +1155,7 @@ namespace TianGongCadSuite {
 
         // ---------------- 打孔 ----------------
         bool hadCommand;
+        Action<string> progress;
         void RunDrill(){
             if (busy || closing) return;
             try {
@@ -1126,7 +1168,7 @@ namespace TianGongCadSuite {
                     return;
                 }
                 foreach (var g in groups) {
-                    string tp = g.Spec == null ? "" : g.Spec.ThreadProblem;
+                    string tp = g.Spec == null ? "" : g.Spec.SpecProblem;
                     if (tp.Length > 0) { SetStatus(g.Head + "：" + tp, Ui.Warn); return; }
                 }
                 // 参考孔的零件 / 面对象还活着吗：天工重新加载过那个文档（比如关掉了原位编辑留下的那个零件窗口）以后，
@@ -1138,6 +1180,7 @@ namespace TianGongCadSuite {
                 if (assembly.ReadOnly) throw new InvalidOperationException("装配是只读打开的，无法打孔。请用可写方式打开装配后再试。");
 
                 busy = true; run.Enabled = false; run.Text = "打孔中…"; UseWaitCursor = true;
+                AutoHoleWriter.Progress = progress;   // 开着两个自动打孔窗口时，进度写到正在打孔的这一个
                 hadCommand = command != null;   // 打完只恢复"原来就在选"的状态（外部脚本驱动时没有选择命令）
                 StopCommand();
 
@@ -1165,6 +1208,10 @@ namespace TianGongCadSuite {
                 // 速度现在不是指标，可靠第一。打完在 finally 里确认回到了顶层装配、刷新一次视图。
                 try {
                 for (int ti = 0; ti < targets.Count; ti++) {
+                    // 一张面一张面地报进度、泵一次消息：十几张面要打一两分钟，原来整段不泵消息，Windows 把天工判成"未响应"
+                    // （打孔中窗口不能关、列表不能改，见 IBusyTool / RemoveSelected，所以这里泵消息是安全的）
+                    if (targets.Count > 1) { SetStatus("正在打第 " + (ti + 1) + " / " + targets.Count + " 个面…", Ui.Accent); try { status.Update(); System.Windows.Forms.Application.DoEvents(); } catch { } }
+                    if (closing) break;
                     var t = ResolvedFace(ti);
                     var partName = t.PartName != null && t.PartName.Length > 0 ? t.PartName : "零件";
                     var requests = new List<AutoHoleWriter.HoleRequest>();
@@ -1344,6 +1391,7 @@ namespace TianGongCadSuite {
 
         // 改配做规则：保存后，已经点好的参考孔按新规则重推规格（用户改过的深度/倒角/螺纹深度保留）
         void EditRules(){
+            if (busy) return;
             using (var f = new HoleRulesForm(HoleRuleBook.Current)) {
                 if (f.ShowDialog(this) != DialogResult.OK || f.Result == null) return;
             }
@@ -1400,8 +1448,9 @@ namespace TianGongCadSuite {
         }
         void OpenEdit(){
             if (busy || closing || lastCreated == null || lastCreated.Count == 0) return;
+            handingOver = command != null;
             try { AutoHoleModule.OpenEdit(app, assembly, lastCreated); }
-            catch (Exception e) { Log.Write("AutoHoleOpenEdit", e); SetStatus("打不开改孔型窗口：" + e.Message, Ui.Bad); }
+            catch (Exception e) { handingOver = false; Log.Write("AutoHoleOpenEdit", e); SetStatus("打不开改孔型窗口：" + e.Message, Ui.Bad); }
         }
         public List<KeyValuePair<SolidEdgePart.PartDocument, string>> LastCreatedForTest { get { return lastCreated; } }
         public void UndoForTest(){ UndoLastBatch(); }
@@ -1418,7 +1467,8 @@ namespace TianGongCadSuite {
 
         void Cleanup(){
             if (closing) return; closing = true;
-            AutoHoleWriter.Progress = null;
+            // 只摘自己挂的：「去配孔」会另开一个自动打孔窗口，后开的那个关掉时不能把前一个的进度回调一起摘掉
+            if (AutoHoleWriter.Progress == progress) AutoHoleWriter.Progress = null;
             StopCommand();
             groups.Clear(); targets.Clear(); targetLabels.Clear(); resolved.Clear(); scannedPicks.Clear();
             lastScanNote = "";
@@ -1438,7 +1488,20 @@ namespace TianGongCadSuite {
         }
         public void MouseDblClick(short b, short s, double x, double y, double z, object w, int k, object g){ }
         public void MouseDrag(short b, short s, double x, double y, double z, object w, short ds, int k, object g){ }
-        public void Terminate(){ if (!closing && !busy) BeginInvoke((Action)(() => Close())); }
+        // 别的命令接管了鼠标：一般就关窗口（和原来一样）。但如果是我们自己点「改孔型…」开的窗口接管的，
+        // 这个窗口说好了要留着（参考孔、规格都还在）—— 原来照样被关掉。现在只是暂停选择，用户回到这个窗口时自动接着选
+        bool handingOver, paused;
+        public void Terminate(){
+            if (closing || busy) return;
+            if (handingOver) { handingOver = false; paused = true; BeginInvoke((Action)(() => { StopCommand(); SetStatus("选择已暂停（改孔型窗口在用鼠标）。回到这个窗口点一下就接着选。", Ui.Muted); })); return; }
+            BeginInvoke((Action)(() => Close()));
+        }
+        protected override void OnActivated(EventArgs e){
+            base.OnActivated(e);
+            if (!paused || closing || busy || command != null) return;
+            paused = false;
+            try { StartPicking(); SetStatus("接着选。", Ui.Muted); } catch (Exception ex) { SetStatus(ex.Message, Ui.Warn); }
+        }
         public void Idle(int n, out bool more){ more = false; }
         void F.ISECommandEvents.Activate(){ }
         void F.ISECommandEvents.Deactivate(){ }

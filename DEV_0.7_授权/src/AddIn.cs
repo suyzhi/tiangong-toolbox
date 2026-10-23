@@ -19,6 +19,7 @@ namespace TianGongCadSuite {
             // 自报家门：把实际加载的 DLL 路径与版本写进 panel.log。
             // 换版本做 A/B 时先看这一行，避免"注册表换了、CAD 还加载旧 DLL"的误判。
             try{Log.Write("AddInConnect","dll="+typeof(PanelAddIn).Assembly.Location+" ver="+typeof(PanelAddIn).Assembly.GetName().Version+" cad="+((F.Application)application).Version);}catch{}
+            Guard.Install();
             try{addin=instance;context=new ToolContext((F.Application)application);registry=ModuleCatalog.Create(context);
                 // GuiVersion 变了 CAD 才会按新的组名重建功能区按钮（firstTime=true）；改组名/增删按钮时要跟着加一。
                 addin.Description=Product.Name+" "+Product.Version;addin.GuiVersion=45;addin.Visible=true;
@@ -48,7 +49,19 @@ diagnostics=new Diagnostics(context.Application,()=>Run(registry.Find(1)),()=>Ru
         public void OnCommand(int id){if(diagnostics!=null)diagnostics.LastCommand=id;if(registry!=null)Run(registry.Find(id));}
         public void OnCommandHelp(int id,int frame,int help){var c=registry==null?null:registry.Find(id);if(c!=null)MessageBox.Show(c.Help,c.Title);}
         public void OnCommandUpdateUI(int id,ref int flags,out string text,ref int bitmap){var c=registry==null?null:registry.Find(id);text=c==null?"":c.Title;flags=0;try{if(c!=null&&c.CanExecute())flags=1;}catch{}}
-        public void OnDisconnection(F.SeDisconnectMode mode){try{if(context!=null)context.Dispose();}finally{if(registry!=null)registry.Dispose();if(diagnostics!=null)diagnostics.Dispose();if(events!=null)events.Dispose();context=null;registry=null;diagnostics=null;events=null;addin=null;}}
+        public void OnDisconnection(F.SeDisconnectMode mode){Guard.Remove();try{if(context!=null)context.Dispose();}finally{if(registry!=null)registry.Dispose();if(diagnostics!=null)diagnostics.Dispose();if(events!=null)events.Dispose();context=null;registry=null;diagnostics=null;events=null;addin=null;}}
+    }
+    // 窗口事件（按钮、定时器、列表选择……）里漏网的异常：没人接的话 WinForms 弹自己的「未处理的异常」框，
+    // 上面有「退出」—— 点了会把插件所有窗口一起关掉（处理中的打孔、原位编辑停在半截）。这里统一接住：记日志 + 提示一句。
+    static class Guard {
+        static bool on;
+        public static void Install(){ if(on)return; try{Application.ThreadException+=OnThread;AppDomain.CurrentDomain.UnhandledException+=OnDomain;on=true;}catch{} }
+        public static void Remove(){ if(!on)return; try{Application.ThreadException-=OnThread;AppDomain.CurrentDomain.UnhandledException-=OnDomain;}catch{} on=false; }
+        static void OnThread(object sender,System.Threading.ThreadExceptionEventArgs e){
+            try{Log.Write("Unhandled",e.Exception);}catch{}
+            try{MessageBox.Show("天工工具箱出了一个意外错误（已记进 panel.log），可以继续使用：\r\n"+(e.Exception==null?"":e.Exception.Message),"天工工具箱",MessageBoxButtons.OK,MessageBoxIcon.Warning);}catch{}
+        }
+        static void OnDomain(object sender,UnhandledExceptionEventArgs e){ try{Log.Write("UnhandledDomain",Convert.ToString(e.ExceptionObject));}catch{} }
     }
     [ComVisible(true),Guid("68F0F28A-52D6-4B57-BF52-D56CE6807204"),ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Diagnostics : IDisposable {

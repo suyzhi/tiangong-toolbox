@@ -118,6 +118,22 @@ namespace TianGongCadSuite {
             }
         }
 
+        // 规格本身就打不出来的情况（打之前就该挡住，别等每个孔都撞一次 CAD 的错误）：
+        // 螺纹深度超过孔深、沉孔/锥孔直径不大于孔径、沉孔深度为 0（CAD 侧 BuildHoleData 也会拒绝，只是那时已经进过原位、建过关联了）
+        public string SpecProblem {
+            get {
+                string tp = ThreadProblem;
+                if (tp.Length > 0) return tp;
+                if (Kind == HoleKind.Counterbore) {
+                    if (!(CounterboreDiameter > HoleDiameter + 1e-9)) return "沉孔直径 Φ" + N(CounterboreDiameter) + " 必须大于孔径 Φ" + N(HoleDiameter);
+                    if (!(CounterboreDepth > 0)) return "沉孔深度必须大于 0";
+                }
+                if (Kind == HoleKind.Countersink && !(CountersinkDiameter > HoleDiameter + 1e-9))
+                    return "锥孔直径 Φ" + N(CountersinkDiameter) + " 必须大于孔径 Φ" + N(HoleDiameter);
+                return "";
+            }
+        }
+
         // 默认的指定螺纹深度：2 倍公称直径（常用的旋合长度），取到 0.5mm。
         public static double DefaultThreadDepth(string size){
             double nominal = HoleShapeBuilderNominal(size);

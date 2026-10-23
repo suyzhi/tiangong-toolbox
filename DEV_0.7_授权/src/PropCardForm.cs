@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Linq;
 using System.Windows.Forms;
 using F = SolidEdgeFramework;
 
@@ -9,7 +10,7 @@ namespace TianGongCadSuite {
     //
     // 好用的三招：选一片格子 → 上面输入框填值 → 「填入」；从 Excel 复制一块 → Ctrl+V；选中 → Delete 清空。
     // 改过的格子标黄，文件里还没有的属性标灰；只写改过的文件（标准件、外购件不会被碰）。
-    public sealed class PropCardForm : Form {
+    public sealed class PropCardForm : Form, IBusyTool {
         static readonly Color EditedBg = Color.FromArgb(0xFF, 0xF4, 0xC2);
         static readonly Color MissingBg = Color.FromArgb(0xEE, 0xF0, 0xF4);
         const int FixedColumns = 2;   // 文件、材料
@@ -25,7 +26,19 @@ namespace TianGongCadSuite {
         readonly Label status = new Label();
         readonly Card fileCard;
         readonly Button write;
-        bool loading;
+        bool loading, busy;
+        public bool Busy { get { return busy; } }
+        public string BusyWhat { get { return "读写属性"; } }
+        // 一百多个文件要读写十几秒到几十秒：期间隔一会儿泵一次消息（窗口禁用着，点不了），不然 Windows 把天工判成"未响应"
+        readonly System.Diagnostics.Stopwatch pulse = new System.Diagnostics.Stopwatch();
+        void Pulse(string text){
+            if (pulse.IsRunning && pulse.ElapsedMilliseconds < 250) return;
+            pulse.Restart();
+            status.Text = text; status.Refresh();
+            try { Application.DoEvents(); } catch { }
+        }
+        void BeginBusy(){ busy = true; Enabled = false; Cursor = Cursors.WaitCursor; pulse.Reset(); }
+        void EndBusy(){ busy = false; Enabled = true; Cursor = Cursors.Default; }
 
         public PropCardForm(F.Application application){
             app = application;
@@ -57,7 +70,13 @@ namespace TianGongCadSuite {
             // ---- 表格 ----
             var gridCard = Ui.Card("属性卡", 0, "黄 = 改过还没写入　灰 = 文件里还没有这个属性");
             var columns = Ui.Small("列…"); columns.Click += (s, e) => EditColumns();
-            var revert = Ui.Small("撤销修改"); revert.Click += (s, e) => { foreach (var r in rows) r.Edited.Clear(); Rebuild(); };
+            // 撤销修改 = 丢掉全部没写入的格子：手一滑点到就几十格白填，先问一句
+            var revert = Ui.Small("撤销修改"); revert.Click += (s, e) => {
+                int dirty = rows.Count(r => r.Dirty);
+                if (dirty == 0) return;
+                if (MessageBox.Show(this, "丢掉 " + dirty + " 个文件里还没写入的修改？", "属性卡填写", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+                foreach (var r in rows) r.Edited.Clear(); Rebuild();
+            };
             gridCard.AddHeader(columns); gridCard.AddHeader(revert);
             BuildGrid();
             gridCard.Controls.Add(grid);
@@ -100,6 +119,10 @@ namespace TianGongCadSuite {
             grid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(0xCF, 0xE3, 0xF8);
             grid.DefaultCellStyle.SelectionForeColor = Ui.Text;
             grid.ShowCellToolTips = true;
+            grid.CellBeginEdit += (s, e) => {
+                var r = e.RowIndex >= 0 ? grid.Rows[e.RowIndex].Tag as PropCardRow : null;
+                if (r != null && r.Problem.Length > 0) { e.Cancel = true; status.Text = "这个文件读取失败，不能改（" + r.Problem + "）"; }
+            };
             grid.CellValueChanged += (s, e) => {
                 if (loading || e.RowIndex < 0 || e.ColumnIndex < FixedColumns) return;
                 var cell = grid.Rows[e.RowIndex].Cells[e.ColumnIndex];
@@ -119,9 +142,12 @@ namespace TianGongCadSuite {
         public void LoadActive(){
             string source;
             List<string> files;
+            // 先问要不要丢掉没写入的修改，再收集：收集会把"哪些文件在 CAD 内存里"换成新文档的。
+            // 原来先收集后问，用户点"否"留下旧修改，之后写入时按新文档去找已加载的零件 —— 找不到就写磁盘，
+            // 正是 0.8.2 修掉的那个"加载后已被其他用户修改"对话框，一个文件弹一个。
+            if (!ConfirmDiscard()) return;
             try { files = cad.Collect(out source); }
             catch (Exception e) { Log.Write("PropCardCollect", e); status.Text = "读当前文档失败：" + e.Message; return; }
-            if (!ConfirmDiscard()) return;
             rows.Clear();
             fileCard.Hint = source; fileCard.Invalidate();
             ReadInto(files);
@@ -141,22 +167,26 @@ namespace TianGongCadSuite {
         void ReadInto(List<string> files){
             var have = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var r in rows) have.Add(r.Path);
-            Cursor = Cursors.WaitCursor;
+            BeginBusy();
             try {
                 int n = 0;
                 foreach (var f in files) {
                     n++;
-                    if (n % 10 == 0) { status.Text = "读取中 " + n + " / " + files.Count + " …"; status.Refresh(); }
+                    Pulse("读取中 " + n + " / " + files.Count + " …");
                     if (!have.Add(f)) continue;
                     rows.Add(cad.Read(f));
                 }
-            } finally { Cursor = Cursors.Default; }
+            } finally { EndBusy(); }
             Rebuild();
         }
 
         void RemoveSelectedRows(){
             var drop = new HashSet<PropCardRow>();
             foreach (DataGridViewCell c in grid.SelectedCells) drop.Add((PropCardRow)grid.Rows[c.RowIndex].Tag);
+            // 移掉的行里有改过没写入的：原来一声不响就丢了
+            int dirty = drop.Count(r => r.Dirty);
+            if (dirty > 0 && MessageBox.Show(this, "要移除的行里有 " + dirty + " 个文件改过还没写入，移除就丢掉这些修改。继续吗？", "属性卡填写",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
             rows.RemoveAll(r => drop.Contains(r));
             Rebuild();
         }
@@ -210,6 +240,7 @@ namespace TianGongCadSuite {
         void SetCell(DataGridViewRow gridRow, int column, string value){
             if (column < FixedColumns) return;
             var r = (PropCardRow)gridRow.Tag;
+            if (r.Problem.Length > 0) return;   // 读失败的文件不改（见 WriteAll）
             string field = (string)grid.Columns[column].Tag;
             r.Set(field, value);
             loading = true;
@@ -259,20 +290,22 @@ namespace TianGongCadSuite {
             if (grid.IsCurrentCellInEditMode) grid.EndEdit();
             int ok = 0, total = 0, unsaved = 0;
             var problems = new List<string>();
-            Cursor = Cursors.WaitCursor;
+            BeginBusy();
             write.Enabled = false;
             try {
-                foreach (var r in rows) {
+                foreach (var r in rows.ToArray()) {
                     if (!r.Dirty) continue;
                     total++;
-                    status.Text = "写入中 " + total + " …　" + r.FileName; status.Refresh();
+                    // 读失败的文件不知道原来有哪些属性：照写的话「补齐」会把它原有的属性全当成缺的、写成空值
+                    if (r.Problem.Length > 0) { problems.Add(r.FileName + "：读取失败的文件不写（" + r.Problem + "），请先点「载入当前文档」重读"); continue; }
+                    Pulse("写入中 " + total + " …　" + r.FileName);
                     var writes = r.Writes(fields, fillMissing.Checked);
                     string result = cad.Write(r, writes);
                     if (result == PropCardCad.SaveHint) { r.Committed(writes); ok++; unsaved++; }
                     else if (result.Length == 0) { r.Committed(writes); ok++; }
                     else problems.Add(r.FileName + "：" + result);
                 }
-            } finally { Cursor = Cursors.Default; }
+            } finally { EndBusy(); }
             Rebuild();
             status.Text = "写好 " + ok + " / " + total + " 个文件"
                 + (unsaved > 0 ? "；其中 " + unsaved + " 个在 CAD 里开着，写进了 CAD，请回 CAD 按 Ctrl+S 保存（装配 / 工程图里的零件会一起保存）" : "")
@@ -306,7 +339,10 @@ namespace TianGongCadSuite {
 
         bool forceClose, quiet;
         List<string> lastProblems = new List<string>();
-        void OnClosing(object sender, FormClosingEventArgs e){ if (!forceClose && !ConfirmDiscard()) e.Cancel = true; }
+        void OnClosing(object sender, FormClosingEventArgs e){
+            if (busy && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; return; }
+            if (!forceClose && !ConfirmDiscard()) e.Cancel = true;
+        }
 
 #if TG_DEV_BUILD
         // 真机探针用（Diagnostics.PropCardFormTest）：走窗口的真实路径 —— 选中某列前 n 行 → 填入 → 写入

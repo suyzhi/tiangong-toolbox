@@ -104,16 +104,24 @@ namespace TianGongCadSuite {
                 if(occurrence!=null)return assembly.CreateReference(occurrence,entity);
                 Array topologyKey=new byte[0];((dynamic)entity).GetReferenceKey(ref topologyKey);A.TopologyReference tr;sub.CreateTopologyReference(ref topologyKey,out tr);return tr;
             };
+            // 同一个实例里所有边、面的"零件 → 装配"变换都一样：只拿第一个建引用取一次矩阵，后面直接复用。
+            // 原来每条边、每张面各建一个装配引用（2～4 次 COM 调用），选整个围栏几百根型材时光这一步就要几分钟。
+            Transform instance=null;
+            Func<object,PickGeometry> pick=entity=>{
+                if(bodyOverride)return new PickGeometry{Geometry=entity,Transform=overrideTransform};
+                if(instance==null)instance=PickGeometry.Unwrap(makeReference(entity)).Transform;
+                return new PickGeometry{Geometry=entity,Transform=instance};
+            };
             double longest=0;
             foreach(G.Edge edge in (G.Edges)body.Edges[G.FeatureTopologyQueryTypeConstants.igQueryAll]){
-                var pg=bodyOverride?new PickGeometry{Geometry=edge,Transform=overrideTransform}:PickGeometry.Unwrap(makeReference(edge));
+                var pg=pick(edge);
                 Array data=new double[0],parameters=new double[0];int count;edge.GetStrokeData(.00001,out count,ref data,ref parameters);
                 var points=new List<V3>();for(int i=0;i+2<data.Length;i+=3)points.Add(pg.Transform.Point(new V3(Convert.ToDouble(data.GetValue(i)),Convert.ToDouble(data.GetValue(i+1)),Convert.ToDouble(data.GetValue(i+2)))));
                 member.Points.AddRange(points);
                 if(edge.Geometry is G.Line&&points.Count>1){var delta=points.Last()-points[0];if(delta.Length>longest){longest=delta.Length;member.Axis=delta.Canonical();}}
             }
             foreach(G.Face face in (G.Faces)body.Faces[G.FeatureTopologyQueryTypeConstants.igQueryPlane]){
-                var pg=bodyOverride?new PickGeometry{Geometry=face,Transform=overrideTransform}:PickGeometry.Unwrap(makeReference(face));member.Faces.Add(new FrameFace{Plane=pg.Plane(),Edges=pg.Outline()});
+                var pg=pick(face);member.Faces.Add(new FrameFace{Plane=pg.Plane(),Edges=pg.Outline()});
             }
             if(longest<.001||member.Points.Count<8)throw new ArgumentException("未读取到有效直型材："+member.Name);
             Array occurrenceMatrix=new double[16];if(occurrence!=null)occurrence.GetMatrix(ref occurrenceMatrix);else sub.GetMatrix(ref occurrenceMatrix);

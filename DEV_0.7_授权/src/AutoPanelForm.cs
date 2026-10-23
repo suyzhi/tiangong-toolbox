@@ -25,7 +25,14 @@ namespace TianGongCadSuite {
     //   · 「追加选择」把这次的选择加到已读的型材里，可以分几次点；「清空」重来；
     //   · 子装配里已有的板子（填充板、玻璃板）不当型材，盖住的框口标「已有板」、默认不勾。
     // 生成的板子插在当前打开的装配里（跨子装配时就是顶层装配）。
-    public sealed class AutoPanelForm : Form {
+    public sealed class AutoPanelForm : Form, IBusyTool {
+        // 生成中（会泵消息）点功能区别的命令：不能把这个窗口连同生成到一半的板子一起关掉（见 IBusyTool）
+        public bool Busy { get { return busy; } }
+        public string BusyWhat { get { return "生成板子"; } }
+        protected override void OnFormClosing(FormClosingEventArgs e){
+            if (busy && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; return; }
+            base.OnFormClosing(e);
+        }
         const string SettingsName = "autopanel.tsv";
         static readonly string[] Materials = { "", "玻璃", "钢化玻璃", "亚克力", "PC 耐力板", "铝板", "不锈钢板", "钢板", "木板" };
 
@@ -379,7 +386,14 @@ namespace TianGongCadSuite {
                 busy = true; Enabled = false; UseWaitCursor = true;
                 SetStatus("正在生成 " + chosen.Count + " 块板子…", Ui.Accent); Application.DoEvents();
                 var props = new PanelProps { Material = material.Text.Trim() };
-                string dir = BatchPanels.Generate(app, assembly, chosen, outputDir, props);
+                // 一块一块报进度、泵消息（窗口禁用着，点不了）：几十块板要一两分钟，原来整段不泵消息，Windows 把天工判成"未响应"
+                var tick = System.Diagnostics.Stopwatch.StartNew();
+                string dir = BatchPanels.Generate(app, assembly, chosen, outputDir, props, (i, n) => {
+                    if (tick.ElapsedMilliseconds < 300) return;
+                    tick.Restart();
+                    SetStatus("正在生成第 " + i + " / " + n + " 块板子…", Ui.Accent);
+                    try { status.Update(); Application.DoEvents(); } catch { }
+                });
                 foreach (var s in chosen) generated.Add(Key(s));
                 SaveSettings();
                 busy = false; Enabled = true; UseWaitCursor = false;

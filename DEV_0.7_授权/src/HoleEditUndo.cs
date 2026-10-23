@@ -72,14 +72,29 @@ namespace TianGongCadSuite {
         public Result Run(){
             var r = new Result();
             var parts = new List<P.PartDocument>();
+            var todo = new List<KeyValuePair<HoleState, P.Hole>>();
             foreach (var s in holes) {
                 P.Model model = null;
                 try { model = HoleEditCad.ModelOf(s.Part); } catch (Exception e) { r.Failed++; r.Notes.Add(e.Message); continue; }
                 var h = Alive(s.Ref) ? s.Ref : HoleEditCad.FindHole(model, s.Sys);
                 if (h == null) { r.Missing++; continue; }
-                try { Restore(h, s); r.Restored++; }
-                catch (Exception e) { r.Failed++; Log.Write("HoleEditUndo", e); r.Notes.Add("有一个孔没能恢复（" + AutoHoleWriter.Friendly(e) + "）"); }
+                todo.Add(new KeyValuePair<HoleState, P.Hole>(s, h));
                 if (!parts.Exists(p => SamePart(p, s.Part))) parts.Add(s.Part);
+            }
+            // 原来是螺纹孔的要先换成同孔径普通孔、重算，再换回螺纹数据（见 HoleEditCad.SwapData）。
+            // 原来每个孔各重算一次整个零件（撤销一组 20 个 M6 = 20 次全零件重算）；现在先全部换普通孔，每个零件只重算一次
+            var bad = new HashSet<HoleState>();
+            var touched = new List<P.PartDocument>();
+            foreach (var kv in todo) {
+                if (kv.Key.Spec == null || kv.Key.Spec.Kind != HoleKind.Tapped) continue;
+                try { HoleEditCad.SwapPlain(kv.Key.Part, kv.Value, kv.Key.Spec); if (!touched.Exists(p => SamePart(p, kv.Key.Part))) touched.Add(kv.Key.Part); }
+                catch (Exception e) { bad.Add(kv.Key); r.Failed++; Log.Write("HoleEditUndo", e); r.Notes.Add("有一个孔没能恢复（" + AutoHoleWriter.Friendly(e) + "）"); }
+            }
+            foreach (var p in touched) { try { var m = HoleEditCad.ModelOf(p); AutoHoleWriter.Attempt("重算", () => { m.Recompute(); return 0; }); } catch (Exception e) { Log.Write("HoleEditUndoRecompute", e); } }
+            foreach (var kv in todo) {
+                if (bad.Contains(kv.Key)) continue;
+                try { Finish(kv.Value, kv.Key); r.Restored++; }
+                catch (Exception e) { r.Failed++; Log.Write("HoleEditUndo", e); r.Notes.Add("有一个孔没能恢复（" + AutoHoleWriter.Friendly(e) + "）"); }
             }
             foreach (var n in names) {
                 try {
@@ -101,6 +116,14 @@ namespace TianGongCadSuite {
 
         static void Restore(P.Hole h, HoleState s){
             HoleEditCad.SwapData(s.Part, HoleEditCad.ModelOf(s.Part), h, s.Spec);
+            Extent(h, s);
+        }
+        // 螺纹孔第一步（换普通孔 + 重算）已经批量做过：只差换回原规格的数据、改回贯通/深度
+        static void Finish(P.Hole h, HoleState s){
+            HoleEditCad.SwapFinal(s.Part, h, s.Spec);
+            Extent(h, s);
+        }
+        static void Extent(P.Hole h, HoleState s){
             bool through = true;
             try { through = h.ExtentType != P.FeaturePropertyConstants.igFinite; } catch { }
             if (!s.Through) {

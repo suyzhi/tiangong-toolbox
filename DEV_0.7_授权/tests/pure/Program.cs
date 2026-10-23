@@ -13,6 +13,7 @@ static class PureProgram {
         failed += Run("PanelPlates", TianGongCadSuite.PanelPlatesPureTests.Run);
         failed += Run("RulesPattern", TianGongCadSuite.RulesPatternPureTests.Run);
         failed += Run("PropCard", TianGongCadSuite.PropCardPureTests.Run);
+        failed += Run("HoleCheckSpeed", TianGongCadSuite.HoleCheckSpeedPureTests.Run);
         Console.WriteLine(failed == 0 ? "ALL PURE SUITES PASSED" : failed + " SUITE(S) FAILED");
         return failed == 0 ? 0 : 1;
     }
