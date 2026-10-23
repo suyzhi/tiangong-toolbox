@@ -9,7 +9,7 @@ namespace TianGongCadSuite {
     //   · 下面一条一条：失败（红）/ 本来就有孔、跳过（橙）/ 打好的孔（绿）/ 说明（灰）；
     //   · 带位置的条目点一下就把视图镜头拉过去（Locate 事件，由窗口去调 CadView）。
     public sealed class ResultList : Panel {
-        public enum Kind { Done, Skip, Fail, Info }
+        public enum Kind { Done, Skip, Fail, Info, Warn }   // Warn：做成了但打了折扣（比如孔打好了、没挂上天工关联），要用户知道
         public sealed class Item {
             public Kind Kind;
             public string Text = "";
@@ -57,7 +57,7 @@ namespace TianGongCadSuite {
             try {
                 list.Items.Clear();
                 // 先坏后好：失败的放最上面，用户第一眼看到要处理的
-                foreach (var k in new[]{ Kind.Fail, Kind.Skip, Kind.Done, Kind.Info })
+                foreach (var k in new[]{ Kind.Fail, Kind.Warn, Kind.Skip, Kind.Done, Kind.Info })
                     foreach (var it in items) if (it.Kind == k) list.Items.Add(it);
             } finally { list.EndUpdate(); }
         }
@@ -77,8 +77,8 @@ namespace TianGongCadSuite {
             var h = Locate; if (h != null) h(it);
         }
 
-        static string Mark(Kind k){ switch (k) { case Kind.Done: return "✓"; case Kind.Skip: return "–"; case Kind.Fail: return "✗"; default: return "·"; } }
-        static Color ColorOf(Kind k){ switch (k) { case Kind.Done: return Ui.Ok; case Kind.Skip: return Ui.Warn; case Kind.Fail: return Ui.Bad; default: return Ui.Muted; } }
+        static string Mark(Kind k){ switch (k) { case Kind.Done: return "✓"; case Kind.Skip: return "–"; case Kind.Fail: return "✗"; case Kind.Warn: return "!"; default: return "·"; } }
+        static Color ColorOf(Kind k){ switch (k) { case Kind.Done: return Ui.Ok; case Kind.Skip: case Kind.Warn: return Ui.Warn; case Kind.Fail: return Ui.Bad; default: return Ui.Muted; } }
 
         void DrawItem(object sender, DrawItemEventArgs e){
             if (e.Index < 0 || e.Index >= list.Items.Count) return;
@@ -90,7 +90,7 @@ namespace TianGongCadSuite {
                 TextFormatFlags.VerticalCenter | TextFormatFlags.HorizontalCenter);
             int right = it.HasWhere ? 46 : 4;
             TextRenderer.DrawText(e.Graphics, it.Text, Ui.F9, new Rectangle(e.Bounds.X + 26, e.Bounds.Y, e.Bounds.Width - 26 - right, e.Bounds.Height),
-                it.Kind == Kind.Info ? Ui.Muted : Ui.Text, TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+                it.Kind == Kind.Info ? Ui.Muted : it.Kind == Kind.Warn ? Ui.Warn : Ui.Text, TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
             if (it.HasWhere)
                 TextRenderer.DrawText(e.Graphics, "跳转 ›", Ui.F8, new Rectangle(e.Bounds.Right - 46, e.Bounds.Y, 42, e.Bounds.Height), Ui.Accent,
                     TextFormatFlags.VerticalCenter | TextFormatFlags.Right);

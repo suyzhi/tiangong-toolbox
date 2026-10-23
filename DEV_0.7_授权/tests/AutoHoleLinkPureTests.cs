@@ -283,6 +283,18 @@ namespace TianGongCadSuite {
             var vb = new HoleSpec { Kind = HoleKind.Through, HoleDiameter = 6, Depth = 10, Bottom = HoleBottom.VBottom };
             var fb = new HoleSpec { Kind = HoleKind.Through, HoleDiameter = 6, Depth = 10, Bottom = HoleBottom.Flat };
             Assert(HoleNaming.SpecKey(vb) != HoleNaming.SpecKey(fb), "孔底不同（短名一样）也不能编进同一组");
+
+            // 0.8.4 孔位链接组：一种规格写规格 ×N，几种规格写总数 + 种数，带上跟随的参考零件
+            var tap6 = new HoleSpec { Kind = HoleKind.Tapped, ThreadSize = "M6", HoleDiameter = 4.917, ThreadFull = true };
+            var one = new List<KeyValuePair<HoleSpec, int>> { new KeyValuePair<HoleSpec, int>(tap6, 4) };
+            Assert(HoleNaming.LinkGroup(one, new[]{ "支撑条" }) == "关联孔 M6 螺纹孔（螺纹全长） ×4（跟随 支撑条）", "链接组名：一种规格 + 参考零件：" + HoleNaming.LinkGroup(one, new[]{ "支撑条" }));
+            Assert(HoleNaming.LinkGroup(one, new[]{ "支撑条", "支撑条", "" }) == "关联孔 M6 螺纹孔（螺纹全长） ×4（跟随 支撑条）", "参考零件重复 / 空的只算一次");
+            var two = new List<KeyValuePair<HoleSpec, int>> { new KeyValuePair<HoleSpec, int>(tap6, 4), new KeyValuePair<HoleSpec, int>(cb, 2) };
+            Assert(HoleNaming.LinkGroup(two, new[]{ "A", "B" }) == "关联孔 6 个（2 种规格，跟随 A 等 2 个零件）", "两种规格两个参考零件：" + HoleNaming.LinkGroup(two, new[]{ "A", "B" }));
+            Assert(HoleNaming.LinkGroup(two, new string[0]) == "关联孔 6 个（2 种规格）", "没有参考零件名：" + HoleNaming.LinkGroup(two, new string[0]));
+            Assert(HoleNaming.LinkGroup(one, null) == "关联孔 M6 螺纹孔（螺纹全长） ×4", "参考零件为 null 也不出错");
+            var lng = new List<KeyValuePair<HoleSpec, int>> { new KeyValuePair<HoleSpec, int>(longSpec, 9) };
+            Assert(HoleNaming.LinkGroup(lng, new[]{ "YF25.07G01-L1-M30-02-23-很长很长的零件名" }).Length <= HoleNaming.MaxLength, "链接组名长度封顶");
         }
 
         static void LinkFormatPure(){

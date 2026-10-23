@@ -447,7 +447,8 @@ namespace TianGongCadSuite {
                     var fresh = AutoHoleReader.ReadTarget(selected);
                     // 打完一批孔以后旧的面片对象已经失效，读它的 ID 会抛 COM 异常 —— 原来这一下直接让"再点同一个面接着排"报错
                     bool sameFace = false;
-                    try { sameFace = target != null && frame != null && target.Part == fresh.Part && target.Face != null && fresh.Face != null && target.Face.ID == fresh.Face.ID; }
+                    // 同一张面 = 同实例 + 同实体 + 同 ID + 平面重合（多实体零件的面 ID 跨实体重号：只比 ID 时点另一个实体上的面会沿用旧面的方向边，排孔排到错的方向上）
+                    try { sameFace = target != null && frame != null && TargetFace.SameFace(target, fresh); }
                     catch { sameFace = false; }
                     target = fresh; faceSelection = selected;
                     dirSelection = null; circleReady = false;

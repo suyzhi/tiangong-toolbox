@@ -173,7 +173,7 @@ namespace TianGongCadSuite {
                     catch (Exception ex) { o.Failed++; Log.Write("HoleUndoDelete", ex); o.Notes.Add(e.PartName + "：有一个孔没能删除（" + AutoHoleWriter.Friendly(ex) + "）"); }
                 }
                 for (int i = e.Cutouts.Count - 1; i >= 0; i--) {
-                    var c = FindCutout(model, e.Cutouts[i]);
+                    var c = FindCutout(e.Part, model, e.Cutouts[i]);
                     if (c == null) { o.Missing++; continue; }
                     try { c.Delete(); o.Removed++; }
                     catch (Exception ex) { o.Failed++; Log.Write("HoleUndoDeleteSlot", ex); o.Notes.Add(e.PartName + "：有一个腰孔没能删除（" + ex.Message + "）"); }
@@ -231,6 +231,14 @@ namespace TianGongCadSuite {
         static P.FeatureGroup FindGroup(P.Model model, string sys){
             int n = 0; try { n = model.FeatureGroups.Count; } catch { }
             for (int i = 1; i <= n; i++) { try { var g = model.FeatureGroups.Item(i); if (SysOf(g) == sys) return g; } catch { } }
+            return null;
+        }
+        // 腰孔（拉伸切除）切在哪个实体上就记在哪个 Model 下（多实体零件，0.7.13 起腰孔用目标实体的 Model 切）：
+        // 原来只在第 1 个实体里找，第 2 个以后实体上的腰孔撤销时报"已经不在模型里"、删不掉。先找第 1 个，找不到再看别的实体
+        static P.ExtrudedCutout FindCutout(P.PartDocument part, P.Model first, string sys){
+            var c = FindCutout(first, sys);
+            if (c != null || !PartBodies.Multi(part)) return c;
+            foreach (var m in PartBodies.All(part)) { c = FindCutout(m, sys); if (c != null) return c; }
             return null;
         }
         static P.ExtrudedCutout FindCutout(P.Model model, string sys){

@@ -51,6 +51,24 @@ namespace TianGongCadSuite {
         // 批量排孔的阵列特征（种子孔照常叫「…-1」，阵列出来的其余孔都在这个特征里）
         public static string PatternName(HoleSpec s){ return Clip(Short(s) + " 阵列"); }
 
+        // 孔位链接组（0.8.4）：一张面这次打的关联孔 + 它们的孔位链接。名字说清楚"是什么孔、跟着谁"：
+        //   一种规格：「关联孔 M6 螺纹孔（螺纹全长） ×4（跟随 支撑条）」
+        //   几种规格：「关联孔 6 个（2 种规格，跟随 支撑条）」
+        //   几个参考零件：「…（跟随 支撑条 等 2 个零件）」
+        // specs：规格 + 这次打的个数（按出现顺序）；refs：参考零件名（去扩展名，重复的只算一次）
+        public static string LinkGroup(IList<KeyValuePair<HoleSpec, int>> specs, IList<string> refs){
+            var names = new List<string>();
+            if (refs != null) foreach (var r in refs) { string n = (r ?? "").Trim(); if (n.Length > 0 && !names.Contains(n)) names.Add(n); }
+            string follow = names.Count == 0 ? "" : "（跟随 " + names[0] + (names.Count > 1 ? " 等 " + names.Count + " 个零件" : "") + "）";
+            int total = 0, kinds = 0;
+            HoleSpec only = null;
+            if (specs != null) foreach (var kv in specs) { if (kv.Value <= 0) continue; total += kv.Value; kinds++; only = kv.Key; }
+            string what = kinds == 1 ? Short(only) + " ×" + total : total + " 个" + (kinds > 1 ? "（" + kinds + " 种规格）" : "");
+            if (kinds > 1 && follow.Length > 0) what = total + " 个（" + kinds + " 种规格，" + follow.Substring(1);
+            else what += follow;
+            return Clip("关联孔 " + what);
+        }
+
         // 在已有名字里找一个不重名的：base、base (2)、base (3)……
         // 特征重名时 CAD 的行为没有实测保证（可能拒绝、可能静默加后缀），所以自己先避开。
         public static string Unique(string wanted, ICollection<string> taken){

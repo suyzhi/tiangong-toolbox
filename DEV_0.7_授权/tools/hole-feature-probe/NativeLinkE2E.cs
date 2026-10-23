@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
@@ -240,6 +241,7 @@ class NativeLinkE2E {
             form.SuppressDialogs = true;
             Retry(delegate { form.Show(); }, "显示窗口");
             Pump(10);
+            form.KeepLink = true;
             L("① 点 A 顶面"); Retry(delegate { form.AcceptPick(refA); }, "点 A"); Pump(5);
             L("   UI: " + form.UiSummary());
             L("② 点 B 底面"); Retry(delegate { form.AcceptPick(refB); }, "点 B"); Pump(5);
@@ -265,7 +267,7 @@ class NativeLinkE2E {
             var groups = new List<string>();
             foreach (P.FeatureGroup g in modelB.FeatureGroups) groups.Add(g.Name + "[" + g.Count + "]");
             L("   特征组：" + string.Join(" | ", groups.ToArray()));
-            Check(groups.Count == 0, "合成了多孔孔特征就不再建特征组（实 " + groups.Count + "）");
+            Check(groups.Count == 1 && groups[0].StartsWith("关联孔 "), "0.8.4：孔位链接和这张面的多孔孔特征编成一个「关联孔 …」组（实 " + string.Join(" | ", groups.ToArray()) + "）");
             double removed = volB0 - Vol(modelB);
             double expect = 4 * Math.PI * Math.Pow(0.004917/2, 2) * 0.010
                           + 2 * (Math.PI * Math.Pow(0.0055, 2) * 0.0068 + Math.PI * Math.Pow(0.0033, 2) * 0.0032);
@@ -310,15 +312,15 @@ class NativeLinkE2E {
             foreach (P.FeatureGroup g in modelB.FeatureGroups) g2.Add(g.Name + "[" + g.Count + "]");
             L("   特征组：" + string.Join(" | ", g2.ToArray()));
             L("   B 特征树：" + Tree(partB));
-            Check(g2.Count == 1 && g2.Contains("M6 螺纹孔（螺纹全长） ×6[2]"), "第二批和第一批的多孔孔特征编成一组「M6 螺纹孔 ×6」（2 个成员）");
-            Check(Tree(partB).IndexOf("孔位链接-ND_") < Tree(partB).IndexOf("M6 沉孔"), "新的孔位链接排在孔前面");
+            Check(g2.Count == 2 && g2.All(x => x.StartsWith("关联孔 ")), "0.8.4：第二批另起一个「关联孔 …」组（链接和孔一起删）");
+            Check(Tree(partB).IndexOf("孔位链接-ND_") > Tree(partB).IndexOf("M6 沉孔"), "第二批的孔位链接紧挨着第二批的孔（排在第一批之后）");
 
             L("⑥ 撤销第二批");
             Retry(delegate { form.UndoForTest(); }, "撤销");
             Pump(10);
             Check(HoleCount(modelB) == 6 && modelB.UserDefinedPatterns.Count == 2, "撤销后 B 回到 6 个孔、2 个多孔孔特征（实 " + HoleCount(modelB) + " / " + modelB.UserDefinedPatterns.Count + "）");
             Check(Copies(partB) == 1, "第二批的零件间复制也删掉了（实 " + Copies(partB) + "）");
-            Check(modelB.FeatureGroups.Count == 0 && Multis(modelB).Contains("M6 螺纹孔（螺纹全长） ×4[4]"), "撤销后组散掉、第一批的「×4」原样（" + Multis(modelB) + "）");
+            Check(modelB.FeatureGroups.Count == 1 && Multis(modelB).Contains("M6 螺纹孔（螺纹全长） ×4[4]"), "撤销后只剩第一批的链接组、第一批的「×4」原样（" + Multis(modelB) + "）");
 
             L("⑦ 改孔型：点「×4」里的一个孔 → 改成 M8 圆柱沉孔 → 撤销修改");
             form.Close(); form = null;
@@ -345,6 +347,11 @@ class NativeLinkE2E {
                 L("   撤销：" + (ef.LastResult ?? "").Replace("\r\n", " ⏎ ") + "　" + Multis(modelB));
                 bool back = true;
                 foreach (var c in Clear) if (DiaAt(modelB, 0.0, c[0] + 0.005, c[1] - 0.003) > 5.5) back = false;
+                L("   撤销后孔口直径：" + string.Join(" ", Clear.Select(c => N(DiaAt(modelB, 0.0, c[0] + 0.005, c[1] - 0.003))).ToArray()));
+                if (!back) {   // 诊断：是不是几何还没重算
+                    try { modelB.Recompute(); } catch { } Pump(6);
+                    L("   重算后孔口直径：" + string.Join(" ", Clear.Select(c => N(DiaAt(modelB, 0.0, c[0] + 0.005, c[1] - 0.003))).ToArray()));
+                }
                 Check(back && Multis(modelB).Contains("M6 螺纹孔（螺纹全长） ×4[4]"), "撤销后回到 M6 螺纹孔 ×4");
             } finally { if (ef != null) try { ef.Close(); } catch {} }
         } finally { if (form != null) try { form.Close(); } catch {} }

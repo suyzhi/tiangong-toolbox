@@ -32,6 +32,42 @@ namespace TianGongCadSuite {
         // 面内包围盒缓存（FaceFrameReader.Bounds 填）。实时预览每改一次参数都要判 N×M 个
         // 孔心是否落在面内，而算包围盒要走一遍面的边（COM），所以算一次存这里。
         public FaceFrameReader.FaceBounds Bounds;
+        // 点面时预判的"这张面挂不了天工关联"的原因（零件的链接属于别的装配……），空 = 没看出问题。预览里提前说
+        public string LinkNote = "";
+        public string FaceId = "";    // 面片 ID（只在同一个实体里唯一，见 SameFace）
+
+        // 是不是同一张面：同一个零件实例（文件 + 装配位置）、同一个实体、同一个面 ID，而且平面数据也重合。
+        // 只比面 ID 不够：多实体零件的面 ID 是各实体自己编的，跨实体大量重号（真机 02-07：39 个实体 710 张面只有 298 个不同 ID）——
+        // 0.8.3 以前点第二个实体上的面，会把第一个实体上同号的面"换掉"（用户说的「不同设计体上的面无法同时打」）。
+        public static bool SameFace(TargetFace a, TargetFace b){
+            if (a == null || b == null) return false;
+            if (!string.Equals(DocName(a.Part), DocName(b.Part), StringComparison.OrdinalIgnoreCase) || DocName(a.Part).Length == 0) return false;
+            if (Math.Max(1, a.Body) != Math.Max(1, b.Body)) return false;
+            if (a.FaceId.Length > 0 && b.FaceId.Length > 0 && a.FaceId != b.FaceId) return false;
+            if (!SamePlacement(a.Placement, b.Placement)) return false;
+            if (a.Plane == null || b.Plane == null) return a.FaceId.Length > 0 && a.FaceId == b.FaceId;
+            var na = a.Plane.Normal.Unit(); var nb = b.Plane.Normal.Unit();
+            if (na.Dot(nb) < 1 - 1e-6) return false;                                       // 法向不同（两个实体贴在一起时共面但外法向相反）
+            return Math.Abs((b.Plane.Point - a.Plane.Point).Dot(na)) < 1e-6;               // 共面
+        }
+        internal static bool SamePlacement(Transform a, Transform b){
+            if (a == null || b == null) return a == b;
+            for (int i = 0; i < 16; i++) if (Math.Abs(a.M[i] - b.M[i]) > 1e-7) return false;
+            return true;
+        }
+        // 零件实例的键：文件 + 装配位置。同一个零件文件的两个实例算两个（原位编辑要进的是点中的那个实例）
+        public string InstanceKey {
+            get {
+                var sb = new System.Text.StringBuilder(DocName(Part));
+                if (Placement != null) foreach (var v in Placement.M) sb.Append('|').Append(Math.Round(v, 7).ToString(CultureInfo.InvariantCulture));
+                return sb.ToString();
+            }
+        }
+        static string DocName(P.PartDocument part){
+            if (part == null) return "";
+            try { string f = part.FullName; if (!string.IsNullOrEmpty(f)) return f; } catch { }
+            try { return part.Name ?? ""; } catch { return ""; }
+        }
     }
 
     public static class AutoHoleReader {
@@ -75,9 +111,16 @@ namespace TianGongCadSuite {
                 Pick = selection
             };
             try { tf.PartName = part.Name; } catch { tf.PartName = "零件"; }
-            tf.Label = "平面 " + face.ID;
+            try { tf.FaceId = face.ID.ToString(CultureInfo.InvariantCulture); } catch { }
             tf.Body = PartBodies.IndexOf(part, face, V3.From(p), V3.From(n).Unit());   // 面片这时还是活的，现在认最准
+            tf.Label = FaceText(part, tf.Body, tf.FaceId);
             return tf;
+        }
+
+        // 「平面 533」；多实体零件写上第几个实体（面 ID 跨实体重号，只写 ID 用户分不清是哪张）
+        internal static string FaceText(P.PartDocument part, int body, string faceId){
+            string s = "平面 " + faceId;
+            return PartBodies.Multi(part) ? "实体 " + Math.Max(1, body) + " · " + s : s;
         }
 
         // 参考孔轴线与目标面的交点（装配坐标）。两零件不平行时给出明确原因。
@@ -109,6 +152,8 @@ namespace TianGongCadSuite {
         public int Combined;             // 合成的多孔孔特征个数（0.7.9，天工自己的 UserDefinedPattern 结构）
         public int Disconnected;         // 没打上、而且最后一次是 CAD 报"对象已断开/没注册"（0x80010108 一类）的孔数 —— 换个编辑环境（原位 ↔ 装配）再打一次（0.7.11）
         public readonly HoleUndo Undo = new HoleUndo();   // 这次改了模型的哪些地方（「撤销本次打孔」用）
+        // 这次在特征树里新出现的孔特征（多孔孔特征 / 没合成的单孔），按建的顺序。孔位链接组要把它们和链接编在一起（0.8.4）
+        public readonly List<object> TopFeatures = new List<object>();
         // 每个孔位的结果（带装配坐标，结果列表点一条就能跳过去）
         public readonly List<ResultList.Item> Outcomes = new List<ResultList.Item>();
         public bool Ok { get { return Created > 0 && Failures.Count == 0 && Audit.Length == 0; } }
@@ -723,7 +768,7 @@ namespace TianGongCadSuite {
                             string awhy;
                             attached = NativeHoleLink.Attach(profile, h2d, anchor, out awhy);
                             if (!attached) {
-                                anchorBroken = true; Log.Write("NativeAttach", anchor.Label + "：" + awhy);
+                                anchorBroken = true; anchor.Why = awhy; Log.Write("NativeAttach", anchor.Label + "：" + awhy);
                                 // 挂不上关联不能连累打孔：换一个干净的轮廓（Attach 已经清过，但轮廓里可能还留着别的东西）
                                 try { ((dynamic)profileSet).Delete(); } catch { }
                                 profile = Attempt("建轮廓", () => { var ps = part.ProfileSets.Add(); profileSet = ps; return ps.Profiles.Add(plane); });
@@ -1092,6 +1137,11 @@ namespace TianGongCadSuite {
             public ReferenceHole From;   // 照哪个参考孔配的（天工原生关联要用它的选择引用和来源面）
             public NativeAnchor Anchor;  // 天工原生关联：孔心挂在哪条零件间复制来的圆边上（null = 不走原生关联）
             public bool NativeLinked;    // 打出来的孔确实挂上了原生关联
+            public string LinkWhy = "";  // 要关联却没挂上天工原生关联的原因（给用户看，带怎么办）
+            public bool PluginLinked;    // 挂不上原生关联、改写了插件关联记录（「同步孔位」能把它挪回去）
+            public bool LinkNotNeeded;   // 参考孔和打孔面在同一个零件上：不用关联
+            public string PluginWhy = "";// 插件关联记录也写不了的原因（认不出实例……）
+            public bool Created;         // DrillRequests 之后：这个孔是这次新打出来的（不含"本来就有孔"）
             public bool Done;            // DrillRequests 之后：打上了，或这个位置本来就有孔（不用再打）
             public bool Disconnected;    // DrillRequests 之后：没打上，最后一次是"对象已断开/没注册"
         }
@@ -1140,8 +1190,10 @@ namespace TianGongCadSuite {
                 anchored.Pick=target.Pick;
                 anchored.Bounds=target.Bounds;
                 anchored.Body=bodyIndex;
-                try{anchored.PartName=Name(active);}catch{anchored.PartName=target.PartName;}
-                anchored.Label="平面 "+face.ID;
+                anchored.PartName=target.PartName;   // 原来用 FullName（全路径）：结果列表里零件名变成一长串路径
+                try{anchored.FaceId=face.ID.ToString(CultureInfo.InvariantCulture);}catch{anchored.FaceId=target.FaceId;}
+                anchored.Label=AutoHoleReader.FaceText(active,bodyIndex,anchored.FaceId);
+                anchored.LinkNote=target.LinkNote;
                 return anchored;
             }catch(Exception e){Log.Write("AnchorFace",e);return target;}
         }
@@ -1219,10 +1271,9 @@ namespace TianGongCadSuite {
                 // ② 多孔合一（0.7.10 起直接建）：N 个孔心画进一个共享轮廓 → 种子孔 → AddByProfiles，CAD 只建 2 个特征。
                 //    原来先逐个打 N 个单孔、再删掉 N 个、再合成 —— 2N+2 次特征重算，20 个孔要半分钟以上。
                 //    合不成就删干净、退回下面逐个打（每个孔位都单独验过，原生关联挂不上的也在那里退回属性集关联）。
-                //    0.7.12：自动打孔不再给孔挂属性集关联（Link 恒为 null），挂没挂上原生关联都合进一个多孔特征。
-                //    （批量排孔等别的调用方若还带 Link，那套记录挂在单孔上、按 Model.Holes 找孔，仍不合。）
+                //    0.8.4：挂不上原生关联的孔改写插件关联记录（Link），也照样合进多孔特征 —— 真机 LinkGroupProbe U1～U3：
+                //    多孔特征的输入孔能挂属性、改它轮廓的孔心 + 重算就能单独挪（种子孔也行），「同步孔位」照样挪得动。
                 bool combinable = CombineHoles && todo.Count >= 2;
-                foreach (int i in todo) if (requests[i].Link != null && requests[i].Anchor == null) combinable = false;
                 if (combinable) {
                     var locals = new List<V3>(); var anchors = new List<NativeAnchor>();
                     foreach (int i in todo) { locals.Add(madeLocal[i]); anchors.Add(requests[i].Anchor); }
@@ -1239,7 +1290,7 @@ namespace TianGongCadSuite {
                             done[i] = true; made[i] = inputs[j]; whyByRequest[i] = null;
                             result.Created++;
                             if (anchors[j] != null) { requests[i].NativeLinked = true; result.NativeLinked++; }
-                            else if (requests[i].Anchor != null) result.NativeMissed++;
+                            else if (requests[i].Anchor != null) { result.NativeMissed++; requests[i].LinkWhy = MissedWhy(requests[i].Anchor); }
                         }
                         string note = inputs.Count > 0 ? Audit(inputs[0], spec) : "";
                         if (note.Length > 0 && !result.Audit.Contains(note)) result.Audit = result.Audit.Length == 0 ? note : result.Audit + "；" + note;
@@ -1273,7 +1324,7 @@ namespace TianGongCadSuite {
                         if (DrillOne(part, model, plane, madeLocal[i], data, depth, r.Anchor, false, out why, out created, out nativeLinked)) {
                             done[i] = true;
                             if (nativeLinked) { r.NativeLinked = true; result.NativeLinked++; }
-                            else if (r.Anchor != null) result.NativeMissed++;
+                            else if (r.Anchor != null) { result.NativeMissed++; r.LinkWhy = MissedWhy(r.Anchor); }
                             made[i] = created;
                             result.Created++;
                             result.Undo.Hole(part, created);
@@ -1291,6 +1342,7 @@ namespace TianGongCadSuite {
             }
             for (int i = 0; i < requests.Count; i++) {
                 requests[i].Done = done[i];
+                requests[i].Created = made[i] != null;
                 requests[i].Disconnected = !done[i] && discon[i];
                 if (requests[i].Disconnected) result.Disconnected++;
             }
@@ -1330,11 +1382,18 @@ namespace TianGongCadSuite {
             first.Outcomes.AddRange(retry.Outcomes);
             foreach (var n in retry.Notes) if (!first.Notes.Contains(n)) first.Notes.Add(n);
             first.Features.AddRange(retry.Features);
+            first.TopFeatures.AddRange(retry.TopFeatures);
             if (retry.Method.Length > 0 && retry.Method != "—" && first.Method.IndexOf(retry.Method, StringComparison.Ordinal) < 0)
                 first.Method = first.Method.Length == 0 || first.Method == "—" ? retry.Method : first.Method + "／" + retry.Method;
             if (retry.Audit.Length > 0 && !first.Audit.Contains(retry.Audit)) first.Audit = first.Audit.Length == 0 ? retry.Audit : first.Audit + "；" + retry.Audit;
             if (first.Standard.Length == 0) first.Standard = retry.Standard;
             first.Undo.Absorb(retry.Undo);
+        }
+
+        // 准备好了原生关联、打孔时却没挂上：孔心约束到复制来的圆边那一步天工没接受
+        static string MissedWhy(NativeAnchor a){
+            string w = a == null || string.IsNullOrEmpty(a.Why) ? "" : "（" + a.Why + "）";
+            return "孔心约束到参考孔圆边时天工没接受" + w + "，孔照常打好了";
         }
 
         static P.HoleData DataFor(P.PartDocument part, HoleSpec spec, Dictionary<string, P.HoleData> cache, List<string> methods){
@@ -1379,6 +1438,10 @@ namespace TianGongCadSuite {
                 if (!bySpec.TryGetValue(key, out l)) { l = new List<int>(); bySpec[key] = l; order.Add(key); }
                 l.Add(i);
             }
+            // 有孔挂上了天工原生关联：这张面的孔要和它们的孔位链接编成一个组（0.8.4，见 NativeHoleLink.Session.End），
+            // 一个特征只能进一个组，所以这里只命名、不并进之前那批的规格组
+            bool linkGroup = false;
+            foreach (var r in requests) if (r.NativeLinked) linkGroup = true;
             // 编组、命名、并进之前那批的组：见 HoleGrouping
             foreach (var key in order) {
                 var idx = bySpec[key];
@@ -1386,23 +1449,27 @@ namespace TianGongCadSuite {
                 multis.TryGetValue(key, out multi);
                 var holes = new List<P.Hole>();
                 foreach (int i in idx) holes.Add(made[i]);
+                if (multi != null) result.TopFeatures.Add(multi); else foreach (var h in holes) result.TopFeatures.Add(h);
                 string node = "";
                 try {
-                    node = multi != null ? HoleGrouping.ApplyMulti(model, requests[idx[0]].Spec, multi, taken, result.Notes, result.Undo, part)
-                                         : HoleGrouping.Apply(model, requests[idx[0]].Spec, holes, taken, result.Notes, result.Undo, part);
+                    var spec = requests[idx[0]].Spec;
+                    if (linkGroup) node = HoleGrouping.NameOnly(spec, multi != null ? new List<object>{ multi } : holes.ConvertAll(h => (object)h), taken);
+                    else node = multi != null ? HoleGrouping.ApplyMulti(model, spec, multi, taken, result.Notes, result.Undo, part)
+                                              : HoleGrouping.Apply(model, spec, holes, taken, result.Notes, result.Undo, part);
                 }
                 catch (Exception e) { Log.Write("AutoHoleGrouping", e); }
                 if (node.Length > 0 && !result.Features.Contains(node)) result.Features.Add(node);
             }
             int wanted = 0;
             for (int i = 0; i < requests.Count; i++) {
-                if (made[i] == null || requests[i].Link == null || requests[i].NativeLinked) continue;
+                if (made[i] == null || requests[i].Link == null || requests[i].NativeLinked || requests[i].LinkNotNeeded) continue;
                 wanted++;
                 try {
                     requests[i].Link.TgtCenter = madeLocal[i];
                     HoleLinkStore.Write(made[i], requests[i].Link);
+                    requests[i].PluginLinked = true;
                     result.Linked++;
-                } catch (Exception e) { Log.Write("AutoHoleLinkWrite", e); }
+                } catch (Exception e) { Log.Write("AutoHoleLinkWrite", e); requests[i].LinkWhy += "；插件关联记录也没写上（" + Friendly(e) + "）"; }
             }
             if (result.Linked < wanted)
                 result.Notes.Add("有 " + (wanted - result.Linked) + " 个孔没写上关联记录，参考零件挪动后它们不会跟着同步。");

@@ -276,6 +276,7 @@ namespace TianGongCadSuite {
                 if (note.Length > 0) o.Notes.Add(partName + "：「" + HoleGrouping.NameOf(h) + "」" + note);
             }
             Rename(model, part, targets, changed, spec, wholeGroup, o);
+            try { RenameLinkGroups(model, part, changed, o); } catch (Exception e) { Log.Write("HoleEditLinkGroupName", e); }
             var counted = new HashSet<string>(StringComparer.Ordinal);
             foreach (var h in changed) {
                 int extra = 0;
@@ -438,7 +439,7 @@ namespace TianGongCadSuite {
             return null;
         }
         // hole 是哪个多孔特征的输入孔（不是的返回 null）
-        static P.UserDefinedPattern MultiOf(P.Model model, P.Hole hole){
+        internal static P.UserDefinedPattern MultiOf(P.Model model, P.Hole hole){
             string sys = HoleGrouping.Sys(hole);
             int n = 0; try { n = model.UserDefinedPatterns.Count; } catch { }
             for (int i = 1; i <= n; i++) {
@@ -463,9 +464,53 @@ namespace TianGongCadSuite {
                 P.FeatureGroup g = null;
                 try { g = model.FeatureGroups.Item(i); } catch { }
                 if (g == null) continue;
+                // 孔位链接组（0.8.4）不是"同规格孔的组"：里面可能有几种规格、还有孔位链接，「整组一起改」不能把它们都改成一个规格
+                if (HoleGrouping.IsLinkGroup(g)) continue;
                 foreach (var m in Members(g)) if (HoleGrouping.Sys(m) == sys) return g;
             }
             return null;
+        }
+
+        // 改完孔型：孔所在的孔位链接组按组里现在的规格重起名（「关联孔 M8 沉孔 … ×4（跟随 支撑条）」）。用户改过的组名不动
+        static void RenameLinkGroups(P.Model model, P.PartDocument part, List<P.Hole> changed, Outcome o){
+            if (changed.Count == 0) return;
+            var mine = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var h in changed) mine.Add(HoleGrouping.Sys(h));
+            int n = 0; try { n = model.FeatureGroups.Count; } catch { }
+            for (int i = 1; i <= n; i++) {
+                P.FeatureGroup g = null;
+                try { g = model.FeatureGroups.Item(i); } catch { }
+                if (g == null || !HoleGrouping.IsLinkGroup(g)) continue;
+                string old = HoleGrouping.NameOf(g);
+                if (!old.StartsWith("关联孔 ", StringComparison.Ordinal)) continue;
+                var members = Members(g);
+                bool touched = false;
+                var specs = new List<KeyValuePair<HoleSpec, int>>();
+                var refs = new List<string>();
+                foreach (var m in members) {
+                    var u = m as P.UserDefinedPattern; var h = m as P.Hole;
+                    var holes = u != null ? HoleCombine.Inputs(u) : h != null ? new List<P.Hole>{ h } : new List<P.Hole>();
+                    foreach (var x in holes) if (mine.Contains(HoleGrouping.Sys(x))) touched = true;
+                    if (holes.Count > 0) {
+                        bool through; var sp = ReadSpec(holes[0], out through);
+                        string k = HoleNaming.SpecKey(sp);
+                        int at = specs.FindIndex(kv => HoleNaming.SpecKey(kv.Key) == k);
+                        int cnt = u != null ? HoleCombine.CountOf(u) : 1;
+                        if (at < 0) specs.Add(new KeyValuePair<HoleSpec, int>(sp, cnt)); else specs[at] = new KeyValuePair<HoleSpec, int>(specs[at].Key, specs[at].Value + cnt);
+                        continue;
+                    }
+                    var c = m as P.InterpartConstruction;
+                    string cn = ""; try { if (c != null) cn = c.Name ?? ""; } catch { }
+                    if (cn.StartsWith("孔位链接-", StringComparison.Ordinal)) refs.Add(cn.Substring(5));
+                }
+                if (!touched) continue;
+                var taken = AutoHoleWriter.ExistingFeatureNames(model);
+                taken.Remove(old);
+                string want = HoleNaming.Unique(HoleNaming.LinkGroup(specs, refs), taken);
+                if (want == old) continue;
+                o.Undo.Named(part, g);
+                HoleGrouping.TryName(g, want);
+            }
         }
         internal static List<object> Members(P.FeatureGroup g){
             var list = new List<object>();

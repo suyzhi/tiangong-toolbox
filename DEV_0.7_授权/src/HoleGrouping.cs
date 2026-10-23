@@ -94,6 +94,37 @@ namespace TianGongCadSuite {
             return NewGroup(model, spec, key, fresh, freshCount, taken, notes, undo, part);
         }
 
+        // 只命名、挂规格键，不编组、不并进之前那批（0.8.4：挂了天工原生关联的孔要和孔位链接编进一个组，见 MakeLinkGroup）。
+        // 返回特征树里的节点名（单孔名 / 多孔特征名，几个单孔时是第一个的名字）。
+        internal static string NameOnly(HoleSpec spec, List<object> fresh, HashSet<string> taken){
+            if (fresh == null || fresh.Count == 0) return "";
+            string key = HoleNaming.SpecKey(spec);
+            foreach (var f in fresh) { Tag(f, key); foreach (var h in InputsOf(f)) Tag(h, key); }
+            if (fresh.Count == 1 && fresh[0] is P.Hole) {
+                string single = HoleNaming.Unique(HoleNaming.Short(spec), taken);
+                if (TryName(fresh[0], single)) taken.Add(single);
+                return single;
+            }
+            NameFresh(spec, fresh, taken);
+            return fresh.Count == 1 ? NameOf(fresh[0]) : HoleNaming.Short(spec) + " 等 " + fresh.Count + " 个孔";
+        }
+
+        // ---- 孔位链接组（0.8.4）----
+        // 用户：「最好将打出来的带链接的孔的链接副本和孔特征放在一个组里，方便删除孔特征的时候连带链接副本一起删掉」。
+        // 真机 LinkGroupProbe（2026-10-23）：零件间复制和多孔孔特征能用 AddFeatureGroupsBySet 编进一个组（G1）；
+        // 编组后挪参考零件 + 更新链接，孔照样跟（G4）；组.Delete() 把复制、孔一起删光，零件不再带链接（G3）。
+        // 组上挂 LinkGroupSet 属性认它：改孔型不把它当"同规格孔的组"（里面可能有几种规格），并组也不往里并。
+        public const string LinkGroupSet = "TGAutoHoleLinkGroup";
+        internal static P.FeatureGroup MakeLinkGroup(P.Model model, IList<object> members, string name, HashSet<string> taken){
+            var g = MakeGroup(model, members);
+            if (g.Count != members.Count) { try { g.Ungroup(); } catch { } throw new InvalidOperationException("组里只有 " + g.Count + " 个成员，应为 " + members.Count); }
+            string want = HoleNaming.Unique(name, taken);
+            if (TryName(g, want)) taken.Add(want);
+            TagSet(g, LinkGroupSet, "1");
+            return g;
+        }
+        public static bool IsLinkGroup(object group){ return group is P.FeatureGroup && HasSet(group, LinkGroupSet); }
+
         // 新成员命名：孔按「规格-序号」接着往下编，阵列叫「规格 阵列」，多孔特征叫「规格 ×N」、它的输入孔也按「规格-序号」编
         static void NameFresh(HoleSpec spec, List<object> fresh, HashSet<string> taken){
             int holes = 0;
@@ -440,13 +471,14 @@ namespace TianGongCadSuite {
         }
 
         // 规格键挂在孔特征 / 阵列 / 特征组的属性集上（随零件文件保存）
-        internal static void Tag(object feature, string key){
+        internal static void Tag(object feature, string key){ TagSet(feature, SpecSet, key); }
+        static void TagSet(object feature, string setName, string key){
             try {
                 var sets = SetsOf(feature) as F.AttributeSets;
                 if (sets == null) return;
                 F.AttributeSet set = null;
-                if (HasSet(feature, SpecSet)) { try { set = (F.AttributeSet)sets.Item(SpecSet); } catch { } }
-                if (set == null) set = sets.Add(SpecSet);
+                if (HasSet(feature, setName)) { try { set = (F.AttributeSet)sets.Item(setName); } catch { } }
+                if (set == null) set = sets.Add(setName);
                 F.Attribute at = null;
                 try { at = (F.Attribute)set.Item(SpecAttr); } catch { }
                 if (at == null) at = set.Add(SpecAttr, F.AttributeTypeConstants.seStringUnicode);

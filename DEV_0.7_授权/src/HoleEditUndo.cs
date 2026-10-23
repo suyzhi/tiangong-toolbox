@@ -81,6 +81,10 @@ namespace TianGongCadSuite {
                 todo.Add(new KeyValuePair<HoleState, P.Hole>(s, h));
                 if (!parts.Exists(p => SamePart(p, s.Part))) parts.Add(s.Part);
             }
+            // 倒着恢复：多孔孔特征的种子孔（第 1 个输入孔，记的时候排在最前）要**最后**换回去。
+            // 真机 EditUndoProbe（0.8.4）：种子孔先换、其余输入孔后换，多孔特征的几何停在改过的样子（M6 ×4 改 M8 沉孔再撤销，
+            // 孔口 9/9/9/9 或 9/4.9/4.9/4.9，0.8.3 一样）；种子孔最后换就全部回到原样
+            todo.Reverse();
             // 原来是螺纹孔的要先换成同孔径普通孔、重算，再换回螺纹数据（见 HoleEditCad.SwapData）。
             // 原来每个孔各重算一次整个零件（撤销一组 20 个 M6 = 20 次全零件重算）；现在先全部换普通孔，每个零件只重算一次
             var bad = new HashSet<HoleState>();
@@ -95,6 +99,17 @@ namespace TianGongCadSuite {
                 if (bad.Contains(kv.Key)) continue;
                 try { Finish(kv.Value, kv.Key); r.Restored++; }
                 catch (Exception e) { r.Failed++; Log.Write("HoleEditUndo", e); r.Notes.Add("有一个孔没能恢复（" + AutoHoleWriter.Friendly(e) + "）"); }
+            }
+            // 原来是螺纹孔时上面是"先全部换普通孔、重算、再换螺纹数据"两步走：多孔孔特征的几何还会停在种子孔改过的孔径上
+            // （EditUndoProbe：M6 ×4 → M8 沉孔 → 撤销，种子孔那个孔口还是 Φ9）。种子孔单独按原规格完整再换一次（换普通孔 → 重算 → 换回）就对了
+            foreach (var kv in todo) {
+                if (bad.Contains(kv.Key)) continue;
+                try {
+                    var model = HoleEditCad.ModelOf(kv.Key.Part);
+                    var u = HoleEditCad.MultiOf(model, kv.Value);
+                    if (u == null || HoleGrouping.Sys(HoleCombine.SeedOf(u)) != HoleGrouping.Sys(kv.Value)) continue;
+                    Restore(kv.Value, kv.Key);
+                } catch (Exception e) { Log.Write("HoleEditUndoSeed", e); }
             }
             foreach (var n in names) {
                 try {

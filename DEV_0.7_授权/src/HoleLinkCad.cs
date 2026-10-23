@@ -55,6 +55,43 @@ namespace TianGongCadSuite {
             return idx;
         }
 
+        // 只建一条实例链上的节点（0.8.4）：打孔时给挂不上天工关联的孔写插件关联记录，只需要认出参考零件 / 打孔零件这两个实例。
+        // 原来为此把整个装配建一遍索引（每个实例取 OccurrenceDocument = 把每个零件加载一遍，大装配现场 106 秒）；
+        // 实例链从选择引用直接拿（NativeHoleLink.ChainOf），这里沿着链用和 Build 一样的取法（SubOccurrences）读矩阵，
+        // 路径、R/C 两种矩阵取法都和 Build 完全一致，「同步孔位」时用整装配索引照样找得回来。
+        public static OccurrenceIndex ForChain(OccChain chain){
+            var idx = new OccurrenceIndex();
+            if (chain == null || chain.Items.Count == 0) return idx;
+            var occ = chain.Items[0];
+            try {
+                string name = occ.Name;
+                Array m = new double[16]; occ.GetMatrix(ref m);
+                var raw = new Transform(m);
+                var node = new OccurrenceNode { Path = name, Name = name, Raw = raw, Composed = raw };
+                object doc = null; try { doc = occ.OccurrenceDocument; } catch { }
+                Fill(node, doc);
+                idx.Nodes.Add(node);
+                A.SubOccurrences subs = null;
+                if (chain.Items.Count > 1) { try { subs = occ.SubOccurrences; } catch { } }
+                for (int k = 1; k < chain.Items.Count && subs != null; k++) {
+                    string want = ""; try { want = chain.Items[k].Name; } catch { }
+                    A.SubOccurrence hit = null;
+                    int n = 0; try { n = subs.Count; } catch { }
+                    for (int i = 1; i <= n && hit == null; i++) { try { var s = subs.Item(i); if (s.Name == want) hit = s; } catch { } }
+                    if (hit == null) break;
+                    Array sm = new double[16]; hit.GetMatrix(ref sm);
+                    var sraw = new Transform(sm);
+                    var child = new OccurrenceNode { Path = node.Path + "/" + want, Name = want, Raw = sraw, Composed = Compose(node.Composed, sraw) };
+                    object sdoc = null; try { sdoc = hit.SubOccurrenceDocument; } catch { }
+                    Fill(child, sdoc);
+                    idx.Nodes.Add(child);
+                    node = child;
+                    try { subs = hit.SubOccurrences; } catch { subs = null; }
+                }
+            } catch (Exception e) { Log.Write("OccIndexChain", e); }
+            return idx;
+        }
+
         static void WalkSubs(OccurrenceIndex idx, A.SubOccurrences subs, string parentPath, Transform parent, int depth){
             if (subs == null || depth > MaxDepth) return;
             int n = 0; try { n = subs.Count; } catch { }
@@ -197,10 +234,14 @@ namespace TianGongCadSuite {
             P.Model model = null;
             try { if (part.Models.Count >= 1) model = part.Models.Item(1); } catch { }
             if (model == null) return list;
+            var all = new List<P.Hole>();
             int n = 0; try { n = model.Holes.Count; } catch { }
-            for (int i = 1; i <= n; i++) {
-                P.Hole h = null;
-                try { h = model.Holes.Item(i); } catch { }
+            for (int i = 1; i <= n; i++) { try { all.Add(model.Holes.Item(i)); } catch { } }
+            // 多孔孔特征（0.7.9 起同规格的孔都合在里面）的输入孔不在 Model.Holes 里：原来「同步孔位」和"参考孔是哪个孔特征"都看不到它们。
+            // 0.8.4 起挂不上天工关联的孔照样进多孔特征、在输入孔上写插件关联记录（真机 LinkGroupProbe U1～U3：能写、能单独挪）
+            int un = 0; try { un = model.UserDefinedPatterns.Count; } catch { }
+            for (int i = 1; i <= un; i++) { try { all.AddRange(HoleCombine.Inputs(model.UserDefinedPatterns.Item(i))); } catch { } }
+            foreach (var h in all) {
                 if (h == null) continue;
                 if (linkedOnly) {
                     bool present = false;
@@ -281,17 +322,22 @@ namespace TianGongCadSuite {
         public int Linked { get { return Items.Count; } }
         public int Misplaced { get { int k = 0; foreach (var i in Items) if (i.NeedsMove) k++; return k; } }
         public int Broken { get { int k = 0; foreach (var i in Items) if (i.Problem.Length > 0) k++; return k; } }
+        // 天工原生关联（0.8.4 起也一起数）：装配里各零件的「孔位链接-…」个数、其中状态不正常的（参考零件删了 / 换了 / 链接断了）
+        public int NativeLinks, NativeBroken;
+        public readonly List<string> NativeBrokenLabels = new List<string>();
         // 给界面的一句话
         public string Summary {
             get {
-                // 0.7.9 起保持关联走天工原生关联，这里只查得到老办法（插件关联记录）打的孔；
-                // 原来这句说"还没有关联孔"，刚打完 6 个原生关联孔点「检查」也这么说，用户会以为关联没挂上
-                if (Linked == 0) return "没有需要插件检查的关联孔。天工原生关联的孔（特征树里带锁链的「孔位链接-…」）由天工自己跟着参考孔走；没跟上时点「同步孔位」或天工里「更新所有链接」。";
-                string s = "关联孔 " + Linked + " 个";
-                if (Misplaced > 0) s += "，其中 " + Misplaced + " 个已和参考孔错位";
+                // 0.7.9 起保持关联走天工原生关联；原来这里只数插件关联记录，刚打完 6 个原生关联孔点「检查」说"还没有关联孔"，
+                // 用户会以为关联没挂上。0.8.4 起两种都数、各说各的
+                string native = NativeLinks == 0 ? "" : "天工关联的孔位链接 " + NativeLinks + " 个" + (NativeBroken > 0 ? "（" + NativeBroken + " 个断了：参考零件被删掉或换掉了）" : "（天工自己跟着参考孔走）");
+                if (Linked == 0)
+                    return native.Length > 0 ? native + "；没有插件关联的孔。" : "没有关联孔。用「保持与参考孔关联」打的孔才会出现在这里。";
+                string s = "插件关联的孔 " + Linked + " 个";
+                if (Misplaced > 0) s += "，其中 " + Misplaced + " 个已和参考孔错位（点「同步孔位」挪回去）";
                 else s += "，全部与参考孔同轴";
                 if (Broken > 0) s += "；" + Broken + " 个找不到参考孔";
-                return s + "。";
+                return (native.Length > 0 ? native + "；" : "") + s + "。";
             }
         }
     }
@@ -307,6 +353,7 @@ namespace TianGongCadSuite {
             var idx = OccurrenceIndex.Build(asm, progress);
             var refCache = new Dictionary<string, List<HoleFeatures.Entry>>(StringComparer.OrdinalIgnoreCase);
             foreach (var node in idx.DistinctParts()) {
+                CountNative(node, report);
                 List<HoleFeatures.Entry> holes;
                 try { holes = HoleFeatures.Read(node.Part, true); } catch (Exception e) { Log.Write("HoleSyncRead", e); continue; }
                 foreach (var entry in holes) {
@@ -316,6 +363,25 @@ namespace TianGongCadSuite {
                 }
             }
             return report;
+        }
+
+        // 零件里插件建的孔位链接（零件间复制，名字「孔位链接-…」）：数一下，状态不正常的记下来
+        static void CountNative(OccurrenceNode node, SyncReport report){
+            P.InterpartConstructions all = null;
+            try { all = node.Part.Constructions.InterpartConstructions; } catch { return; }
+            int n = 0; try { n = all.Count; } catch { }
+            for (int i = 1; i <= n; i++) {
+                try {
+                    var c = (P.InterpartConstruction)all.Item(i);
+                    string name = c.Name ?? "";
+                    if (!name.StartsWith("孔位链接-", StringComparison.Ordinal)) continue;
+                    report.NativeLinks++;
+                    object d; var st = c.get_Status(out d);
+                    if (st == P.FeatureStatusConstants.igFeatureOK) continue;
+                    report.NativeBroken++;
+                    report.NativeBrokenLabels.Add(System.IO.Path.GetFileNameWithoutExtension(node.FileName) + " · " + name + "（" + st + "）");
+                } catch (Exception e) { Log.Write("HoleSyncNative", e.Message); }
+            }
         }
 
         static LinkedHole Check(OccurrenceIndex idx, OccurrenceNode partNode, HoleFeatures.Entry entry, HoleLink link,
@@ -341,7 +407,9 @@ namespace TianGongCadSuite {
                     refCache[item.Reference.FullName] = refHoles;
                 }
                 var rf = HoleFeatures.BySystemName(refHoles, link.RefFeature);
-                if (rf == null) { item.Problem = "参考孔特征已被删除"; return item; }
+                // SystemName 会跟着孔型变（改过孔型的参考孔按名字找不回来）：再按记下的轴线找一次
+                if (rf == null) rf = HoleFeatures.OnAxis(refHoles, link.RefCenter, link.RefAxis);
+                if (rf == null) { item.Problem = "参考孔找不到了（参考孔被删掉了，或者参考零件里的孔改过）"; return item; }
                 if (rf.Centers.Count > 0) {
                     V3 best = rf.Centers[0]; double bd = (best - link.RefCenter).Length;
                     foreach (var c in rf.Centers) { double d = (c - link.RefCenter).Length; if (d < bd) { bd = d; best = c; } }
@@ -435,6 +503,8 @@ namespace TianGongCadSuite {
             public OccurrenceIndex Index;
             public readonly Dictionary<string, List<HoleFeatures.Entry>> RefHoles =
                 new Dictionary<string, List<HoleFeatures.Entry>>(StringComparer.OrdinalIgnoreCase);
+            public readonly Dictionary<string, OccurrenceIndex> Chains = new Dictionary<string, OccurrenceIndex>(StringComparer.Ordinal);
+            public readonly Dictionary<string, KeyValuePair<OccurrenceNode, string>> Located = new Dictionary<string, KeyValuePair<OccurrenceNode, string>>(StringComparer.Ordinal);
         }
 
         // 实例索引要遍历整个装配（会把所有零件加载一遍，大装配很慢），所以**用到时才建**：
@@ -447,18 +517,16 @@ namespace TianGongCadSuite {
 
         public static HoleLink Make(Session s, ScannedHole r, TargetFace t, out string why){
             why = "";
-            if (s != null && s.Index == null && s.Assembly != null) {
-                try { s.Index = OccurrenceIndex.Build(s.Assembly); } catch (Exception e) { Log.Write("HoleLinkBegin", e); s.Index = new OccurrenceIndex(); }
-            }
-            if (s == null || s.Index == null) { why = "没有装配实例索引"; return null; }
+            if (s == null || s.Assembly == null) { why = "没有装配"; return null; }
             var refPart = r == null ? null : r.Owner as P.PartDocument;
             if (refPart == null || r.Placement == null) { why = "参考孔读不到所在零件"; return null; }
             if (t == null || t.Part == null || t.Placement == null) { why = "打孔面读不到所在零件"; return null; }
-            string rmode, tmode;
-            var refNode = s.Index.Locate(refPart, r.Placement, out rmode);
-            if (refNode == null) { why = "认不出参考孔在装配里是哪个零件实例"; return null; }
-            var tgtNode = s.Index.Locate(t.Part, t.Placement, out tmode);
-            if (tgtNode == null) { why = "认不出打孔面在装配里是哪个零件实例"; return null; }
+            // 只认这两个实例（0.8.4，见 OccurrenceIndex.ForChain）：不再为写一条关联记录把整个装配加载一遍
+            string rmode, tmode, cwhy;
+            var refNode = Locate(s, r.Pick, refPart, r.Placement, out rmode, out cwhy);
+            if (refNode == null) { why = "认不出参考孔在装配里是哪个零件实例" + (cwhy.Length > 0 ? "（" + cwhy + "）" : ""); return null; }
+            var tgtNode = Locate(s, t.Pick, t.Part, t.Placement, out tmode, out cwhy);
+            if (tgtNode == null) { why = "认不出打孔面在装配里是哪个零件实例" + (cwhy.Length > 0 ? "（" + cwhy + "）" : ""); return null; }
             V3 rc, ra;
             try { rc = r.Placement.InversePoint(r.Center); ra = r.Placement.InverseNormal(r.Axis).Unit(); }
             catch (Exception e) { why = "参考孔坐标换算失败：" + e.Message; return null; }
@@ -476,6 +544,31 @@ namespace TianGongCadSuite {
                 if (f != null) link.RefFeature = f.SystemName;
             } catch (Exception e) { Log.Write("HoleLinkRefFeature", e); }
             return link;
+        }
+
+        static OccurrenceNode Locate(Session s, object pick, P.PartDocument part, Transform placement, out string mode, out string why){
+            mode = "R"; why = "";
+            // 一批孔大多是同一个参考零件、同一个打孔零件：认过的实例直接用（ChainOf 要沿实例链读矩阵，几十个孔各认一遍白花时间）
+            string full = ""; try { full = part.FullName ?? ""; } catch { }
+            var sb = new System.Text.StringBuilder(full);
+            foreach (var v in placement.M) sb.Append('|').Append(Math.Round(v, 7).ToString(CultureInfo.InvariantCulture));
+            string memo = sb.ToString();
+            KeyValuePair<OccurrenceNode, string> hit;
+            if (s.Located.TryGetValue(memo, out hit)) { mode = hit.Value; if (hit.Key == null) why = "认不出这个零件实例"; return hit.Key; }
+            var node = LocateFresh(s, pick, part, placement, out mode, out why);
+            s.Located[memo] = new KeyValuePair<OccurrenceNode, string>(node, mode);
+            return node;
+        }
+        static OccurrenceNode LocateFresh(Session s, object pick, P.PartDocument part, Transform placement, out string mode, out string why){
+            mode = "R";
+            var chain = NativeHoleLink.ChainOf(s.Assembly, pick, part, placement, out why);
+            if (chain == null) return null;
+            string key = chain.Key;
+            OccurrenceIndex idx;
+            if (!s.Chains.TryGetValue(key, out idx)) { idx = OccurrenceIndex.ForChain(chain); s.Chains[key] = idx; }
+            var node = idx.Locate(part, placement, out mode);
+            if (node == null) why = "实例链上的矩阵对不上";
+            return node;
         }
     }
 }

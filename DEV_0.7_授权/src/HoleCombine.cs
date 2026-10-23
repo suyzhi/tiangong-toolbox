@@ -93,7 +93,7 @@ namespace TianGongCadSuite {
                         AttachMs += aw.ElapsedMilliseconds;
                         // 0.7.12：一个孔挂不上关联不再让整批散成单孔（用户不要单孔 + 编组）—— 这个孔不挂关联、照样进多孔特征。
                         // Attach 失败时已经把包含进来的东西删干净；anchors[k] 置空，调用方据此统计哪些孔挂上了。
-                        if (!ok) { Log.Write("HoleCombineAttach", "第 " + (k + 1) + " 个孔挂不上原生关联：" + awhy); anchors[k] = null; }
+                        if (!ok) { Log.Write("HoleCombineAttach", "第 " + (k + 1) + " 个孔挂不上原生关联：" + awhy); anchors[k].Why = awhy; anchors[k] = null; }
                     }
                 }
                 Timing += "（挂关联 " + AttachMs + "ms：包含圆边 " + IncludeMs + "ms，约束 " + KeypointMs + "ms）";
