@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using P=SolidEdgePart;
 
@@ -94,7 +94,7 @@ namespace TianGongCadSuite {
                 try { HoleEditCad.SwapPlain(kv.Key.Part, kv.Value, kv.Key.Spec); if (!touched.Exists(p => SamePart(p, kv.Key.Part))) touched.Add(kv.Key.Part); }
                 catch (Exception e) { bad.Add(kv.Key); r.Failed++; Log.Write("HoleEditUndo", e); r.Notes.Add("有一个孔没能恢复（" + AutoHoleWriter.Friendly(e) + "）"); }
             }
-            foreach (var p in touched) { try { var m = HoleEditCad.ModelOf(p); AutoHoleWriter.Attempt("重算", () => { m.Recompute(); return 0; }); } catch (Exception e) { Log.Write("HoleEditUndoRecompute", e); } }
+            foreach (var p in touched) { try { HoleEditCad.RecomputeAll(p, HoleEditCad.ModelOf(p)); } catch (Exception e) { Log.Write("HoleEditUndoRecompute", e); } }
             foreach (var kv in todo) {
                 if (bad.Contains(kv.Key)) continue;
                 try { Finish(kv.Value, kv.Key); r.Restored++; }
@@ -122,7 +122,7 @@ namespace TianGongCadSuite {
                 } catch (Exception e) { Log.Write("HoleEditUndoName", e); }
             }
             foreach (var p in parts) {
-                try { HoleEditCad.ModelOf(p).Recompute(); } catch (Exception e) { Log.Write("HoleEditUndoRecompute", e); }
+                try { HoleEditCad.RecomputeAll(p, HoleEditCad.ModelOf(p)); } catch (Exception e) { Log.Write("HoleEditUndoRecompute", e); }
                 try { HoleScanCad.Invalidate(p); } catch { }
             }
             holes.Clear(); names.Clear();

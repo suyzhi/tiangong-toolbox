@@ -26,7 +26,7 @@ namespace TianGongCadSuite.Licensing {
 
         // 命令入口调用：不通过就弹激活窗口，返回 false 让上层直接收工。
         internal static bool EnsureInteractive(IWin32Window owner){
-            if(Pass())return true;
+            if(Pass()){ RemindExpiry(owner); return true; }
             LicenseReport report = LicenseLibrary.Current();
             if(report.Status == LicenseStatus.Expired && !string.IsNullOrEmpty(report.PlanName)){
                 MessageBox.Show("该授权已于 " + LicenseTime.Format(report.ExpiryDate) + " 到期，请输入新的激活码。",
@@ -38,6 +38,27 @@ namespace TianGongCadSuite.Licensing {
                 MessageBox.Show(report.Describe(), "天工工具箱", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
             return LicenseActivation.Show(owner);
+        }
+
+        // 快到期（剩 14 天以内）提前说（0.8.5）：原来"将到期"只在「授权状态」里看得到，没人会去点 —— 到期那天打开命令才发现插件停了。
+        // 一天最多提醒一次（记在 license-remind.tsv），不挡命令
+        static string remindedDay = "";
+        static void RemindExpiry(IWin32Window owner){
+            try{
+#if TG_DEV_BUILD
+                if(LicenseTestHooks.GateOverride >= 0)return;   // 测试脚本放行时不弹框（私有桌面上没人点）
+#endif
+                string today = DateTime.Now.ToString("yyyy-MM-dd");
+                if(remindedDay == today)return;
+                remindedDay = today;
+                LicenseReport report = LicenseLibrary.Current();
+                if(report.Status != LicenseStatus.ExpiringSoon)return;
+                string file = SettingsFile.PathOf("license-remind.tsv");
+                foreach(var r in SettingsFile.Read(file))if(r.Length >= 2 && r[0] == "day" && r[1] == today)return;
+                SettingsFile.Write(file, new System.Collections.Generic.List<string[]>{ new[]{ "day", today } }, "天工工具箱 · 授权快到期的提醒今天已经弹过");
+                MessageBox.Show(owner, "天工工具箱的授权还剩 " + report.DaysLeft + " 天（" + LicenseTime.Format(report.ExpiryDate) + " 到期）。\r\n到期后各命令会停用，请提前联系管理员要新的激活码（换码不用重装）。",
+                    "天工工具箱 · 授权快到期", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }catch(Exception e){ Log.Write("LicenseRemind", e.Message); }
         }
 
         internal static void ReportStatus(){

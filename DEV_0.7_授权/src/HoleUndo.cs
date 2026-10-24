@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using P=SolidEdgePart;
 
@@ -15,6 +15,24 @@ namespace TianGongCadSuite {
     //   · 被改了名的旧孔（之前那批只有一个孔时会被改成「…-1」）。
     // 撤销顺序：散掉新组 → 删多孔特征（连它的输入孔一起删）→ 删阵列（它依赖种子孔，先删）→ 删新孔/腰孔 → 旧孔改回原名 → 旧组按原样编回去。
     // 找不到的特征（用户已经 Ctrl+Z 或手动删掉了）跳过并如实报告，不算失败。
+    // 关掉窗口时还没撤销的最后一批（0.8.5）：同一个装配里下次打开同一个窗口接着能「撤销本次打孔」。
+    // 原来窗口一关撤销记录就没了，发现打错只能去特征树里一个个删
+    public sealed class CarriedUndo {
+        public HoleUndo Undo; public List<KeyValuePair<P.PartDocument, string>> Created; string assembly = "";
+        static string Key(object asm){ try { return Convert.ToString(((dynamic)asm).FullName) ?? ""; } catch { return ""; } }
+        public void Keep(object asm, HoleUndo undo, List<KeyValuePair<P.PartDocument, string>> created){
+            if (undo == null || undo.IsEmpty) return;
+            Undo = undo; Created = created; assembly = Key(asm);
+        }
+        // 取走（只给同一个装配；取走以后这里清空，归新窗口管）
+        public bool Take(object asm, out HoleUndo undo, out List<KeyValuePair<P.PartDocument, string>> created){
+            undo = null; created = null;
+            if (Undo == null || assembly.Length == 0 || !string.Equals(assembly, Key(asm), StringComparison.OrdinalIgnoreCase)) return false;
+            undo = Undo; created = Created; Undo = null; Created = null; assembly = "";
+            return !undo.IsEmpty;
+        }
+    }
+
     public sealed class HoleUndo {
         sealed class GroupRestore {
             public string Name = "", Key = "";

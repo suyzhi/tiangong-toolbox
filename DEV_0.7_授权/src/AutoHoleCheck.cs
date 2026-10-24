@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -76,6 +76,7 @@ namespace TianGongCadSuite {
         public HoleIssueKind Kind;
         public string Message = "";
         public string MissingPart = "";   // 漏打孔：没打孔的那个零件（「去配孔」时提示用户点它的面）
+        public string Done = "";          // 「去配孔」以后打上了：写一句（"已配 2 个孔"），列表里标出来（0.8.5）
         public List<HoleRecord> Holes = new List<HoleRecord>();
         public string KindName {
             get {
@@ -476,16 +477,17 @@ namespace TianGongCadSuite {
                 foreach (var chain in SplitByGap(g, CoaxialSpanTolMm)) {
                     var parts = chain.Select(h => h.PartName).Distinct().ToList();
 
-                    if (parts.Count == 1) {
-                        // 只有一个零件有孔：看轴线在这个孔附近是否穿过别的零件
+                    // 轴线在这串孔附近穿过、却没有孔的零件（0.8.5：几个零件都有孔时也查 —— 原来只查"只有一个零件有孔"的，
+                    // 上板 + 中间垫板都有孔、下面的块漏了螺纹孔这种最常见的漏孔反而报不出来）
+                    string hitPart = null;
+                    {
                         var h = chain[0];
                         V3 o, a; double lo, hi; ChainSpan(chain, out o, out a, out lo, out hi);
-                        string hitPart = null;
                         foreach (var other in partUniverse) {
-                            if (other == h.PartName) continue;
+                            if (parts.Contains(other)) continue;
                             if (HasCoaxialShaft(shafts, other, h)) continue;   // 同轴的螺栓杆 / 销：本来就该穿过它
                             bool hit = bodies != null ? bodies.Hits(other, o, a, lo, hi, tol)
-                                     : (rayHitsPart != null && rayHitsPart(h, other));
+                                     : (parts.Count == 1 && rayHitsPart != null && rayHitsPart(h, other));
                             if (hit) { hitPart = other; break; }
                         }
                         if (hitPart != null) {
@@ -495,7 +497,12 @@ namespace TianGongCadSuite {
                                 missingByPart[hitPart] = mi; missingOrder.Add(hitPart);
                             }
                             mi.Holes.AddRange(chain);
-                        } else if (reportUnpaired) {
+                        }
+                    }
+
+                    if (parts.Count == 1) {
+                        var h = chain[0];
+                        if (hitPart == null && reportUnpaired) {
                             issues.Add(new HoleIssue { Kind = HoleIssueKind.Unpaired, Holes = chain,
                                 Message = h.PartName + " 上的 Φ" + N(h.DiameterMm) + " 孔" + Pos(h) + "是孤孔（附近其他零件上没有同轴孔）" });
                         }

@@ -36,6 +36,8 @@ namespace TianGongCadSuite {
         // ---------- 收集 ----------
 
         // 当前文档涉及的文件：装配 = 自己 + 全部零件和子装配（逐层，去重）；工程图 = 它引用的模型；零件 = 自己。
+        // 收集时读不出来、只好跳过的子装配（文件名）：窗口里要说出来，不然用户以为全收齐了
+        public readonly List<string> skippedSubs = new List<string>();
         public List<string> Collect(out string source){
             var list = new List<string>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -44,7 +46,7 @@ namespace TianGongCadSuite {
             try { doc = app.ActiveDocument; } catch { }
             root = doc;
             opened = null;
-            occurrences.Clear();
+            occurrences.Clear(); skippedSubs.Clear();
             if (doc == null) return list;
             var assembly = doc as A.AssemblyDocument;
             if (assembly != null) {
@@ -78,8 +80,9 @@ namespace TianGongCadSuite {
                 try { sub = o.Subassembly; } catch { }
                 // 子装配只展开一次（同一个子装配用了好几次，零件已经收过了）
                 if (sub && first) {
-                    try { var child = o.OccurrenceDocument as A.AssemblyDocument; if (child != null) Walk(child, list, seen); }
-                    catch (Exception e) { Log.Write("PropCardWalk " + file, e); }
+                    // 天工正忙（0x8001010A，大装配刚打开、还在加载）时原来直接跳过这个子装配，里面的零件一声不响地不在表里（10-23 日志两次）：等一下重试
+                    try { var oc = o; var child = AutoHoleWriter.Attempt("读子装配", () => oc.OccurrenceDocument) as A.AssemblyDocument; if (child != null) Walk(child, list, seen); }
+                    catch (Exception e) { Log.Write("PropCardWalk " + file, e); skippedSubs.Add(System.IO.Path.GetFileName(file)); }
                 }
             }
         }
@@ -106,7 +109,12 @@ namespace TianGongCadSuite {
             } catch (Exception e) {
                 // 读不了文件（打开着的加密文件就读不了）：退回已打开的文档
                 var doc = LoadedDocument(path);
-                if (doc == null) { row.Problem = "读不了：" + e.Message; Log.Write("PropCardRead " + path, e); }
+                // 原来显示"读不了：调用的目标发生了异常"（后期绑定的外层异常），10-23 现场 3 个文件其实是装配引用的文件已经不在了（STG_E_FILENOTFOUND）
+                if (doc == null) {
+                    bool missing = false; try { missing = !File.Exists(path); } catch { }
+                    row.Problem = missing ? "文件不在了（装配里引用的这个文件被移走、改名或删了）：" + path : "读不了：" + Message(e);
+                    Log.Write("PropCardRead " + path, e);
+                }
                 else {
                     try {
                         var custom = DocCustom(doc);

@@ -198,7 +198,7 @@ namespace TianGongCadSuite {
 
         // 批量排孔窗口：同一套控件、按排布方式/孔型整行显隐、螺纹深度、天工标准孔提示
         static void PatternUiState(){
-            using (var form = new AutoHolePatternForm(null, null)) {
+            using (var form = new AutoHolePatternForm(null, (SolidEdgeAssembly.AssemblyDocument)null)) {
                 form.CreateControl();
                 var all = new List<W.Control>();
                 Collect(form, all);

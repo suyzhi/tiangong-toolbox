@@ -80,7 +80,7 @@ static class UiShot {
                 form.Close();
             }
             // ---- 批量排孔 ----
-            using (var pf = new AutoHolePatternForm(null, null)) {
+            using (var pf = new AutoHolePatternForm(null, (SolidEdgeAssembly.AssemblyDocument)null)) {
                 pf.StartPosition = FormStartPosition.Manual; pf.Location = new Point(40, 20);
                 pf.Show(); pf.Refresh(); Pump(600);
                 var pall = new List<Control>(); Collect(pf, pall);

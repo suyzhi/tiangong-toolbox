@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using A=SolidEdgeAssembly;
 using F=SolidEdgeFramework;
@@ -166,6 +166,7 @@ namespace TianGongCadSuite {
             public int Levels;                      // 这次自己进了几级（退出时退几级）
             public P.PartDocument Part;
             public readonly List<P.InterpartConstruction> Made = new List<P.InterpartConstruction>();   // 这次新建的零件间复制
+            public string Side = "";                // 打孔面在零件里的方位（链接组名用，见 HoleNaming.SideOf）
         }
 
         // 等 CAD 把命令做完：插件在 CAD 的主线程里，命令要等消息循环跑起来才会执行，所以这里自己泵消息。
@@ -437,6 +438,7 @@ namespace TianGongCadSuite {
                 string ewhy;
                 InPlace s = EnterTarget(app, top, t, out ewhy);
                 if (s == null) { Note(ewhy); Why(requests, ewhy); return null; }
+                s.Side = SideOf(t);
                 var part = s.Part ?? t.Part;
                 long enterMs = sw.ElapsedMilliseconds;
 
@@ -481,6 +483,14 @@ namespace TianGongCadSuite {
                 return n;
             }
 
+            // 打孔面的方位（外法向换到零件坐标；面片读不到朝向时按几何法向）
+            static string SideOf(TargetFace t){
+                try {
+                    var n = t.Placement.InverseNormal(t.Plane.Normal).Unit();
+                    bool rev = false; try { rev = t.Face.IsParamReversed; } catch { }
+                    return HoleNaming.SideOf(rev ? n * -1.0 : n);
+                } catch { return ""; }
+            }
             public void End(InPlace s){ End(s, null, null, null); }
             // requests：这一面的打孔请求（打完以后）。这次新建、却一个孔都没挂上的零件间复制在退出原位前删掉 ——
             // 孔全没打上时撤销按钮是灰的，留下的「孔位链接-…」就删不掉了（FenceHoleE2E 在用户围栏上留下过两个）。
@@ -500,7 +510,7 @@ namespace TianGongCadSuite {
                     }
                 }
                 if (s != null && used.Count > 0 && result != null && result.TopFeatures.Count > 0) {
-                    try { GroupLinks(s.Part, used, requests, result, undo); }
+                    try { GroupLinks(s.Part, used, requests, result, undo, s.Side); }
                     catch (Exception e) {
                         Log.Write("NativeLinkGroup", e);
                         string n = "孔位链接没能和孔编成一组（" + AutoHoleWriter.Friendly(e) + "）：孔和关联都在，删孔时请把特征树里的「孔位链接-…」一起删掉";
@@ -510,7 +520,7 @@ namespace TianGongCadSuite {
                 Leave(app, s);
             }
 
-            void GroupLinks(P.PartDocument part, List<P.InterpartConstruction> copiesUsed, IList<AutoHoleWriter.HoleRequest> requests, DrillResult result, HoleUndo undo){
+            void GroupLinks(P.PartDocument part, List<P.InterpartConstruction> copiesUsed, IList<AutoHoleWriter.HoleRequest> requests, DrillResult result, HoleUndo undo, string side){
                 var model = PartBodies.Model(part, 1);   // 特征组整个零件共用（真机：每个 Model 都看得到全部组）
                 if (model == null) return;
                 var members = new List<object>();
@@ -526,7 +536,7 @@ namespace TianGongCadSuite {
                     if (r.NativeLinked && r.From != null) refNames.Add(System.IO.Path.GetFileNameWithoutExtension(SafeName(r.From.Owner)));
                 }
                 var taken = AutoHoleWriter.ExistingFeatureNames(model);
-                var g = HoleGrouping.MakeLinkGroup(model, members, HoleNaming.LinkGroup(specs, refNames), taken);
+                var g = HoleGrouping.MakeLinkGroup(model, members, HoleNaming.LinkGroup(specs, refNames, side), taken);
                 if (undo != null) undo.Group(part, g);
                 string name = HoleGrouping.NameOf(g);
                 Log.Write("NativeLinkGroup", SafeName(part) + "：「" + name + "」= " + copiesUsed.Count + " 个孔位链接 + " + (members.Count - copiesUsed.Count) + " 个孔特征");

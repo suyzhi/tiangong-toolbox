@@ -151,6 +151,10 @@ namespace TianGongCadSuite {
             rows.Clear();
             fileCard.Hint = source; fileCard.Invalidate();
             ReadInto(files);
+            if (cad.skippedSubs.Count > 0) {
+                status.Text = "注意：" + cad.skippedSubs.Count + " 个子装配读不出来，里面的零件没收进来（" + string.Join("、", cad.skippedSubs.Take(3).ToArray()) + (cad.skippedSubs.Count > 3 ? " 等" : "") + "）。等天工加载完再点「载入当前文档」。";
+                status.ForeColor = Ui.Warn;
+            }
         }
 
         void AddFiles(){
@@ -279,7 +283,15 @@ namespace TianGongCadSuite {
             string text = Ui.Prompt(this, "列", "要填的属性名，用顿号或逗号隔开（留空恢复默认）", PropCardFields.Join(fields));
             if (text == null) return;
             var next = PropCardFields.Parse(text);
-            fields = next.Count > 0 ? next : new List<string>(PropCardFields.Default);
+            next = next.Count > 0 ? next : new List<string>(PropCardFields.Default);
+            // 去掉的列上有改过还没写入的格子（0.8.5）：原来这些修改既不写、也不清，行一直标着"改过"，写入按钮永远灰不下去
+            int lost = 0;
+            foreach (var r in rows) foreach (var k in r.Edited.Keys) if (!next.Contains(k)) lost++;
+            if (lost > 0) {
+                if (MessageBox.Show(this, "去掉的列里有 " + lost + " 个格子改过还没写入，去掉列就丢掉这些修改。继续吗？", "属性卡填写", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+                foreach (var r in rows) foreach (var k in r.Edited.Keys.ToList()) if (!next.Contains(k)) r.Edited.Remove(k);
+            }
+            fields = next;
             try { PropCardFields.Save(SettingsFile.PathOf(PropCardFields.FileName), fields); } catch (Exception e) { Log.Write("PropCardFieldsSave", e); }
             Rebuild();
         }

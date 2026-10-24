@@ -417,6 +417,13 @@ namespace TianGongCadSuite {
             Assert(index.Hits(lone, "B") && !index.Hits(lone, "B:2") && !index.Hits(lone, "不存在"), "按实例名查，每个实例用自己的变换");
             var missing = HoleCheck.Run(new List<HoleRecord>{ lone }, null, false, new List<string>{ "A", "B", "B:2" }, index);
             Assert(missing.Count == 1 && missing[0].Kind == HoleIssueKind.MissingHole, "PartRayIndex 接入主检查 -> 漏打孔，实得 " + Describe(missing));
+            // 0.8.5：上板 A、垫板 P 都有孔（一串里两个零件），下面的块 C 没孔 —— 原来只查"一串里只有一个零件"，C 的漏孔报不出来
+            var ix2 = new PartRayIndex();
+            ix2.Add(new PartRayTarget("C", Transform.Identity, (o, d) => RayHitsBox(o, d, new V3(0,0,-0.04), new V3(0.1,0.1,0))));
+            var topA = new HoleRecord { Center = new V3(0.03,0.03,0.02), Axis = new V3(0,0,1), DiameterMm = 6.6, PartName = "A" };
+            var midP = new HoleRecord { Center = new V3(0.03,0.03,0.01), Axis = new V3(0,0,1), DiameterMm = 6.6, PartName = "P" };
+            var stack = HoleCheck.Run(new List<HoleRecord>{ topA, midP }, null, false, new List<string>{ "A", "P", "C" }, ix2);
+            Assert(stack.Count == 1 && stack[0].Kind == HoleIssueKind.MissingHole && stack[0].MissingPart == "C", "两个零件都有孔、下面的块没孔 -> 报 C 漏打孔，实得 " + Describe(stack));
             var far = new HoleRecord { Center = new V3(0.05,0.02,0), Axis = new V3(0,0,1), DiameterMm = 6.6, PartName = "A" };
             Assert(HoleCheck.Run(new List<HoleRecord>{ far }, null, false, new List<string>{ "A", "B", "B:2" }, index).Count == 0, "轴线不穿过任何实例 -> 不报漏孔");
         }

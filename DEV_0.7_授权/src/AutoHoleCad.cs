@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using A=SolidEdgeAssembly;
@@ -35,6 +35,51 @@ namespace TianGongCadSuite {
         // 点面时预判的"这张面挂不了天工关联"的原因（零件的链接属于别的装配……），空 = 没看出问题。预览里提前说
         public string LinkNote = "";
         public string FaceId = "";    // 面片 ID（只在同一个实体里唯一，见 SameFace）
+        // 这张面所在实体上已有的孔（预览里提前算"哪些位置本来就有孔"用，0.8.5）。读一次缓存；打完孔整个 TargetFace 会换新的
+        internal HoleSpots Spots;
+        internal HoleSpots ExistingSpots(){
+            if (Spots == null) { try { Spots = AutoHoleWriter.ScanSpots(AutoHoleWriter.ModelFor(this)); } catch { Spots = new HoleSpots(); } }
+            return Spots;
+        }
+        // 装配坐标的孔心在这张面上是不是本来就有孔（孔口在面上，见 HoleSpots.At）
+        internal bool HasHoleAt(V3 centreAssembly){ double d; return HasHoleAt(centreAssembly, out d); }
+        internal bool HasHoleAt(V3 centreAssembly, out double diameterMm){
+            diameterMm = 0;
+            try {
+                var local = Placement.InversePoint(OntoFace(centreAssembly));
+                var n = Placement.InverseNormal(Plane.Normal).Unit();
+                return ExistingSpots().At(local, n, out diameterMm);
+            } catch { return false; }
+        }
+        // "这个位置本来就有孔"的说法：和 DrillRequests 里的一样
+        internal static string AlreadySay(string source, double existingMm, HoleSpec want){
+            double w = want == null ? 0 : want.HoleDiameter;
+            string where = string.IsNullOrEmpty(source) ? "" : source + "：";
+            return Math.Abs(existingMm - w) <= 0.05 && w > 0
+                ? where + "这个位置已经有同规格的孔（Φ" + existingMm.ToString("0.##") + "），无需再打。"
+                : where + "这个位置已经有孔（Φ" + existingMm.ToString("0.##") + "），规格与要打的不同，已跳过。";
+        }
+        public string Risk = "";      // 点面时看出来的"改这个文件要当心"（只读 / 标准件库里的文件），空 = 没看出问题（0.8.5）
+        // 只读文件（文件属性只读：PDM 没检出、从光盘/共享拷来的）：孔能打进内存，存盘时存不下；标准件库 / 外购件：打孔会改到库里的原件、所有项目都跟着变
+        internal static string RiskOf(P.PartDocument part, string assemblyPath){
+            string f = ""; try { f = part.FullName; } catch { }
+            if (string.IsNullOrEmpty(f)) return "";
+            string name = System.IO.Path.GetFileName(f);
+            // 不看 part.ReadOnly：装配里没激活编辑的零件文档它也回 True（真机 User085E2E S1：刚建的零件照样打孔、存盘），会误报
+            try { if (System.IO.File.Exists(f) && (System.IO.File.GetAttributes(f) & System.IO.FileAttributes.ReadOnly) != 0) return "「" + name + "」文件是只读的，孔能打上但存不了盘"; } catch { }
+            return LibraryHint(f, assemblyPath);
+        }
+        static readonly string[] LibraryWords = { "标准件", "外购", "standard parts", "misumi", "米思米", "library", "零件库", "库文件" };
+        internal static string LibraryHint(string partPath, string assemblyPath){
+            if (string.IsNullOrEmpty(partPath)) return "";
+            string low = partPath.ToLowerInvariant();
+            string asmLow = (assemblyPath ?? "").ToLowerInvariant();
+            foreach (var w in LibraryWords)
+                if (low.IndexOf(w, StringComparison.Ordinal) >= 0 && asmLow.IndexOf(w, StringComparison.Ordinal) < 0)
+                    return "「" + System.IO.Path.GetFileName(partPath) + "」看起来是标准件库 / 外购件里的文件（" + System.IO.Path.GetDirectoryName(partPath) + "），打孔会改到库里的原件，用到它的项目都会变";
+            return "";
+        }
+        public int Instances;         // 这个零件文件在装配里用了几次（点面时数，0 = 没数 / 数不出）。>1 时打的孔每处都有
 
         // 是不是同一张面：同一个零件实例（文件 + 装配位置）、同一个实体、同一个面 ID，而且平面数据也重合。
         // 只比面 ID 不够：多实体零件的面 ID 是各实体自己编的，跨实体大量重号（真机 02-07：39 个实体 710 张面只有 298 个不同 ID）——
@@ -55,6 +100,22 @@ namespace TianGongCadSuite {
             for (int i = 0; i < 16; i++) if (Math.Abs(a.M[i] - b.M[i]) > 1e-7) return false;
             return true;
         }
+        // 零件文档对象还活着吗（进出原位编辑、关掉它的窗口以后天工会重新加载它，原来的对象全部"已断开"）
+        internal static bool PartAlive(P.PartDocument part){
+            if (part == null) return false;
+            try { var n = part.Name; return true; } catch { return false; }
+        }
+        internal static string DeadPartMessage(string partName){
+            return "「" + (string.IsNullOrEmpty(partName) ? "零件" : partName) + "」被天工重新加载过（刚进出过原位编辑或关过它的窗口），原来点的面已经失效。请重新点一次这张面再打。";
+        }
+        // 装配坐标的一点沿面法向投到打孔面上（0.8.5）。"已经有孔"只认孔口在打孔面上的圆（HoleSpots.At），
+        // 孔心得在面上：圆周排孔点的定位圆可能在法兰另一面（差一个板厚），原来靠"同轴就算"糊过去了
+        public V3 OntoFace(V3 p){
+            if (Plane == null) return p;
+            var n = Plane.Normal.Unit();
+            if (!(n.Length > 0.5) || !p.Finite) return p;
+            return p - n * (p - Plane.Point).Dot(n);
+        }
         // 零件实例的键：文件 + 装配位置。同一个零件文件的两个实例算两个（原位编辑要进的是点中的那个实例）
         public string InstanceKey {
             get {
@@ -70,7 +131,14 @@ namespace TianGongCadSuite {
         }
     }
 
+    // 参考孔轴线和打孔面不垂直（斜的角度，度）
+    public sealed class ObliqueHoleException : ArgumentException {
+        public readonly double Degrees;
+        public ObliqueHoleException(double deg) : base("参考孔轴线和打孔面不垂直（斜 " + deg.ToString("0.#", CultureInfo.InvariantCulture) + "°）：孔只能垂直于面打，打出来和参考孔不同轴，没有打。请点和参考孔垂直的面。"){ Degrees = deg; }
+    }
+
     public static class AutoHoleReader {
+        public const double ObliqueLimitDeg = 2.0;
         // 读到的孔（装配坐标）转成参考孔。面扫描/圆柱面/圆边三条路都走这里。
         public static ReferenceHole ToReference(ScannedHole scanned){
             if (scanned == null) throw new ArgumentNullException("scanned");
@@ -101,7 +169,13 @@ namespace TianGongCadSuite {
             var plane = face.Geometry as G.Plane;
             if (plane == null) throw new ArgumentException("选中的是曲面，打孔面必须是平面。");
             var part = face.Document as P.PartDocument;
-            if (part == null) throw new ArgumentException("选中的面不属于零件文档，请直接在装配中选择零件上的平面。");
+            if (part == null) {
+                // 钣金件（.psm）：原来报"选中的面不属于零件文档，请直接在装配中选择零件上的平面"—— 用户点的明明就是装配里的零件面（0.8.5）
+                object doc = null; try { doc = face.Document; } catch { }
+                if (doc is P.SheetMetalDocument)
+                    throw new ArgumentException("这是钣金件（.psm）上的面：自动打孔 / 批量排孔目前只支持普通零件（.par）。钣金件请用天工自己的「孔」命令（参考孔照样可以点钣金件上的孔）。");
+                throw new ArgumentException("选中的面不属于零件文档，请直接在装配中选择零件上的平面。");
+            }
             Array p = new double[3], n = new double[3]; plane.GetPlaneData(ref p, ref n);
             var tf = new TargetFace {
                 Plane = new PlaneInput(pg.Transform.Point(V3.From(p)), pg.Transform.Normal(V3.From(n)), "打孔面"),
@@ -125,9 +199,13 @@ namespace TianGongCadSuite {
 
         // 参考孔轴线与目标面的交点（装配坐标）。两零件不平行时给出明确原因。
         public static V3 Intersect(ReferenceHole hole, TargetFace face){
-            double denom = hole.Axis.Dot(face.Plane.Normal);
+            double denom = hole.Axis.Unit().Dot(face.Plane.Normal.Unit());
             if (Math.Abs(denom) < 0.05)
                 throw new ArgumentException("参考孔的轴线与打孔面几乎平行，无法定位孔心。请确认两个零件是平行装配的。");
+            // 斜着的参考孔（0.8.5）：孔特征总是垂直于打孔面打，参考孔斜 5° 时打出来的孔和它不同轴，螺钉根本穿不过去。
+            // 原来照样投点、照样打，结果里还写"打好了"。超过 2° 就不打，说清楚
+            if (Math.Abs(denom) < Math.Cos(ObliqueLimitDeg * Math.PI / 180.0))
+                throw new ObliqueHoleException(Math.Acos(Math.Min(1.0, Math.Abs(denom))) * 180.0 / Math.PI);
             double t = (face.Plane.Point - hole.Center).Dot(face.Plane.Normal) / denom;
             return hole.Center + hole.Axis * t;
         }
@@ -450,6 +528,11 @@ namespace TianGongCadSuite {
         static string SafeName(P.PartDocument part){ try { return part.Name; } catch { return "?"; } }
         static int SafeCount(P.PartDocument part){ try { return part.RefPlanes.Count; } catch { return -1; } }
 
+        // 点选时的错误：对象断开 = 点到的东西刚被天工重新加载过（不是"建孔被拒"），其余同 Friendly
+        public static string FriendlyPick(Exception e){
+            if (e != null && DisconnectHr(e.HResult)) return "点到的对象已经失效（零件刚被天工重新加载过，或者刚进出过原位编辑），请再点一次。";
+            return Friendly(e);
+        }
         // 把 COM 错误翻译成用户看得懂的话（原始 HRESULT 照样保留在日志里）
         public static string Friendly(Exception e){
             if (e == null) return "";
@@ -462,8 +545,14 @@ namespace TianGongCadSuite {
                      + "或者零件刚被关掉/重新加载过。请检查该位置后重新点一次「开始打孔」。";
             if (hr == unchecked((int)0x800401FD))
                 return "目标零件暂时不可用，请再点一次开始打孔。";
-            if (hr == unchecked((int)0x80010001) || m.Contains("拒绝"))
-                return "CAD 正忙，请稍后再点一次开始打孔。";
+            if (hr == unchecked((int)0x80010001) || hr == unchecked((int)0x8001010A) || m.Contains("拒绝"))
+                return "CAD 正忙，请稍后再点一次。";
+            // 其它 COM 错误（0.8.5）：原来原样显示「…（异常来自 HRESULT:0x8000FFFF）」，用户看不懂也不知道该干什么。
+            // 去掉 HRESULT 那一截、说一句怎么办；原始错误照样在 panel.log
+            if (e is System.Runtime.InteropServices.COMException) {
+                string brief = System.Text.RegularExpressions.Regex.Replace(m, @"\s*[（(]异常来自 HRESULT[^)）]*[)）]", "").Trim();
+                return "天工没能完成这一步（" + (brief.Length > 0 ? brief : "0x" + hr.ToString("X8")) + "）。请再试一次；还不行就重新点一下要用的面或孔。";
+            }
             return m;
         }
 
@@ -1207,6 +1296,8 @@ namespace TianGongCadSuite {
             target = AnchorToActivePart(target);   // 原位编辑时把面锚定到正在编辑的文档（见上）
             result.Requested = requests.Count;
             var part = target.Part;
+            // 零件对象已经断开（刚进出过原位编辑、天工把它重新加载了）：原来往下走拿不到模型，报一句"目标零件没有可用的实体模型"（10-23 现场），不知所云
+            if (!TargetFace.PartAlive(part)) throw new InvalidOperationException(TargetFace.DeadPartMessage(target.PartName));
             P.Model model = ModelFor(target);
             if (model == null) throw new InvalidOperationException("目标零件没有可用的实体模型。");
             P.RefPlane plane = FindOrCreatePlane(part, target);
@@ -1238,15 +1329,11 @@ namespace TianGongCadSuite {
                 var todo = new List<int>();
                 foreach (int i in batch) {
                     var r = requests[i];
-                    var local = target.Placement.InversePoint(r.Centre);
+                    var local = target.Placement.InversePoint(target.OntoFace(r.Centre));
                     if (!local.Finite) { whyByRequest[i] = r.Source + " 孔心换算失败"; continue; }
                     double existing;
                     if (spots.At(local, normal, out existing)) {
-                        double want = r.Spec == null ? 0 : r.Spec.HoleDiameter;
-                        string where = r.Source.Length > 0 ? r.Source + "：" : "";
-                        string say = Math.Abs(existing - want) <= 0.05 && want > 0
-                            ? where + "这个位置已经有同规格的孔（Φ" + existing.ToString("0.##") + "），无需再打。"
-                            : where + "这个位置已经有孔（Φ" + existing.ToString("0.##") + "），规格与要打的不同，已跳过。";
+                        string say = TargetFace.AlreadySay(r.Source, existing, r.Spec);
                         result.AlreadyOk++;
                         result.Outcomes.Add(new ResultList.Item(ResultList.Kind.Skip, say).At(r.Centre, existing));
                         done[i] = true;
@@ -1354,6 +1441,7 @@ namespace TianGongCadSuite {
             try { model = ModelFor(target) ?? model; } catch { }
             long drilledMs = clock.ElapsedMilliseconds;
             Organize(part, model, requests, made, madeLocal, multis, result);
+            CheckBlindThrough(model, plane, requests, made, madeLocal, result);
             Log.Write("AutoHoleTiming", requests.Count + " 个孔：打孔 " + drilledMs + "ms，命名/编组 " + (clock.ElapsedMilliseconds - drilledMs)
                       + "ms（其中读实体圆边 " + scanMs + "ms，CAD 建孔 " + addMs + "ms；合成 " + result.Combined + " 个多孔孔特征：" + HoleCombine.Timing + "）");
             // 打好的孔：名字是编组/命名之后的（「M6 螺纹孔（螺纹全长）-3」），用户在特征树里找得到
@@ -1367,6 +1455,35 @@ namespace TianGongCadSuite {
                     .At(requests[i].Centre, requests[i].Spec == null ? 6 : requests[i].Spec.HoleDiameter));
             }
             return result;
+        }
+
+        // 盲孔比这里的材料还深：CAD 照样打成通孔（真机 User085E2E S5：10 厚板上 15 深），结果里要说出来；沉孔比板还深同理
+        static void CheckBlindThrough(P.Model model, P.RefPlane plane, IList<HoleRequest> requests, P.Hole[] made, V3[] madeLocal, DrillResult result){
+            HoleSpots after = null;
+            var n = PlaneNormal(plane);
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < requests.Count; i++) {
+                var sp = requests[i].Spec;
+                if (made[i] == null || sp == null) continue;
+                // 沉孔比板还深：沉头那一段直接切穿，整个成了 Φ沉孔 的通孔，螺钉头卡不住（5 厚板上 M6 沉孔深 6.8）
+                if (sp.Kind == HoleKind.Counterbore && sp.CounterboreDepth > 0) {
+                    if (after == null) after = ScanSpots(model);
+                    double cbExit = after.ExitDepth(madeLocal[i], n, sp.CounterboreDiameter / 2000.0, sp.CounterboreDepth / 1000.0);   // 沉孔底那一圈正好在沉孔深处，不算
+                    if (cbExit > 0) {
+                        string cb = "沉孔深 " + sp.CounterboreDepth.ToString("0.##") + "mm 比这里的板厚（" + (cbExit * 1000).ToString("0.##") + "mm）还深，整个打成了 Φ" + sp.CounterboreDiameter.ToString("0.##") + " 的通孔，螺钉头卡不住 —— 请换孔型（过孔 / 锥形沉孔）或改小沉孔深度";
+                        if (seen.Add(cb)) result.Notes.Add(cb);
+                        result.Outcomes.Add(new ResultList.Item(ResultList.Kind.Warn, (requests[i].Source.Length > 0 ? requests[i].Source + "：" : "") + "沉孔切穿了板").At(requests[i].Centre, sp.CounterboreDiameter));
+                        continue;
+                    }
+                }
+                if (sp.Through) continue;
+                if (after == null) after = ScanSpots(model);
+                double exit = after.ExitDepth(madeLocal[i], n, sp.HoleDiameter / 2000.0, sp.Depth / 1000.0);
+                if (exit <= 0) continue;
+                string note = "盲孔深 " + sp.Depth.ToString("0.##") + "mm 比这里的材料还深（" + (exit * 1000).ToString("0.##") + "mm 处就穿出去了），打出来是通孔 —— 要盲孔请把深度改小（「改孔型」或撤销重打）";
+                if (seen.Add(note)) result.Notes.Add(note);
+                result.Outcomes.Add(new ResultList.Item(ResultList.Kind.Warn, (requests[i].Source.Length > 0 ? requests[i].Source + "：" : "") + "打穿了（盲孔比材料深）").At(requests[i].Centre, sp.HoleDiameter));
+            }
         }
 
         // 换个编辑环境补打（0.7.11）：retry 是对 first 里没打上的那些请求再打一遍的结果。
@@ -1670,6 +1787,9 @@ namespace TianGongCadSuite {
                 object rawEdges;
                 try { rawEdges = body.get_Edges(G.FeatureTopologyQueryTypeConstants.igQueryAll); }
                 catch (Exception e) { warnings.Add(partName + " 读取边失败：" + e.Message); continue; }
+                // 单段圆弧（腰孔两头、圆角）不是孔（0.8.5）：原来圆弧也当孔收，腰孔压在螺纹孔上这种调节结构，腰孔两头各报一条假的漏打孔。
+                // 但导入件常把一个整圆孔口拆成两段：同一个圆的第二段起照常当孔（去重会把它们并成一条）
+                var arcSeen = new HashSet<string>(StringComparer.Ordinal);
                 foreach (G.Edge edge in (G.Edges)rawEdges) {
                     G.Circle circle = null;
                     try { circle = edge.Geometry as G.Circle; } catch { }
@@ -1677,6 +1797,11 @@ namespace TianGongCadSuite {
                     Array c = new double[3], ax = new double[3]; double r = 0;
                     try { circle.GetCircleData(ref c, ref ax, out r); } catch { continue; }
                     if (r <= 0) continue;
+                    bool closedEdge = true; try { closedEdge = edge.IsClosed; } catch { }
+                    if (!closedEdge) {
+                        string key = Math.Round(Convert.ToDouble(c.GetValue(0)), 6) + "," + Math.Round(Convert.ToDouble(c.GetValue(1)), 6) + "," + Math.Round(Convert.ToDouble(c.GetValue(2)), 6) + "," + Math.Round(r, 6);
+                        if (arcSeen.Add(key)) continue;
+                    }
                     double dia = r * 2000.0;
                     bool holeSize = dia >= minHole && dia <= maxHole, shaftSize = dia >= minShaft && dia <= maxShaft;
                     if (!holeSize && !shaftSize) continue;

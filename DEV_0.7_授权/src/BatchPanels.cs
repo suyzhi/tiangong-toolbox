@@ -26,16 +26,30 @@ namespace TianGongCadSuite {
             string directory = Path.Combine(parent, PanelNaming.BatchDirectoryName(stamp, Guid.NewGuid().ToString("N").Substring(0, 8)));
             Directory.CreateDirectory(directory);
             var created = new List<Tuple<A.Occurrence, string>>();
+            var made = new List<int>();
+            Exception firstError = null;
             try {
                 for (int i = 0; i < specs.Count; i++) {
                     if (progress != null) { try { progress(i + 1, specs.Count); } catch { } }
                     string file = Path.Combine(directory, name(i + 1));
-                    created.Add(Tuple.Create(CadBuilder.Generate(app, assembly, specs[i], file, props), file));
+                    // 一块板失败只跳过这一块（0.8.5）：原来整批全撤回，错误里也不说是哪个框口 —— 40 块里坏 1 块就得全部重来。
+                    // CadBuilder.Generate 失败时自己把这一块插进去的实例和文件收拾干净
+                    try { created.Add(Tuple.Create(CadBuilder.Generate(app, assembly, specs[i], file, props), file)); made.Add(i); }
+                    catch (Exception e) {
+                        if (firstError == null) firstError = e;
+                        Log.Write("BatchPanel", "框口 " + (i + 1) + "：" + e.Message);
+                        if (props != null) {
+                            props.Failed.Add(i);
+                            props.Problem(string.Format(CultureInfo.InvariantCulture, "框口 {0}（{1:0.#}×{2:0.#}）没生成：{3}", i + 1, specs[i].Width * 1000, specs[i].Height * 1000, e.Message));
+                        }
+                    }
                 }
+                if (made.Count == 0) throw firstError ?? new InvalidOperationException("一块板都没生成出来。");
+                if (props == null && firstError != null) throw firstError;   // 没地方说"哪块失败了"：照原来整批撤回
                 string material = props == null ? "" : props.Material;
                 File.WriteAllLines(Path.Combine(directory, "尺寸清单.csv"),
-                    new[]{ "文件,宽mm,高mm,厚mm,每边间隙mm,材质" }.Concat(specs.Select((s, i) => string.Format(CultureInfo.InvariantCulture,
-                        "{0},{1:R},{2:R},{3:R},{4:R},{5}", name(i + 1), s.Width * 1000, s.Height * 1000, s.Thickness * 1000, s.Gap * 1000, material))),
+                    new[]{ "文件,宽mm,高mm,厚mm,每边间隙mm,材质" }.Concat(made.Select(i => string.Format(CultureInfo.InvariantCulture,
+                        "{0},{1:R},{2:R},{3:R},{4:R},{5}", name(i + 1), specs[i].Width * 1000, specs[i].Height * 1000, specs[i].Thickness * 1000, specs[i].Gap * 1000, material))),
                     System.Text.Encoding.UTF8);
                 return directory;
             } catch (Exception original) {

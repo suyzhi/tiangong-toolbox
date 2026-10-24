@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 
 namespace TianGongCadSuite {
@@ -9,8 +9,12 @@ namespace TianGongCadSuite {
     // 现在一张面读一遍（O(边数)），这批里要打的孔也记进来（Plan），同一个位置重复的请求照样认得出来。
     // 判定口径和原来一样：圆的轴线和打孔方向平行（|cos| ≥ 0.99），圆心到孔轴线的径向距离 < 0.5mm；
     // 横着的孔（圆心恰好落在这根轴线上）不算（用户围栏 FenceHoleE2E 第 4 条）。
+    // 0.8.5：圆还必须在打孔面上（轴向距离 < 0.2mm）。原来只看"同一根轴线"，从**另一面**打的同轴盲孔
+    // （顶面要打的孔正下方、底面已有一个盲孔）也被当成"这个位置已经有孔、已跳过"——现场截图那块板就是这样；
+    // 真机实测这种孔 CAD 照样能打（CoaxialE2E）。真正"已经有孔"时孔口那条圆边一定在打孔面上（从哪面打的通孔都一样）。
     public sealed class HoleSpots {
         public const double RadialTolM = 0.0005;
+        public const double AxialTolM = 0.0002;
         readonly List<NativeLinkMath.Circle> circles = new List<NativeLinkMath.Circle>();
 
         public int Count { get { return circles.Count; } }
@@ -44,7 +48,7 @@ namespace TianGongCadSuite {
             return false;
         }
 
-        // 孔心 localCentre、打孔方向 normal 上有没有孔；有的话给出（按读到的顺序第一条）圆的直径 mm
+        // 孔心 localCentre（在打孔面上）、打孔方向 normal 上、孔口在这张面上的孔有没有；有的话给出（按读到的顺序第一条）圆的直径 mm
         public bool At(V3 localCentre, V3 normal, out double diameterMm){
             diameterMm = 0;
             V3 n = normal.Length > 1e-12 ? normal.Unit() : new V3(0, 0, 1);
@@ -52,9 +56,26 @@ namespace TianGongCadSuite {
                 if (Math.Abs(c.Axis.Dot(n)) < 0.99) continue;
                 V3 delta = c.Centre - localCentre;
                 double axial = delta.Dot(n);
+                if (Math.Abs(axial) >= AxialTolM) continue;   // 同轴但不在这张面上（反面的盲孔、孔底）
                 if ((delta - n * axial).Length < RadialTolM) { diameterMm = c.Radius * 2000.0; return true; }
             }
             return false;
+        }
+
+        // 盲孔打穿了没有（0.8.5）：孔心 localCentre（孔口）沿轴线、孔口以下 (0.05mm, maxDepthM) 之间有没有同样大小的同轴圆 ——
+        // 有就是孔从那里穿出去了（板比孔深薄），返回穿出的深度（米）；没有返回 0。
+        // 现场：10 厚的板上打"盲孔 深15"，CAD 照样打成通孔，结果里还写"盲孔 深15"
+        public double ExitDepth(V3 localCentre, V3 normal, double radiusM, double maxDepthM){
+            V3 n = normal.Length > 1e-12 ? normal.Unit() : new V3(0, 0, 1);
+            double best = 0;
+            foreach (var c in circles) {
+                if (Math.Abs(c.Axis.Dot(n)) < 0.99 || Math.Abs(c.Radius - radiusM) > 0.00002) continue;
+                V3 delta = c.Centre - localCentre;
+                double axial = Math.Abs(delta.Dot(n));
+                if ((delta - n * delta.Dot(n)).Length >= RadialTolM) continue;
+                if (axial > 0.00005 && axial < maxDepthM - 0.00005 && (best == 0 || axial < best)) best = axial;
+            }
+            return best;
         }
 
         // 把找到的孔心（found，读不出的为 null）一一配给想要的孔位（wanted）：每个孔位取离它最近、还没配出去的那个，

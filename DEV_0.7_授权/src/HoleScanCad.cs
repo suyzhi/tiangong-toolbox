@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using P=SolidEdgePart;
@@ -289,6 +289,19 @@ namespace TianGongCadSuite {
             G.Circle circle = null;
             try { circle = edge.Geometry as G.Circle; } catch { }
             if (circle == null) throw new ArgumentException("选中的边不是圆孔。请在模型上点击孔口的圆形边线。");
+            // 圆弧（腰孔两头、倒圆角）不是孔（0.8.5）：原来照样按"孔"配，在腰孔一头打出一个圆孔
+            // 但导入的零件（STEP）常把一个整圆孔口拆成两段半圆：同一个圆上还有别的弧段就照常认
+            bool closed = true; try { closed = edge.IsClosed; } catch { }
+            if (!closed) {
+                P.PartDocument owner = null; try { owner = edge.Document as P.PartDocument; } catch { }
+                Array cc = new double[3], ax = new double[3]; double rr = 0;
+                circle.GetCircleData(ref cc, ref ax, out rr);
+                int same = 0;
+                if (owner != null)
+                    foreach (var bc in BodyCircles(owner, edge))
+                        if ((bc.Center - V3.From(cc)).Length < 1e-6 && Math.Abs(bc.RadiusMm - rr * 1000.0) < 0.001 && HoleScan.Parallel(bc.Axis, V3.From(ax))) same++;
+                if (same < 2) throw new ArgumentException("这是一段圆弧（腰孔的一头或圆角），不是整圆的孔，没法按它配孔。腰孔请用「批量排孔」勾「排成腰孔」打。");
+            }
             Array c = new double[3], axis = new double[3]; double radius = 0;
             circle.GetCircleData(ref c, ref axis, out radius);
             if (!(radius > 1e-6)) throw new ArgumentException("读取到的孔半径为 0，请重新选择孔边线。");
@@ -299,7 +312,7 @@ namespace TianGongCadSuite {
             mouth.Wall = WallOf(edge, null, out wallFace);
             if (WallSaysHole(wallFace) == 0) throw new ArgumentException(BossWallMessage);
             var all = part != null ? BodyCircles(part, edge) : new List<CircleCandidate>();
-            var hole = HoleScan.FromCircle(mouth, all);
+            var hole = HoleScan.FromCircle(mouth, HoleScan.MergeArcs(all));
             if (hole == null) throw new ArgumentException("这条边读不出孔径，请重新点一次孔口的圆形边线。");
             hole.Center = pg.Transform.Point(hole.Center);
             hole.Axis = pg.Transform.Vector(hole.Axis).Unit();

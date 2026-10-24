@@ -7,6 +7,7 @@ using System.Windows.Forms;
 using A=SolidEdgeAssembly;
 using F=SolidEdgeFramework;
 using P=SolidEdgePart;
+using G=SolidEdgeGeometry;
 
 namespace TianGongCadSuite {
     // 命令 9：改孔型。打错了孔型、后来要换规格，不用删了重打：
@@ -15,7 +16,7 @@ namespace TianGongCadSuite {
     // 「自动打孔」「批量排孔」打完以后点「改孔型…」会把刚打的那批孔直接带进来。
     // 换孔型的做法和限制见 HoleEditCad（真机实测）；改错了点「撤销修改」恢复原孔型和原名字。
     public sealed class HoleEditForm : Form, IBusyTool, F.ISEMouseEvents, F.ISECommandEvents {
-        // 处理中不让关（Esc、关闭按钮、标题栏 ×、CAD 里按 Esc / 右键都会走到这里）：见 IBusyTool
+        // 处理中不让关（Esc、关闭按钮、标题栏 ×、CAD 里按 Esc 都会走到这里）：见 IBusyTool
         public bool Busy { get { return busy; } }
         public string BusyWhat { get { return "改孔型"; } }
         protected override void OnFormClosing(FormClosingEventArgs e){
@@ -29,6 +30,7 @@ namespace TianGongCadSuite {
 
         readonly F.Application app;
         readonly A.AssemblyDocument assembly;
+        readonly P.PartDocument partDoc;   // 单独打开的零件里用（0.8.5），这时 assembly 为 null
         F.ISECommand command; F.ISEMouse mouse; Connection mouseConnection, commandConnection;
         F.HighlightSet highlights;
         readonly List<object> picked = new List<object>();
@@ -59,8 +61,10 @@ namespace TianGongCadSuite {
         readonly Label status = new Label();
         readonly ToolTip tips = new ToolTip { AutoPopDelay = 15000, InitialDelay = 400 };
 
-        public HoleEditForm(F.Application application, A.AssemblyDocument document){
-            app = application; assembly = document;
+        public HoleEditForm(F.Application application, P.PartDocument part) : this(application, (A.AssemblyDocument)null, part){ }
+        public HoleEditForm(F.Application application, A.AssemblyDocument document) : this(application, document, null){ }
+        HoleEditForm(F.Application application, A.AssemblyDocument document, P.PartDocument part){
+            app = application; assembly = document; partDoc = part;
             Ui.Shell(this, "改孔型", 640, 720, 560, 620);
             BuildLayout();
             WireEvents();
@@ -68,10 +72,15 @@ namespace TianGongCadSuite {
             try { sizeBox.SelectedItem = "M6"; } finally { loading = false; }
             ApplySize();
             FormClosed += (s, e) => Cleanup();
+            // 上次关窗口前改的那批还没撤销（0.8.5，同自动打孔）：同一个文档里接着能「撤销修改」
+            if (carried != null && !carried.IsEmpty && carriedFor.Length > 0 && string.Equals(carriedFor, HostName(), StringComparison.OrdinalIgnoreCase)) {
+                lastUndo = carried; carried = null; carriedFor = ""; RefreshAll();
+                SetStatus("上次关窗口前改的 " + lastUndo.Count + " 个孔特征还能「撤销修改」。在模型里点要改的孔开始。", Ui.Muted);
+            }
         }
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData){
-            if (keyData == Keys.Escape) { Close(); return true; }
+            if (keyData == Keys.Escape) { if (ConfirmQuickClose("Esc")) Close(); return true; }
             if (keyData == (Keys.Control | Keys.Enter)) { Apply(); return true; }
             return base.ProcessCmdKey(ref msg, keyData);
         }
@@ -79,7 +88,7 @@ namespace TianGongCadSuite {
         // ---------------- 布局 ----------------
         // ① 要改的孔（吃掉剩余高度）→ ② 改成 → 结果 → 按钮 → 状态栏
         void BuildLayout(){
-            var holeCard = Ui.Card("① 要改的孔", 0, "在模型里点孔口圆边或孔内壁，可以连续点");
+            var holeCard = Ui.Card("① 要改的孔", 0, "点孔口圆边、孔内壁，或点带孔的平面（面上的孔全加进来）");
             var remove = Ui.Small("移除"); var clear = Ui.Small("清空");
             remove.Click += (s, e) => RemoveSelected();
             clear.Click += (s, e) => { if (busy) return; targets.Clear(); picked.Clear(); RefreshAll(); SetStatus("已清空。重新点要改的孔。", Ui.Accent); };
@@ -140,7 +149,7 @@ namespace TianGongCadSuite {
 
             status.Height = 24; status.Padding = new Padding(2, 0, 10, 0); status.AutoEllipsis = true;
             status.TextAlign = ContentAlignment.MiddleLeft; status.ForeColor = Ui.Accent; status.BackColor = Ui.Bg;
-            status.Text = "在模型里点要改的孔（孔口圆边或孔内壁）。";
+            status.Text = "在模型里点要改的孔（孔口圆边、孔内壁，或点一个带孔的平面）。";
 
             var stack = rootStack = new VerticalStack { Dock = DockStyle.Fill };
             stack.Add(holeCard, true); stack.Add(specCard); stack.Add(preview); stack.Add(resultCard); stack.Add(actions); stack.Add(status);
@@ -278,6 +287,8 @@ namespace TianGongCadSuite {
         public string LastResult = "";
         public int TargetCount { get { return targets.Count; } }
         public string PreviewText { get { return preview.Text; } }
+        public string StatusForTest { get { return status.Text; } }
+        public int TargetCountForTest { get { return targets.Count; } }
         public bool CanApply { get { return apply.Enabled; } }
         public bool CanUndo { get { return lastUndo != null && !lastUndo.IsEmpty; } }
         public bool WholeGroup { get { return wholeGroup.Checked; } set { wholeGroup.Checked = value; } }
@@ -335,16 +346,21 @@ namespace TianGongCadSuite {
                 resultCard.Visible = true; rootStack.Relayout();
                 LastResult = head + (o.Notes.Count > 0 ? "\r\n" + string.Join("\r\n", o.Notes.ToArray()) : "");
                 var notes = new List<string>();
+                var before = targets;
                 targets = HoleEditCad.Refresh(targets, notes);
+                // 高亮选择跟着重读的列表对齐（0.8.5）：重读可能少了几条（找不回来的），原来 picked 还按旧下标，之后「移除」删错高亮
+                var kept = new List<object>();
+                foreach (var t in targets) { int at = before.FindIndex(b => b.Sys == t.Sys && b.PartName == t.PartName); kept.Add(at >= 0 && at < picked.Count ? picked[at] : null); }
+                picked.Clear(); picked.AddRange(kept);
                 SetStatus(head, o.Failed > 0 ? Ui.Warn : Ui.Ok);
             } catch (Exception e) {
                 Log.Write("HoleEditRun", e);
-                SetStatus(e.Message, Ui.Bad);
+                SetStatus(AutoHoleWriter.Friendly(e), Ui.Bad);
                 LastResult = "改孔型中断：" + e.Message;
-                if (!SuppressDialogs) MessageBox.Show(this, e.Message, "改孔型", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                if (!SuppressDialogs) MessageBox.Show(this, AutoHoleWriter.Friendly(e), "改孔型", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             } finally {
                 busy = false; UseWaitCursor = false;
-                if (hadCommand) { try { StartPicking(); } catch (Exception ex) { SetStatus(ex.Message, Ui.Warn); } }
+                if (hadCommand) { try { StartPicking(); } catch (Exception ex) { SetStatus(AutoHoleWriter.Friendly(ex), Ui.Warn); } }
                 RefreshAll();
             }
         }
@@ -365,15 +381,20 @@ namespace TianGongCadSuite {
                 resultCard.Visible = true; rootStack.Relayout();
                 LastResult = r.Summary;
                 var notes = new List<string>();
+                var before = targets;
                 targets = HoleEditCad.Refresh(targets, notes);
+                // 高亮选择跟着重读的列表对齐（0.8.5）：重读可能少了几条（找不回来的），原来 picked 还按旧下标，之后「移除」删错高亮
+                var kept = new List<object>();
+                foreach (var t in targets) { int at = before.FindIndex(b => b.Sys == t.Sys && b.PartName == t.PartName); kept.Add(at >= 0 && at < picked.Count ? picked[at] : null); }
+                picked.Clear(); picked.AddRange(kept);
                 SetStatus(r.Summary, r.Failed > 0 ? Ui.Warn : Ui.Ok);
             } catch (Exception e) {
                 Log.Write("HoleEditUndoRun", e);
-                SetStatus("撤销没有完成：" + e.Message, Ui.Bad);
+                SetStatus("撤销没有完成：" + AutoHoleWriter.Friendly(e), Ui.Bad);
                 LastResult = "撤销中断：" + e.Message;
             } finally {
                 busy = false; UseWaitCursor = false;
-                if (hadCommand) { try { StartPicking(); } catch (Exception ex) { SetStatus(ex.Message, Ui.Warn); } }
+                if (hadCommand) { try { StartPicking(); } catch (Exception ex) { SetStatus(AutoHoleWriter.Friendly(ex), Ui.Warn); } }
                 RefreshAll();
             }
         }
@@ -382,24 +403,27 @@ namespace TianGongCadSuite {
         public void StartPicking(){
             try {
                 if (command != null) StopCommand();
-                if (assembly == null) throw new InvalidOperationException("请先打开装配文件。");
-                if (assembly.ReadOnly || assembly.InPlaceActivated) throw new InvalidOperationException("请在可编辑的装配顶层运行。");
+                if (assembly == null && partDoc == null) throw new InvalidOperationException("请先打开装配或零件文件。");
+                if (assembly != null && (assembly.ReadOnly || assembly.InPlaceActivated)) throw new InvalidOperationException("请在可编辑的装配顶层运行。");
+                if (partDoc != null && partDoc.ReadOnly) throw new InvalidOperationException("这个零件是只读打开的，改不了。请用可写方式打开。");
                 command = (F.ISECommand)app.CreateCommand((int)SolidEdgeConstants.seCmdFlag.seNoDeactivate);
                 commandConnection = new Connection(command, typeof(F.ISECommandEvents), this);
                 command.Start();
                 mouse = (F.ISEMouse)command.Mouse;
                 mouseConnection = new Connection(mouse, typeof(F.ISEMouseEvents), this);
                 mouse.ScaleMode = 1; mouse.WindowTypes = 1;
-                mouse.LocateMode = (int)SolidEdgeConstants.seLocateModes.seLocateSimple;
+                // QuickPick（0.8.5，用户要的）：和天工自己的选择一样，右键 / 停一下会弹出光标下层层叠叠的面、边列表，
+                // 点里面那个被挡住的就选中它（原来 seLocateSimple 只认最前面那层，右键还被拿去关窗口，遮挡面根本选不到）
+                mouse.LocateMode = (int)SolidEdgeConstants.seLocateModes.seLocateQuickPick;
                 mouse.EnabledMove = true;
-                ((F.ISEMouseEx)mouse).InterDocumentLocate = true;
+                ((F.ISEMouseEx)mouse).InterDocumentLocate = assembly != null;
                 ((F.ISEMouseEx2)mouse).LocateFrontToBack = true;
                 ((F.ISEMouseEx3)mouse).PathfinderLocate = false;
                 mouse.ClearLocateFilter();
                 mouse.AddToLocateFilter((int)SolidEdgeConstants.seLocateFilterConstants.seLocateEdge);
                 mouse.AddToLocateFilter((int)SolidEdgeConstants.seLocateFilterConstants.seLocateFace);
                 if (highlights != null) highlights.Delete();
-                highlights = assembly.HighlightSets.Add();
+                highlights = assembly != null ? assembly.HighlightSets.Add() : partDoc.HighlightSets.Add();
                 highlights.Color = ColorTranslator.ToOle(Color.DeepSkyBlue);
                 DrawHighlights();
             } catch { Cleanup(); throw; }
@@ -408,6 +432,19 @@ namespace TianGongCadSuite {
         public void AcceptPick(object selected){
             if (busy || closing || selected == null) return;
             try {
+                var pg = PickGeometry.Unwrap(selected);
+                var face = pg.Geometry as G.Face;
+                if (face != null && face.Geometry is G.Plane) {
+                    int skipped;
+                    var found = HoleEditCad.ResolveFace(selected, out skipped);
+                    if (found.Count == 0) throw new ArgumentException("这张面上没有认出孔特征打的孔" + (skipped > 0 ? "（" + skipped + " 个圆孔不是孔特征打的，改不了孔型）" : "") + "。请点孔口的圆形边线或孔的内壁。");
+                    bool was = targets.Count == 0; int added = 0;
+                    foreach (var h in found) if (AddTarget(h, selected)) added++;
+                    if (was && added > 0) LoadSpec(targets[0]);
+                    RefreshAll();
+                    SetStatus("从这张面上加入 " + added + " 个孔" + (found.Count > added ? "（" + (found.Count - added) + " 个已经在列表里）" : "") + (skipped > 0 ? "，" + skipped + " 个不是孔特征打的、跳过" : "") + "。", added > 0 ? Ui.Ok : Ui.Muted);
+                    return;
+                }
                 var t = HoleEditCad.Resolve(selected);
                 bool first = targets.Count == 0;
                 if (!AddTarget(t, selected)) { SetStatus("这个孔已经在列表里了。", Ui.Muted); return; }
@@ -415,7 +452,7 @@ namespace TianGongCadSuite {
                 RefreshAll();
                 SetStatus("已加入：" + t.Label, Ui.Ok);
             } catch (Exception e) {
-                SetStatus(e.Message, Ui.Warn);
+                SetStatus(AutoHoleWriter.FriendlyPick(e), Ui.Warn);
                 Log.Write("HoleEditPick", e);
             }
         }
@@ -427,11 +464,17 @@ namespace TianGongCadSuite {
             var c = command; command = null; mouse = null;
             if (c != null) try { c.Done = true; } catch { }
         }
-        void Cleanup(){ if (closing) return; closing = true; StopCommand(); try { tips.Dispose(); } catch { } }
+        static HoleEditUndo carried; static string carriedFor = "";
+        string HostName(){ try { return assembly != null ? assembly.FullName : partDoc != null ? partDoc.FullName : ""; } catch { return ""; } }
+        void Cleanup(){
+            if (closing) return; closing = true;
+            if (lastUndo != null && !lastUndo.IsEmpty) { carried = lastUndo; carriedFor = HostName(); }
+            StopCommand(); try { tips.Dispose(); } catch { }
+        }
 
         public new void MouseClick(short b, short s, double x, double y, double z, object w, int k, object g){
             if (b == 1) { if (g == null) { SetStatus("这里没有捕捉到对象。零件没激活（重开大装配后常见）时，先在天工里右键它选「激活」。", Ui.Warn); return; } AcceptPick(g); }
-            else if (b == 2) Close();
+            // 右键交给天工弹 QuickPick 选遮挡面（0.8.5）。原来右键 = 关窗口；关窗口用 Esc 或「关闭」按钮
         }
         public new void MouseDown(short b, short s, double x, double y, double z, object w, int k, object g){ }
         public new void MouseUp(short b, short s, double x, double y, double z, object w, int k, object g){ }
@@ -442,7 +485,12 @@ namespace TianGongCadSuite {
         public void Idle(int n, out bool more){ more = false; }
         void F.ISECommandEvents.Activate(){ }
         void F.ISECommandEvents.Deactivate(){ }
-        public new void KeyDown(ref short key, short shift){ if (key == 27) Close(); }
+        public new void KeyDown(ref short key, short shift){ if (key == 27 && ConfirmQuickClose("Esc")) Close(); }
+        readonly QuickClose quickClose = new QuickClose();
+        bool ConfirmQuickClose(string how){
+            if (busy) return false;
+            return quickClose.Confirm(how, targets.Count == 0 ? "" : "已选的 " + targets.Count + " 个孔", m => SetStatus(m, Ui.Warn));
+        }
         public new void KeyPress(ref short key){ }
         public new void KeyUp(ref short key, short shift){ }
     }

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
@@ -53,7 +53,7 @@ namespace TianGongCadSuite {
         readonly Button jump = Ui.Small("跳转到孔");
         readonly Button goDrill = Ui.Small("去配孔");
         // 「去配孔」：打开自动打孔，把这条漏打孔涉及的孔带进去当参考孔（由命令模块接上，见 AutoHoleModule）
-        public Action<List<HoleRecord>, string> GoDrill;
+        public Func<List<HoleRecord>, string, AutoHoleForm> GoDrill;
 
         public AutoHoleCheckForm(F.Application application, A.AssemblyDocument document){
             app = application; assembly = document;
@@ -161,7 +161,7 @@ namespace TianGongCadSuite {
                 using (var p = new Pen(Color.FromArgb(90, c))) g.DrawPath(p, path);
             }
             g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.Default;
-            TextRenderer.DrawText(g, it.KindName, Ui.F8, tag, c, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            TextRenderer.DrawText(g, it.Done.Length > 0 ? "已配" : it.KindName, Ui.F8, tag, it.Done.Length > 0 ? Ui.Ok : c, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
             int x = tag.Right + 10, w = Math.Max(10, e.Bounds.Right - x - 10);
             TextRenderer.DrawText(g, it.Message, Ui.F9, new Rectangle(x, e.Bounds.Y + 5, w, 20), Ui.Text, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
             var parts = it.Holes.Select(h => h.PartName).Distinct().ToArray();
@@ -205,7 +205,8 @@ namespace TianGongCadSuite {
                 var holes = AutoHoleWriter.CollectAssemblyHoles(assembly, out warnings, out shafts, out parts, (i, n) => pulse("正在读取零件", i, n));
                 var bodies = AutoHoleWriter.OccurrenceBodies.Build(parts);
                 var allNames = new List<string>();
-                foreach (var ap in parts) if (!allNames.Contains(ap.Name)) allNames.Add(ap.Name);
+                foreach (var ap in parts) if (!ap.Ignored && !allNames.Contains(ap.Name)) allNames.Add(ap.Name);   // 隐藏 / 参考件不当漏打孔的零件
+                int ignored = parts.Count(x => x.Ignored);
                 int nested = parts.Count(x => x.Nested);
                 lastHoles = holes; lastShafts = shafts;
                 SetStatus("读到 " + holes.Count + " 个孔，正在配对…", Ui.Accent); Application.DoEvents();
@@ -214,12 +215,13 @@ namespace TianGongCadSuite {
                 failedParts = warnings.Count;
                 string s = summary.Text;
                 if (nested > 0) s += "　（含子装配里的 " + nested + " 个零件）";
+                if (ignored > 0) s += "　（" + ignored + " 个隐藏 / 参考零件不查漏孔）";
                 if (warnings.Count > 0) s += "　（" + warnings.Count + " 个零件读取失败）";
                 SetStatus(s, issues.Count(i => i.Kind != HoleIssueKind.Unpaired) == 0 ? Ui.Ok : Ui.Warn);
             } catch (Exception e) {
                 Log.Write("AutoHoleCheck", e);
-                SetStatus(e.Message, Ui.Bad);
-                MessageBox.Show(this, e.Message, "配孔检查", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                SetStatus(AutoHoleWriter.Friendly(e), Ui.Bad);
+                MessageBox.Show(this, AutoHoleWriter.Friendly(e), "配孔检查", MessageBoxButtons.OK, MessageBoxIcon.Error);
             } finally {
                 busy = false; run.Enabled = true; run.Text = checkedOnce ? "重新检查" : "开始检查"; UseWaitCursor = false;
             }
@@ -271,7 +273,7 @@ namespace TianGongCadSuite {
             jump.Enabled = it.Holes.Count > 0;
             goDrill.Enabled = it.Kind == HoleIssueKind.MissingHole && GoDrill != null;
             var sb = new StringBuilder();
-            sb.Append("【").Append(it.KindName).Append("】").Append(it.Message).Append("\r\n");
+            sb.Append("【").Append(it.KindName).Append("】").Append(it.Done.Length > 0 ? "（" + it.Done + "）" : "").Append(it.Message).Append("\r\n");
             foreach (var h in it.Holes.OrderBy(x => x.PartName, StringComparer.Ordinal))
                 sb.Append("· ").Append(h.PartName).Append("　Φ").Append(h.DiameterMm.ToString("0.##", CultureInfo.InvariantCulture))
                   .Append("　@X").Append((h.Center.X * 1000).ToString("0.#", CultureInfo.InvariantCulture))
@@ -335,7 +337,15 @@ namespace TianGongCadSuite {
             if (idx < 0 || idx >= shown.Count || GoDrill == null) return;
             var it = shown[idx];
             if (it.Kind != HoleIssueKind.MissingHole) { SetStatus("只有「漏打孔」能直接去配孔。", Ui.Warn); return; }
-            try { GoDrill(new List<HoleRecord>(it.Holes), it.MissingPart); }
+            try {
+                var f = GoDrill(new List<HoleRecord>(it.Holes), it.MissingPart);
+                // 去配孔打完：这一条标成"已配"（0.8.5）。原来检查窗口里这条一直挂着红的「漏打孔」，配了哪几条、还剩哪几条只能再整装配查一遍
+                if (f != null) f.DrillDone += made => {
+                    if (made <= 0 || IsDisposed) return;
+                    it.Done = "已配 " + made + " 个孔";
+                    try { list.Invalidate(); ShowDetail(); SetStatus("「" + it.MissingPart + "」上配好了 " + made + " 个孔（这一条已标成已配；要确认可以点「重新检查」）。", Ui.Ok); } catch { }
+                };
+            }
             catch (Exception e) { Log.Write("AutoHoleCheckGoDrill", e); SetStatus("打不开自动打孔：" + e.Message, Ui.Bad); }
         }
 

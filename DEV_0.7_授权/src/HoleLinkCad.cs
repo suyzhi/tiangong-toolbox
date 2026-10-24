@@ -432,6 +432,14 @@ namespace TianGongCadSuite {
             return item;
         }
 
+        // 重算零件的每个实体（0.8.5）：多实体零件上挪的孔可能在第 2 个以后的实体上，原来只重算第 1 个实体，
+        // 那些实体上的孔几何不跟着动、状态也读不准（0.8.4 交接里记的遗留）
+        static void RecomputeAll(P.PartDocument part){
+            var models = new List<P.Model>();
+            try { if (PartBodies.Multi(part)) models.AddRange(PartBodies.All(part)); else models.Add(part.Models.Item(1)); } catch (Exception e) { Log.Write("HoleSyncModels", e); }
+            foreach (var m in models) { try { m.Recompute(); } catch (Exception e) { Log.Write("HoleSyncRecompute", e); } }
+        }
+
         // 把错位的孔挪回去。返回同一份报告（Moved / Failed / Notes 填好）。
         public static SyncReport Apply(SyncReport report){
             if (report == null) return report;
@@ -463,7 +471,8 @@ namespace TianGongCadSuite {
                 }
                 if (moved.Count == 0) continue;
                 P.Model model = null;
-                try { model = part.Models.Item(1); model.Recompute(); } catch (Exception e) { Log.Write("HoleSyncRecompute", e); }
+                try { model = part.Models.Item(1); } catch { }
+                RecomputeAll(part);
                 bool revertedAny = false;
                 foreach (var kvm in moved) {
                     var it = kvm.Key;
@@ -488,7 +497,7 @@ namespace TianGongCadSuite {
                         revertedAny = true;
                     } catch (Exception e) { Log.Write("HoleSyncRevert", e); }
                 }
-                if (revertedAny && model != null) { try { model.Recompute(); } catch (Exception e) { Log.Write("HoleSyncRecompute2", e); } }
+                if (revertedAny && model != null) RecomputeAll(part);
                 try { HoleScanCad.Invalidate(part); } catch { }
             }
             return report;

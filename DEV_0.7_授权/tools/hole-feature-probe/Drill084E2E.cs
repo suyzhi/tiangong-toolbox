@@ -51,6 +51,13 @@ class Drill084E2E {
         }
         return null;
     }
+    // 组成员：1 个复制 + 2 个多孔特征（天工列组成员的先后不固定，0.8.5 一次是 [多孔,多孔,复制]）
+    static bool LinkGroupOk(string g){
+        int a = g.IndexOf('['), b = a < 0 ? -1 : g.IndexOf(']', a);
+        if (b < 0) return false;
+        var m = g.Substring(a + 1, b - a - 1).Split(',');
+        return m.Length == 3 && m.Count(x => x == "复制") == 1 && m.Count(x => x == "多孔") == 2;
+    }
     static P.Model Plate(P.PartDocument part, double w, double h, double t){
         var prof = part.ProfileSets.Add().Profiles.Add(FindXY(part));
         var Ls = new S.Line2d[4];
@@ -201,7 +208,7 @@ class Drill084E2E {
         AutoHoleForm form = null;
         try {
             form = new AutoHoleForm(app, a0); form.SuppressDialogs = true; form.Show(); Pump(8);
-            form.KeepLink = true;
+            form.KeepLink = true; form.ScanFaceOnPick = true;   // 用户设置（autohole.tsv）可能关着自动识别
             L("① A 顶面认孔 → B 底面 → 打孔");
             form.AcceptPick(a0.CreateReference(occA, FaceAtZ(mA, 0.01))); Pump(4);
             form.ScanFaceOnPick = false; form.AcceptPick(a0.CreateReference(occB, FaceAtZ(mBm, 0.0))); Pump(4); form.ScanFaceOnPick = true;
@@ -212,7 +219,7 @@ class Drill084E2E {
             L("   B 特征树：" + Tree(partB));
             L("   B 组：" + Groups(mBm));
             var gs = GroupList(mBm);
-            Check(gs.Count == 1 && gs[0].Name.StartsWith("关联孔 ") && Groups(mBm).Contains("[复制,多孔,多孔]"), "孔位链接 + 两个多孔孔特征编成一个「关联孔 …」组");
+            Check(gs.Count == 1 && gs[0].Name.StartsWith("关联孔 ") && LinkGroupOk(Groups(mBm)), "孔位链接 + 两个多孔孔特征编成一个「关联孔 …」组");
             Check(gs.Count == 1 && HoleGrouping.IsLinkGroup(gs[0]), "组上挂着孔位链接组的标记");
             Check(form.UiSummary().IndexOf("打孔面 0 个") >= 0, "打完打孔面列表清空（不会把用过的面再打一遍）");
             Check(ReferenceEquals(app.ActiveDocument, a0), "回到顶层装配");
@@ -255,7 +262,7 @@ class Drill084E2E {
                 ef.ApplyForTest(); Pump(8);
                 L("   改后：" + Udps(mBm) + "　组：" + Groups(mBm));
                 Check(Udps(mBm).Contains("M8") && Udps(mBm).Contains("M6 沉孔 Φ6.6/Φ11"), "只改了点中的多孔特征，另一个规格没被整组带着改");
-                Check(GroupList(mBm).Count == 1 && Groups(mBm).Contains("[复制,多孔,多孔]"), "链接组还在");
+                Check(GroupList(mBm).Count == 1 && LinkGroupOk(Groups(mBm)), "链接组还在");
                 ef.UndoForTest(); Pump(8);
                 Check(Udps(mBm) == before, "撤销修改后回到原样（" + Udps(mBm) + "）");
             } finally { if (ef != null) try { ef.Close(); } catch { } Pump(4); }
@@ -330,7 +337,7 @@ class Drill084E2E {
         AutoHoleForm form = null;
         try {
             form = new AutoHoleForm(app, a0); form.SuppressDialogs = true; form.Show(); Pump(8);
-            form.KeepLink = true;
+            form.KeepLink = true; form.ScanFaceOnPick = true;   // 用户设置（autohole.tsv）可能关着自动识别
             form.AcceptPick(a0.CreateReference(p1, FaceAtZ(pm, 0.005))); Pump(3);
             form.AcceptPick(a0.CreateReference(p2, FaceAtZ((P.Model)((P.PartDocument)p2.OccurrenceDocument).Models.Item(1), 0.005))); Pump(3);
             form.ScanFaceOnPick = false;

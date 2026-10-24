@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using G=SolidEdgeGeometry;
 using P=SolidEdgePart;
@@ -51,10 +51,29 @@ namespace TianGongCadSuite {
         // ---- 认孔：点孔口圆边 / 孔内壁 ----
         public static EditableHole Resolve(object selection){
             var pg = PickGeometry.Unwrap(selection);
+            object doc = null; try { doc = ((dynamic)pg.Geometry).Document; } catch { }
+            if (doc is P.SheetMetalDocument) throw new ArgumentException("这是钣金件（.psm）上的孔：改孔型目前只支持普通零件（.par），钣金件请在天工里直接编辑孔特征。");
             ScannedHole sh;
             if (pg.Geometry is G.Edge) sh = HoleScanCad.ScanEdge(selection);
             else if (pg.Geometry is G.Face && !(((G.Face)pg.Geometry).Geometry is G.Plane)) { string label; sh = HoleScanCad.ScanSurface(selection, out label); }
-            else throw new ArgumentException("请点孔口的圆形边线，或者孔的内壁。");
+            else throw new ArgumentException("请点孔口的圆形边线、孔的内壁，或者点一个带孔的平面（面上的孔全加进来）。");
+            return Resolve(sh);
+        }
+
+        // 点一个平面：面上的孔全认出来、逐个找回孔特征（0.8.5；原来点平面只报"请点孔口的圆形边线"，现场日志一天两次）。
+        // 不是孔特征打的（拉伸切除、别的特征）数进 skipped
+        public static List<EditableHole> ResolveFace(object selection, out int skipped){
+            skipped = 0;
+            var list = new List<EditableHole>();
+            var t = AutoHoleReader.ReadTarget(selection);
+            string how; int notHole;
+            foreach (var sh in HoleScanCad.ScanFace(t, out how, out notHole)) {
+                try { list.Add(Resolve(sh)); } catch (Exception e) { skipped++; Log.Write("HoleEditFace", e.Message); }
+            }
+            return list;
+        }
+
+        static EditableHole Resolve(ScannedHole sh){
             var part = sh.Owner as P.PartDocument;
             if (part == null || sh.Placement == null) throw new ArgumentException("读不到这个孔所在的零件，请在装配里直接点零件上的孔。");
             var c = sh.Placement.InversePoint(sh.Center);
@@ -133,6 +152,15 @@ namespace TianGongCadSuite {
             }
             e.Spec = ReadSpec(e.Hole, out e.Through);
             return e;
+        }
+
+        // 重算（0.8.5）：多实体零件上要改的孔可能在第 2 个以后的实体上，只重算第 1 个实体时那些孔的几何不跟着变、
+        // 回读状态也不准（"改完 CAD 报特征失败、已恢复原样"误报）。单实体零件照旧只算一次
+        internal static void RecomputeAll(P.PartDocument part, P.Model first){
+            var models = new List<P.Model>();
+            try { if (PartBodies.Multi(part)) models.AddRange(PartBodies.All(part)); } catch { }
+            if (models.Count == 0) models.Add(first);
+            foreach (var m in models) { try { AutoHoleWriter.Attempt("重算", () => { m.Recompute(); return 0; }); } catch (Exception e) { Log.Write("HoleEditRecompute", e); } }
         }
 
         // ---- 回读规格 ----
@@ -235,7 +263,7 @@ namespace TianGongCadSuite {
                         o.Undo.RestoreOne(part, h);
                     }
                 }
-                if (ready.Count > 0) { try { AutoHoleWriter.Attempt("重算", () => { model.Recompute(); return 0; }); } catch (Exception e) { Log.Write("HoleEditRecompute", e); } }
+                if (ready.Count > 0) RecomputeAll(part, model);
                 holes = ready;
             }
             foreach (var h in holes) {
@@ -254,7 +282,7 @@ namespace TianGongCadSuite {
                     o.Undo.RestoreOne(part, h);
                 }
             }
-            try { AutoHoleWriter.Attempt("重算", () => { model.Recompute(); return 0; }); } catch (Exception e) { Log.Write("HoleEditRecompute", e); }
+            RecomputeAll(part, model);
 
             // 重算后逐个看状态：失败的退回原样（孔型改错了不能留一个坏特征给用户）
             var failed = new List<P.Hole>();
@@ -267,7 +295,7 @@ namespace TianGongCadSuite {
                     o.Undo.RestoreOne(part, h);
                     changed.Remove(h);
                 }
-                try { model.Recompute(); } catch (Exception e) { Log.Write("HoleEditRecompute", e); }
+                RecomputeAll(part, model);
                 o.Failed += failed.Count;
             }
 
@@ -307,7 +335,7 @@ namespace TianGongCadSuite {
         internal static void SwapData(P.PartDocument part, P.Model model, P.Hole h, HoleSpec spec){
             if (spec.Kind == HoleKind.Tapped) {
                 SwapPlain(part, h, spec);
-                AutoHoleWriter.Attempt("重算", () => { model.Recompute(); return 0; });
+                RecomputeAll(part, model);
             }
             SwapFinal(part, h, spec);
         }
@@ -506,7 +534,7 @@ namespace TianGongCadSuite {
                 if (!touched) continue;
                 var taken = AutoHoleWriter.ExistingFeatureNames(model);
                 taken.Remove(old);
-                string want = HoleNaming.Unique(HoleNaming.LinkGroup(specs, refs), taken);
+                string want = HoleNaming.Unique(HoleNaming.LinkGroup(specs, refs, HoleNaming.SideIn(old)), taken);
                 if (want == old) continue;
                 o.Undo.Named(part, g);
                 HoleGrouping.TryName(g, want);

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
@@ -394,11 +394,11 @@ namespace TianGongCadSuite {
                     SetStatus("正在生成第 " + i + " / " + n + " 块板子…", Ui.Accent);
                     try { status.Update(); Application.DoEvents(); } catch { }
                 });
-                foreach (var s in chosen) generated.Add(Key(s));
+                for (int i = 0; i < chosen.Count; i++) if (!props.Failed.Contains(i)) generated.Add(Key(chosen[i]));
                 SaveSettings();
                 busy = false; Enabled = true; UseWaitCursor = false;
                 Recompute();   // 刷新列表：生成过的标出来、取消勾选
-                string msg = "已生成 " + chosen.Count + " 块板子：" + dir + "　记得保存装配。";
+                string msg = "已生成 " + (chosen.Count - props.Failed.Count) + " 块板子" + (props.Failed.Count > 0 ? "（" + props.Failed.Count + " 块没生成，见下面）" : "") + "：" + dir + "　记得保存装配。";
                 if (props.Problems.Count > 0) msg += "　注意：" + string.Join("；", props.Problems.ToArray());
                 SetStatus(msg, props.Problems.Count > 0 ? Ui.Warn : Ui.Ok);
                 tips.SetToolTip(status, msg);

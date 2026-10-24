@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -16,6 +16,34 @@ namespace TianGongCadSuite {
             CheckChainPure();
             NativeLinkPure();
             HoleSpotsPure();
+            FaceShapePure();
+            MergeArcsPure();
+        }
+
+        // 0.8.5 孔心落没落在面的材料上：L 形面（缺一角）、面上的孔口（算在面上，交给"已经有孔"去说）、读不到面片时不拦
+        static void MergeArcsPure(){
+            var z = new V3(0, 0, 1);
+            var half1 = new CircleCandidate { Center = new V3(0.01, 0.01, 0), Axis = z, RadiusMm = 3.3, Closed = false };
+            var half2 = new CircleCandidate { Center = new V3(0.01, 0.01, 0), Axis = z, RadiusMm = 3.3, Closed = false };
+            var slotEnd = new CircleCandidate { Center = new V3(0.05, 0.01, 0), Axis = z, RadiusMm = 4.5, Closed = false };
+            var full = new CircleCandidate { Center = new V3(0.08, 0.01, 0), Axis = z, RadiusMm = 3.3 };
+            var m = HoleScan.MergeArcs(new List<CircleCandidate>{ half1, half2, slotEnd, full });
+            Assert(m.Count == 3 && m.Count(c => c.Closed) == 2, "两段半圆拼成一个整圆孔口，腰孔一头的单段圆弧不算（实 " + m.Count + "）");
+            var holes = HoleScan.FromCircles(new List<CircleCandidate>{ half1, half2 }, new List<CircleCandidate>{ half1, half2 });
+            Assert(holes.Count == 1 && Math.Abs(holes[0].DiameterMm - 6.6) < 1e-9, "导入件拆成两段的孔口照样认出 Φ6.6");
+        }
+
+        static void FaceShapePure(){
+            // L 形：0..0.1 × 0..0.05 加 0..0.05 × 0.05..0.1（右上角 0.05..0.1 × 0.05..0.1 空着）
+            var t = new double[]{ 0,0, 0.1,0, 0.1,0.05,   0,0, 0.1,0.05, 0,0.05,   0,0.05, 0.05,0.05, 0.05,0.1,   0,0.05, 0.05,0.1, 0,0.1 };
+            var c = new List<double[]>{ new[]{ 0.02, 0.02, 0.0033 }, new[]{ 0.09, 0.09, 0.03 } };
+            Assert(FaceShape.Inside(t, c, 0.08, 0.02, 0.001), "L 形面：下半截里的孔心在面上");
+            Assert(FaceShape.Inside(t, c, 0.02, 0.08, 0.001), "L 形面：左上那一块里的孔心在面上");
+            Assert(!FaceShape.Inside(t, c, 0.08, 0.08, 0.001), "L 形面：缺掉的右上角不在面上（原来按包围盒算在面上，CAD 报含糊错误）");
+            Assert(FaceShape.Inside(t, c, 0.1005, 0.02, 0.001), "离边 0.5mm（容差 1mm 以内）算在面上");
+            Assert(FaceShape.Inside(t, c, 0.02, 0.02, 0.001), "落在面上已有的孔口圆心上：算在面上（后面报「本来就有孔」）");
+            Assert(!FaceShape.Inside(t, c, 0.07, 0.07, 0.001), "大圆窗口里不在圆心的位置：不在面上");
+            Assert(FaceShape.Inside(null, null, 5, 5, 0.001), "读不到面片：不拦");
         }
 
         // 0.7.10 打孔提速：实体圆边读一遍、孔位在内存里比（HoleSpots），判定口径必须和原来逐个读边的 ExistingHoleAt 一样。
@@ -27,14 +55,25 @@ namespace TianGongCadSuite {
             s.Add(new V3(0.05, 0.05, 0), new V3(0, 0, 1), 0);                // 半径 0 的不收
             double d;
             Assert(s.Count == 2, "半径 0 的圆不收（实 " + s.Count + "）");
-            Assert(s.At(new V3(0.03, 0.04, 0), n, out d) && Math.Abs(d - 6.6) < 1e-9, "同轴（不同高度）的竖孔认出来，给出孔口直径 6.6");
-            Assert(s.At(new V3(0.0304, 0.04, 0), n, out d), "径向差 0.4mm 仍算同一个孔位（容差 0.5mm）");
-            Assert(!s.At(new V3(0.0306, 0.04, 0), n, out d), "径向差 0.6mm 不算");
+            Assert(s.At(new V3(0.03, 0.04, 0.01), n, out d) && Math.Abs(d - 6.6) < 1e-9, "孔口在打孔面上的竖孔认出来，给出孔口直径 6.6");
+            Assert(s.At(new V3(0.0304, 0.04, 0.0101), n, out d), "径向差 0.4mm、轴向差 0.1mm 仍算同一个孔位（容差 0.5 / 0.2mm）");
+            Assert(!s.At(new V3(0.0306, 0.04, 0.01), n, out d), "径向差 0.6mm 不算");
+            Assert(!s.At(new V3(0.03, 0.04, 0), n, out d), "0.8.5：同轴但孔口不在打孔面上（反面打的盲孔）不算已经有孔（现场截图）");
+            Assert(!s.At(new V3(0.03, 0.04, 0.0103), n, out d), "轴向差 0.3mm 不算");
             Assert(!s.At(new V3(0.08, 0.04, 0), n, out d), "横孔不算这里已经有孔（围栏 FenceHoleE2E 第 4 条）");
-            Assert(s.At(new V3(0.07, 0.04, 0.005), new V3(1, 0, 0), out d), "沿 x 打孔、孔心在横孔轴线上时就算");
+            Assert(s.At(new V3(0.08, 0.04, 0.005), new V3(1, 0, 0), out d), "沿 x 打孔、孔心就在横孔孔口上时就算");
             s.Plan(new V3(0.1, 0.1, 0), n, 5);
-            Assert(s.At(new V3(0.1, 0.1, 0.002), n, out d) && Math.Abs(d - 5) < 1e-9, "这批准备打的孔：同一位置后面的请求算已经有孔");
+            Assert(s.At(new V3(0.1, 0.1, 0), n, out d) && Math.Abs(d - 5) < 1e-9, "这批准备打的孔：同一位置后面的请求算已经有孔");
             Assert(!new HoleSpots().At(new V3(0, 0, 0), n, out d) && d == 0, "空表：没有孔");
+            // 0.8.5 盲孔打穿：孔口 z=0.01、向下 15 深；10 厚的板在 z=0 处有出口圆 → 10mm 处穿出；材料够厚（孔底圆在 15mm）→ 0
+            var b = new HoleSpots();
+            b.Add(new V3(0.05, 0.03, 0.01), new V3(0, 0, 1), 0.0033); b.Add(new V3(0.05, 0.03, 0.0), new V3(0, 0, 1), 0.0033);
+            Assert(Math.Abs(b.ExitDepth(new V3(0.05, 0.03, 0.01), n, 0.0033, 0.015) - 0.01) < 1e-9, "15 深的盲孔在 10mm 处穿出");
+            var c2 = new HoleSpots();
+            c2.Add(new V3(0.05, 0.03, 0.03), new V3(0, 0, 1), 0.0033); c2.Add(new V3(0.05, 0.03, 0.015), new V3(0, 0, 1), 0.0033);
+            Assert(c2.ExitDepth(new V3(0.05, 0.03, 0.03), n, 0.0033, 0.015) == 0, "孔底圆正好在 15mm（平底盲孔）不算穿出");
+            Assert(b.ExitDepth(new V3(0.05, 0.03, 0.01), n, 0.0025, 0.015) == 0, "大小不一样的同轴圆不算");
+
             // 0.7.12 这批里互相重叠的孔（腰孔两头当成两个参考孔）
             var o = new HoleSpots();
             o.Plan(new V3(-0.692, 0, 0), n, 20);
@@ -293,6 +332,10 @@ namespace TianGongCadSuite {
             Assert(HoleNaming.LinkGroup(two, new[]{ "A", "B" }) == "关联孔 6 个（2 种规格，跟随 A 等 2 个零件）", "两种规格两个参考零件：" + HoleNaming.LinkGroup(two, new[]{ "A", "B" }));
             Assert(HoleNaming.LinkGroup(two, new string[0]) == "关联孔 6 个（2 种规格）", "没有参考零件名：" + HoleNaming.LinkGroup(two, new string[0]));
             Assert(HoleNaming.LinkGroup(one, null) == "关联孔 M6 螺纹孔（螺纹全长） ×4", "参考零件为 null 也不出错");
+            Assert(HoleNaming.LinkGroup(one, new[]{ "支撑条" }, "顶面") == "关联孔 M6 螺纹孔（螺纹全长） ×4 · 顶面（跟随 支撑条）", "0.8.5 组名带面的方位：" + HoleNaming.LinkGroup(one, new[]{ "支撑条" }, "顶面"));
+            Assert(HoleNaming.LinkGroup(two, new[]{ "A" }, "左侧面") == "关联孔 6 个 · 左侧面（2 种规格，跟随 A）", "几种规格也带方位：" + HoleNaming.LinkGroup(two, new[]{ "A" }, "左侧面"));
+            Assert(HoleNaming.SideIn("关联孔 M6 螺纹孔 ×4 · 左侧面（跟随 A） (2)") == "左侧面" && HoleNaming.SideIn("关联孔 M6 ×4（跟随 A）") == "", "改孔型重起名时认出组名里的方位");
+            Assert(HoleNaming.SideOf(new V3(0, 0, -1)) == "底面" && HoleNaming.SideOf(new V3(1, 0, 0.01)) == "右侧面" && HoleNaming.SideOf(new V3(0, -1, 0)) == "前面" && HoleNaming.SideOf(new V3(0.7, 0.7, 0)) == "斜面", "方位：底面 / 右侧面 / 前面 / 斜面");
             var lng = new List<KeyValuePair<HoleSpec, int>> { new KeyValuePair<HoleSpec, int>(longSpec, 9) };
             Assert(HoleNaming.LinkGroup(lng, new[]{ "YF25.07G01-L1-M30-02-23-很长很长的零件名" }).Length <= HoleNaming.MaxLength, "链接组名长度封顶");
         }

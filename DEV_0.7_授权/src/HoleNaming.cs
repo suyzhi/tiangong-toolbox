@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 
@@ -56,7 +56,10 @@ namespace TianGongCadSuite {
         //   几种规格：「关联孔 6 个（2 种规格，跟随 支撑条）」
         //   几个参考零件：「…（跟随 支撑条 等 2 个零件）」
         // specs：规格 + 这次打的个数（按出现顺序）；refs：参考零件名（去扩展名，重复的只算一次）
-        public static string LinkGroup(IList<KeyValuePair<HoleSpec, int>> specs, IList<string> refs){
+        // side：打孔面在零件里的方位（「顶面」「左侧面」…，见 SideOf），0.8.5 起写进组名 ——
+        // 一个零件几张面各打一批时，原来是一排「关联孔 M5 … ×2」「… (2)」「… (3)」，分不清哪组是哪张面
+        public static string LinkGroup(IList<KeyValuePair<HoleSpec, int>> specs, IList<string> refs){ return LinkGroup(specs, refs, null); }
+        public static string LinkGroup(IList<KeyValuePair<HoleSpec, int>> specs, IList<string> refs, string side){
             var names = new List<string>();
             if (refs != null) foreach (var r in refs) { string n = (r ?? "").Trim(); if (n.Length > 0 && !names.Contains(n)) names.Add(n); }
             string follow = names.Count == 0 ? "" : "（跟随 " + names[0] + (names.Count > 1 ? " 等 " + names.Count + " 个零件" : "") + "）";
@@ -64,9 +67,29 @@ namespace TianGongCadSuite {
             HoleSpec only = null;
             if (specs != null) foreach (var kv in specs) { if (kv.Value <= 0) continue; total += kv.Value; kinds++; only = kv.Key; }
             string what = kinds == 1 ? Short(only) + " ×" + total : total + " 个" + (kinds > 1 ? "（" + kinds + " 种规格）" : "");
-            if (kinds > 1 && follow.Length > 0) what = total + " 个（" + kinds + " 种规格，" + follow.Substring(1);
-            else what += follow;
+            string at = string.IsNullOrEmpty(side) ? "" : " · " + side;
+            if (kinds > 1 && follow.Length > 0) what = total + " 个" + at + "（" + kinds + " 种规格，" + follow.Substring(1);
+            else what += at + follow;
             return Clip("关联孔 " + what);
+        }
+
+        // 面的外法向（零件坐标）→ 方位：±Z 顶面/底面，±X 右侧面/左侧面，±Y 后面/前面（天工主视图从 -Y 看）；不沿轴的叫"斜面"
+        public static string SideOf(V3 outwardLocal){
+            if (!outwardLocal.Finite || outwardLocal.Length < 1e-9) return "";
+            var n = outwardLocal.Unit();
+            double ax = Math.Abs(n.X), ay = Math.Abs(n.Y), az = Math.Abs(n.Z);
+            if (az >= 0.98) return n.Z > 0 ? "顶面" : "底面";
+            if (ax >= 0.98) return n.X > 0 ? "右侧面" : "左侧面";
+            if (ay >= 0.98) return n.Y > 0 ? "后面" : "前面";
+            return "斜面";
+        }
+
+        // 组名里带的方位（改孔型重起组名时留着它）
+        static readonly string[] Sides = { "顶面", "底面", "右侧面", "左侧面", "后面", "前面", "斜面" };
+        public static string SideIn(string groupName){
+            if (string.IsNullOrEmpty(groupName)) return "";
+            foreach (var s in Sides) if (groupName.IndexOf(" · " + s, StringComparison.Ordinal) >= 0) return s;
+            return "";
         }
 
         // 在已有名字里找一个不重名的：base、base (2)、base (3)……

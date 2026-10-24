@@ -24,6 +24,8 @@ namespace TianGongCadSuite {
         public G.Body Body;
         public List<G.Body> Bodies = new List<G.Body>();
         public bool Nested;
+        // 隐藏的、只作参考的（「范围」「包络」这类不计入物理属性的零件）：配孔检查不拿它当"漏打孔的那个零件"（0.8.5，见 RefOnly）
+        public bool Ignored;
         public A.Occurrence Top;                 // 顶层实例（Nested=false）
         public A.SubOccurrence Sub;              // 子装配里的实例（Nested=true）
         A.AssemblyDocument assembly;
@@ -73,7 +75,7 @@ namespace TianGongCadSuite {
                 if (part == null) continue;
                 var bodies = BodiesOf(part, name, warnings);
                 if (bodies.Count == 0) continue;
-                result.Add(new AssemblyPart { Name = name, Part = part, Body = bodies[0], Bodies = bodies, Top = occ, assembly = assembly });
+                result.Add(new AssemblyPart { Name = name, Part = part, Body = bodies[0], Bodies = bodies, Top = occ, assembly = assembly, Ignored = RefOnly(occ) });
             }
             return result;
         }
@@ -99,8 +101,52 @@ namespace TianGongCadSuite {
                 if (part == null) continue;
                 var bodies = BodiesOf(part, name, warnings);
                 if (bodies.Count == 0) continue;
-                result.Add(new AssemblyPart { Name = name, Part = part, Body = bodies[0], Bodies = bodies, Nested = true, Sub = s, assembly = assembly });
+                result.Add(new AssemblyPart { Name = name, Part = part, Body = bodies[0], Bodies = bodies, Nested = true, Sub = s, assembly = assembly, Ignored = RefOnly(s) });
             }
+        }
+
+        // 这个零件文件在装配里一共用了几次（顶层 + 各级子装配，0.8.5）。只读文件名，不取 OccurrenceDocument（不加载零件）。
+        // 打孔是改零件文件：用了 4 次的支架，4 处都会长出这些孔 —— 自动打孔点面时要先说清楚。读不出来返回 0
+        public static int CountInstances(A.AssemblyDocument assembly, string fullName){
+            if (assembly == null || string.IsNullOrEmpty(fullName)) return 0;
+            int n = 0;
+            try {
+                foreach (A.Occurrence occ in assembly.Occurrences) {
+                    bool sub = false; try { sub = occ.Subassembly; } catch { }
+                    if (sub) { try { n += CountIn(occ.SubOccurrences, fullName, 1); } catch { } continue; }
+                    string f = ""; try { f = occ.OccurrenceFileName; } catch { }
+                    if (string.Equals(f, fullName, StringComparison.OrdinalIgnoreCase)) n++;
+                }
+            } catch (Exception e) { Log.Write("CountInstances", e.Message); return 0; }
+            return n;
+        }
+        static int CountIn(A.SubOccurrences subs, string fullName, int depth){
+            if (subs == null || depth > MaxDepth) return 0;
+            int n = 0, count = 0; try { count = subs.Count; } catch { }
+            for (int i = 1; i <= count; i++) {
+                A.SubOccurrence s = null; try { s = subs.Item(i); } catch { }
+                if (s == null) continue;
+                bool sub = false; try { sub = s.Subassembly; } catch { }
+                if (sub) { try { n += CountIn(s.SubOccurrences, fullName, depth + 1); } catch { } continue; }
+                string f = ""; try { f = s.SubOccurrenceFileName; } catch { }
+                if (string.Equals(f, fullName, StringComparison.OrdinalIgnoreCase)) n++;
+            }
+            return n;
+        }
+
+        // 隐藏 / 只作参考 / 不计入物理属性：现场「万向轮范围--兼容小车.par」这种运动范围包络件，轴线一穿过它就被报"漏打孔"，
+        // 用户还真照着去给包络件打孔（10-22 日志）。读不出来的当正常零件
+        static bool RefOnly(A.Occurrence o){
+            try { if (!o.Visible) return true; } catch { }
+            try { if (o.ReferenceOnly) return true; } catch { }
+            try { if (o.DisplayAsReference) return true; } catch { }
+            try { if (!o.IncludeInPhysicalProperties) return true; } catch { }
+            return false;
+        }
+        static bool RefOnly(A.SubOccurrence s){
+            try { if (!s.Visible) return true; } catch { }
+            try { if (s.ExcludeFromPhysicalProperties) return true; } catch { }
+            return false;
         }
 
         static P.PartDocument Doc(object doc){ return doc as P.PartDocument; }

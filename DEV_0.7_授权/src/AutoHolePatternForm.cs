@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -20,7 +20,7 @@ namespace TianGongCadSuite {
     //   · 螺纹孔可选「全长 / 指定深度」；
     //   · 界面换成同一套：分段按钮 + FieldGrid（按排布方式/孔型整行显隐，不再一堆灰掉的框）。
     public sealed class AutoHolePatternForm : Form, IBusyTool, F.ISEMouseEvents, F.ISECommandEvents {
-        // 处理中不让关（Esc、关闭按钮、标题栏 ×、CAD 里按 Esc / 右键都会走到这里）：见 IBusyTool
+        // 处理中不让关（Esc、关闭按钮、标题栏 ×、CAD 里按 Esc 都会走到这里）：见 IBusyTool
         public bool Busy { get { return busy; } }
         public string BusyWhat { get { return "打孔"; } }
         protected override void OnFormClosing(FormClosingEventArgs e){
@@ -34,6 +34,9 @@ namespace TianGongCadSuite {
 
         readonly F.Application app;
         readonly A.AssemblyDocument assembly;
+        // 单独打开的零件里用（0.8.5）：原来只认装配，给一个零件排一排孔得先建个装配把它放进去。这时 assembly 为 null
+        readonly P.PartDocument partDoc;
+        object HostDoc { get { return (object)assembly ?? partDoc; } }
         F.ISECommand command; F.ISEMouse mouse; Connection mouseConnection, commandConnection;
         F.HighlightSet highlights;
 
@@ -93,8 +96,10 @@ namespace TianGongCadSuite {
         VerticalStack rootStack;
         Panel previewCanvas;
 
-        public AutoHolePatternForm(F.Application application, A.AssemblyDocument document){
-            app = application; assembly = document;
+        public AutoHolePatternForm(F.Application application, P.PartDocument part) : this(application, (A.AssemblyDocument)null, part){ }
+        public AutoHolePatternForm(F.Application application, A.AssemblyDocument document) : this(application, document, null){ }
+        AutoHolePatternForm(F.Application application, A.AssemblyDocument document, P.PartDocument part){
+            app = application; assembly = document; partDoc = part;
             Ui.Shell(this, "批量排孔", 680, 800, 600, 700);
             BuildLayout();
             WireEvents();
@@ -102,10 +107,16 @@ namespace TianGongCadSuite {
             try { sizeBox.SelectedItem = "M6"; } finally { loading = false; }
             ApplySize();
             FormClosed += (s, e) => Cleanup();
+            HoleUndo carried; List<KeyValuePair<P.PartDocument, string>> carriedCreated;
+            if (Carried.Take(HostDoc, out carried, out carriedCreated)) {
+                lastUndo = carried; lastCreated = carriedCreated;
+                undoButton.Enabled = true; editButton.Enabled = lastCreated != null && lastCreated.Count > 0;
+                SetStatus("上次关窗口前排的 " + carried.HoleCount + " 个孔还能撤销（「撤销本次打孔」）。点要排孔的那个平面。", Ui.Muted);
+            }
         }
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData){
-            if (keyData == Keys.Escape) { Close(); return true; }
+            if (keyData == Keys.Escape) { if (ConfirmQuickClose("Esc")) Close(); return true; }
             if (keyData == (Keys.Control | Keys.Enter)) { Run(); return true; }
             return base.ProcessCmdKey(ref msg, keyData);
         }
@@ -173,7 +184,7 @@ namespace TianGongCadSuite {
             var previewCard = Ui.Card("④ 预览", 0, "");
             var pv = new Panel { Dock = DockStyle.Fill, BackColor = Color.White };
             previewCard.Controls.Add(pv);
-            previewText.Dock = DockStyle.Top; previewText.Height = 40; previewText.AutoSize = false; previewText.Font = Ui.F9B;
+            previewText.Dock = DockStyle.Top; previewText.Height = 58; previewText.AutoSize = false; previewText.Font = Ui.F9B;
             previewText.AutoEllipsis = true; previewText.BackColor = Color.White;
             var canvas = new Panel { Dock = DockStyle.Fill, BackColor = Color.White };
             canvas.Paint += DrawPreview;
@@ -312,6 +323,9 @@ namespace TianGongCadSuite {
             try {
                 // 开窗时没读到预设（读失败）：先读一遍再加，别拿一个空表把文件里原有的预设整个覆盖掉
                 if (presets == null) presets = PatternPresetStore.Default().Load();
+                // 和另一个已有预设重名：原来一声不响覆盖掉（0.8.5）。改的就是当前选中的那个时不问
+                if (name != current && presets.Find(name) != null && !SuppressDialogs
+                    && MessageBox.Show(this, "已经有一个叫「" + name + "」的预设，覆盖它吗？", "批量排孔", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
                 presets.Put(CapturePreset(name));
                 presets.Save();
                 LoadPresets(name);
@@ -405,25 +419,42 @@ namespace TianGongCadSuite {
         public void StartPicking(){
             try {
                 if (command != null) StopCommand();   // 幂等：重复调用不会留下第二条命令
-                if (assembly == null) throw new InvalidOperationException("请先打开装配文件。");
-                if (assembly.ReadOnly || assembly.InPlaceActivated) throw new InvalidOperationException("请在可编辑的装配顶层运行。");
+                if (assembly == null && partDoc == null) throw new InvalidOperationException("请先打开装配或零件文件。");
+                if (assembly != null && (assembly.ReadOnly || assembly.InPlaceActivated)) throw new InvalidOperationException("请在可编辑的装配顶层运行。");
+                if (partDoc != null && partDoc.ReadOnly) throw new InvalidOperationException("这个零件是只读打开的，改不了。请用可写方式打开。");
                 command = (F.ISECommand)app.CreateCommand((int)SolidEdgeConstants.seCmdFlag.seNoDeactivate);
                 commandConnection = new Connection(command, typeof(F.ISECommandEvents), this);
                 command.Start();
                 mouse = (F.ISEMouse)command.Mouse;
                 mouseConnection = new Connection(mouse, typeof(F.ISEMouseEvents), this);
                 mouse.ScaleMode = 1; mouse.WindowTypes = 1;
-                mouse.LocateMode = (int)SolidEdgeConstants.seLocateModes.seLocateSimple;
+                // QuickPick（0.8.5，用户要的）：和天工自己的选择一样，右键 / 停一下会弹出光标下层层叠叠的面、边列表，
+                // 点里面那个被挡住的就选中它（原来 seLocateSimple 只认最前面那层，右键还被拿去关窗口，遮挡面根本选不到）
+                mouse.LocateMode = (int)SolidEdgeConstants.seLocateModes.seLocateQuickPick;
                 mouse.EnabledMove = true;
-                ((F.ISEMouseEx)mouse).InterDocumentLocate = true;
+                ((F.ISEMouseEx)mouse).InterDocumentLocate = assembly != null;
                 ((F.ISEMouseEx2)mouse).LocateFrontToBack = true;
                 ((F.ISEMouseEx3)mouse).PathfinderLocate = false;
                 ConfigureFilter();
                 if (highlights != null) highlights.Delete();
-                highlights = assembly.HighlightSets.Add();
+                highlights = assembly != null ? assembly.HighlightSets.Add() : partDoc.HighlightSets.Add();
                 highlights.Color = ColorTranslator.ToOle(Color.DeepSkyBlue);
             } catch { Cleanup(); throw; }
+            // 打开前在天工里选好的面 / 方向边（0.8.5，同自动打孔）：按先后当成点了一下
+            if (!preloaded) {
+                preloaded = true;
+                try {
+                    BeginInvoke((Action)(() => {
+                        if (closing || busy) return;
+                        try {
+                            var set = assembly != null ? assembly.SelectSet : partDoc.SelectSet; int n = Math.Min(set.Count, 3);
+                            for (int i = 1; i <= n; i++) { object o = null; try { o = set.Item(i); } catch { } if (o != null && !(o is A.Occurrence) && !(o is A.SubOccurrence)) AcceptPick(o); }
+                        } catch (Exception e) { Log.Write("AutoHolePatternPreselect", e.Message); }
+                    }));
+                } catch { }
+            }
         }
+        bool preloaded;
 
         // 点面与点边都必须能选到，不能"选完面就只让点边"：
         //   - 圆周均布：打孔面可以是端面也可以是圆柱侧面，所以先点面、再点圆边定位；
@@ -458,11 +489,20 @@ namespace TianGongCadSuite {
                     } else {
                         frame = FaceFrameReader.Read(target);   // 自动取最长边
                         faceText = FaceLabel(target) + "　方向：" + frame.Label;
-                        SetStatus("已选打孔面。" + frame.Label + "　（要手动指定方向就再点一条直线边）", Ui.Ok);
+                        // 零件在装配里用了好几次：孔打在零件文件上，每处都会有（0.8.5）
+                        string f = ""; try { f = target.Part.FullName; } catch { }
+                        target.Instances = assembly == null ? 0 : AssemblyPart.CountInstances(assembly, f);
+                        string inst = target.Instances > 1 ? "　⚠「" + target.PartName + "」在装配里用了 " + target.Instances + " 次，排的孔每处都会有" : "";
+                        try { target.Risk = TargetFace.RiskOf(target.Part, assembly != null ? assembly.FullName : ""); } catch { }
+                        if (target.Risk.Length > 0) inst += "　⚠ " + target.Risk;
+                        faceText += inst;
+                        SetStatus("已选打孔面。" + frame.Label + "　（要手动指定方向就再点一条直线边）" + inst, inst.Length > 0 ? Ui.Warn : Ui.Ok);
                     }
                 } else if (Kind == HolePatternKind.Circular) {
                     V3 c, ax; double r;
                     FaceFrameReader.ReadCircle(selected, out c, out r, out ax);
+                    // 定位圆要和打孔面平行（法兰上的螺栓分布圆）：斜的圆投到面上是椭圆，均布出来的孔位全不对
+                    if (Math.Abs(ax.Unit().Dot(target.Plane.Normal.Unit())) < 0.99) throw new ArgumentException("这条圆边和打孔面不平行，不能当分度圆。请点打孔面上（或和它平行的面上）的圆形边线。");
                     circleCentre = c; circleRadiusMm = r; circleReady = true; dirSelection = selected;
                     SetStatus("已选定位圆：R" + Num(r) + "mm。", Ui.Ok);
                 } else {
@@ -473,7 +513,7 @@ namespace TianGongCadSuite {
                 }
                 ConfigureFilter();
                 RefreshPreview();
-            } catch (Exception e) { SetStatus(e.Message, Ui.Warn); Log.Write("AutoHolePatternPick", e); }
+            } catch (Exception e) { SetStatus(AutoHoleWriter.FriendlyPick(e), Ui.Warn); Log.Write("AutoHolePatternPick", e); }
         }
 
         static string FaceLabel(TargetFace t){
@@ -521,7 +561,9 @@ namespace TianGongCadSuite {
                         var a = HolePatternSolver.Angles(Spec());
                         previewText.Text = "在 R" + Num(circleRadiusMm) + " 的分度圆上均布 " + a.Length + " 个孔，起始 " + Num(Spec().StartAngleDeg) + "°，间隔 " + Num(360.0 / Spec().Count) + "°。\r\n"
                                          + HoleNaming.Short(hs) + "　·　" + (asPattern.Checked ? "种子孔 + 圆周阵列" : "同规格的孔合成一个孔特征");
-                        previewText.ForeColor = Ui.Ok; ok = true;
+                        var outside = Outside(Centres(Spec()));
+                        if (outside.Count > 0) previewText.Text += "\r\n⚠ 第 " + OutsideText(outside) + " 个孔位落在面外，不会打";
+                        previewText.ForeColor = outside.Count > 0 ? Ui.Warn : Ui.Ok; ok = true;
                     }
                 } else {
                     HolePatternSolver.Offsets(frame.LengthMm, Spec());
@@ -531,7 +573,16 @@ namespace TianGongCadSuite {
                                      + (latMode.SelectedIndex == 1 ? "，孔心离方向边 " + Num((double)lateral.Value) + "mm" : "，横向居中") + "\r\n"
                                      + (SlotMode ? "腰孔 " + Num((double)slotLen.Value) + "×" + Num((double)slotWidth.Value) + "（通切）"
                                                  : HoleNaming.Short(hs) + "　·　" + (asPattern.Checked ? "种子孔 + 阵列" : "同规格的孔合成一个孔特征"));
-                    previewText.ForeColor = Ui.Ok; ok = true;
+                    var outside = Outside(Centres(Spec()));
+                    if (outside.Count > 0) previewText.Text += "\r\n⚠ 第 " + OutsideText(outside) + " 个孔位落在面外（缺口/开窗处），不会打";
+                    else {
+                        // 孔心在面上、孔口却切到面边（离边太近 / L 形面的内角）：打出来是缺口（0.8.5）
+                        var cut = new List<int>(); var cs = Centres(Spec());
+                        double mouth = SlotMode ? (double)slotWidth.Value : hs.Kind == HoleKind.Counterbore ? hs.CounterboreDiameter : hs.Kind == HoleKind.Countersink ? hs.CountersinkDiameter : hs.HoleDiameter;
+                        for (int i = 0; i < cs.Count; i++) if (FaceFrameReader.CutsEdge(target, cs[i], mouth)) cut.Add(i + 1);
+                        if (cut.Count > 0) { previewText.Text += "\r\n⚠ 第 " + OutsideText(cut) + " 个孔的孔口会切到面的边上（打出来是缺口），请调边距 / 横向位置"; outside = cut; }
+                    }
+                    previewText.ForeColor = outside.Count > 0 ? Ui.Warn : Ui.Ok; ok = true;
                 }
             } catch (Exception e) { previewText.Text = e.Message; previewText.ForeColor = Ui.Bad; }
             tips.SetToolTip(previewText, previewText.Text);
@@ -645,8 +696,9 @@ namespace TianGongCadSuite {
             if (busy || closing) return;
             bool hadCommand = command != null;
             try {
-                if (assembly == null) throw new InvalidOperationException("请先打开装配文件。");
-                if (assembly.ReadOnly || assembly.InPlaceActivated) throw new InvalidOperationException("装配不可编辑或处于原位编辑中。");
+                if (assembly == null && partDoc == null) throw new InvalidOperationException("请先打开装配或零件文件。");
+                try { var nm = assembly != null ? assembly.Name : partDoc.Name; } catch { throw new InvalidOperationException("打开这个窗口时的文档已经关掉了。请关掉这个窗口重新打开「批量排孔」。"); }
+                if (assembly != null && (assembly.ReadOnly || assembly.InPlaceActivated)) throw new InvalidOperationException("装配不可编辑或处于原位编辑中。");
                 // 打完孔后缓存的面会失效，重解析一次。选择引用本身也失效时（模型重算过、面被孔切过）别把 COM 错误甩给用户：
                 // 沿用上次读到的平面数据接着打（建基准面只用平面数据，FindOrCreatePlane 有退路）
                 if (faceSelection != null) {
@@ -660,20 +712,16 @@ namespace TianGongCadSuite {
                 var spec = Spec();
                 var hs = HoleSpecNow();
                 if (!SlotMode && hs.SpecProblem.Length > 0) throw new InvalidOperationException(hs.SpecProblem);
-                var centres = new List<V3>();
-                if (Kind == HolePatternKind.Circular) {
-                    if (!circleReady) throw new InvalidOperationException("圆周均布需要先点一条圆形边线。");
-                    var u = frame.Direction; var v = frame.Perp;
-                    foreach (var deg in HolePatternSolver.Angles(spec)) {
-                        double rad = deg * Math.PI / 180.0;
-                        centres.Add(circleCentre + u * (circleRadiusMm / 1000.0 * Math.Cos(rad)) + v * (circleRadiusMm / 1000.0 * Math.Sin(rad)));
-                    }
-                } else {
+                if (Kind == HolePatternKind.Circular && !circleReady) throw new InvalidOperationException("圆周均布需要先点一条圆形边线。");
+                if (Kind != HolePatternKind.Circular) {
                     string lp = HolePatternSolver.LateralProblem(frame.WidthMm, spec.LateralMm, HalfWidthMm(hs));
                     if (lp.Length > 0) throw new InvalidOperationException(lp);
-                    var side = frame.Perp * (spec.LateralMm / 1000.0);
-                    foreach (var o in HolePatternSolver.Offsets(frame.LengthMm, spec)) centres.Add(frame.At(o) + side);
                 }
+                var centres = Centres(spec);
+                // 落在面外（缺口、开窗、L 形面缺的那一角）的孔位不打：CAD 只会报一句含糊的拒绝，阵列也整排建不成（0.8.5）
+                var outside = Outside(centres);
+                if (outside.Count == centres.Count) throw new InvalidOperationException("排出来的孔位全都落在打孔面外面（第 " + OutsideText(outside) + " 个），请检查方向边、边距和横向位置。");
+                for (int i = outside.Count - 1; i >= 0; i--) centres.RemoveAt(outside[i] - 1);
 
                 busy = true; run.Enabled = false; run.Text = "打孔中…"; UseWaitCursor = true; StopCommand();
                 DrillResult res;
@@ -682,7 +730,7 @@ namespace TianGongCadSuite {
                 // 在装配里直接建孔每个孔两侧都是 0x80010108（0.7.11 现场，自动打孔早就这么处理了，排孔漏了）。
                 object startDoc = null; try { startDoc = app.ActiveDocument; } catch { }
                 NativeHoleLink.InPlace inPlace = null;
-                if (NativeHoleLink.HasLinks(target.Part)) {
+                if (assembly != null && NativeHoleLink.HasLinks(target.Part)) {   // 单独打开的零件：本来就在零件自己的环境里，不用原位编辑
                     string other = NativeHoleLink.TargetOpenElsewhere(app, assembly, target);
                     if (other.Length > 0) throw new InvalidOperationException(NativeHoleLink.OpenElsewhereMessage(other));
                     string ewhy;
@@ -693,7 +741,7 @@ namespace TianGongCadSuite {
                 if (SlotMode) {
                     var localDir = target.Placement.InverseNormal(frame.Direction);
                     var lc = new List<V3>(); var ld = new List<V3>();
-                    foreach (var c in centres) { lc.Add(target.Placement.InversePoint(c)); ld.Add(localDir); }
+                    foreach (var c in centres) { lc.Add(target.Placement.InversePoint(target.OntoFace(c))); ld.Add(localDir); }
                     res = AutoHoleWriter.DrillSlots(target, lc, ld, (double)slotLen.Value, (double)slotWidth.Value);
                     if (res.Method.Length == 0) res.Method = "腰孔（通切）";
                     what = "腰孔 " + Num((double)slotLen.Value) + "×" + Num((double)slotWidth.Value);
@@ -732,6 +780,11 @@ namespace TianGongCadSuite {
                 foreach (var f in res.Features) items.Add(new ResultList.Item(ResultList.Kind.Info, "特征树：" + f));
                 if (res.Audit.Length > 0) items.Add(new ResultList.Item(ResultList.Kind.Fail, "自检：" + res.Audit));
                 foreach (var n in res.Notes) items.Add(new ResultList.Item(ResultList.Kind.Info, n));
+                if (outside.Count > 0) {
+                    string skipped = "第 " + OutsideText(outside) + " 个孔位落在打孔面外面（缺口/开窗处），没有打。";
+                    items.Add(new ResultList.Item(ResultList.Kind.Warn, skipped));
+                    LastResult = msg + "\r\n\r\n" + skipped;
+                }
                 if (res.Created > 0) items.Add(new ResultList.Item(ResultList.Kind.Info, what + "　·　" + res.Method + "　·　记得保存装配，排错了点「撤销本次打孔」。"));
                 string head = "排孔 " + res.Created + " / " + res.Requested + " 个" + (res.AlreadyOk > 0 ? " · 本来就有孔 " + res.AlreadyOk : "") + (res.Failures.Count > 0 ? " · 失败 " + res.Failures.Count : "");
                 results.SetResult(head, res.Failures.Count > 0 || res.Audit.Length > 0 ? Ui.Bad : (res.Created > 0 ? Ui.Ok : Ui.Warn), items);
@@ -743,17 +796,45 @@ namespace TianGongCadSuite {
                 SetStatus("完成：" + res.Created + " 个孔" + (res.Failures.Count > 0 ? "，失败 " + res.Failures.Count : ""), res.Failures.Count > 0 ? Ui.Warn : Ui.Ok);
                 try { if (target != null && target.Part != null) HoleScanCad.Invalidate(target.Part); } catch { }
                 busy = false; run.Text = "开始打孔"; UseWaitCursor = false;
-                if (hadCommand) { try { StartPicking(); } catch (Exception ex) { SetStatus(ex.Message, Ui.Warn); } }
+                if (hadCommand) { try { StartPicking(); } catch (Exception ex) { SetStatus(AutoHoleWriter.Friendly(ex), Ui.Warn); } }
                 RefreshPreview();
             } catch (Exception e) {
                 Log.Write("AutoHolePatternRun", e);
                 busy = false; run.Text = "开始打孔"; UseWaitCursor = false;
                 try { if (hadCommand && command == null) StartPicking(); } catch { }
-                SetStatus(e.Message, Ui.Bad);
+                SetStatus(AutoHoleWriter.Friendly(e), Ui.Bad);
                 LastResult = "排孔中断：" + e.Message;
-                if (!SuppressDialogs) MessageBox.Show(this, e.Message, "批量排孔", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                if (!SuppressDialogs) MessageBox.Show(this, AutoHoleWriter.Friendly(e), "批量排孔", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 RefreshPreview();
             }
+        }
+
+        // 按现在的参数排出来的孔心（装配坐标，已投到打孔面上）
+        List<V3> Centres(HolePatternSpec spec){
+            var centres = new List<V3>();
+            if (target == null || frame == null) return centres;
+            if (Kind == HolePatternKind.Circular) {
+                if (!circleReady) return centres;
+                var u = frame.Direction; var v = frame.Perp;
+                var cc = target.OntoFace(circleCentre);   // 定位圆可能在另一面（法兰背面）：圆心先投到打孔面上
+                foreach (var deg in HolePatternSolver.Angles(spec)) {
+                    double rad = deg * Math.PI / 180.0;
+                    centres.Add(cc + u * (circleRadiusMm / 1000.0 * Math.Cos(rad)) + v * (circleRadiusMm / 1000.0 * Math.Sin(rad)));
+                }
+            } else {
+                var side = frame.Perp * (spec.LateralMm / 1000.0);
+                foreach (var o in HolePatternSolver.Offsets(frame.LengthMm, spec)) centres.Add(target.OntoFace(frame.At(o) + side));
+            }
+            return centres;
+        }
+        // 落在面外的孔位序号（1 起）
+        List<int> Outside(IList<V3> centres){
+            var l = new List<int>();
+            for (int i = 0; i < centres.Count; i++) { try { if (!FaceFrameReader.ContainsPoint(target, centres[i], 0.5)) l.Add(i + 1); } catch { } }
+            return l;
+        }
+        static string OutsideText(IList<int> idx){
+            return string.Join("、", idx.Take(8).Select(i => i.ToString(CultureInfo.InvariantCulture)).ToArray()) + (idx.Count > 8 ? " 等" : "");
         }
 
         // 撤销上一次「开始打孔」（HoleUndo：删掉那一批孔/腰孔，编组和改名恢复原样）
@@ -777,24 +858,30 @@ namespace TianGongCadSuite {
                 SetStatus(outcome.Summary, outcome.Failed > 0 ? Ui.Warn : Ui.Ok);
             } catch (Exception e) {
                 Log.Write("AutoHolePatternUndo", e);
-                SetStatus("撤销没有完成：" + e.Message, Ui.Bad);
+                SetStatus("撤销没有完成：" + AutoHoleWriter.Friendly(e), Ui.Bad);
                 LastResult = "撤销中断：" + e.Message;
             } finally {
                 busy = false; UseWaitCursor = false;
-                if (hadCmd) { try { StartPicking(); } catch (Exception ex) { SetStatus(ex.Message, Ui.Warn); } }
+                if (hadCmd) { try { StartPicking(); } catch (Exception ex) { SetStatus(AutoHoleWriter.Friendly(ex), Ui.Warn); } }
                 RefreshPreview();
             }
         }
         void OpenEdit(){
             if (busy || closing || lastCreated == null || lastCreated.Count == 0) return;
             handingOver = command != null;
-            try { AutoHoleModule.OpenEdit(app, assembly, lastCreated); }
+            try { if (assembly != null) AutoHoleModule.OpenEdit(app, assembly, lastCreated); else AutoHoleModule.OpenEdit(app, partDoc, lastCreated); }
             catch (Exception e) { handingOver = false; Log.Write("AutoHolePatternOpenEdit", e); SetStatus("打不开改孔型窗口：" + e.Message, Ui.Bad); }
         }
         public List<KeyValuePair<P.PartDocument, string>> LastCreatedForTest { get { return lastCreated; } }
         public bool AsPattern { get { return asPattern.Checked; } set { asPattern.Checked = value; } }
         public bool SlotForTest { get { return slotCheck.Checked; } set { slotCheck.Checked = value; } }
         public void UndoForTest(){ UndoLastBatch(); }
+        public string PreviewForTest { get { return previewText.Text; } }
+        // 排布：方式（0 等分 / 1 定距 / 2 圆周）、孔数、边距、横向（0 居中 / 1 离方向边 X mm）
+        public void SetLayoutForTest(int mode, int holes, double edgeMm, int lat, double lateralMm){
+            modeSeg.SelectedIndex = mode; count.Value = holes; edge.Value = (decimal)edgeMm;
+            latMode.SelectedIndex = lat; lateral.Value = (decimal)lateralMm; RefreshPreview();
+        }
         public bool CanUndo { get { return lastUndo != null && !lastUndo.IsEmpty; } }
 
         void StopCommand(){
@@ -804,11 +891,12 @@ namespace TianGongCadSuite {
             var c = command; command = null; mouse = null;
             if (c != null) try { c.Done = true; } catch { }
         }
-        void Cleanup(){ if (closing) return; closing = true; StopCommand(); try { tips.Dispose(); } catch { } }
+        internal static readonly CarriedUndo Carried = new CarriedUndo();
+        void Cleanup(){ if (closing) return; closing = true; try { Carried.Keep(HostDoc, lastUndo, lastCreated); } catch { } StopCommand(); try { tips.Dispose(); } catch { } }
 
         public new void MouseClick(short b, short s, double x, double y, double z, object w, int k, object g){
             if (b == 1) { if (g == null) { SetStatus("这里没有捕捉到对象。零件没激活（重开大装配后常见）时，先在天工里右键它选「激活」。", Ui.Warn); return; } AcceptPick(g); }
-            else if (b == 2) Close();
+            // 右键交给天工弹 QuickPick 选遮挡面（0.8.5）。原来右键 = 关窗口；关窗口用 Esc 或「关闭」按钮
         }
         public new void MouseDown(short b, short s, double x, double y, double z, object w, int k, object g){ }
         public new void MouseUp(short b, short s, double x, double y, double z, object w, int k, object g){ }
@@ -827,12 +915,17 @@ namespace TianGongCadSuite {
             base.OnActivated(e);
             if (!paused || closing || busy || command != null) return;
             paused = false;
-            try { StartPicking(); SetStatus("接着选。", Ui.Muted); } catch (Exception ex) { SetStatus(ex.Message, Ui.Warn); }
+            try { StartPicking(); SetStatus("接着选。", Ui.Muted); } catch (Exception ex) { SetStatus(AutoHoleWriter.Friendly(ex), Ui.Warn); }
         }
         public void Idle(int n, out bool more){ more = false; }
         void F.ISECommandEvents.Activate(){ }
         void F.ISECommandEvents.Deactivate(){ }
-        public new void KeyDown(ref short key, short shift){ if (key == 27) Close(); }
+        public new void KeyDown(ref short key, short shift){ if (key == 27 && ConfirmQuickClose("Esc")) Close(); }
+        readonly QuickClose quickClose = new QuickClose();
+        bool ConfirmQuickClose(string how){
+            if (busy) return false;
+            return quickClose.Confirm(how, target == null ? "" : "选好的打孔面和方向", m => SetStatus(m, Ui.Warn));
+        }
         public new void KeyPress(ref short key){ }
         public new void KeyUp(ref short key, short shift){ }
     }

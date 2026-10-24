@@ -544,4 +544,18 @@ namespace TianGongCadSuite {
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
         }
     }
+
+    // Esc 关窗口（0.8.5）：窗口里已经点好东西时，按一次只提醒，3 秒内再按一次才关。
+    // 原来一按就关 —— 在数值框里按 Esc 想撤销输入、点了半天的东西全没了（右键现在留给天工的 QuickPick 选遮挡面）。「关闭」按钮照旧直接关
+    public sealed class QuickClose {
+        DateTime asked = DateTime.MinValue;
+        // lost：会丢掉什么（"3 个参考孔、1 个打孔面"），空 = 没什么可丢的，直接关
+        public bool Confirm(string how, string lost, Action<string> warn){
+            if (string.IsNullOrEmpty(lost)) return true;
+            if ((DateTime.Now - asked).TotalSeconds < 3) return true;
+            asked = DateTime.Now;
+            if (warn != null) warn("再按一次" + how + "关闭窗口（" + lost + "会丢掉）。");
+            return false;
+        }
+    }
 }

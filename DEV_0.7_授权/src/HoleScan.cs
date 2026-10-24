@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 
@@ -133,9 +133,34 @@ namespace TianGongCadSuite {
         }
 
         // 一组圆口 -> 孔（逐个识别 + 去重）。
+        // 同一个圆被拆成几段圆弧的（导入的 STEP 零件常见：孔口是两段半圆）拼回一个整圆（0.8.5）。
+        // 原来这种孔口一律不算（Usable 要整圆），MISUMI、供应商给的件点带孔的面说"没有识别到孔"。
+        // 只拼圆心、半径、轴线都一样、至少两段的；单独一段圆弧（腰孔一头、圆角）照旧不算孔口
+        public static List<CircleCandidate> MergeArcs(IList<CircleCandidate> list){
+            var result = new List<CircleCandidate>();
+            if (list == null) return result;
+            var arcs = new List<CircleCandidate>();
+            foreach (var c in list) { if (c == null) continue; if (c.Closed) result.Add(c); else arcs.Add(c); }
+            var used = new bool[arcs.Count];
+            for (int i = 0; i < arcs.Count; i++) {
+                if (used[i]) continue;
+                int n = 1;
+                for (int j = i + 1; j < arcs.Count; j++) {
+                    if (used[j]) continue;
+                    var a = arcs[i]; var b = arcs[j];
+                    if ((a.Center - b.Center).Length < 1e-6 && Math.Abs(a.RadiusMm - b.RadiusMm) < 0.001 && Parallel(a.Axis, b.Axis)) { used[j] = true; n++; }
+                }
+                var first = arcs[i];
+                if (n < 2) { result.Add(first); continue; }
+                result.Add(new CircleCandidate { Center = first.Center, Axis = first.Axis, RadiusMm = first.RadiusMm, Closed = true, Wall = first.Wall, Source = first.Source + "（" + n + " 段圆弧拼成）", Tag = first.Tag });
+            }
+            return result;
+        }
+
         public static List<ScannedHole> FromCircles(IList<CircleCandidate> mouths, IList<CircleCandidate> all){
             var list = new List<ScannedHole>();
             if (mouths == null) return list;
+            mouths = MergeArcs(mouths); all = MergeArcs(all);
             foreach (var m in mouths) {
                 var h = FromCircle(m, all);
                 if (h != null) list.Add(h);

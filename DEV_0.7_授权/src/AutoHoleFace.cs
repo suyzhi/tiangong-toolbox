@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using G=SolidEdgeGeometry;
 using S=SolidEdgeFrameworkSupport;
@@ -54,6 +54,9 @@ namespace TianGongCadSuite {
             var q2 = pg.Transform.Point(V3.From(ep));
             var dir = q2 - q1;
             if (dir.Length < 1e-9) throw new ArgumentException("所选边长度为 0。");
+            // 方向边得和打孔面平行（0.8.5）：点到侧面的竖边时原来照样用，孔心沿一条斜线排、投到面上间距被压短，排出来全不对
+            double tilt = Math.Abs(dir.Unit().Dot(target.Plane.Normal.Unit()));
+            if (tilt > 0.02) throw new ArgumentException("这条边和打孔面不平行（斜 " + (Math.Asin(Math.Min(1, tilt)) * 180 / Math.PI).ToString("0.#") + "°），不能当排孔方向。请点打孔面上（或和它平行）的直线边。");
             var pts = new List<V3>();
             V3 bd = new V3(), bp = new V3(); double bl = 0;
             Collect(target, pts, ref bd, ref bp, ref bl);
@@ -118,6 +121,11 @@ namespace TianGongCadSuite {
             public double PlanePointDot;      // 缓存键：平面点沿法向的投影
             public double PlaneNormalKey;
             public bool Any;                  // 有没有读到过边
+            // 0.8.5：面的实际形状（面内 (u,v) 三角形，每 6 个数一个）+ 面上圆边（孔口，u,v,r）。
+            // 只用包围盒时 L 形面、开了窗的面、两块分开的面上，落在空处的孔心也算"在面内"，
+            // 打的时候 CAD 只报一句含糊的"拒绝建孔"，同一批合成多孔特征也整批失败。读不到面片时为 null，退回只看包围盒
+            public double[] Tris;
+            public List<double[]> Circles = new List<double[]>();
         }
 
         // 缓存键：同一张面每次重解析出来的 TargetFace 实例不同，但平面数据是同一份。
@@ -169,11 +177,29 @@ namespace TianGongCadSuite {
                     // 圆周上任意点可写成 c + r·(cosθ·u + sinθ·v)，θ 连续取值时
                     // 在 u/v 两个方向上的极值就是 ±r，所以补 4 个方向点即可精确包住整圆。
                     take(c + b.U * r); take(c - b.U * r); take(c + b.V * r); take(c - b.V * r);
+                    var rc = c - b.BasePoint;
+                    b.Circles.Add(new[]{ rc.Dot(b.U), rc.Dot(b.V), r });
                 }
             } catch { }
+            b.Tris = Facets(target, b);
 
             target.Bounds = b;
             return b;
+        }
+
+        // 面片三角形投到面内 (u,v)。一次 COM 调用；面很大、孔很多时也就几千个三角形
+        static double[] Facets(TargetFace target, FaceBounds b){
+            try {
+                int n = 0; Array pts = new double[0]; object nrm = null, tex = null;
+                target.Face.GetFacetData(0.0002, out n, ref pts, out nrm, out tex);
+                if (n <= 0 || pts == null || pts.Length < n * 9) return null;
+                var uv = new double[n * 6];
+                for (int i = 0; i < n * 3; i++) {
+                    var q = target.Placement.Point(new V3(Convert.ToDouble(pts.GetValue(i * 3)), Convert.ToDouble(pts.GetValue(i * 3 + 1)), Convert.ToDouble(pts.GetValue(i * 3 + 2)))) - b.BasePoint;
+                    uv[i * 2] = q.Dot(b.U); uv[i * 2 + 1] = q.Dot(b.V);
+                }
+                return uv;
+            } catch (Exception e) { Log.Write("FaceFacets", e.Message); return null; }
         }
 
         static bool SameKey(FaceBounds b, object key){
@@ -181,9 +207,8 @@ namespace TianGongCadSuite {
             return Math.Abs(b.PlanePointDot - (double)k[0]) < 1e-12 && Math.Abs(b.PlaneNormalKey - (double)k[1]) < 1e-12;
         }
 
-        // 孔心是否落在打孔面内。用"面内 (u,v) 包围盒"判断（包围盒由面的边算一次、缓存）。
-        // 对矩形/凸多边形面是精确的；对带缺口的凹面会略微放宽（包围盒必然包住实际轮廓），
-        // 但绝不会漏判——宁可多打一个孔让 CAD 自己报失败，也不要静默跳过该打的孔。
+        // 孔心是否落在打孔面内：先看"面内 (u,v) 包围盒"，再看面的实际形状（面片三角形，0.8.5，见 FaceBounds.Tris）。
+        // 读不到面片时只看包围盒（宁可多打一个孔让 CAD 自己报失败，也不要静默跳过该打的孔）。
         public static bool ContainsPoint(TargetFace target, V3 pointAssembly, double toleranceMm = 1.0){
             if (target == null) return false;
             var b = Bounds(target);
@@ -191,7 +216,21 @@ namespace TianGongCadSuite {
             var rp = pointAssembly - b.BasePoint;
             double pu = rp.Dot(b.U), pv = rp.Dot(b.V);
             double tol = toleranceMm * 0.001;
-            return pu >= b.MinU - tol && pu <= b.MaxU + tol && pv >= b.MinV - tol && pv <= b.MaxV + tol;
+            if (!(pu >= b.MinU - tol && pu <= b.MaxU + tol && pv >= b.MinV - tol && pv <= b.MaxV + tol)) return false;
+            return FaceShape.Inside(b.Tris, b.Circles, pu, pv, tol);
+        }
+
+        // 孔口（直径 mouthMm）一圈上有没有点落在面外（0.8.5）：孔心在面上、孔口却切到面边上 / 旁边的孔 —— 打出来是个缺口
+        public static bool CutsEdge(TargetFace t, V3 centre, double mouthMm){
+            double r = mouthMm / 2000.0;
+            if (t == null || !(r > 0)) return false;
+            var n = t.Plane.Normal.Unit();
+            var u = n.Cross(Math.Abs(n.X) < 0.9 ? new V3(1, 0, 0) : new V3(0, 1, 0)).Unit(); var v = n.Cross(u).Unit();
+            for (int k = 0; k < 8; k++) {
+                double a = k * Math.PI / 4;
+                if (!ContainsPoint(t, centre + u * (r * Math.Cos(a)) + v * (r * Math.Sin(a)), 0.2)) return true;
+            }
+            return false;
         }
 
         // 面被重新选了，或者模型被改动过：丢掉缓存，下次调用重新遍历边。

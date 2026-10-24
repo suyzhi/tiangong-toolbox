@@ -7,5 +7,7 @@ namespace TianGongCadSuite {
         public readonly List<string> Problems = new List<string>();
         // 同样的问题每块板都会碰到一次，只记一条
         public void Problem(string text){ if (!Problems.Contains(text)) Problems.Add(text); }
+        // 这一批里没生成出来的框口（specs 里的下标，0.8.5）：其余照常生成，窗口据此只把生成了的标成「已生成」
+        public readonly List<int> Failed = new List<int>();
     }
 }

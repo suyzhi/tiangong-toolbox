@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using P=SolidEdgePart;
 using S=SolidEdgeFrameworkSupport;
@@ -34,7 +34,7 @@ namespace TianGongCadSuite {
 
             var local = new List<V3>();
             foreach (var c in centres) {
-                var lp = target.Placement.InversePoint(c);
+                var lp = target.Placement.InversePoint(target.OntoFace(c));
                 if (!lp.Finite) return Fallback(target, spec, centres, "孔心换算失败");
                 local.Add(lp);
             }
@@ -45,7 +45,7 @@ namespace TianGongCadSuite {
 
             Layout layout;
             string why;
-            if (!Plan(plane, local, circleCentre.HasValue ? (V3?)target.Placement.InversePoint(circleCentre.Value) : null, out layout, out why))
+            if (!Plan(plane, local, circleCentre.HasValue ? (V3?)target.Placement.InversePoint(target.OntoFace(circleCentre.Value)) : null, out layout, out why))
                 return Fallback(target, spec, centres, why);
 
             var result = new DrillResult { Requested = centres.Count };
