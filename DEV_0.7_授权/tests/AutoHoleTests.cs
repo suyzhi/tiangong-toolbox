@@ -71,22 +71,22 @@ namespace TianGongCadSuite {
                 Assert(chamfer.Checked && chamferSet.Enabled, "勾上孔口倒角后倒角尺寸可填");
                 chamfer.Checked = false;
 
-                // ④ 换孔型：螺纹/沉孔/锥孔那一行按孔型出现；倒角行跟着上下移，卡片跟着变高变矮（中间不留空带）
+                // ④ 换孔型：螺纹/沉孔/锥孔那一行按孔型出现；倒角行跟着上下移，参数网格跟着变高变矮（中间不留空带）
                 var threadRow = RowOf(grid, "螺纹"); var cboreRow = RowOf(grid, "沉孔"); var csinkRow = RowOf(grid, "锥孔"); var chamferRow = RowOf(grid, "倒角");
                 Assert(threadRow != null && cboreRow != null && csinkRow != null && chamferRow != null, "螺纹/沉孔/锥孔/倒角四行都在（只是按孔型显示）");
                 Assert(!threadRow.Shown && !cboreRow.Shown && !csinkRow.Shown, "通孔时螺纹/沉孔/锥孔行都隐藏");
-                int h0 = CardHeight(form, "③ 孔规格");
+                int h0 = grid.Height;
                 int y0 = grid.TopOf(chamferRow);
                 kind.SelectedIndex = 2;
                 Assert(cboreRow.Shown && !csinkRow.Shown && !threadRow.Shown, "圆柱沉孔时只出现沉孔行");
                 Assert(grid.TopOf(chamferRow) > y0, "圆柱沉孔时倒角行被顶下一行（给沉孔行让位）");
-                Assert(CardHeight(form, "③ 孔规格") > h0, "多一行时规格卡片变高");
+                Assert(grid.Height > h0, "多一行时参数网格变高");
                 kind.SelectedIndex = 3;
                 Assert(csinkRow.Shown && !cboreRow.Shown, "锥形沉孔时只出现锥孔行");
                 Assert(!chamfer.Enabled, "锥形沉孔不叠加孔口倒角");
                 kind.SelectedIndex = 0;
                 Assert(grid.TopOf(chamferRow) == y0, "切回通孔后倒角行顶回原位");
-                Assert(CardHeight(form, "③ 孔规格") == h0, "切回通孔后规格卡片收回原高度，中间不留空带");
+                Assert(grid.Height == h0, "切回通孔后参数网格收回原高度，中间不留空带");
 
                 // ⑤ 螺纹孔：选标准规格，孔径按表回填（草稿也一样），螺纹深度行出现、默认全长
                 kind.SelectedIndex = 1;
@@ -134,8 +134,9 @@ namespace TianGongCadSuite {
                 Assert(Math.Abs((double)dia.Value - 6.6) < 0.01, "M6 螺纹孔切成通孔后孔径 = 过孔 6.6，实得 " + dia.Value);
 
                 // ⑦ 按钮都在（别被排版挤没了）；没有装配时「同步孔位」不可用
-                Assert(FindButton(form, "开始打孔") != null, "有开始打孔按钮");
-                Assert(FindButton(form, "全部重选") != null, "有全部重选按钮");
+                // 0.9.0：主按钮能打时写「开始打孔 N 个孔」；全部重选 / 撤销 / 改孔型收进「更多」菜单
+                Assert(FindButtonPrefix(form, "开始打孔") != null, "有开始打孔按钮");
+                Assert(FindButtonPrefix(form, "更多") != null, "有「更多」按钮（全部重选、撤销本次打孔、改孔型在它的菜单里）");
                 Assert(FindButton(form, "移除") != null && FindButton(form, "清空") != null, "参考孔/打孔面卡片上有移除、清空按钮");
                 var sync = FindButton(form, "同步孔位");
                 Assert(sync != null && !sync.Enabled, "有「同步孔位」按钮，没有装配时不可用");
@@ -171,6 +172,19 @@ namespace TianGongCadSuite {
                 threadPart.Checked = true;
                 Assert(form.UiSummary().Contains("螺纹深 12"), "改成指定深度后，参考孔组的规格跟着变：" + form.UiSummary());
                 Assert(form.SelfCheck().Length == 0, "全部孔型 × 规格组合过一遍编辑器没有异常");
+
+                // ⑫ 0.9.0 侧栏向导：四步，翻页立刻生效（动画只是盖在上面的一张图，状态是同步的）
+                var rail = FindControl<StepRail>(form);
+                Assert(rail != null && rail.Items.Count == 4 && rail.Items[0].Title == "参考孔" && rail.Items[3].Title == "预览并打孔", "左侧步骤栏四步：参考孔/打孔面/孔规格/预览并打孔");
+                Assert(rail.Items[0].Done && rail.Items[0].Sub.Contains("4 个孔"), "有参考孔以后第 1 步打勾、小字写孔数：" + rail.Items[0].Sub);
+                Assert(!rail.Items[1].Done, "还没点打孔面：第 2 步没打勾");
+                form.GoPageForTest(1);
+                Assert(form.PageForTest == 1 && rail.Selected == 1, "翻到第 2 步");
+                var next = FindButtonPrefix(form, "下一步");
+                Assert(next != null && next.Text == "下一步：孔规格", "还不能打孔时主按钮是「下一步：孔规格」，实得 " + (next == null ? "null" : next.Text));
+                form.GoPageForTest(3);
+                var drill = FindButtonPrefix(form, "开始打孔");
+                Assert(drill != null && !drill.Enabled, "最后一步、还没有打孔面：开始打孔是灰的");
             }
             PatternUiState();
             CheckUiState();
@@ -314,19 +328,6 @@ namespace TianGongCadSuite {
             }
             return null;
         }
-        static int CardHeight(W.Control root, string title){
-            var card = FindCard(root, title);
-            return card == null ? -1 : card.Height;
-        }
-        static Card FindCard(W.Control c, string title){
-            foreach (W.Control k in c.Controls) {
-                var card = k as Card;
-                if (card != null && card.Title == title) return card;
-                var deep = FindCard(k, title);
-                if (deep != null) return deep;
-            }
-            return null;
-        }
         static bool RowExists(W.Control root, string labelText){
             return FindLabel(root, labelText) != null;
         }
@@ -344,6 +345,15 @@ namespace TianGongCadSuite {
                 var t = k as T;
                 if (t != null) return t;
                 var deep = FindControl<T>(k);
+                if (deep != null) return deep;
+            }
+            return null;
+        }
+        static W.Button FindButtonPrefix(W.Control c, string prefix){
+            foreach (W.Control k in c.Controls) {
+                var b = k as W.Button;
+                if (b != null && b.Text != null && b.Text.StartsWith(prefix)) return b;
+                var deep = FindButtonPrefix(k, prefix);
                 if (deep != null) return deep;
             }
             return null;

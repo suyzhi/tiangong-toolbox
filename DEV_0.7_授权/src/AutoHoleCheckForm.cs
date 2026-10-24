@@ -40,24 +40,24 @@ namespace TianGongCadSuite {
         readonly Label summary = new Label();
         readonly ListBox list = new ListBox();
         readonly TextBox detail = new TextBox();
-        readonly Button run = Ui.Primary("开始检查", 130, 34);
-        readonly Button copy = Ui.Secondary("复制结果", 96, 30);
+        readonly Button run = Ui.Primary("开始检查", 200, 44);
+        readonly Button copy = Ui.Ghost("复制结果");
         readonly Label rules = new Label();
         readonly ToggleChip cMissing = new ToggleChip { Text = "漏打孔 0", ChipColor = Ui.Bad };
         readonly ToggleChip cMis = new ToggleChip { Text = "孔偏了 0", ChipColor = Ui.Warn };
-        readonly ToggleChip cWrong = new ToggleChip { Text = "配错孔 0", ChipColor = Ui.Accent };
+        readonly ToggleChip cWrong = new ToggleChip { Text = "配错孔 0", ChipColor = Color.FromArgb(0x25, 0x63, 0xEB) };
         readonly ToggleChip cUnpaired = new ToggleChip { Text = "孤孔 0", ChipColor = Ui.Muted };
         readonly ToolTip tips = new ToolTip { AutoPopDelay = 20000, InitialDelay = 300 };
         // 跳转到孔：选中一条就把镜头拉到涉及的孔上（大装配里光高亮看不见几毫米的孔）
         readonly CheckBox autoJump = new CheckBox { Text = "选中即跳转", Checked = true, AutoSize = true };
-        readonly Button jump = Ui.Small("跳转到孔");
-        readonly Button goDrill = Ui.Small("去配孔");
+        readonly Button jump = Ui.Secondary("跳转到孔", 100, 38);
+        readonly Button goDrill = Ui.Primary("去配孔", 120, 44);
         // 「去配孔」：打开自动打孔，把这条漏打孔涉及的孔带进去当参考孔（由命令模块接上，见 AutoHoleModule）
         public Func<List<HoleRecord>, string, AutoHoleForm> GoDrill;
 
         public AutoHoleCheckForm(F.Application application, A.AssemblyDocument document){
             app = application; assembly = document;
-            Ui.Shell(this, "配孔检查", 840, 680, 700, 560);
+            Ui.Shell(this, "配孔检查", 900, 680, 760, 560);
             // 用户改过判定口径就按他的来（读不到就是默认值）
             try { HoleCheck.Options = HoleCheckOptions.Load(SettingsFile.PathOf(HoleCheckOptions.FileName)); }
             catch (Exception e) { Log.Write("HoleCheckOptionsLoad", e); }
@@ -76,97 +76,128 @@ namespace TianGongCadSuite {
         }
 
         // ---------------- 布局 ----------------
-        // [开始检查] [复制结果]  判定口径ⓘ                    一句话结论
-        // ┌ 检查结果 ─────────────── [漏打孔 3][孔偏了 1][配错孔 0][孤孔 12] ┐
-        // │ 列表（吃掉剩余高度）                                            │
-        // └──────────────────────────────────────────────────────────────────┘
-        // ┌ 详情：涉及的孔 ─────────────────────────────────────────────────┐
-        // 状态栏
+        // 0.9.0「D · 侧栏向导」：
+        // ┌ 侧栏 ─────────────┬ 发现 3 处问题　点一条在模型里高亮 ─────────────┐
+        // │ [开始检查]         │ 检查了 42 个孔（17 组同轴孔）……                  │
+        // │ ● 漏打孔        1  │ ┌ 漏打孔 ┐ 中间板在 Φ6.6 孔的轴线上没有孔……    │
+        // │ ● 孔偏了        1  │ ┌ 孔偏了 ┐ ……                                    │
+        // │ ● 配错孔        1  │                                                    │
+        // │ ○ 孤孔          0  │ ┌ 涉及的孔（浅灰块）───────────────────────────┐ │
+        // │ 复制结果 · 判定口径│ [☑ 选中即跳转]  状态字 ……   [跳转到孔] [去配孔] │
+        // 侧栏里的四类是可以同时勾几类的筛选（孤孔默认不显示），不是单选。
+        readonly WizardShell shell = new WizardShell { StepCaption = false };
+        readonly Label countLine = new Label();
+
         void BuildLayout(){
-            var bar = new Panel { Height = 40, BackColor = Ui.Bg };
-            run.SetBounds(0, 2, 130, 34);
-            copy.SetBounds(140, 5, 96, 30); copy.Enabled = false;
-            rules.Text = "判定口径 ⓘ"; rules.AutoSize = true; rules.ForeColor = Ui.Accent; rules.Cursor = Cursors.Hand;
-            rules.Location = new Point(250, 12); rules.BackColor = Ui.Bg;
+            Controls.Add(shell);
+            var page = shell.AddPage("检查结果", "配孔检查", "");
+
+            // ---- 侧栏顶部：开始检查 + 四类筛选 ----
+            var top = new Panel { BackColor = Ui.Rail, Height = 44 + 34 + 4 * 40 };
+            run.Font = Ui.BtnB;
+            top.Controls.Add(run);
+            countLine.AutoSize = false; countLine.Font = Ui.F8; countLine.ForeColor = Ui.Muted; countLine.BackColor = Ui.Rail; countLine.Text = "还没检查";
+            countLine.TextAlign = ContentAlignment.MiddleLeft;
+            top.Controls.Add(countLine);
+            foreach (var c in new[]{ cMissing, cMis, cWrong, cUnpaired }) {
+                c.RailStyle = true; c.Height = 36;
+                c.CheckedChanged += (s, e) => ApplyFilter();
+                top.Controls.Add(c);
+            }
+            top.Resize += (s, e) => {
+                int w = top.Width;
+                run.SetBounds(0, 0, w, 44);
+                countLine.SetBounds(10, 48, w - 10, 24);
+                int y = 78;
+                foreach (var c in new[]{ cMissing, cMis, cWrong, cUnpaired }) { c.SetBounds(0, y, w, 36); y += 40; }
+            };
+            run.Click += (s, e) => RunCheck();
+            tips.SetToolTip(run, "Ctrl+Enter");
+            tips.SetToolTip(cUnpaired, "只有一个零件有孔、附近也没穿过别的零件。真实装配里大多数孔都是孤孔，默认不显示。");
+            shell.RailTop = top;
+
+            // ---- 侧栏底部：复制结果 · 判定口径 ----
+            var links = new Panel { BackColor = Ui.Rail, Height = 72 };
+            copy.Enabled = false;
+            copy.Click += (s, e) => CopyResults();
+            rules.Text = "判定口径…"; rules.AutoSize = true; rules.ForeColor = Ui.Accent; rules.Cursor = Cursors.Hand; rules.BackColor = Ui.Rail;
             tips.SetToolTip(rules, HoleCheck.Options.Describe());
             rules.Click += (s, e) => EditOptions();
-            summary.AutoSize = false; summary.TextAlign = ContentAlignment.MiddleRight; summary.AutoEllipsis = true;
-            summary.ForeColor = Ui.Muted; summary.BackColor = Ui.Bg; summary.Font = Ui.F9B;
-            summary.Text = "还没检查";
-            bar.Controls.Add(run); bar.Controls.Add(copy); bar.Controls.Add(rules); bar.Controls.Add(summary);
-            bar.Resize += (s, e) => summary.SetBounds(340, 0, Math.Max(40, bar.Width - 340), bar.Height);
-            run.Click += (s, e) => RunCheck();
-            copy.Click += (s, e) => CopyResults();
-            tips.SetToolTip(run, "Ctrl+Enter");
+            links.Controls.Add(copy); links.Controls.Add(rules);
+            copy.Location = new Point(0, 4); rules.Location = new Point(10, 44);
+            shell.RailBottom = links;
 
-            var listCard = Ui.Card("检查结果", 0, "点一条在模型里高亮");
-            foreach (var c in new[]{ cMissing, cMis, cWrong, cUnpaired }) {
-                c.Width = 86;
-                c.CheckedChanged += (s, e) => ApplyFilter();
-                listCard.AddHeader(c);
-            }
-            tips.SetToolTip(cUnpaired, "只有一个零件有孔、附近也没穿过别的零件。真实装配里大多数孔都是孤孔，默认不显示。");
-            list.Dock = DockStyle.Fill; list.IntegralHeight = false; list.BorderStyle = BorderStyle.None;
-            list.DrawMode = DrawMode.OwnerDrawFixed; list.ItemHeight = 46; list.BackColor = Color.White;
+            // ---- 正文：一句话结论 → 问题列表 → 涉及的孔 ----
+            var stack = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = 10, AutoScroll = false };
+            page.Body.Controls.Add(stack);
+            summary.AutoSize = false; summary.TextAlign = ContentAlignment.MiddleLeft; summary.AutoEllipsis = true;
+            summary.ForeColor = Ui.Muted; summary.BackColor = Ui.Bg; summary.Font = Ui.F9; summary.Height = 22;
+            summary.Text = "还没检查";
+            summary.TextChanged += (s, e) => tips.SetToolTip(summary, summary.Text);
+            list.IntegralHeight = false; list.BorderStyle = BorderStyle.None;
+            list.DrawMode = DrawMode.OwnerDrawFixed; list.ItemHeight = 66; list.BackColor = Color.White;
             list.DrawItem += DrawIssue;
             list.SelectedIndexChanged += (s, e) => { HighlightSelected(); ShowDetail(); if (autoJump.Checked) JumpToSelected(false); };
             list.DoubleClick += (s, e) => JumpToSelected(true);
-            listCard.Controls.Add(list);
+            var detailCard = Ui.Card("涉及的孔", 140, "");
+            detailCard.Fill = true;
+            detail.Dock = DockStyle.Fill; detail.Multiline = true; detail.ReadOnly = true; detail.BorderStyle = BorderStyle.None;
+            detail.BackColor = Ui.Rail; detail.ForeColor = Ui.Text; detail.ScrollBars = ScrollBars.Vertical; detail.Font = Ui.F9;
+            detailCard.Controls.Add(detail);
+            stack.Add(summary); stack.Add(list, true); stack.Add(detailCard);
 
-            var detailCard = Ui.Card("详情", 132, "选中一条，这里列出涉及的每个孔");
-            autoJump.Font = Ui.F8; autoJump.BackColor = Color.White; autoJump.Height = 22;
+            // ---- 底部操作栏 ----
+            autoJump.Font = Ui.F9; autoJump.BackColor = Ui.Bg;
             jump.Click += (s, e) => JumpToSelected(true);
             goDrill.Click += (s, e) => GoDrillSelected();
             goDrill.Enabled = false; jump.Enabled = false;
             tips.SetToolTip(jump, "把视图镜头拉到这一条涉及的孔上（双击列表也行）。");
             tips.SetToolTip(goDrill, "漏打孔：打开「自动打孔」，这几个孔直接带进去当参考孔，再点没打孔那个零件上的面就能配做。");
-            detailCard.AddHeader(goDrill); detailCard.AddHeader(jump); detailCard.AddHeader(autoJump);
-            detail.Dock = DockStyle.Fill; detail.Multiline = true; detail.ReadOnly = true; detail.BorderStyle = BorderStyle.None;
-            detail.BackColor = Color.White; detail.ForeColor = Ui.Text; detail.ScrollBars = ScrollBars.Vertical; detail.Font = Ui.F9;
-            detailCard.Controls.Add(detail);
-
-            status.Height = 24; status.Padding = new Padding(2, 0, 10, 0); status.AutoEllipsis = true;
-            status.TextAlign = ContentAlignment.MiddleLeft; status.ForeColor = Ui.Muted; status.BackColor = Ui.Bg;
+            shell.Footer.AddLeft(autoJump);
+            shell.Footer.AddRight(jump); shell.Footer.AddRight(goDrill);
+            shell.Footer.Status = status;
+            status.ForeColor = Ui.Muted;
             status.Text = "就绪。点「开始检查」（Ctrl+Enter）。";
-
-            var stack = new VerticalStack { Dock = DockStyle.Fill };
-            stack.Add(bar); stack.Add(listCard, true); stack.Add(detailCard); stack.Add(status);
-            Controls.Add(stack);
+            status.TextChanged += (s, e) => tips.SetToolTip(status, status.Text);
         }
 
         void DrawIssue(object sender, DrawItemEventArgs e){
-            e.DrawBackground();
             var g = e.Graphics;
             using (var b = new SolidBrush(Color.White)) g.FillRectangle(b, e.Bounds);
             if (shown.Count == 0) {
                 // 空状态：一句居中的话，不是一条"假的结果"
-                string text = !checkedOnce ? "点「开始检查」扫一遍装配里的孔。"
-                            : (issues.Count == 0 ? "没有发现问题。" : "当前筛选下没有问题（点上面的胶囊切换显示哪几类）。");
+                string text = !checkedOnce ? "点左边「开始检查」扫一遍装配里的孔。"
+                            : (issues.Count == 0 ? "没有发现问题。" : "当前筛选下没有问题（在左边勾选要看哪几类）。");
                 TextRenderer.DrawText(g, text, Ui.F9, e.Bounds, Ui.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
                 return;
             }
             if (e.Index < 0 || e.Index >= shown.Count) return;
             var it = shown[e.Index];
             bool sel = (e.State & DrawItemState.Selected) != 0;
-            if (sel) {
-                using (var b = new SolidBrush(Ui.ChipBg)) g.FillRectangle(b, e.Bounds);
-                using (var b = new SolidBrush(Ui.Accent)) g.FillRectangle(b, e.Bounds.X, e.Bounds.Y + 4, 3, e.Bounds.Height - 8);
-            }
-            using (var p = new Pen(Ui.Line)) g.DrawLine(p, e.Bounds.Left + 8, e.Bounds.Bottom - 1, e.Bounds.Right - 8, e.Bounds.Bottom - 1);
+            var r = new Rectangle(e.Bounds.X, e.Bounds.Y + 3, e.Bounds.Width - 1, e.Bounds.Height - 7);
+            Ui.FillRound(g, r, 10, sel ? Ui.AccentSoft : Color.White);
+            Ui.DrawRound(g, r, 10, sel ? Ui.Accent : Ui.Line, sel ? 1.5f : 1f);
             Color c = ColorFor(it.Kind);
-            var tag = new Rectangle(e.Bounds.X + 12, e.Bounds.Y + 11, 64, 22);
-            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            using (var path = Ui.Rounded(tag, 10)) {
-                using (var b = new SolidBrush(Color.FromArgb(26, c))) g.FillPath(b, path);
-                using (var p = new Pen(Color.FromArgb(90, c))) g.DrawPath(p, path);
-            }
-            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.Default;
-            TextRenderer.DrawText(g, it.Done.Length > 0 ? "已配" : it.KindName, Ui.F8, tag, it.Done.Length > 0 ? Ui.Ok : c, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-            int x = tag.Right + 10, w = Math.Max(10, e.Bounds.Right - x - 10);
-            TextRenderer.DrawText(g, it.Message, Ui.F9, new Rectangle(x, e.Bounds.Y + 5, w, 20), Ui.Text, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+            bool done = it.Done.Length > 0;
+            string tagText = done ? "已配" : it.KindName;
+            int tw = TextRenderer.MeasureText(tagText, Ui.F8).Width + 16;
+            var tag = new Rectangle(r.X + 14, r.Y + 11, tw, 24);
+            Ui.FillRound(g, tag, 6, done ? Ui.OkSoft : SoftFor(it.Kind));
+            TextRenderer.DrawText(g, tagText, Ui.F8, tag, done ? Ui.Ok : c, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            int x = tag.Right + 12, w = Math.Max(10, r.Right - x - 12);
+            TextRenderer.DrawText(g, it.Message, Ui.F9, new Rectangle(x, r.Y + 10, w, 22), Ui.Text, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
             var parts = it.Holes.Select(h => h.PartName).Distinct().ToArray();
             TextRenderer.DrawText(g, it.Holes.Count + " 个孔 · " + parts.Length + " 个零件：" + string.Join("、", parts), Ui.F8,
-                new Rectangle(x, e.Bounds.Y + 26, w, 16), Ui.Muted, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+                new Rectangle(x, r.Y + 34, w, 18), Ui.Muted, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+        }
+
+        static Color SoftFor(HoleIssueKind k){
+            switch (k) {
+                case HoleIssueKind.MissingHole: return Ui.BadSoft;
+                case HoleIssueKind.Misaligned: return Ui.WarnSoft;
+                case HoleIssueKind.WrongSpec: return Ui.AccentSoft;
+                default: return Ui.Subtle;
+            }
         }
 
         static Color ColorFor(HoleIssueKind k){
@@ -257,6 +288,8 @@ namespace TianGongCadSuite {
                 var counted = issues.Where(i => i.Kind != HoleIssueKind.Unpaired || cUnpaired.Checked).ToList();
                 summary.Text = HoleCheck.Summary(counted, holeCount, groupCount);
                 summary.ForeColor = counted.Count == 0 ? Ui.Ok : Ui.Warn;
+                shell.SetTitle(counted.Count == 0 ? "没有发现问题" : "发现 " + counted.Count + " 处问题", "点一条在模型里高亮");
+                countLine.Text = holeCount + " 个孔 · " + groupCount + " 组同轴孔";
             }
             ShowDetail();
         }

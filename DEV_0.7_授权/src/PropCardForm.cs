@@ -11,8 +11,8 @@ namespace TianGongCadSuite {
     // 好用的三招：选一片格子 → 上面输入框填值 → 「填入」；从 Excel 复制一块 → Ctrl+V；选中 → Delete 清空。
     // 改过的格子标黄，文件里还没有的属性标灰；只写改过的文件（标准件、外购件不会被碰）。
     public sealed class PropCardForm : Form, IBusyTool {
-        static readonly Color EditedBg = Color.FromArgb(0xFF, 0xF4, 0xC2);
-        static readonly Color MissingBg = Color.FromArgb(0xEE, 0xF0, 0xF4);
+        static readonly Color EditedBg = Ui.WarnSoft;
+        static readonly Color MissingBg = Ui.Subtle;
         const int FixedColumns = 2;   // 文件、材料
 
         readonly F.Application app;
@@ -24,7 +24,6 @@ namespace TianGongCadSuite {
         readonly TextBox fillBox = new TextBox();
         readonly CheckBox fillMissing = new CheckBox();
         readonly Label status = new Label();
-        readonly Card fileCard;
         readonly Button write;
         bool loading, busy;
         public bool Busy { get { return busy; } }
@@ -44,31 +43,44 @@ namespace TianGongCadSuite {
             app = application;
             cad = new PropCardCad(application);
             fields = PropCardFields.Load(SettingsFile.PathOf(PropCardFields.FileName));
-            Ui.Shell(this, Product.Title("属性卡填写"), 1040, 620, 760, 420);
+            Ui.Shell(this, Product.Title("属性卡填写"), 1120, 680, 860, 480);
             FormBorderStyle = FormBorderStyle.Sizable;
 
-            // ---- 文件 + 填值 ----
-            fileCard = Ui.Card("文件", 74, "");
-            var reload = Ui.Small("载入当前文档"); reload.Click += (s, e) => LoadActive();
-            var add = Ui.Small("添加文件…"); add.Click += (s, e) => AddFiles();
-            var remove = Ui.Small("移除选中行"); remove.Click += (s, e) => RemoveSelectedRows();
-            fileCard.AddHeader(reload); fileCard.AddHeader(add); fileCard.AddHeader(remove);
-            var bar = new Panel { Dock = DockStyle.Fill, BackColor = Color.White };
-            var lf = Ui.Caption("按文件名筛选"); lf.BackColor = Color.White;
-            var lv = Ui.Caption("把选中的格子填成"); lv.BackColor = Color.White;
-            var fill = Ui.Primary("填入", 64, 26);
-            var tip = Ui.Muted8("Ctrl+V 粘贴（可从 Excel 整块复制）· Delete 清空 · 双击改单格"); tip.BackColor = Color.White;
-            lf.Location = new Point(0, 7); filter.SetBounds(86, 3, 150, 24);
-            lv.Location = new Point(256, 7); fillBox.SetBounds(366, 3, 200, 24);
-            fill.Location = new Point(574, 2); tip.Location = new Point(650, 8);
-            bar.Controls.AddRange(new Control[] { lf, filter, lv, fillBox, fill, tip });
-            fileCard.Controls.Add(bar);
+            // ---- 0.9.0「D」：侧栏放文件来源、筛选；正文上面一行"把选中的格子填成"，下面表格；底部写入 ----
+            Controls.Add(shell);
+            var page = shell.AddPage("属性卡", "属性卡", "");
+            var top = new Panel { BackColor = Ui.Rail, Height = 38 + 6 + 32 + 12 + 22 + 30 };
+            var reload = Ui.Secondary("载入当前文档", 200, 38); reload.Click += (s, e) => LoadActive();
+            var add = Ui.Ghost("添加文件…"); add.Click += (s, e) => AddFiles();
+            var lf = new Label { Text = "按文件名筛选", AutoSize = false, Font = Ui.F8, ForeColor = Ui.Text2, BackColor = Ui.Rail };
+            filter.BorderStyle = BorderStyle.FixedSingle; filter.Font = Ui.F9;
+            top.Controls.AddRange(new Control[] { reload, add, lf, filter });
+            top.Resize += (s, e) => {
+                int w = top.Width;
+                reload.SetBounds(0, 0, w, 38); add.SetBounds(0, 44, w, 32);
+                lf.SetBounds(2, 88, w, 20); filter.SetBounds(0, 110, w, 26);
+            };
+            shell.RailTop = top;
+            // 侧栏中段：按状态筛（全部 / 改过未写入 / 缺属性 / 读取出错）
+            shell.Rail.Visible = true;
+            shell.Rail.Kind = StepRail.Mode.Nav;
+            shell.Rail.Add("全部文件", "");
+            shell.Rail.Add("改过未写入", "").Dot = Color.FromArgb(0xF5, 0x9E, 0x0B);
+            shell.Rail.Add("缺属性", "").Dot = Color.FromArgb(0xA1, 0xA1, 0xAA);
+            shell.Rail.Add("读取出错", "").Dot = Ui.Bad;
+            shell.Rail.SelectedChanged += (s, e) => { stateFilter = shell.Rail.Selected; Rebuild(); };
             filter.TextChanged += (s, e) => Rebuild();
-            fill.Click += (s, e) => SetSelected(fillBox.Text);
-            fillBox.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { SetSelected(fillBox.Text); e.SuppressKeyPress = true; } };
+            // 侧栏底部：顺便补齐缺的属性
+            var foot = new Panel { BackColor = Ui.Rail, Height = 64 };
+            fillMissing.Text = "写入时顺便补齐缺的属性（标题栏不再显示“错误：没有参考”）";
+            fillMissing.Checked = true; fillMissing.AutoSize = false; fillMissing.BackColor = Ui.Rail; fillMissing.Font = Ui.F8;
+            fillMissing.CheckAlign = ContentAlignment.TopLeft; fillMissing.TextAlign = ContentAlignment.TopLeft;
+            fillMissing.Dock = DockStyle.Fill;
+            foot.Controls.Add(fillMissing);
+            shell.RailBottom = foot;
 
-            // ---- 表格 ----
-            var gridCard = Ui.Card("属性卡", 0, "黄 = 改过还没写入　灰 = 文件里还没有这个属性");
+            // ---- 正文 ----
+            var remove = Ui.Small("移除选中行"); remove.Click += (s, e) => RemoveSelectedRows();
             var columns = Ui.Small("列…"); columns.Click += (s, e) => EditColumns();
             // 撤销修改 = 丢掉全部没写入的格子：手一滑点到就几十格白填，先问一句
             var revert = Ui.Small("撤销修改"); revert.Click += (s, e) => {
@@ -77,33 +89,42 @@ namespace TianGongCadSuite {
                 if (MessageBox.Show(this, "丢掉 " + dirty + " 个文件里还没写入的修改？", "属性卡填写", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
                 foreach (var r in rows) r.Edited.Clear(); Rebuild();
             };
-            gridCard.AddHeader(columns); gridCard.AddHeader(revert);
+            foreach (var b2 in new[] { remove, columns, revert }) ((FlatButton)b2).SetFore(Ui.Text2);
+            shell.AddHeader(page, remove); shell.AddHeader(page, columns); shell.AddHeader(page, revert);
+            var stack = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = 12, AutoScroll = false };
+            page.Body.Controls.Add(stack);
+            var bar = new Panel { Height = 56, BackColor = Ui.Bg };
+            var lv = new Label { Text = "把选中的格子填成", AutoSize = false, Font = Ui.F8, ForeColor = Ui.Text2, BackColor = Ui.Bg };
+            var fill = Ui.Secondary("填入", 72, 30);
+            var tip = Ui.Muted8("Ctrl+V 粘贴（可从 Excel 整块复制）· Delete 清空 · 双击改单格"); tip.BackColor = Ui.Bg;
+            fillBox.BorderStyle = BorderStyle.FixedSingle; fillBox.Font = Ui.F9;
+            lv.SetBounds(0, 0, 200, 20); fillBox.SetBounds(0, 24, 240, 28);
+            fill.Location = new Point(250, 23); tip.Location = new Point(334, 31);
+            bar.Controls.AddRange(new Control[] { lv, fillBox, fill, tip });
+            fill.Click += (s, e) => SetSelected(fillBox.Text);
+            fillBox.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { SetSelected(fillBox.Text); e.SuppressKeyPress = true; } };
+            var gridFrame = Ui.Card("", 0, "");
+            gridFrame.Padding = new Padding(2, 2, 2, 8);
             BuildGrid();
-            gridCard.Controls.Add(grid);
+            gridFrame.Controls.Add(grid);
+            var legend = new Label { Text = "黄底 = 改过还没写入　灰底 = 文件里还没有这个属性", AutoSize = false, Height = 18, Font = Ui.F8, ForeColor = Ui.Muted, BackColor = Ui.Bg };
+            stack.Add(bar); stack.Add(gridFrame, true); stack.Add(legend);
 
             // ---- 底部 ----
-            var actions = new Panel { Height = 40, BackColor = Ui.Bg };
-            fillMissing.Text = "顺便补齐缺的属性（标题栏不再显示“错误：没有参考”）";
-            fillMissing.Checked = true; fillMissing.AutoSize = true; fillMissing.BackColor = Ui.Bg;
-            write = Ui.Primary("写入", 150, 32);
-            var close = Ui.Secondary("关闭", 80, 30);
+            write = Ui.Primary("写入", 220, 44);
+            var close = Ui.Secondary("关闭", 84, 38);
             write.Click += (s, e) => WriteAll();
             close.Click += (s, e) => Close();
-            status.AutoSize = false; status.BackColor = Ui.Bg; status.ForeColor = Ui.Muted; status.TextAlign = ContentAlignment.MiddleLeft; status.AutoEllipsis = true;
-            actions.Controls.AddRange(new Control[] { fillMissing, status, write, close });
-            actions.Resize += (s, e) => {
-                close.SetBounds(actions.Width - 80, 5, 80, 30);
-                write.SetBounds(close.Left - 8 - 150, 4, 150, 32);
-                fillMissing.Location = new Point(0, 11);
-                status.SetBounds(fillMissing.Right + 12, 4, Math.Max(40, write.Left - fillMissing.Right - 20), 32);
-            };
-
-            var stack = new VerticalStack { Dock = DockStyle.Fill };
-            stack.Add(fileCard); stack.Add(gridCard, true); stack.Add(actions);
-            Controls.Add(stack);
+            shell.Footer.Padding = new Padding(28, 0, 20, 0);
+            shell.Footer.AddRight(close); shell.Footer.AddRight(write);
+            shell.Footer.Status = status;
+            status.ForeColor = Ui.Muted;
             FormClosing += OnClosing;
             UpdateStatus();
         }
+        readonly WizardShell shell = new WizardShell { StepCaption = false };
+        int stateFilter;   // 0 全部 / 1 改过未写入 / 2 缺属性 / 3 读取出错
+        bool Missing(PropCardRow r){ foreach (var f in fields) if (!r.Has(f)) return true; return false; }
 
         void BuildGrid(){
             grid.Dock = DockStyle.Fill;
@@ -114,9 +135,20 @@ namespace TianGongCadSuite {
             grid.EditMode = DataGridViewEditMode.EditOnKeystrokeOrF2;
             grid.ClipboardCopyMode = DataGridViewClipboardCopyMode.EnableWithoutHeaderText;
             grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None;
-            grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
             grid.Font = Ui.F9;
-            grid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(0xCF, 0xE3, 0xF8);
+            grid.EnableHeadersVisualStyles = false;
+            grid.ColumnHeadersDefaultCellStyle.BackColor = Ui.Rail;
+            grid.ColumnHeadersDefaultCellStyle.ForeColor = Ui.Muted;
+            grid.ColumnHeadersDefaultCellStyle.Font = Ui.F8;
+            grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = Ui.Rail;
+            grid.ColumnHeadersDefaultCellStyle.Padding = new Padding(6, 0, 0, 0);
+            grid.ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.Single;
+            grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
+            grid.ColumnHeadersHeight = 34;
+            grid.GridColor = Color.FromArgb(0xEE, 0xEE, 0xF0);
+            grid.RowTemplate.Height = 32;
+            grid.DefaultCellStyle.Padding = new Padding(6, 0, 0, 0);
+            grid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(0xE0, 0xE7, 0xFF);
             grid.DefaultCellStyle.SelectionForeColor = Ui.Text;
             grid.ShowCellToolTips = true;
             grid.CellBeginEdit += (s, e) => {
@@ -149,7 +181,7 @@ namespace TianGongCadSuite {
             try { files = cad.Collect(out source); }
             catch (Exception e) { Log.Write("PropCardCollect", e); status.Text = "读当前文档失败：" + e.Message; return; }
             rows.Clear();
-            fileCard.Hint = source; fileCard.Invalidate();
+            shell.SetTitle("属性卡", source);
             ReadInto(files);
             if (cad.skippedSubs.Count > 0) {
                 status.Text = "注意：" + cad.skippedSubs.Count + " 个子装配读不出来，里面的零件没收进来（" + string.Join("、", cad.skippedSubs.Take(3).ToArray()) + (cad.skippedSubs.Count > 3 ? " 等" : "") + "）。等天工加载完再点「载入当前文档」。";
@@ -208,6 +240,9 @@ namespace TianGongCadSuite {
                 string key = filter.Text.Trim();
                 foreach (var r in rows) {
                     if (key.Length > 0 && r.FileName.IndexOf(key, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    if (stateFilter == 1 && !r.Dirty) continue;
+                    if (stateFilter == 2 && (r.Problem.Length > 0 || !Missing(r))) continue;
+                    if (stateFilter == 3 && r.Problem.Length == 0) continue;
                     var values = new object[FixedColumns + fields.Count];
                     values[0] = r.FileName; values[1] = r.Problem.Length > 0 ? "（读取失败）" : r.Material;
                     for (int i = 0; i < fields.Count; i++) values[FixedColumns + i] = r.Value(fields[i]);
@@ -334,10 +369,15 @@ namespace TianGongCadSuite {
         void UpdateStatus(){
             int files = 0, cells = 0;
             foreach (var r in rows) if (r.Dirty) { files++; cells += r.Edited.Count; }
-            write.Text = files > 0 ? "写入（" + files + " 个文件）" : "写入";
+            write.Text = files > 0 ? "写入 " + files + " 个文件" : "写入";
             write.Enabled = files > 0;
+            shell.Rail.SetCount(0, rows.Count.ToString(), false);
+            shell.Rail.SetCount(1, files.ToString(), files == 0);
+            int miss = rows.Count(r => r.Problem.Length == 0 && Missing(r)), bad = rows.Count(r => r.Problem.Length > 0);
+            shell.Rail.SetCount(2, miss.ToString(), miss == 0);
+            shell.Rail.SetCount(3, bad.ToString(), bad == 0);
             status.ForeColor = Ui.Muted;
-            status.Text = rows.Count == 0 ? "没有文件：点上面的「载入当前文档」或「添加文件…」"
+            status.Text = rows.Count == 0 ? "没有文件：点左边的「载入当前文档」或「添加文件…」"
                 : "共 " + rows.Count + " 个文件" + (grid.Rows.Count != rows.Count ? "（筛出 " + grid.Rows.Count + " 个）" : "") + (files > 0 ? "　·　改了 " + files + " 个文件 " + cells + " 格" : "");
         }
 

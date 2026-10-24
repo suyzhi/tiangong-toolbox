@@ -56,8 +56,8 @@ namespace TianGongCadSuite {
         readonly ResultList results = new ResultList();
         Card resultCard;
         VerticalStack rootStack;
-        readonly Button apply = Ui.Primary("应用", 130, 36);
-        readonly Button undoButton = Ui.Secondary("撤销修改", 96, 30);
+        readonly FlatButton apply = (FlatButton)Ui.Primary("应用", 200, 44);
+        readonly Button undoButton = Ui.Secondary("撤销修改", 96, 38);
         readonly Label status = new Label();
         readonly ToolTip tips = new ToolTip { AutoPopDelay = 15000, InitialDelay = 400 };
 
@@ -65,7 +65,7 @@ namespace TianGongCadSuite {
         public HoleEditForm(F.Application application, A.AssemblyDocument document) : this(application, document, null){ }
         HoleEditForm(F.Application application, A.AssemblyDocument document, P.PartDocument part){
             app = application; assembly = document; partDoc = part;
-            Ui.Shell(this, "改孔型", 640, 720, 560, 620);
+            Ui.Shell(this, "改孔型", 900, 680, 780, 560);
             BuildLayout();
             WireEvents();
             loading = true;
@@ -86,44 +86,72 @@ namespace TianGongCadSuite {
         }
 
         // ---------------- 布局 ----------------
-        // ① 要改的孔（吃掉剩余高度）→ ② 改成 → 结果 → 按钮 → 状态栏
+        // 0.9.0「D · 侧栏向导」：① 要改的孔（列表）→ ② 改成（要改什么的说明 + 参数），底部「应用到 N 个孔」。
+        // 在模型里点了孔自动翻回第 1 步，新的一行闪一下。
+        const int PageHoles = 0, PageSpec = 1;
+        readonly WizardShell shell = new WizardShell();
+        readonly FlatButton nextButton = (FlatButton)Ui.Primary("下一步：改成", 200, 44);
+        readonly FlatButton backButton = (FlatButton)Ui.Secondary("上一步", 84, 38);
+        readonly EmptyHint holeEmpty = new EmptyHint("正在等你在模型里点要改的孔：孔口圆边、孔内壁，或带孔的平面…");
+        Panel previewBox;
+        Flash flash;
+        int lastN;
+
         void BuildLayout(){
-            var holeCard = Ui.Card("① 要改的孔", 0, "点孔口圆边、孔内壁，或点带孔的平面（面上的孔全加进来）");
+            Controls.Add(shell);
+            var pHoles = shell.AddPage("要改的孔", "要改的孔", "");
+            var pSpec = shell.AddPage("改成", "改成", "");
+
+            // ---- ① 要改的孔 ----
             var remove = Ui.Small("移除"); var clear = Ui.Small("清空");
+            ((FlatButton)remove).SetFore(Ui.Text2); ((FlatButton)clear).SetFore(Ui.Text2);
             remove.Click += (s, e) => RemoveSelected();
             clear.Click += (s, e) => { if (busy) return; targets.Clear(); picked.Clear(); RefreshAll(); SetStatus("已清空。重新点要改的孔。", Ui.Accent); };
-            holeCard.AddHeader(clear); holeCard.AddHeader(remove);
-            var hb = new Panel { Dock = DockStyle.Fill, BackColor = Color.White };
+            shell.AddHeader(pHoles, remove); shell.AddHeader(pHoles, clear);
+            var hs = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = 8, AutoScroll = false };
+            pHoles.Body.Controls.Add(hs);
+            hs.Add(new Label { Text = "在模型里点孔口圆边、孔内壁，或点带孔的平面（面上的孔全加进来）。可以连续点。", AutoSize = false, Height = 40, ForeColor = Ui.Text2, BackColor = Ui.Bg });
+            var frame = new Panel { BackColor = Color.White };
             list.Dock = DockStyle.Fill; list.BorderStyle = BorderStyle.None; list.IntegralHeight = false; list.Font = Ui.F9;
             list.HorizontalScrollbar = true;
+            list.DrawMode = DrawMode.OwnerDrawFixed; list.ItemHeight = 40;
+            list.DrawItem += DrawHoleItem;
             list.SelectedIndexChanged += (s, e) => JumpToSelected();
-            wholeGroup.Dock = DockStyle.Bottom; wholeGroup.Font = Ui.F9; wholeGroup.BackColor = Color.White;
+            holeEmpty.Dock = DockStyle.Top;
+            frame.Controls.Add(list); frame.Controls.Add(holeEmpty); holeEmpty.BringToFront();
+            wholeGroup.Font = Ui.F9; wholeGroup.BackColor = Ui.Bg; wholeGroup.Height = 28;
             tips.SetToolTip(wholeGroup, "勾着：点中一个孔，它所在特征组里的孔全部一起改（组名、孔名按新规格重起）。\r\n不勾：只改点中的那个孔特征（阵列里的孔仍然整排跟着种子孔变）。");
-            hb.Controls.Add(list); hb.Controls.Add(wholeGroup);
-            holeCard.Controls.Add(hb);
+            hs.Add(frame, true); hs.Add(wholeGroup);
+            flash = new Flash(list);
 
-            var specCard = Ui.Card("② 改成", 34 + 4 * 32 + 22 + 10, "规格按天工孔标准表；改了孔径就是非标孔");
-            var sb = new Panel { Dock = DockStyle.Fill, BackColor = Color.White };
-            specCard.Controls.Add(sb);
+            // ---- ② 改成 ----
+            var st = rootStack = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = 12, AutoScroll = false };
+            pSpec.Body.Controls.Add(st);
+            previewBox = new RoundBox { Height = 66, Fill = Ui.AccentSoft, Padding = new Padding(14, 8, 14, 6) };
+            preview.AutoSize = false; preview.Font = Ui.F9B; preview.AutoEllipsis = true; preview.BackColor = Ui.AccentSoft;
+            preview.Dock = DockStyle.Fill;
+            previewBox.Controls.Add(preview);
+            var sb = new Panel { BackColor = Ui.Bg, Height = 4 * 40 + 30 };
+            specGrid.BackColor = Ui.Bg;
             sb.Controls.Add(specGrid);
-            stdInfo.AutoSize = false; stdInfo.Font = Ui.F8; stdInfo.ForeColor = Ui.Muted; stdInfo.AutoEllipsis = true; stdInfo.BackColor = Color.White;
+            stdInfo.AutoSize = false; stdInfo.Font = Ui.F8; stdInfo.ForeColor = Ui.Muted; stdInfo.AutoEllipsis = true; stdInfo.BackColor = Ui.Bg;
             sb.Controls.Add(stdInfo);
-            kindSeg.Width = Math.Max(300, kindSeg.PreferredWidth);
+            kindSeg.Width = Math.Max(340, kindSeg.PreferredWidth);
             specGrid.Add("孔型", kindSeg);
             specGrid.Add("规格", sizeBox, FieldGrid.Space(10), Ui.Caption("孔径"), diaNum, FieldGrid.Unit("mm"));
             specGrid.Add("深度", throughRadio, blindRadio, depthNum, FieldGrid.Unit("mm"));
             threadRow = specGrid.Add("螺纹", threadFullRadio, threadPartRadio, threadNum, FieldGrid.Unit("mm"));
             tips.SetToolTip(blindRadio, "贯通孔不能直接改成盲孔（天工接口限制，实测会让孔失效）；盲孔可以改深度、也可以改成贯通。");
-            sb.Resize += (s, e) => {
+            EventHandler fit = (s, e) => {
                 int w = Math.Max(80, sb.ClientSize.Width);
                 specGrid.SetBounds(0, 0, w, specGrid.PreferredHeight);
-                stdInfo.SetBounds(0, specGrid.PreferredHeight + 2, w, 18);
+                stdInfo.SetBounds(0, specGrid.PreferredHeight + 4, w, 20);
+                int h = specGrid.PreferredHeight + 28;
+                if (sb.Height != h) { sb.Height = h; if (rootStack != null) rootStack.Relayout(); }
             };
+            sb.Resize += fit; specGrid.Resize += fit;
 
-            preview.Height = 40; preview.AutoSize = false; preview.Font = Ui.F9B; preview.AutoEllipsis = true; preview.BackColor = Ui.Bg;
-            preview.Padding = new Padding(2, 2, 10, 0);
-
-            resultCard = Ui.Card("本次结果", 150, "点一条跳到那个孔");
+            resultCard = Ui.Card("本次结果", 0, "点一条跳到那个孔");
             var hideResult = Ui.Small("收起");
             hideResult.Click += (s, e) => { resultCard.Visible = false; rootStack.Relayout(); };
             resultCard.AddHeader(hideResult);
@@ -131,29 +159,50 @@ namespace TianGongCadSuite {
             results.Locate += it => { if (it.HasWhere && CadView.ZoomToHole(app, it.Where, it.DiameterMm)) SetStatus("已跳到：" + it.Text, Ui.Accent); };
             resultCard.Controls.Add(results);
             resultCard.Visible = false;
+            st.Add(previewBox); st.Add(sb); st.Add(resultCard, true);
 
-            var actions = new Panel { Height = 40, BackColor = Ui.Bg };
-            apply.SetBounds(0, 2, 130, 36);
-            var close = Ui.Secondary("关闭", 80, 30);
-            close.Click += (s, e) => Close();
+            // ---- 底部操作栏 ----
+            backButton.Click += (s, e) => shell.Go(shell.Current - 1);
+            nextButton.Click += (s, e) => shell.Go(PageSpec);
             apply.Click += (s, e) => Apply();
             undoButton.Enabled = false;
             undoButton.Click += (s, e) => UndoLast();
-            tips.SetToolTip(apply, "Ctrl+Enter"); tips.SetToolTip(close, "Esc");
+            tips.SetToolTip(apply, "Ctrl+Enter");
             tips.SetToolTip(undoButton, "把上一次「应用」改过的孔恢复成原来的孔型和名字。");
-            actions.Controls.Add(apply); actions.Controls.Add(undoButton); actions.Controls.Add(close);
-            actions.Resize += (s, e) => {
-                close.SetBounds(actions.Width - 80, 5, 80, 30);
-                undoButton.SetBounds(close.Left - 8 - 96, 5, 96, 30);
-            };
-
-            status.Height = 24; status.Padding = new Padding(2, 0, 10, 0); status.AutoEllipsis = true;
-            status.TextAlign = ContentAlignment.MiddleLeft; status.ForeColor = Ui.Accent; status.BackColor = Ui.Bg;
+            shell.Footer.AddLeft(backButton); shell.Footer.AddLeft(undoButton);
+            shell.Footer.AddRight(apply); shell.Footer.AddRight(nextButton);
+            shell.Footer.Status = status;
+            status.ForeColor = Ui.Accent;
             status.Text = "在模型里点要改的孔（孔口圆边、孔内壁，或点一个带孔的平面）。";
+            status.TextChanged += (s, e) => tips.SetToolTip(status, status.Text);
+            shell.PageChanged += (s, e) => UpdatePrimary();
+        }
 
-            var stack = rootStack = new VerticalStack { Dock = DockStyle.Fill };
-            stack.Add(holeCard, true); stack.Add(specCard); stack.Add(preview); stack.Add(resultCard); stack.Add(actions); stack.Add(status);
-            Controls.Add(stack);
+        void DrawHoleItem(object sender, DrawItemEventArgs e){
+            var g = e.Graphics;
+            using (var w = new SolidBrush(Color.White)) g.FillRectangle(w, e.Bounds);
+            if (e.Index < 0 || e.Index >= list.Items.Count) return;
+            bool sel = (e.State & DrawItemState.Selected) != 0;
+            var r = new Rectangle(e.Bounds.X, e.Bounds.Y + 2, e.Bounds.Width - 1, e.Bounds.Height - 5);
+            object key = e.Index < targets.Count ? (object)targets[e.Index] : null;
+            Ui.FillRound(g, r, 10, flash.Back(key, sel ? Ui.AccentSoft : Color.White));
+            Ui.DrawRound(g, r, 10, sel ? Ui.Accent : Ui.Line, sel ? 1.5f : 1f);
+            TextRenderer.DrawText(g, list.Items[e.Index].ToString(), sel ? Ui.F9B : Ui.F9, new Rectangle(r.X + 14, r.Y, r.Width - 20, r.Height), Ui.Text,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+        }
+
+        void UpdatePrimary(){
+            int cur = shell.Current;
+            backButton.Enabled = cur > 0 && !busy;
+            bool showApply = busy || apply.Enabled || cur == PageSpec;
+            apply.Visible = showApply; nextButton.Visible = !showApply;
+            if (!busy) apply.Text = apply.Enabled && lastN > 0 ? "应用到 " + lastN + " 个孔" : "应用";
+            shell.Rail.Set(PageHoles, targets.Count == 0 ? "点孔口圆边或带孔的面" : targets.Count + " 个孔" + (wholeGroup.Checked ? " · 整组一起改" : ""), targets.Count > 0, false);
+            string problem = ""; try { problem = SpecNow().SpecProblem; } catch { }
+            string name = ""; try { name = HoleNaming.Short(SpecNow()); } catch { }
+            shell.Rail.Set(PageSpec, problem.Length > 0 ? "规格有问题" : name, apply.Enabled, problem.Length > 0);
+            holeEmpty.Visible = targets.Count == 0;
+            shell.Footer.PerformLayout();
         }
 
         void WireEvents(){
@@ -247,12 +296,13 @@ namespace TianGongCadSuite {
                     foreach (var t in targets) if (t.Multi != null) multis.Add(HoleGrouping.Sys(t.Multi));
                     string what = multis.Count > 0 ? n + " 个孔（" + multis.Count + " 个多孔孔特征，整个一起改）" : n + " 个孔特征";
                     preview.Text = "要改 " + what + " → " + HoleNaming.Short(hs) + "\r\n" + hs.Summary;
-                    preview.ForeColor = Ui.Ok; ok = true;
+                    preview.ForeColor = Ui.Ok; ok = true; lastN = n;
                 }
             }
             tips.SetToolTip(preview, preview.Text);
             apply.Enabled = ok && !busy;
             undoButton.Enabled = lastUndo != null && !lastUndo.IsEmpty && !busy;
+            UpdatePrimary();
             DrawHighlights();
         }
 
@@ -287,6 +337,7 @@ namespace TianGongCadSuite {
         public string LastResult = "";
         public int TargetCount { get { return targets.Count; } }
         public string PreviewText { get { return preview.Text; } }
+        public void GoPageForTest(int i){ shell.Go(i, false); }
         public string StatusForTest { get { return status.Text; } }
         public int TargetCountForTest { get { return targets.Count; } }
         public bool CanApply { get { return apply.Enabled; } }
@@ -431,6 +482,15 @@ namespace TianGongCadSuite {
 
         public void AcceptPick(object selected){
             if (busy || closing || selected == null) return;
+            int before = targets.Count;
+            AcceptPickCore(selected);
+            // 点了新孔：翻回「要改的孔」，新加的几行闪一下
+            if (targets.Count > before) {
+                for (int i = before; i < targets.Count; i++) flash.Mark(targets[i]);
+                shell.Go(PageHoles);
+            }
+        }
+        void AcceptPickCore(object selected){
             try {
                 var pg = PickGeometry.Unwrap(selected);
                 var face = pg.Geometry as G.Face;

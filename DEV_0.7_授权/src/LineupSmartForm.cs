@@ -15,12 +15,10 @@ namespace TianGongCadSuite {
             catch(Exception ex){catalog=new LineupModelCatalog();catalogError="型号库加载失败："+ex.Message;}
         }
         Control BuildToolbar(){
-            var container=new Panel{Dock=DockStyle.Top,Height=74};
-            var filters=new FlowLayoutPanel{Dock=DockStyle.Top,Height=34,Padding=new Padding(5)};
-            filters.Controls.Add(new Label{Text="类目",AutoSize=true,Margin=new Padding(3,5,2,0)});
-            category.Items.Add("全部");category.Items.AddRange(LineupTableData.Categories);category.Items.Add("旧分类/辅助");category.SelectedIndex=1;filters.Controls.Add(category);
-            filters.Controls.Add(new Label{Text="查找",AutoSize=true,Margin=new Padding(12,5,2,0)});filters.Controls.Add(search);
-            var menu=new ToolStrip{Font=Font,Dock=DockStyle.Bottom,Height=34,GripStyle=ToolStripGripStyle.Hidden};
+            // 0.9.0：类目、查找挪到左侧导航（BuildNav），这里只剩一排菜单
+            var container=new Panel{Dock=DockStyle.Top,Height=46,BackColor=Ui.Bg};
+            category.Items.Add("全部");category.Items.AddRange(LineupTableData.Categories);category.Items.Add("旧分类/辅助");category.SelectedIndex=1;
+            var menu=new ToolStrip{Font=Ui.F9,Dock=DockStyle.Fill,GripStyle=ToolStripGripStyle.Hidden,BackColor=Ui.Bg,Padding=new Padding(12,6,12,6),Renderer=new FlatMenuRenderer()};
             var add=Drop(menu,"新增");Item(add,"新增记录（自动编号）",()=>AddEmpty());Item(add,"多选模型加入",()=>AddSelectedModels());Item(add,"复制选中行",DuplicateRows);Item(add,"从气缸生成 H/W 传感器",GenerateSensorPairs);
             var edit=Drop(menu,"编辑");Item(edit,"粘贴到当前单元格",()=>PasteCells(Clipboard.GetText()));Item(edit,"向下填充（不含编号/地址）",FillDown);Item(edit,"删除选中行",DeleteRows);Item(edit,"撤销",Undo);Item(edit,"保存",SaveDraft);
             Item(edit,"上方插入",()=>InsertAt(false));Item(edit,"下方插入",()=>InsertAt(true));Item(edit,"上移",()=>MoveRows(-1));Item(edit,"下移",()=>MoveRows(1));
@@ -34,7 +32,7 @@ namespace TianGongCadSuite {
             Item(files,"导出位置图",ExportLocationDialog);
             var view=Drop(menu,"视图");Item(view,"紧凑模型点选模式",()=>SetPickingMode(true));Item(view,"定位当前行模型",Locate);Item(view,"清除高亮",ClearHighlight);Item(view,"常用字段（编号/描述/型号等）",()=>{fullFieldView=false;ApplyFieldVisibility();});Item(view,"完整字段（含地址/参数/安装等）",()=>{fullFieldView=true;ApplyFieldVisibility();});
             menu.Items.Add(new ToolStripSeparator());Quick(menu,"连续绑定",()=>StartContinuous("bind"));Quick(menu,"绑定下一行",BindAndNext);Quick(menu,"点选模型",()=>SetPickingMode(true));Quick(menu,"撤销",Undo);
-            container.Controls.Add(filters);container.Controls.Add(menu);return container;
+            container.Controls.Add(menu);container.Paint+=(s,e)=>{using(var p=new Pen(Ui.Line))e.Graphics.DrawLine(p,0,container.Height-1,container.Width,container.Height-1);};return container;
         }
         ToolStripDropDownButton Drop(ToolStrip strip,string title){var item=new ToolStripDropDownButton(title);strip.Items.Add(item);return item;}
         void Item(ToolStripDropDownButton menu,string title,Action action){var item=new ToolStripMenuItem(title);item.Click+=(s,e)=>Try(action);menu.DropDownItems.Add(item);}
@@ -93,11 +91,49 @@ namespace TianGongCadSuite {
                 }
             }GenerateSensorPairsFor(ids);
         }
+        // 左侧类目导航（0.9.0）：点一个类目 = 原来的类目下拉框选它（下拉框还在，代码照旧读 category.SelectedIndex）
+        Panel nav;readonly StepRail navRail=new StepRail{Kind=StepRail.Mode.Nav};readonly Label navStats=new Label();
+        Control BuildNav(){
+            nav=new Panel{Dock=DockStyle.Left,Width=220,BackColor=Ui.Rail,Padding=new Padding(12,16,12,16)};
+            var label=new Label{Text="查找",Font=Ui.F8,ForeColor=Ui.Text2,BackColor=Ui.Rail,AutoSize=false};
+            search.BorderStyle=BorderStyle.FixedSingle;search.Font=Ui.F9;
+            foreach(var c in category.Items)navRail.Add(Convert.ToString(c),"");
+            navRail.Selected=Math.Max(0,category.SelectedIndex);
+            navRail.SelectedChanged+=(s,e)=>{if(category.SelectedIndex!=navRail.Selected)category.SelectedIndex=navRail.Selected;};
+            category.SelectedIndexChanged+=(s,e)=>{if(category.SelectedIndex>=0)navRail.Selected=category.SelectedIndex;};
+            var card=new RailCard("清单状态",96);
+            navStats.AutoSize=false;navStats.Font=Ui.F8;navStats.ForeColor=Ui.Text2;navStats.BackColor=Color.White;
+            card.Controls.Add(navStats);card.Resize+=(s,e)=>navStats.SetBounds(12,32,card.Width-24,card.Height-40);
+            nav.Controls.AddRange(new Control[]{label,search,navRail,card});
+            nav.Layout+=(s,e)=>{int w=nav.ClientSize.Width-24,h=nav.ClientSize.Height;label.SetBounds(12,16,w,20);search.SetBounds(12,38,w,26);card.SetBounds(12,h-16-card.Height,w,card.Height);navRail.SetBounds(12,78,w,Math.Max(0,card.Top-12-78));};
+            nav.Paint+=(s,e)=>{using(var p=new Pen(Ui.Line))e.Graphics.DrawLine(p,nav.Width-1,0,nav.Width-1,nav.Height);};
+            return nav;
+        }
+        void RefreshNav(){
+            if(nav==null)return;
+            try{
+                for(int i=0;i<navRail.Items.Count;i++){
+                    int n=i==0?project.Records.Count:i<=LineupTableData.Categories.Length?project.Records.Count(r=>LineupTableData.Category(r.Category)==LineupTableData.Categories[i-1]):project.Records.Count(r=>!LineupTableData.Categories.Contains(LineupTableData.Category(r.Category)));
+                    navRail.SetCount(i,n.ToString(),n==0&&i>0);
+                }
+                int unnumbered=project.Records.Count(r=>string.IsNullOrWhiteSpace(r.Number)),unbound=project.Records.Count(r=>string.IsNullOrEmpty(r.ReferenceKey));
+                navStats.Text="未编号　"+unnumbered+" 条"+Environment.NewLine+"未绑定模型　"+unbound+" 条"+Environment.NewLine+project.NumberPrefix+" Y"+project.ActiveIsland;
+            }catch(Exception ex){Log.Write("LineupNav",ex.Message);}
+        }
+        // 菜单的扁平外观：白底、没有边框，悬停浅灰圆角
+        sealed class FlatMenuRenderer:ToolStripProfessionalRenderer{
+            protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e){}
+            protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e){using(var b=new SolidBrush(Ui.Bg))e.Graphics.FillRectangle(b,e.AffectedBounds);}
+            protected override void OnRenderButtonBackground(ToolStripItemRenderEventArgs e){if(e.Item.Selected||e.Item.Pressed)Ui.FillRound(e.Graphics,new Rectangle(0,0,e.Item.Width-1,e.Item.Height-1),6,Ui.Subtle);}
+            protected override void OnRenderDropDownButtonBackground(ToolStripItemRenderEventArgs e){if(e.Item.Selected||e.Item.Pressed)Ui.FillRound(e.Graphics,new Rectangle(0,0,e.Item.Width-1,e.Item.Height-1),6,Ui.Subtle);}
+            protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e){if(e.Item.Selected&&e.Item.Enabled)using(var b=new SolidBrush(Ui.AccentSoft))e.Graphics.FillRectangle(b,new Rectangle(2,0,e.Item.Width-4,e.Item.Height));}
+            protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e){using(var p=new Pen(Ui.Line)){if(e.Vertical)e.Graphics.DrawLine(p,e.Item.Width/2,4,e.Item.Width/2,e.Item.Height-4);else e.Graphics.DrawLine(p,4,e.Item.Height/2,e.Item.Width-4,e.Item.Height/2);}}
+        }
         void InitializePickingPanel(Control toolbar){
-            fullToolbar=toolbar;pickingPanel=new Panel{Dock=DockStyle.Fill,Visible=false};pickingLabel=new Label{Dock=DockStyle.Top,Height=59,Padding=new Padding(6),AutoEllipsis=true};
-            var actions=new FlowLayoutPanel{Dock=DockStyle.Bottom,Height=65};
+            fullToolbar=toolbar;pickingPanel=new Panel{Dock=DockStyle.Fill,Visible=false};pickingLabel=new Label{Dock=DockStyle.Top,Height=59,Padding=new Padding(10,8,10,4),AutoEllipsis=true,BackColor=Ui.Bg};
+            var actions=new FlowLayoutPanel{Dock=DockStyle.Bottom,Height=65,Padding=new Padding(6,4,6,4),BackColor=Ui.Bg};
             Button(actions,"绑定并下一条",BindAndNext);Button(actions,"另建记录",()=>AddSelectedModels());Button(actions,"返回表格",()=>SetPickingMode(false));
-            watchStop=new Button{Text="停止连续",AutoSize=true,Visible=false};watchStop.Click+=(s,e)=>StopContinuous();actions.Controls.Add(watchStop);Button(actions,"撤销",Undo);
+            watchStop=Ui.Secondary("停止连续",88,32);watchStop.Visible=false;watchStop.Margin=new Padding(4,1,2,1);((FlatButton)watchStop).SetFore(Ui.Bad);watchStop.Click+=(s,e)=>StopContinuous();actions.Controls.Add(watchStop);Button(actions,"撤销",Undo);
             pickingPanel.Controls.Add(pickingLabel);pickingPanel.Controls.Add(actions);Controls.Add(pickingPanel);
             grid.CurrentCellChanged+=(s,e)=>RefreshPickingLabel();
         }
@@ -106,8 +142,8 @@ namespace TianGongCadSuite {
         internal string BindingRecordId {get{return CurrentId();}}
         internal void SetPickingMode(bool value){
             if(value==pickingMode)return;grid.EndEdit();if(value)pickingId=CurrentId();pickingMode=value;
-            if(value){normalBounds=Bounds;fullToolbar.Visible=false;helpBar.Visible=false;if(entryPanel!=null)entryPanel.Visible=false;grid.Visible=false;status.Visible=false;MinimumSize=new Size(400,140);Size=new Size(440,180);var area=Screen.FromControl(this).WorkingArea;Location=new Point(Math.Max(area.Left,area.Right-Width-20),Math.Max(area.Top,area.Bottom-Height-60));pickingPanel.Visible=true;pickingPanel.BringToFront();}
-            else{StopContinuous();pickingPanel.Visible=false;MinimumSize=new Size(1040,520);Bounds=normalBounds;fullToolbar.Visible=true;helpBar.Visible=true;if(entryPanel!=null)entryPanel.Visible=true;grid.Visible=true;status.Visible=true;}
+            if(value){normalBounds=Bounds;fullToolbar.Visible=false;helpBar.Visible=false;if(nav!=null)nav.Visible=false;if(entryPanel!=null)entryPanel.Visible=false;grid.Visible=false;status.Visible=false;MinimumSize=new Size(400,140);Size=new Size(440,180);var area=Screen.FromControl(this).WorkingArea;Location=new Point(Math.Max(area.Left,area.Right-Width-20),Math.Max(area.Top,area.Bottom-Height-60));pickingPanel.Visible=true;pickingPanel.BringToFront();}
+            else{StopContinuous();pickingPanel.Visible=false;MinimumSize=new Size(1040,520);Bounds=normalBounds;fullToolbar.Visible=true;helpBar.Visible=true;if(nav!=null)nav.Visible=true;if(entryPanel!=null)entryPanel.Visible=true;grid.Visible=true;status.Visible=true;}
             if(!value&&pickingId!=null)SelectId(pickingId);RefreshPickingLabel();
         }
         void RefreshPickingLabel(){if(pickingLabel==null)return;var id=CurrentId();var r=project.Records.FirstOrDefault(x=>x.Id==id);pickingLabel.Text=r==null?"先在表格选择待绑定行，或选择模型后点“另建记录”。":"当前："+r.Number+"（"+(string.IsNullOrEmpty(r.ReferenceKey)?"待绑定":"已绑定")+"）\n"+(string.IsNullOrEmpty(r.ReferenceKey)?"请选择对应模型，再点“绑定并下一条”。":"可换绑并前进；新增清单行请点“另建记录”。");}

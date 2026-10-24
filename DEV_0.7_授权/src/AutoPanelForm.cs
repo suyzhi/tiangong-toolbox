@@ -45,10 +45,10 @@ namespace TianGongCadSuite {
         readonly CheckedListBox openings = new CheckedListBox();
         readonly Label outputLabel = new Label();
         readonly Label status = new Label();
-        readonly Button read = Ui.Primary("读取当前选择", 130, 32);
-        readonly Button append = Ui.Secondary("追加选择", 96, 32);
-        readonly Button clear = Ui.Secondary("清空", 60, 32);
-        readonly Button generate = Ui.Primary("生成选中的框口", 160, 36);
+        readonly Button read = Ui.Primary("读取当前选择", 150, 40);
+        readonly Button append = Ui.Secondary("追加选择", 100, 38);
+        readonly Button clear = Ui.Ghost("清空");
+        readonly Button generate = Ui.Primary("生成选中的框口", 220, 44);
         readonly Preview preview = new Preview();
         readonly Timer debounce = new Timer { Interval = 350 };
         readonly ToolTip tips = new ToolTip { AutoPopDelay = 15000, InitialDelay = 400 };
@@ -73,7 +73,7 @@ namespace TianGongCadSuite {
 
         public AutoPanelForm(F.Application app, A.AssemblyDocument assembly){
             this.app = app; this.assembly = assembly;
-            Ui.Shell(this, Product.Title("型材自动填充"), 1040, 680, 900, 600);
+            Ui.Shell(this, Product.Title("型材自动填充"), 1120, 720, 960, 600);
             material.Items.AddRange(Materials);
             BuildLayout();
             LoadSettings();
@@ -88,81 +88,108 @@ namespace TianGongCadSuite {
             return base.ProcessCmdKey(ref msg, keyData);
         }
 
-        // ┌ 左：① 型材 ② 板子 ③ 框口（勾选）输出目录 ┬ 右：位置预览 ┐
-        // │ [生成选中的框口]                              [关闭] │
-        // └ 状态栏 ─────────────────────────────────────────────────┘
-        void BuildLayout(){
-            var columns = new SplitColumns(390);
-            var left = new VerticalStack { Padding = new Padding(0) };
+        // 0.9.0「D · 侧栏向导」：① 型材（读取 / 追加选择）→ ② 板子（厚度、间隙、材质）→ ③ 框口（勾选 + 右边位置预览）。
+        // 读到型材、识别出框口后自动翻到「框口」；输出目录在侧栏底部；主按钮「生成 N 块板子」。
+        const int PageMembers = 0, PagePanel = 1, PageOpenings = 2;
+        readonly WizardShell shell = new WizardShell();
+        readonly FlatButton nextButton = (FlatButton)Ui.Primary("下一步", 200, 44);
+        readonly FlatButton backButton = (FlatButton)Ui.Secondary("上一步", 84, 38);
 
-            var memberCard = Ui.Card("① 型材", 140, "可跨子装配：Ctrl 多选型材 / 选整个子装配");
-            var mb = new Panel { Dock = DockStyle.Fill, BackColor = Color.White };
-            read.SetBounds(0, 0, 130, 32);
+        void BuildLayout(){
+            Controls.Add(shell);
+            var pM = shell.AddPage("型材", "型材", "");
+            var pP = shell.AddPage("板子", "板子", "");
+            var pO = shell.AddPage("框口", "框口", "");
+
+            // ---- ① 型材 ----
+            var mb = new Panel { Dock = DockStyle.Fill, BackColor = Ui.Bg };
+            pM.Body.Controls.Add(mb);
+            var mHint = new Label { Text = "在装配里多选型材（可跨子装配：Ctrl 多选型材 / 选整个子装配），然后点「读取当前选择」。会按平面自动分开识别。", AutoSize = false, ForeColor = Ui.Text2, BackColor = Ui.Bg };
             read.Click += (s, e) => ReadSelection();
-            append.SetBounds(136, 0, 96, 32);
             append.Click += (s, e) => ReadSelection(true);
-            clear.SetBounds(238, 0, 60, 32);
+            ((FlatButton)clear).SetFore(Ui.Text2);
             clear.Click += (s, e) => ClearMembers();
             tips.SetToolTip(read, "用 CAD 里当前选中的型材重新识别（替换掉已读的）。");
             tips.SetToolTip(append, "把 CAD 里当前选中的型材加到已读的里面再识别。\n例如：先选整个子围栏读取，再点选隔壁子装配的立柱「追加选择」。");
-            memberInfo.SetBounds(0, 38, 360, 58); memberInfo.AutoSize = false; memberInfo.ForeColor = Ui.Muted; memberInfo.BackColor = Color.White;
+            var infoBox = new RoundBox { Fill = Ui.Rail, Padding = new Padding(16, 12, 16, 12) };
+            memberInfo.Dock = DockStyle.Fill; memberInfo.AutoSize = false; memberInfo.ForeColor = Ui.Text2; memberInfo.BackColor = Ui.Rail;
             memberInfo.Text = Hint;
-            mb.Controls.Add(read); mb.Controls.Add(append); mb.Controls.Add(clear); mb.Controls.Add(memberInfo);
-            mb.Resize += (s, e) => memberInfo.Width = Math.Max(60, mb.ClientSize.Width);
-            memberCard.Controls.Add(mb);
+            infoBox.Controls.Add(memberInfo);
+            mb.Controls.AddRange(new Control[] { mHint, read, append, clear, infoBox });
+            mb.Layout += (s, e) => {
+                int w = mb.ClientSize.Width;
+                mHint.SetBounds(0, 0, w, 44);
+                read.Location = new Point(0, 52); append.Location = new Point(read.Right + 8, 53); clear.Location = new Point(append.Right + 4, 56);
+                infoBox.SetBounds(0, 108, w, Math.Max(80, Math.Min(200, mb.ClientSize.Height - 120)));
+            };
 
-            var panelCard = Ui.Card("② 板子", 34 + 3 * 32 + 10, "改了数字停一下就会重新识别");
-            var grid = new FieldGrid { LabelWidth = 64, Dock = DockStyle.Fill };
+            // ---- ② 板子 ----
+            var grid = new FieldGrid { LabelWidth = 84, BackColor = Ui.Bg };
             grid.Add("总厚度", thickness, FieldGrid.Unit("mm"));
             grid.Add("每边间隙", gap, FieldGrid.Unit("mm"), FieldGrid.Space(8), Ui.Muted8("板边离型材槽底的距离"));
+            material.FlatStyle = FlatStyle.Flat; material.Width = 170;
             grid.Add("材质", material, FieldGrid.Space(8), Ui.Muted8("写进零件属性，可留空"));
-            panelCard.Controls.Add(grid);
             tips.SetToolTip(material, "写进零件的自定义属性「材质」，并尝试套用天工材料库里同名的材料。可以直接输入别的名字。");
+            var pb = new Panel { Dock = DockStyle.Fill, BackColor = Ui.Bg };
+            var pHint = new Label { Text = "改了数字停一下就会重新识别框口。", AutoSize = false, ForeColor = Ui.Muted, Font = Ui.F8, BackColor = Ui.Bg };
+            pb.Controls.Add(grid); pb.Controls.Add(pHint);
+            pb.Layout += (s, e) => { grid.SetBounds(0, 0, pb.ClientSize.Width, grid.PreferredHeight); pHint.SetBounds(0, grid.PreferredHeight + 6, pb.ClientSize.Width, 22); };
+            pP.Body.Controls.Add(pb);
 
-            var openCard = Ui.Card("③ 框口", 0, "勾上的才生成；点一个看预览");
+            // ---- ③ 框口：左列表，右位置预览 ----
             var all = Ui.Small("全选"); var none = Ui.Small("全不选");
+            ((FlatButton)none).SetFore(Ui.Text2);
             all.Click += (s, e) => SetAllChecked(true);
             none.Click += (s, e) => SetAllChecked(false);
-            openCard.AddHeader(all); openCard.AddHeader(none);
+            shell.AddHeader(pO, all); shell.AddHeader(pO, none);
+            var cols = new SplitColumns(340) { Dock = DockStyle.Fill, Gap = 20 };
+            var listFrame = Ui.Card("", 0, "");
+            listFrame.Padding = new Padding(8, 8, 4, 8);
             openings.Dock = DockStyle.Fill; openings.BorderStyle = BorderStyle.None; openings.IntegralHeight = false;
             openings.CheckOnClick = true; openings.BackColor = Color.White; openings.Font = Ui.F9;
             openings.SelectedIndexChanged += (s, e) => ShowPreview();
             // ItemCheck 触发时勾选状态还没改，所以延后刷新按钮；窗口还没显示时（构造里读预选就会 Recompute）
             // 不能 BeginInvoke，而 Recompute 末尾本来就会刷新，跳过即可。
             openings.ItemCheck += (s, e) => { if (IsHandleCreated) BeginInvoke((Action)UpdateGenerateButton); };
-            openCard.Controls.Add(openings);
-
-            var outCard = Ui.Card("输出目录", 70, "每批一个子目录，每个框口一个 PAR");
-            var change = Ui.Small("更改…");
-            change.Click += (s, e) => PickOutputDir();
-            outCard.AddHeader(change);
-            outputLabel.Dock = DockStyle.Fill; outputLabel.AutoEllipsis = true; outputLabel.BackColor = Color.White; outputLabel.ForeColor = Ui.Text;
-            outCard.Controls.Add(outputLabel);
-
-            left.Add(memberCard); left.Add(panelCard); left.Add(openCard, true); left.Add(outCard);
-
+            listFrame.Controls.Add(openings);
             // 预览控件自己画标题和操作提示，卡片不再写一遍
             var previewCard = Ui.Card("", 0, "");
-            previewCard.Padding = new Padding(1, 1, 1, 1);
+            previewCard.Padding = new Padding(2, 2, 2, 2);
             preview.Dock = DockStyle.Fill;
             preview.EmptyText = "读取型材、识别出框口后，点左边列表里的框口在这里看位置。";
             previewCard.Controls.Add(preview);
-            columns.Add(left); columns.Add(previewCard);
+            cols.Add(listFrame); cols.Add(previewCard);
+            pO.Body.Controls.Add(cols);
 
-            var actions = new Panel { Height = 42, BackColor = Ui.Bg };
-            var close = Ui.Secondary("关闭", 80, 30);
-            generate.SetBounds(0, 3, 160, 36); generate.Enabled = false;
+            // ---- 侧栏底部：输出目录 ----
+            var outCard = new RailCard("输出目录", 110);
+            var change = Ui.Small("更改…");
+            change.Click += (s, e) => PickOutputDir();
+            outputLabel.AutoEllipsis = true; outputLabel.BackColor = Color.White; outputLabel.ForeColor = Ui.Muted; outputLabel.Font = Ui.F8;
+            outCard.Controls.Add(outputLabel); outCard.Controls.Add(change);
+            outCard.Resize += (s, e) => { outputLabel.SetBounds(12, 32, outCard.Width - 24, 40); change.Location = new Point(6, outCard.Height - 34); };
+            tips.SetToolTip(outputLabel, "每批一个子目录，每个框口一个 PAR");
+            shell.RailBottom = outCard;
+
+            // ---- 底部操作栏 ----
+            generate.Enabled = false;
             generate.Click += (s, e) => Generate();
-            close.Click += (s, e) => Close();
-            actions.Controls.Add(generate); actions.Controls.Add(close);
-            actions.Resize += (s, e) => close.SetBounds(actions.Width - 80, 6, 80, 30);
+            backButton.Click += (s, e) => shell.Go(shell.Current - 1);
+            nextButton.Click += (s, e) => shell.Go(shell.Current + 1);
+            shell.Footer.AddLeft(backButton);
+            shell.Footer.AddRight(generate); shell.Footer.AddRight(nextButton);
+            shell.Footer.Status = status;
+            status.TextChanged += (s, e) => tips.SetToolTip(status, status.Text);
+            shell.PageChanged += (s, e) => UpdateGenerateButton();
+        }
 
-            status.Height = 40; status.AutoSize = false; status.Padding = new Padding(2, 0, 10, 0);
-            status.TextAlign = ContentAlignment.MiddleLeft; status.BackColor = Ui.Bg; status.AutoEllipsis = true;
-
-            var stack = new VerticalStack { Dock = DockStyle.Fill };
-            stack.Add(columns, true); stack.Add(actions); stack.Add(status);
-            Controls.Add(stack);
+        public void GoPageForTest(int i){ shell.Go(i, false); }
+        void RefreshRail(){
+            int members = cachedMembers == null ? 0 : cachedMembers.Count;
+            shell.Rail.Set(PageMembers, members == 0 ? "选型材后点读取" : members + " 根型材", members > 0, false);
+            shell.Rail.Set(PagePanel, "厚 " + thickness.Value.ToString("0.##", CultureInfo.InvariantCulture) + " · 间隙 " + gap.Value.ToString("0.##", CultureInfo.InvariantCulture), true, false);
+            int n = openings.CheckedIndices.Count;
+            shell.Rail.Set(PageOpenings, specs.Count == 0 ? "读取型材后自动识别" : "识别出 " + specs.Count + " 个，勾选 " + n + " 个", n > 0, false);
         }
 
         // ---------------- 设置（记住上次的输入）----------------
@@ -336,6 +363,8 @@ namespace TianGongCadSuite {
                 if (notes.Count > 2) msg += "　另有 " + notes.Count + " 个平面没识别出框口（鼠标停在这里看原因）。";
                 else if (notes.Count > 0) msg += "　另有：" + string.Join("；", notes.ToArray());
                 SetStatus(msg, notes.Count > 0 ? Ui.Warn : Ui.Ok);
+                // 读到型材、识别出框口：翻到「框口」（在「板子」页改数字时不跳）
+                if (specs.Count > 0 && shell.Current == PageMembers) shell.Go(PageOpenings);
                 tips.SetToolTip(status, msg + (notes.Count > 2 ? detail : ""));
             } catch (Exception e) {
                 ClearResult(e.Message);
@@ -362,8 +391,14 @@ namespace TianGongCadSuite {
 
         void UpdateGenerateButton(){
             int n = openings.CheckedIndices.Count;
-            generate.Text = n > 0 ? "生成选中的 " + n + " 个框口" : "生成选中的框口";
+            generate.Text = n > 0 ? "生成 " + n + " 块板子" : "生成选中的框口";
             generate.Enabled = n > 0 && !busy;
+            bool showGen = busy || n > 0 || shell.Current == PageOpenings;
+            generate.Visible = showGen; nextButton.Visible = !showGen;
+            if (!showGen) nextButton.Text = "下一步：" + shell.Pages[Math.Min(shell.Current + 1, shell.Pages.Count - 1)].Title;
+            backButton.Enabled = shell.Current > 0 && !busy;
+            shell.Footer.PerformLayout();
+            RefreshRail();
         }
 
         // ---------------- 生成 ----------------

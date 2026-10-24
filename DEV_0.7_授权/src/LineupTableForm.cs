@@ -23,12 +23,13 @@ namespace TianGongCadSuite {
             app=host;assembly=doc;file=LineupCad.AssemblyFile(doc);store=Path.ChangeExtension(file,".lineup.xml");
             project=File.Exists(store)?LineupProject.Load(store,file):new LineupProject{AssemblyFile=file};
             InitializeCatalog(modelLibraryPath);
-            Text="Lineup 快速录入";Font=new Font("Microsoft YaHei UI",9F);Width=1280;Height=660;MinimumSize=new Size(1040,520);StartPosition=FormStartPosition.Manual;var area=Screen.PrimaryScreen.WorkingArea;Location=new Point(Math.Max(area.Left,area.Right-Width-20),Math.Max(area.Top,area.Bottom-Height-40));
+            Text="Lineup 快速录入";Font=Ui.F9;BackColor=Ui.Bg;ForeColor=Ui.Text;Width=1320;Height=660;MinimumSize=new Size(1040,520);StartPosition=FormStartPosition.Manual;var area=Screen.PrimaryScreen.WorkingArea;Location=new Point(Math.Max(area.Left,area.Right-Width-20),Math.Max(area.Top,area.Bottom-Height-40));
             var tools=BuildToolbar();
-            helpBar=new Label{Text="上方填写本批共用字段，下方直接修改已有记录。F4 型号库 · Ctrl+V 粘贴 · Ctrl+Z 撤销",Dock=DockStyle.Top,Height=27,Padding=new Padding(8,4,0,0)};
+            helpBar=new Label{Text="上方填写本批共用字段，下方直接修改已有记录。F4 型号库 · Ctrl+V 粘贴 · Ctrl+Z 撤销",Dock=DockStyle.Top,Height=30,Padding=new Padding(16,8,0,0),ForeColor=Ui.Muted,Font=Ui.F8,BackColor=Ui.Bg};
             grid.Dock=DockStyle.Fill;grid.AutoGenerateColumns=false;grid.AllowUserToAddRows=false;grid.AllowUserToDeleteRows=false;grid.RowHeadersWidth=50;grid.SelectionMode=DataGridViewSelectionMode.CellSelect;grid.MultiSelect=true;grid.BackgroundColor=Color.White;grid.BorderStyle=BorderStyle.None;
             grid.ClipboardCopyMode=DataGridViewClipboardCopyMode.EnableWithoutHeaderText;
-            grid.EnableHeadersVisualStyles=false;grid.ColumnHeadersDefaultCellStyle.BackColor=Color.FromArgb(225,234,242);grid.ColumnHeadersHeight=32;grid.RowTemplate.Height=28;grid.AlternatingRowsDefaultCellStyle.BackColor=Color.FromArgb(247,249,251);
+            grid.EnableHeadersVisualStyles=false;grid.ColumnHeadersDefaultCellStyle.BackColor=Ui.Rail;grid.ColumnHeadersDefaultCellStyle.ForeColor=Ui.Muted;grid.ColumnHeadersDefaultCellStyle.Font=Ui.F8;grid.ColumnHeadersDefaultCellStyle.SelectionBackColor=Ui.Rail;grid.ColumnHeadersHeightSizeMode=DataGridViewColumnHeadersHeightSizeMode.DisableResizing;grid.ColumnHeadersHeight=34;grid.RowTemplate.Height=32;grid.AlternatingRowsDefaultCellStyle.BackColor=Color.FromArgb(0xFA,0xFA,0xFB);
+            grid.GridColor=Color.FromArgb(0xEE,0xEE,0xF0);grid.DefaultCellStyle.SelectionBackColor=Color.FromArgb(0xE0,0xE7,0xFF);grid.DefaultCellStyle.SelectionForeColor=Ui.Text;grid.RowHeadersDefaultCellStyle.BackColor=Ui.Rail;grid.RowHeadersDefaultCellStyle.SelectionBackColor=Ui.AccentSoft;
             data.Columns.Add("Id");data.Columns.Add("类别");foreach(var h in LineupTableData.Headers)data.Columns.Add(h);data.Columns.Add("关联模型");data.Columns.Add("阀岛型号");
             var types=new DataGridViewComboBoxColumn{Name="类别",HeaderText="类别",DataPropertyName="类别",Width=110,FlatStyle=FlatStyle.Flat};
             types.Items.AddRange(LineupTableData.Categories);foreach(var c in project.Records.Select(r=>LineupTableData.Category(r.Category)).Distinct())if(!types.Items.Contains(c))types.Items.Add(c);grid.Columns.Add(types);
@@ -38,7 +39,8 @@ namespace TianGongCadSuite {
             grid.Columns.Add(new DataGridViewTextBoxColumn{Name="阀岛型号",HeaderText="所属阀岛的型号",DataPropertyName="阀岛型号",Width=220,ReadOnly=true});
             grid.Columns[0].Frozen=true;grid.Columns[1].Frozen=true;
             grid.DataSource=data;
-            Controls.Add(grid);Controls.Add(helpBar);Controls.Add(tools);Controls.Add(status);InitializePickingPanel(tools);
+            status.BackColor=Ui.Bg;status.ForeColor=Ui.Muted;status.Font=Ui.F8;status.Padding=new Padding(16,0,0,0);status.TextAlign=ContentAlignment.MiddleLeft;
+            Controls.Add(grid);Controls.Add(helpBar);Controls.Add(BuildNav());Controls.Add(tools);Controls.Add(status);InitializePickingPanel(tools);
             category.SelectedIndexChanged+=(s,e)=>Filter();search.TextChanged+=(s,e)=>Filter();
             grid.CellBeginEdit+=(s,e)=>{if(!loading)undo.Push(Snapshot(false));};
             grid.CellEndEdit+=(s,e)=>{if(!loading){if(e.ColumnIndex==5)Try(()=>CompleteKnownModel(e.RowIndex));dirty=true;saver.Stop();saver.Start();}};
@@ -49,7 +51,7 @@ namespace TianGongCadSuite {
             FormClosed+=(s,e)=>{saver.Dispose();ClearHighlight();};
             SetupModelEditing();InitializeHierarchy();Reload(null);InitializeEntry();UpdateStatus("已加载");
         }
-        void Button(FlowLayoutPanel p,string title,Action action){var b=new Button{Text=title,AutoSize=true,Height=28};b.Click+=(s,e)=>Try(action);p.Controls.Add(b);}
+        void Button(FlowLayoutPanel p,string title,Action action){var b=title.StartsWith("加入",StringComparison.Ordinal)?Ui.Primary(title,TextRenderer.MeasureText(title,Ui.F9B).Width+28,32):Ui.Secondary(title,TextRenderer.MeasureText(title,Ui.F9).Width+24,32);b.Margin=new Padding(4,1,2,1);b.Click+=(s,e)=>Try(action);p.Controls.Add(b);}
         void Try(Action action){try{action();}catch(Exception ex){status.Text=ex.Message;if(pickingMode&&pickingLabel!=null)pickingLabel.Text=ex.Message;}}
         void Ensure(){if(!string.Equals(LineupCad.AssemblyFile(assembly),file,StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("装配已另存，请重新打开 Lineup。");if(!string.Equals(Convert.ToString(((dynamic)app.ActiveDocument).FullName),file,StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("请先激活本清单所属装配。");}
         string ActiveCategory {get{return category.SelectedIndex>=1&&category.SelectedIndex<=5?Convert.ToString(category.SelectedItem):"气缸";}}
@@ -84,7 +86,7 @@ namespace TianGongCadSuite {
         void Commit(LineupProject next,string selected,string message){
             Ensure();LineupTableData.RejectDuplicates(next.Records);var before=Snapshot();next.Save(store);undo.Push(before);project=next;dirty=false;Reload(selected);UpdateStatus(message);LearnAfterSave();
         }
-        void UpdateStatus(string message){RefreshPickingLabel();status.Text=message+" · "+project.NumberPrefix+" Y"+project.ActiveIsland+" · 共 "+project.Records.Count+" 条，未编号 "+project.Records.Count(r=>string.IsNullOrWhiteSpace(r.Number))+" 条，未绑定模型 "+project.Records.Count(r=>string.IsNullOrEmpty(r.ReferenceKey))+" 条。";}
+        void UpdateStatus(string message){RefreshPickingLabel();RefreshNav();status.Text=message+" · "+project.NumberPrefix+" Y"+project.ActiveIsland+" · 共 "+project.Records.Count+" 条，未编号 "+project.Records.Count(r=>string.IsNullOrWhiteSpace(r.Number))+" 条，未绑定模型 "+project.Records.Count(r=>string.IsNullOrEmpty(r.ReferenceKey))+" 条。";}
         internal void SaveDraft(){Ensure();var next=Snapshot();var changed=next.Records.Where(r=>string.IsNullOrWhiteSpace(r.Number)&&!string.IsNullOrWhiteSpace(r.Model)&&project.Records.Any(old=>old.Id==r.Id&&old.Model!=r.Model)&&(r.Category=="普通传感器"||r.Category=="其他电气件"||((r.Category=="气缸"||r.Category=="阀片")&&!string.IsNullOrWhiteSpace(next.NumberPrefix)))).ToList();LineupNumbering.FillMissing(next,changed);foreach(var valve in next.Records.Where(r=>r.Category=="阀片"&&project.Records.Any(old=>old.Id==r.Id&&old.Number!=r.Number)))LineupHierarchy.RenumberChildren(next,valve);foreach(var cylinder in next.Records.Where(r=>r.Category=="气缸"&&project.Records.Any(old=>old.Id==r.Id&&old.Number!=r.Number)))foreach(var sensor in next.Records.Where(r=>r.CylinderId==cylinder.Id))sensor.Number=cylinder.Number+sensor.Position;LineupTableData.RejectDuplicates(next.Records);if(dirty){next.Save(store);project=next;dirty=false;foreach(System.Data.DataRow row in data.Rows){var record=project.Records.First(r=>r.Id==(string)row["Id"]);row["编号"]=record.Number;row["阀岛型号"]=LineupNumbering.IslandModel(project,record);row["上级"]=LineupHierarchy.Parent(project,record);}UpdateStatus("已保存");LearnAfterSave();}else UpdateStatus("已保存");}
         internal void ImportText(string text,char separator){
             Ensure();var batch=LineupTableData.Parse(text,ActiveCategory,separator);if(batch.Records.Count==0)throw new InvalidOperationException("没有找到可导入的数据行。");

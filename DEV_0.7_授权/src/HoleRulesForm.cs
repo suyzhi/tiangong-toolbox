@@ -18,49 +18,46 @@ namespace TianGongCadSuite {
         public HoleRuleSet Result { get; private set; }
 
         public HoleRulesForm(HoleRuleSet current){
-            Ui.Shell(this, "配做规则", 620, 470, 560, 420);
+            Ui.Shell(this, "配做规则", 660, 520, 600, 460);
             FormBorderStyle = FormBorderStyle.SizableToolWindow;
             var names = new string[presets.Length];
             for (int i = 0; i < presets.Length; i++) names[i] = presets[i].Name;
             presetSeg = new Segmented(names);
             presetSeg.SelectedIndex = -1;
 
-            var presetCard = Ui.Card("预设", 96, "点一套常用的，下面的表会照它填好");
-            var pb = new Panel { Dock = DockStyle.Fill, BackColor = Color.White };
-            presetSeg.SetBounds(0, 0, Math.Max(480, presetSeg.PreferredWidth), 26);
-            nameLabel.SetBounds(0, 32, 560, 20); nameLabel.AutoSize = false; nameLabel.Font = Ui.F8; nameLabel.ForeColor = Ui.Muted; nameLabel.BackColor = Color.White;
-            pb.Controls.Add(presetSeg); pb.Controls.Add(nameLabel);
-            presetCard.Controls.Add(pb);
+            // 0.9.0「D」对话框：预设（分段按钮）→ 规则表 → 说明，底部操作栏
+            var presetCard = new Panel { Height = 104, BackColor = Ui.Bg };
+            var ptitle = new Label { Text = "点一套常用的，下面的表会照它填好", AutoSize = false, Font = Ui.F9B, ForeColor = Ui.Text2, BackColor = Ui.Bg };
+            ptitle.SetBounds(0, 0, 560, 22);
+            presetSeg.SetBounds(0, 28, Math.Max(500, presetSeg.PreferredWidth), 32);
+            nameLabel.SetBounds(0, 68, 560, 22); nameLabel.AutoSize = false; nameLabel.Font = Ui.F8; nameLabel.ForeColor = Ui.Muted; nameLabel.BackColor = Ui.Bg;
+            presetCard.Controls.Add(ptitle); presetCard.Controls.Add(presetSeg); presetCard.Controls.Add(nameLabel);
             presetSeg.SelectedIndexChanged += (s, e) => { if (!loading && presetSeg.SelectedIndex >= 0) Fill(presets[presetSeg.SelectedIndex]); };
 
             var tableCard = Ui.Card("规则表", 0, "先找这个规格专门的一行，没有再用「全部规格」");
             var add = Ui.Small("添加一行"); var del = Ui.Small("删除选中行");
+            ((FlatButton)del).SetFore(Ui.Text2);
             add.Click += (s, e) => { grid.Rows.Add("M8", HoleRuleBook.RoleName(HoleRefRole.Clearance), HoleSpec.KindName(HoleKind.Through), HoleStandards.Normal); Changed(); };
             del.Click += (s, e) => { foreach (DataGridViewRow r in grid.SelectedRows) if (!r.IsNewRow) grid.Rows.Remove(r); Changed(); };
             tableCard.AddHeader(add); tableCard.AddHeader(del);
             BuildGrid();
             tableCard.Controls.Add(grid);
 
-            var hint = new Label { AutoSize = false, Height = 36, ForeColor = Ui.Muted, Font = Ui.F8, BackColor = Ui.Bg,
+            var hint = new Label { AutoSize = false, Height = 54, ForeColor = Ui.Muted, Font = Ui.F8, BackColor = Ui.Bg,
                 Text = "参考孔是螺纹底孔 = 参考件上是螺纹孔，螺钉从目标件这边穿过去；参考孔是过孔 = 螺钉穿过参考件拧进/穿过目标件。\r\n过孔配合决定通孔、沉孔、锥沉的孔径（天工孔标准表「常规螺钉间隙」的紧密 / 普通 / 宽松三档）。" };
 
-            var actions = new Panel { Height = 40, BackColor = Ui.Bg };
-            var ok = Ui.Primary("保存并应用", 120, 32);
-            var cancel = Ui.Secondary("取消", 80, 30);
+            var actions = new ActionBar { Dock = DockStyle.Bottom, Height = 68, Padding = new Padding(18, 0, 18, 0) };
+            var ok = Ui.Primary("保存并应用", 132, 40);
+            var cancel = Ui.Secondary("取消", 80, 36);
             ok.Click += (s, e) => Save();
             cancel.Click += (s, e) => { DialogResult = DialogResult.Cancel; Close(); };
-            status.AutoSize = false; status.ForeColor = Ui.Bad; status.BackColor = Ui.Bg; status.TextAlign = ContentAlignment.MiddleLeft; status.AutoEllipsis = true;
-            actions.Controls.Add(ok); actions.Controls.Add(cancel); actions.Controls.Add(status);
-            actions.Resize += (s, e) => {
-                cancel.SetBounds(actions.Width - 80, 5, 80, 30);
-                ok.SetBounds(cancel.Left - 8 - 120, 4, 120, 32);
-                status.SetBounds(0, 4, Math.Max(40, ok.Left - 8), 32);
-            };
+            actions.AddRight(cancel); actions.AddRight(ok);
+            actions.Status = status; status.ForeColor = Ui.Bad;
             CancelButton = cancel;
 
-            var stack = new VerticalStack { Dock = DockStyle.Fill };
-            stack.Add(presetCard); stack.Add(tableCard, true); stack.Add(hint); stack.Add(actions);
-            Controls.Add(stack);
+            var stack = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(20, 16, 20, 4), AutoScroll = false };
+            stack.Add(presetCard); stack.Add(tableCard, true); stack.Add(hint);
+            Controls.Add(stack); Controls.Add(actions);
 
             Fill(current ?? HoleRuleBook.Current);
         }
@@ -73,6 +70,12 @@ namespace TianGongCadSuite {
             grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
             grid.EditMode = DataGridViewEditMode.EditOnEnter;
             grid.Font = Ui.F9;
+            grid.EnableHeadersVisualStyles = false;
+            grid.ColumnHeadersDefaultCellStyle.BackColor = Ui.Rail; grid.ColumnHeadersDefaultCellStyle.ForeColor = Ui.Muted; grid.ColumnHeadersDefaultCellStyle.Font = Ui.F8;
+            grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = Ui.Rail;
+            grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing; grid.ColumnHeadersHeight = 32;
+            grid.RowTemplate.Height = 34; grid.GridColor = Color.FromArgb(0xEE, 0xEE, 0xF0);
+            grid.DefaultCellStyle.SelectionBackColor = Ui.AccentSoft; grid.DefaultCellStyle.SelectionForeColor = Ui.Text;
             var size = Combo("规格", 22);
             size.Items.Add(AnyLabel);
             foreach (var r in HoleMatcher.Table) size.Items.Add(r.Size);

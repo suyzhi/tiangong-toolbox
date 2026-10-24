@@ -14,35 +14,31 @@ namespace TianGongCadSuite {
         public HoleCheckOptions Result { get; private set; }
 
         public HoleCheckOptionsForm(HoleCheckOptions current){
-            Ui.Shell(this, "配孔检查 · 判定口径", 460, 300, 420, 300);
+            Ui.Shell(this, "配孔检查 · 判定口径", 540, 380, 500, 380);
             FormBorderStyle = FormBorderStyle.FixedToolWindow;
-            var card = Ui.Card("判定口径", 0, "改完点保存，下次检查生效");
-            var grid = new FieldGrid { LabelWidth = 96, Dock = DockStyle.Fill };
+            // 0.9.0「D」对话框：上面标题 + 一行说明，中间参数，底部操作栏（左：恢复默认；右：取消、保存）
+            var body = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(24, 20, 24, 8), Gap = 6, AutoScroll = false };
+            body.Add(new Label { Text = "判定口径", AutoSize = false, Height = 32, Font = Ui.F12B, ForeColor = Ui.Text, BackColor = Ui.Bg });
+            body.Add(new Label { Text = "改完点保存，下次检查生效。", AutoSize = false, Height = 26, Font = Ui.F8, ForeColor = Ui.Muted, BackColor = Ui.Bg });
+            var grid = new FieldGrid { LabelWidth = 96, BackColor = Ui.Bg };
             grid.Add("连接孔孔径", minDia, FieldGrid.Unit("mm"), Ui.Caption("～"), maxDia, FieldGrid.Unit("mm"));
             grid.Add("轴线方向差", angle, FieldGrid.Unit("°"), FieldGrid.Space(6), Ui.Muted8("小于它算同一方向"));
             grid.Add("同轴偏差", offset, FieldGrid.Unit("mm"), FieldGrid.Space(6), Ui.Muted8("超过它报「孔偏了」"));
             grid.Add("轴向间隙", gap, FieldGrid.Unit("mm"), FieldGrid.Space(6), Ui.Muted8("沿轴线挨这么近才算一对"));
-            card.Controls.Add(grid);
+            grid.Height = grid.PreferredHeight;
+            body.Add(grid);
 
-            var actions = new Panel { Height = 40, BackColor = Ui.Bg };
-            var save = Ui.Primary("保存", 90, 32);
-            var reset = Ui.Secondary("恢复默认", 90, 30);
-            var cancel = Ui.Secondary("取消", 80, 30);
+            var actions = new ActionBar { Dock = DockStyle.Bottom, Height = 68, Padding = new Padding(18, 0, 18, 0) };
+            var save = Ui.Primary("保存", 96, 40);
+            var reset = Ui.Ghost("恢复默认");
+            var cancel = Ui.Secondary("取消", 80, 36);
             save.Click += (s, e) => Save();
             reset.Click += (s, e) => Fill(new HoleCheckOptions());
             cancel.Click += (s, e) => { DialogResult = DialogResult.Cancel; Close(); };
-            status.AutoSize = false; status.ForeColor = Ui.Bad; status.BackColor = Ui.Bg; status.TextAlign = ContentAlignment.MiddleLeft;
-            actions.Controls.Add(save); actions.Controls.Add(reset); actions.Controls.Add(cancel); actions.Controls.Add(status);
-            actions.Resize += (s, e) => {
-                cancel.SetBounds(actions.Width - 80, 5, 80, 30);
-                save.SetBounds(cancel.Left - 8 - 90, 4, 90, 32);
-                reset.SetBounds(0, 5, 90, 30);
-                status.SetBounds(98, 4, Math.Max(10, save.Left - 104), 32);
-            };
+            actions.AddLeft(reset); actions.AddRight(cancel); actions.AddRight(save);
+            actions.Status = status; status.ForeColor = Ui.Bad;
             CancelButton = cancel;
-            var stack = new VerticalStack { Dock = DockStyle.Fill };
-            stack.Add(card, true); stack.Add(actions);
-            Controls.Add(stack);
+            Controls.Add(body); Controls.Add(actions);
             Fill(current ?? new HoleCheckOptions());
         }
 

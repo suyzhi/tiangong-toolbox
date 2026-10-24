@@ -23,11 +23,11 @@ namespace TianGongCadSuite {
         readonly CheckBox verify=new CheckBox();
         readonly CheckBox autoWorkers=new CheckBox();
         readonly NumericUpDown workers=new NumericUpDown();
-        readonly Button start=new Button();
-        readonly Button stop=new Button();
+        readonly FlatButton start=(FlatButton)Ui.Primary("开始转换",220,44);
+        readonly Button stop=Ui.Secondary("停止",72,38);
         readonly Button openOutput=new Button();
-        readonly Button saveReport=new Button();
-        readonly ProgressBar progress=new ProgressBar();
+        readonly Button saveReport=Ui.Secondary("导出报告",96,38);
+        readonly SlimProgress progress=new SlimProgress();
         readonly Label status=new Label();
         readonly TextBox logBox=new TextBox();
         readonly Timer timer=new Timer();
@@ -47,79 +47,130 @@ namespace TianGongCadSuite {
         int totalPlanned;
         IntPtr jobHandle=IntPtr.Zero;
 
+        // 0.9.0「D · 侧栏向导」：① 输入（文件/文件夹 + 转哪几类）→ ② 输出设置 → ③ 转换（数字块 + 细进度条 + 日志）。
+        // 「开始转换」在最后一步；转换中主按钮自己变成进度条（转换中 23 / 64）。
+        readonly WizardShell shell=new WizardShell();
+        readonly FlatButton next=(FlatButton)Ui.Primary("下一步",200,44);
+        readonly FlatButton back=(FlatButton)Ui.Secondary("上一步",84,38);
+        readonly StatTile statDone=new StatTile("完成"),statOk=new StatTile("成功"),statFail=new StatTile("失败"),statSkip=new StatTile("已存在跳过");
+        readonly EmptyHint inputEmpty=new EmptyHint("还没有输入：点右上角「添加文件…」或「添加文件夹…」");
+
         public FormatConvertForm(){
-            Text=Product.Title("批量格式转换 SolidWorks / STEP");
-            ClientSize=new Size(900,660);
-            MinimumSize=new Size(760,560);
+            Ui.Shell(this,Product.Title("批量格式转换 SolidWorks / STEP"),1000,700,860,580);
+            FormBorderStyle=FormBorderStyle.Sizable;
             StartPosition=FormStartPosition.CenterScreen;
-            Font=new Font("Microsoft YaHei UI",9f);
+            ShowInTaskbar=true;
+            Controls.Add(shell);
+            var pIn=shell.AddPage("输入","输入","SolidWorks / STEP 文件或文件夹");
+            var pOut=shell.AddPage("输出设置","输出设置","");
+            var pRun=shell.AddPage("转换","转换","");
 
-            var inputLabel=MakeLabel("输入（SolidWorks 文件或文件夹，可多选）",12,10);
-            Controls.Add(inputLabel);
-            inputs.Location=new Point(12,32);inputs.Size=new Size(660,120);inputs.SelectionMode=SelectionMode.MultiExtended;
-            inputs.Anchor=AnchorStyles.Top|AnchorStyles.Left|AnchorStyles.Right;
-            Controls.Add(inputs);
-            Controls.Add(MakeButton("添加文件…",684,32,96,delegate{ AddFiles(); }));
-            Controls.Add(MakeButton("添加文件夹…",684,60,96,delegate{ AddFolder(); }));
-            Controls.Add(MakeButton("移除选中",684,88,96,delegate{ RemoveSelected(); }));
-            Controls.Add(MakeButton("清空",684,116,96,delegate{ items.Clear();RefreshList(); }));
+            // ---- ① 输入 ----
+            var addFiles=Ui.Small("添加文件…");addFiles.Click+=delegate{ AddFiles();RefreshRail(); };
+            var addFolder=Ui.Small("添加文件夹…");addFolder.Click+=delegate{ AddFolder();RefreshRail(); };
+            var remove=Ui.Small("移除选中");((FlatButton)remove).SetFore(Ui.Text2);remove.Click+=delegate{ RemoveSelected();RefreshRail(); };
+            var clear=Ui.Small("清空");((FlatButton)clear).SetFore(Ui.Text2);clear.Click+=delegate{ items.Clear();RefreshList();RefreshRail(); };
+            shell.AddHeader(pIn,addFiles);shell.AddHeader(pIn,addFolder);shell.AddHeader(pIn,remove);shell.AddHeader(pIn,clear);
+            var inStack=new VerticalStack{ Dock=DockStyle.Fill,Padding=new Padding(0),Gap=10,AutoScroll=false };
+            pIn.Body.Controls.Add(inStack);
+            var frame=Ui.Card("",0,"");frame.Padding=new Padding(6,8,6,8);
+            inputs.Dock=DockStyle.Fill;inputs.SelectionMode=SelectionMode.MultiExtended;inputs.BorderStyle=BorderStyle.None;inputs.IntegralHeight=false;inputs.Font=Ui.F9;inputs.ItemHeight=24;
+            inputEmpty.Dock=DockStyle.Top;
+            frame.Controls.Add(inputs);frame.Controls.Add(inputEmpty);inputEmpty.BringToFront();
+            var kinds=new FlowLayoutPanel{ Height=76,BackColor=Ui.Bg,FlowDirection=FlowDirection.LeftToRight,WrapContents=true,Padding=new Padding(0) };
+            var kindsLabel=new Label{ Text="转哪几类",AutoSize=false,Width=76,Height=26,TextAlign=ContentAlignment.MiddleLeft,Font=Ui.F9B,ForeColor=Ui.Text2,BackColor=Ui.Bg };
+            kinds.Controls.Add(kindsLabel);
+            parts.Text="零件 .SLDPRT";parts.Checked=true;
+            assemblies.Text="装配 .SLDASM";assemblies.Checked=true;
+            drawings.Text="工程图 .SLDDRW";
+            step.Text="STEP .stp/.step";step.Checked=true;
+            recursive.Text="包含子文件夹";recursive.Checked=true;
+            foreach(var c in new[]{ parts,assemblies,drawings,step,recursive }){ c.AutoSize=true;c.BackColor=Ui.Bg;c.Margin=new Padding(0,4,18,4);kinds.Controls.Add(c); }
+            var scan=Ui.Secondary("扫描文件",100,34);scan.Click+=delegate{ ScanInputs();RefreshRail(); };scan.Margin=new Padding(0,0,0,0);
+            kinds.Controls.Add(scan);
+            inStack.Add(frame,true);inStack.Add(kinds);
 
-            Controls.Add(MakeLabel("输出目录",12,160));
-            output.Location=new Point(80,157);output.Size=new Size(556,25);output.Anchor=AnchorStyles.Top|AnchorStyles.Left|AnchorStyles.Right;
-            Controls.Add(output);
-            Controls.Add(MakeButton("浏览…",644,156,80,delegate{ BrowseOutput(); }));
-            Controls.Add(MakeButton("打开",728,156,52,delegate{ OpenOutputFolder(); }));
+            // ---- ② 输出设置 ----
+            var outStack=new VerticalStack{ Dock=DockStyle.Fill,Padding=new Padding(0),Gap=14,AutoScroll=false };
+            pOut.Body.Controls.Add(outStack);
+            var outRow=new Panel{ Height=62,BackColor=Ui.Bg };
+            var outLabel=new Label{ Text="输出目录",AutoSize=false,Font=Ui.F9B,ForeColor=Ui.Text2,BackColor=Ui.Bg,Bounds=new Rectangle(0,0,200,22) };
+            output.BorderStyle=BorderStyle.FixedSingle;output.Font=Ui.F9;
+            var browse=Ui.Secondary("浏览…",80,30);browse.Click+=delegate{ BrowseOutput();RefreshRail(); };
+            var openDir=Ui.Ghost("打开");openDir.Click+=delegate{ OpenOutputFolder(); };
+            outRow.Controls.AddRange(new Control[]{ outLabel,output,browse,openDir });
+            outRow.Resize+=delegate{ int w=outRow.Width;output.SetBounds(0,28,Math.Max(80,w-180),28);browse.Location=new Point(output.Right+8,27);openDir.Location=new Point(browse.Right+6,27); };
+            output.TextChanged+=delegate{ RefreshRail(); };
             openOutput.Visible=false;
-
-            mirror.Text="镜像源目录结构（推荐，避免同名覆盖）";mirror.Location=new Point(80,186);mirror.Size=new Size(300,22);mirror.Checked=true;Controls.Add(mirror);
-            force.Text="覆盖已存在的转换结果";force.Location=new Point(400,186);force.Size=new Size(200,22);Controls.Add(force);
-            verify.Text="转换后重新打开校验引用";verify.Location=new Point(610,186);verify.Size=new Size(220,22);Controls.Add(verify);
-
-            parts.Text="零件 .SLDPRT";parts.Location=new Point(80,212);parts.Size=new Size(120,22);parts.Checked=true;Controls.Add(parts);
-            assemblies.Text="装配 .SLDASM";assemblies.Location=new Point(210,212);assemblies.Size=new Size(130,22);assemblies.Checked=true;Controls.Add(assemblies);
-            drawings.Text="工程图 .SLDDRW";drawings.Location=new Point(350,212);drawings.Size=new Size(140,22);Controls.Add(drawings);
-            step.Text="STEP .stp/.step";step.Location=new Point(500,212);step.Size=new Size(150,22);step.Checked=true;Controls.Add(step);
-            recursive.Text="包含子文件夹";recursive.Location=new Point(660,212);recursive.Size=new Size(130,22);recursive.Checked=true;Controls.Add(recursive);
-
-            Controls.Add(MakeLabel("并行进程",12,244));
-            workers.Location=new Point(80,241);workers.Size=new Size(56,25);workers.Minimum=1;workers.Maximum=8;workers.Value=2;Controls.Add(workers);
-            autoWorkers.Text="自动（推荐：单进程）";autoWorkers.Location=new Point(146,243);autoWorkers.Size=new Size(180,22);autoWorkers.Checked=true;
+            var opts=new FieldGrid{ BackColor=Ui.Bg,LabelWidth=84 };
+            mirror.Text="镜像源目录结构（推荐，避免同名覆盖）";mirror.Checked=true;mirror.AutoSize=true;
+            force.Text="覆盖已存在的转换结果";force.AutoSize=true;
+            verify.Text="转换后重新打开校验引用";verify.AutoSize=true;
+            opts.Add("目录结构",mirror);
+            opts.Add("已存在",force);
+            opts.Add("校验",verify);
+            workers.Minimum=1;workers.Maximum=8;workers.Value=2;workers.Width=64;workers.BorderStyle=BorderStyle.FixedSingle;workers.TextAlign=HorizontalAlignment.Right;
+            autoWorkers.Text="自动（推荐：单进程）";autoWorkers.Checked=true;autoWorkers.AutoSize=true;
             autoWorkers.CheckedChanged+=delegate{ workers.Enabled=!autoWorkers.Checked; };workers.Enabled=false;
-            Controls.Add(autoWorkers);
-            estimate.Location=new Point(330,244);estimate.Size=new Size(560,22);estimate.ForeColor=Color.DimGray;
-            estimate.Text="并行>1 为实验特性：实测仅快约 1.2 倍，且个别零件可能保存失败";
-            Controls.Add(estimate);
+            opts.Add("并行进程",autoWorkers,workers);
+            opts.Height=opts.PreferredHeight;
+            estimate.AutoSize=false;estimate.ForeColor=Ui.Muted;estimate.Font=Ui.F8;estimate.BackColor=Ui.Bg;estimate.Height=40;
+            estimate.Text="并行>1 为实验特性：实测仅快约 1.2 倍，且个别零件可能保存失败。\r\n输出格式：装配 .asm、零件 .par、钣金 .psm、工程图 .dft；转换由天工CAD自带的 SolidWorks / STEP 转换器完成。";
+            outStack.Add(outRow);outStack.Add(opts);outStack.Add(estimate);
 
-            Controls.Add(MakeLabel("输出格式：装配 .asm、零件 .par、钣金 .psm、工程图 .dft；转换由天工CAD自带的 SolidWorks / STEP 转换器完成。",12,272,true));
+            // ---- ③ 转换 ----
+            var runStack=new VerticalStack{ Dock=DockStyle.Fill,Padding=new Padding(0),Gap=12,AutoScroll=false };
+            pRun.Body.Controls.Add(runStack);
+            progress.Height=10;
+            var tiles=new Panel{ Height=statDone.Height,BackColor=Ui.Bg };
+            tiles.Controls.AddRange(new Control[]{ statDone,statOk,statFail,statSkip });
+            tiles.Resize+=delegate{ int w=(tiles.Width-36)/4;int x=0;foreach(var t in new[]{ statDone,statOk,statFail,statSkip }){ t.SetBounds(x,0,w,tiles.Height);x+=w+12; } };
+            var logFrame=Ui.Card("日志",0,"");logFrame.Padding=new Padding(12,36,6,8);
+            logBox.Dock=DockStyle.Fill;logBox.Multiline=true;logBox.ScrollBars=ScrollBars.Vertical;logBox.ReadOnly=true;
+            logBox.BorderStyle=BorderStyle.None;logBox.BackColor=Color.White;logBox.Font=Ui.F8;
+            logFrame.Controls.Add(logBox);
+            runStack.Add(progress);runStack.Add(tiles);runStack.Add(logFrame,true);
 
-            start.Text="开始转换";start.Location=new Point(12,300);start.Size=new Size(110,30);start.Click+=delegate{ StartConversion(); };Controls.Add(start);
-            stop.Text="停止";stop.Location=new Point(130,300);stop.Size=new Size(90,30);stop.Enabled=false;stop.Click+=delegate{ StopConversion(); };Controls.Add(stop);
-            saveReport.Text="导出报告";saveReport.Location=new Point(228,300);saveReport.Size=new Size(100,30);saveReport.Enabled=false;saveReport.Click+=delegate{ SaveReportAs(); };Controls.Add(saveReport);
-            Controls.Add(MakeButton("扫描文件",336,300,100,30,delegate{ ScanInputs(); }));
-            Controls.Add(MakeButton("输出目录",444,300,100,30,delegate{ OpenOutputFolder(); }));
-
-            progress.Location=new Point(12,340);progress.Size=new Size(876,18);progress.Anchor=AnchorStyles.Top|AnchorStyles.Left|AnchorStyles.Right;
-            Controls.Add(progress);
-            status.Location=new Point(12,362);status.Size=new Size(876,20);status.Anchor=AnchorStyles.Top|AnchorStyles.Left|AnchorStyles.Right;
-            status.Text="就绪。";Controls.Add(status);
-
-            logBox.Location=new Point(12,388);logBox.Size=new Size(876,258);logBox.Multiline=true;logBox.ScrollBars=ScrollBars.Vertical;
-            logBox.ReadOnly=true;logBox.BackColor=Color.FromArgb(250,250,250);
-            logBox.Anchor=AnchorStyles.Top|AnchorStyles.Bottom|AnchorStyles.Left|AnchorStyles.Right;
-            Controls.Add(logBox);
+            // ---- 底部 ----
+            start.Text="开始转换";start.Click+=delegate{ StartConversion(); };
+            stop.Text="停止";stop.Enabled=false;stop.Click+=delegate{ StopConversion(); };((FlatButton)stop).SetFore(Ui.Bad);
+            saveReport.Text="导出报告";saveReport.Enabled=false;saveReport.Click+=delegate{ SaveReportAs(); };
+            back.Click+=delegate{ shell.Go(shell.Current-1); };
+            next.Click+=delegate{ shell.Go(shell.Current+1); };
+            shell.Footer.AddLeft(back);shell.Footer.AddLeft(stop);shell.Footer.AddLeft(saveReport);
+            shell.Footer.AddRight(start);shell.Footer.AddRight(next);
+            shell.Footer.Status=status;status.ForeColor=Ui.Muted;
+            status.Text="就绪。";
+            shell.PageChanged+=delegate{ UpdatePrimary(); };
 
             timer.Interval=500;timer.Tick+=delegate{ Poll(); };
             AcceptButton=null;
+            RefreshRail();
+        }
+        public void GoPageForTest(int i){ shell.Go(i,false); }
+        void UpdatePrimary(){
+            int cur=shell.Current;
+            bool running=timer.Enabled;
+            back.Enabled=cur>0&&!running;
+            bool showStart=running||cur==2;
+            start.Visible=showStart;next.Visible=!showStart;
+            if(!showStart)next.Text="下一步："+shell.Pages[cur+1].Title;
+            shell.Footer.PerformLayout();
+        }
+        void RefreshRail(){
+            int n=inputs.Items.Count;
+            shell.Rail.Set(0,n==0?"文件或文件夹，可多选":n+" 项"+(items.Count>0?" · 扫到 "+items.Count+" 个文件":""),n>0,false);
+            string o=output.Text.Trim();
+            shell.Rail.Set(1,o.Length==0?"选输出目录":(mirror.Checked?"镜像目录 · ":"")+Path.GetFileName(o.TrimEnd('\\','/')),o.Length>0,false);
+            inputEmpty.Visible=n==0;
+            UpdatePrimary();
         }
         public void PrefillInput(string folder){
             if(folder==null||folder.Length==0||!Directory.Exists(folder))return;
             if(!inputs.Items.Contains(folder))inputs.Items.Add(folder);
             if(output.Text.Length==0)output.Text=Path.Combine(folder,"天工格式输出");
+            RefreshRail();
         }
-        Label MakeLabel(string text,int x,int y){ return MakeLabel(text,x,y,false); }
-        Label MakeLabel(string text,int x,int y,bool small){ var l=new Label();l.Text=text;l.Location=new Point(x,y);l.AutoSize=true;if(small)l.ForeColor=Color.DimGray;return l; }
-        Button MakeButton(string text,int x,int y,int w,Action action){ return MakeButton(text,x,y,w,26,action); }
-        Button MakeButton(string text,int x,int y,int w,int h,Action action){ var b=new Button();b.Text=text;b.Location=new Point(x,y);b.Size=new Size(w,h);b.Click+=delegate{ action(); };return b; }
 
         void AddFiles(){
             using(var dialog=new OpenFileDialog()){
@@ -247,6 +298,8 @@ namespace TianGongCadSuite {
             start.Enabled=false;stop.Enabled=true;saveReport.Enabled=false;
             progress.Maximum=totalPlanned;progress.Value=0;
             timer.Start();
+            start.Text="转换中 0 / "+totalPlanned;start.Progress=0;
+            shell.Go(2);UpdatePrimary();
         }
         void StopConversion(){
             AppendLog("正在停止……");
@@ -262,6 +315,9 @@ namespace TianGongCadSuite {
             int done=0,failed=0;double seconds=0;
             foreach(ConvertRow row in rows.Values){ if(row.Status=="ok"){done++;seconds+=row.TotalSeconds;} else if(row.Status=="fail")failed++; }
             progress.Value=Math.Min(progress.Maximum,rows.Count);
+            int skipped=0;foreach(ConvertRow row in rows.Values)if(row.Status=="skip")skipped++;
+            statDone.Set(rows.Count+" / "+totalPlanned,Ui.Text);statOk.Set(done.ToString(),Ui.Ok);statFail.Set(failed.ToString(),failed>0?Ui.Bad:Ui.Text);statSkip.Set(skipped.ToString(),Ui.Text);
+            if(timer.Enabled){ start.Text="转换中 "+rows.Count+" / "+totalPlanned;start.Progress=totalPlanned>0?(float)rows.Count/totalPlanned:0; }
             status.Text="进度 "+rows.Count+" / "+totalPlanned+"　成功 "+done+"　失败 "+failed+"　累计单件 "+seconds.ToString("F1")+" 秒　已用 "+(DateTime.Now-startedAt).TotalSeconds.ToString("F1")+" 秒";
             if(!running){
                 timer.Stop();
@@ -320,6 +376,8 @@ namespace TianGongCadSuite {
             status.Text=summary.Describe();
             start.Enabled=true;stop.Enabled=false;saveReport.Enabled=true;
             progress.Value=progress.Maximum;
+            start.Text="开始转换";start.Progress=-1;UpdatePrimary();
+            shell.ShowToast(summary.Describe(),summary.Failed>0?Ui.Warn:Ui.Ok,"打开输出目录",delegate{ OpenOutputFolder(); });
             if(jobHandle!=IntPtr.Zero){ NativeJob.Close(jobHandle);jobHandle=IntPtr.Zero; }
         }
         void SaveReportAs(){
