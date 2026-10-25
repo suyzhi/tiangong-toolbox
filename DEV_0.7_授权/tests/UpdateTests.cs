@@ -75,7 +75,7 @@ namespace PanelTests {
                 Shot(f, Path.Combine(dir, "update-1-found.png"));
                 f.FinishForTest(@"C:\x\pkg", null);
                 Shot(f, Path.Combine(dir, "update-2-done.png"));
-                check("下载完：主按钮变「知道了」", FindButton(f, "知道了") != null);
+                check("下载完：主按钮「立即更新」、次按钮「关闭天工时再装」", FindButton(f, "立即更新") != null && FindButton(f, "关闭天工时再装") != null);
                 f.FinishForTest(null, "连不上更新服务器（ConnectFailure）。");
                 Shot(f, Path.Combine(dir, "update-3-failed.png"));
                 check("下载失败：主按钮变「重试」", FindButton(f, "重试") != null);
@@ -100,6 +100,102 @@ namespace PanelTests {
             Console.WriteLine("SHOT " + path);
         }
         [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr hwnd, IntPtr hdcBlt, uint nFlags);
+
+        // ---------- 「立即更新」：请天工关闭 → 装 → 重新打开（用假天工，不碰真的天工） ----------
+        // --update-restart <TianGongFake.exe>
+        // --update-restart-cad <TianGongFake.exe>：真天工（排队脚本在私有桌面上起的、没有打开文件）收到关闭请求会不会退出；
+        //   "重新打开"换成假天工，不在用户桌面上真开一个天工
+        internal static void RunRestartRealCad(Action<string, bool> check, string fakeExe){
+            string dir = Path.GetDirectoryName(Path.GetFullPath(fakeExe));
+            string pkg = Path.Combine(dir, "pkg");
+            Directory.CreateDirectory(Path.Combine(pkg, "tools"));
+            File.WriteAllText(Path.Combine(pkg, @"tools\install.ps1"), "# 假安装包");
+            string state = SettingsFile.PathOf("update.tsv");
+            byte[] savedState = File.Exists(state) ? File.ReadAllBytes(state) : null;
+            bool hadRoot = Directory.Exists(AutoUpdate.UpdatesRoot);
+            var before = new HashSet<string>(hadRoot ? Directory.GetFileSystemEntries(AutoUpdate.UpdatesRoot) : new string[0], StringComparer.OrdinalIgnoreCase);
+            AutoUpdate.DryRunForTest = true; AutoUpdate.CadExeForTest = Path.GetFullPath(fakeExe); AutoUpdate.CloseWaitSecondsForTest = 90;
+            try {
+                int cads = System.Diagnostics.Process.GetProcessesByName("TianGong").Length;
+                check("真天工：开着（" + cads + " 个进程）", cads > 0);
+                string error, log = AutoUpdate.WaiterLogPath;
+                if (File.Exists(log)) File.Delete(log);
+                bool ok = AutoUpdate.Schedule(new UpdateManifest { Version = "9.9.9" }, pkg, true, out error);
+                check("真天工：起了等待脚本（" + error + "）", ok);
+                string text = "";
+                for (int i = 0; i < 300 && text.IndexOf("已重新打开") < 0 && text.IndexOf("没关") < 0; i++) { Thread.Sleep(500); try { text = File.ReadAllText(log); } catch { } }
+                Console.WriteLine("   update.log: " + text.Trim().Replace("\r\n", " ⏎ "));
+                check("真天工：收到关闭请求后退出了（没有打开的文件时不弹保存提示）", System.Diagnostics.Process.GetProcessesByName("TianGong").Length == 0 && text.IndexOf("没关") < 0);
+                check("真天工：装完（DRYRUN）后走到重新打开那一步", text.IndexOf("已重新打开") >= 0);
+            } finally {
+                foreach (var p in System.Diagnostics.Process.GetProcessesByName(Path.GetFileNameWithoutExtension(fakeExe))) { try { p.Kill(); } catch { } }
+                AutoUpdate.DryRunForTest = false; AutoUpdate.CadExeForTest = null; AutoUpdate.CloseWaitSecondsForTest = 0;
+                if (Directory.Exists(AutoUpdate.UpdatesRoot))
+                    foreach (var e in Directory.GetFileSystemEntries(AutoUpdate.UpdatesRoot))
+                        if (!before.Contains(e)) { try { if (Directory.Exists(e)) Directory.Delete(e, true); else File.Delete(e); } catch { } }
+                if (!hadRoot) { try { Directory.Delete(AutoUpdate.UpdatesRoot, true); } catch { } }
+                if (savedState != null) File.WriteAllBytes(state, savedState); else if (File.Exists(state)) File.Delete(state);
+            }
+        }
+
+        internal static void RunRestart(Action<string, bool> check, string fakeExe){
+            string dir = Path.GetDirectoryName(Path.GetFullPath(fakeExe));
+            string starts = Path.Combine(dir, "fake-starts.log");
+            string pkg = Path.Combine(dir, "pkg");
+            Directory.CreateDirectory(Path.Combine(pkg, "tools"));
+            File.WriteAllText(Path.Combine(pkg, @"tools\install.ps1"), "# 假安装包");
+            string state = SettingsFile.PathOf("update.tsv");
+            byte[] savedState = File.Exists(state) ? File.ReadAllBytes(state) : null;
+            bool hadRoot = Directory.Exists(AutoUpdate.UpdatesRoot);
+            var before = new HashSet<string>(hadRoot ? Directory.GetFileSystemEntries(AutoUpdate.UpdatesRoot) : new string[0], StringComparer.OrdinalIgnoreCase);
+            AutoUpdate.DryRunForTest = true;
+            AutoUpdate.CadNameForTest = Path.GetFileNameWithoutExtension(fakeExe);
+            AutoUpdate.CadExeForTest = Path.GetFullPath(fakeExe);
+            AutoUpdate.CloseWaitSecondsForTest = 6;
+            var m = new UpdateManifest { Version = "9.9.9" };
+            try {
+                // (a) 假天工收到关闭就退出 → 装（DRYRUN）→ 重新打开
+                if (File.Exists(starts)) File.Delete(starts);
+                var fake = System.Diagnostics.Process.Start(fakeExe);
+                Thread.Sleep(1500);
+                string error, log = AutoUpdate.WaiterLogPath;
+                if (File.Exists(log)) File.Delete(log);
+                bool ok = AutoUpdate.Schedule(m, pkg, true, out error); check("立即更新：起了等待脚本（" + error + "）", ok);
+                string text = "";
+                for (int i = 0; i < 60 && text.IndexOf("DRYRUN 已重新打开") < 0; i++) { Thread.Sleep(500); try { text = File.ReadAllText(log); } catch { } }
+                Console.WriteLine("   update.log: " + text.Trim().Replace("\r\n", " ⏎ "));
+                check("立即更新：天工收到关闭请求、退出了", fake.HasExited);
+                check("立即更新：装完（DRYRUN）后重新打开了天工", text.IndexOf("DRYRUN 已重新打开") >= 0);
+                Thread.Sleep(1500);
+                var lines = File.Exists(starts) ? File.ReadAllLines(starts) : new string[0];
+                check("立即更新：假天工启动了两次（原来那次 + 重新打开），实 " + lines.Length, lines.Length == 2);
+                foreach (var p in System.Diagnostics.Process.GetProcessesByName(AutoUpdate.CadNameForTest)) { try { p.Kill(); } catch { } }
+
+                // (b) 用户在保存提示里点了取消（假天工拒绝关闭）→ 退回"关闭时再装"，装完不重新打开
+                File.Delete(starts); File.Delete(log);
+                var stubborn = System.Diagnostics.Process.Start(fakeExe, "--refuse");
+                Thread.Sleep(1500);
+                check("取消关闭：起了等待脚本", AutoUpdate.Schedule(m, pkg, true, out error));
+                text = "";
+                for (int i = 0; i < 40 && text.IndexOf("没关") < 0; i++) { Thread.Sleep(500); try { text = File.ReadAllText(log); } catch { } }
+                check("取消关闭：天工没关，脚本说改成关闭后再装", text.IndexOf("没关") >= 0 && !stubborn.HasExited);
+                stubborn.Kill(); stubborn.WaitForExit(3000);       // 用户过了一阵自己关掉天工
+                for (int i = 0; i < 40 && text.IndexOf("DRYRUN 会运行") < 0; i++) { Thread.Sleep(500); try { text = File.ReadAllText(log); } catch { } }
+                Thread.Sleep(2000);
+                try { text = File.ReadAllText(log); } catch { }
+                Console.WriteLine("   update.log: " + text.Trim().Replace("\r\n", " ⏎ "));
+                check("取消关闭：天工关掉后照样装（DRYRUN）", text.IndexOf("DRYRUN 会运行") >= 0);
+                check("取消关闭：装完不会突然把天工打开", text.IndexOf("已重新打开") < 0 && File.ReadAllLines(starts).Length == 1);
+            } finally {
+                foreach (var p in System.Diagnostics.Process.GetProcessesByName(AutoUpdate.CadNameForTest)) { try { p.Kill(); } catch { } }
+                AutoUpdate.DryRunForTest = false; AutoUpdate.CadNameForTest = null; AutoUpdate.CadExeForTest = null; AutoUpdate.CloseWaitSecondsForTest = 0;
+                if (Directory.Exists(AutoUpdate.UpdatesRoot))
+                    foreach (var e in Directory.GetFileSystemEntries(AutoUpdate.UpdatesRoot))
+                        if (!before.Contains(e)) { try { if (Directory.Exists(e)) Directory.Delete(e, true); else File.Delete(e); } catch { } }
+                if (!hadRoot) { try { Directory.Delete(AutoUpdate.UpdatesRoot, true); } catch { } }
+                if (savedState != null) File.WriteAllBytes(state, savedState); else if (File.Exists(state)) File.Delete(state);
+            }
+        }
 
         // ---------- 真服务器 ----------
 

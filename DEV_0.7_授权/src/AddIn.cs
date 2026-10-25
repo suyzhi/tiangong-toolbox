@@ -47,7 +47,7 @@ diagnostics=new Diagnostics(context.Application,()=>Run(registry.Find(1)),()=>Ru
         void Run(ToolCommand c){if(c==null)return;try{
             var owner=context==null?null:new CadOwner(context.Application.ActiveFramehWnd);
             // 有新版本：先提示一次（每次开天工最多一次；「稍后提醒」一天内不再提示）。提示完照常执行命令
-            if(c.Id!=UpdateModule.CommandId){try{AutoUpdate.PromptIfDue(owner);}catch(Exception e){Log.Write("UpdatePrompt",e);}}
+            if(c.Id!=UpdateModule.CommandId){try{if(AutoUpdate.PromptIfDue(owner))return;/* 点了「立即更新」：天工马上关，不再打开命令 */}catch(Exception e){Log.Write("UpdatePrompt",e);}}
             // 命令入口栅栏：未激活、过期、换机器、时间回调或环境异常都在此拦截。「检查更新」不拦（授权出问题时也要能装新版本）
             if(c.Id!=UpdateModule.CommandId&&!TianGongCadSuite.Licensing.LicenseGate.EnsureInteractive(owner))return;
             if(!c.CanExecute())throw new InvalidOperationException("请先打开适用的 CAD 文件。");c.Execute();}catch(Exception e){Log.Write(c.Title,e);MessageBox.Show(e.Message,"天工工具箱",MessageBoxButtons.OK,MessageBoxIcon.Error);}}

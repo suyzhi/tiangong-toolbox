@@ -26,6 +26,8 @@ namespace TianGongCadSuite {
     //   安装包的 SHA-256 和大小写在签过名的清单里，下载完对不上就不装。
     // 安装：插件跑在天工进程里，DLL 被占着没法换。所以只下载、解压，然后起一个独立的小脚本（不是天工的子进程，
     //   天工关了它还在），等所有天工进程都退出后静默运行安装包自己的 tools\install.ps1 -Force，装完弹一句。
+    //   「立即更新」（用户要的，0.9.2）：脚本先请天工关闭（等于点窗口的 ×，没保存的文件天工自己会问），
+    //   5 分钟内关掉了就装好后自动重新打开天工；用户在保存提示里点了取消 = 天工还开着 → 退回"关闭天工时再装"，事后不会突然把天工打开。
     public static class AutoUpdate {
         const string StateFile = "update.tsv";
         const double CheckHours = 12;
@@ -38,6 +40,9 @@ namespace TianGongCadSuite {
         // 测试：等待脚本只写日志不真装；跳过 12 小时间隔
         internal static bool DryRunForTest;
         internal static bool IgnoreIntervalForTest;
+        // 测试：「立即更新」关的 / 重开的换成一个假天工（别把开发机上真的天工关掉）
+        internal static string CadNameForTest, CadExeForTest;
+        internal static int CloseWaitSecondsForTest;
 
         // ---------- 地址与版本 ----------
 
@@ -180,19 +185,20 @@ namespace TianGongCadSuite {
             if (WaiterRunning()) return;
             Log.Write("UpdateResume", "上次下载的 " + s.Staged + " 还没装上，重新等天工关闭后安装");
             string error;
-            if (!LaunchWaiter(s.StagedDir, s.Staged, out error)) Log.Write("UpdateResume", error);
+            if (!LaunchWaiter(s.StagedDir, s.Staged, false, out error)) Log.Write("UpdateResume", error);
         }
 
         // ---------- 提示（UI 线程：用户点工具箱命令时） ----------
 
-        // 有新版本、没被跳过、没在"稍后提醒"期内、这次开天工还没提示过 → 弹窗
-        public static void PromptIfDue(IWin32Window owner){
+        // 有新版本、没被跳过、没在"稍后提醒"期内、这次开天工还没提示过 → 弹窗。
+        // 返回 true = 用户点了「立即更新」，天工马上要关：调用方不要再打开命令窗口
+        public static bool PromptIfDue(IWin32Window owner){
             var m = pending;
-            if (m == null || promptedThisSession || !IsNewer(m)) return;
+            if (m == null || promptedThisSession || !IsNewer(m)) return false;
             var s = Load();
-            if (s.Skip == m.Version || DateTime.UtcNow < s.SnoozeUntil || s.Staged == m.Version) return;
+            if (s.Skip == m.Version || DateTime.UtcNow < s.SnoozeUntil || s.Staged == m.Version) return false;
             promptedThisSession = true;
-            Show(owner, m);
+            return Show(owner, m, null) == UpdateForm.Answer.RestartNow;
         }
 
         // 功能区「检查更新」
@@ -207,20 +213,19 @@ namespace TianGongCadSuite {
                 MessageBox.Show(owner, "已经是最新版本（" + Product.Version + "）。", "检查更新", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
-            if (s.Staged == m.Version) {
-                MessageBox.Show(owner, m.Version + " 已经下载好了，关闭天工后会自动安装。", "检查更新", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
-            }
             pending = m;
-            Show(owner, m);
+            // 已经下载好了（等着关天工再装）：直接打开到"已下载"那一步，可以点「立即更新」
+            bool staged = s.Staged == m.Version && Directory.Exists(s.StagedDir);
+            Show(owner, m, staged ? s.StagedDir : null);
         }
 
-        static void Show(IWin32Window owner, UpdateManifest m){
-            using (var f = new UpdateForm(m)) {
+        static UpdateForm.Answer Show(IWin32Window owner, UpdateManifest m, string stagedPkg){
+            using (var f = new UpdateForm(m, stagedPkg)) {
                 f.ShowDialog(owner);
                 var s = Load();
                 if (f.Choice == UpdateForm.Answer.Skip) { s.Skip = m.Version; Save(s); }
                 else if (f.Choice == UpdateForm.Answer.Later) { s.SnoozeUntil = DateTime.UtcNow.AddDays(1); Save(s); }
+                return f.Choice;
             }
         }
 
@@ -264,11 +269,12 @@ namespace TianGongCadSuite {
             return pkg;
         }
 
-        // 下载好以后：起等待脚本，记下"已下载待安装"
-        public static bool Schedule(UpdateManifest m, string pkg, out string error){
-            if (!LaunchWaiter(pkg, m.Version, out error)) return false;
+        // 下载好以后：起等待脚本，记下"已下载待安装"。restart = 「立即更新」：脚本先请天工关闭，装好后重新打开
+        public static bool Schedule(UpdateManifest m, string pkg, out string error){ return Schedule(m, pkg, false, out error); }
+        public static bool Schedule(UpdateManifest m, string pkg, bool restart, out string error){
+            if (!LaunchWaiter(pkg, m.Version, restart, out error)) return false;
             var s = Load(); s.Staged = m.Version; s.StagedDir = pkg; s.SnoozeUntil = DateTime.MinValue; Save(s);
-            Log.Write("UpdateStaged", m.Version + " 已下载，等天工关闭后安装：" + pkg);
+            Log.Write("UpdateStaged", m.Version + (restart ? " 立即更新：请天工关闭，装好后重新打开：" : " 已下载，等天工关闭后安装：") + pkg);
             return true;
         }
 
@@ -288,10 +294,20 @@ namespace TianGongCadSuite {
 
         // 等所有天工进程退出 → 运行安装包里的 install.ps1 -Force → 弹一句结果。写在 updates\apply-update.ps1
         internal const string WaiterScript =
-@"param([string]$Pkg, [string]$Version, [string]$Log, [switch]$DryRun)
+@"param([string]$Pkg, [string]$Version, [string]$Log, [switch]$DryRun, [switch]$Restart, [string]$CadExe = '', [string]$CadName = 'TianGong', [int]$CloseWait = 300)
 $ErrorActionPreference = 'Continue'
 function W([string]$s){ try { Add-Content -LiteralPath $Log -Value ((Get-Date).ToString('yyyy-MM-dd HH:mm:ss') + ' ' + $s) -Encoding UTF8 } catch {} }
-function Busy { @(Get-Process -Name TianGong -ErrorAction SilentlyContinue).Count -gt 0 }
+function Busy { @(Get-Process -Name $CadName -ErrorAction SilentlyContinue).Count -gt 0 }
+$relaunch = $false
+if ($Restart) {
+    # 立即更新：请天工关闭（等于点窗口的 ×；没保存的文件天工自己会问）。5 分钟内关掉了才在装好后重新打开它
+    Start-Sleep -Seconds 2
+    W ('立即更新 ' + $Version + '：请天工关闭')
+    Get-Process -Name $CadName -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | ForEach-Object { [void]$_.CloseMainWindow() }
+    $deadline = (Get-Date).AddSeconds($CloseWait)
+    while ((Busy) -and ((Get-Date) -lt $deadline)) { Start-Sleep -Seconds 1 }
+    if (Busy) { W ('天工 ' + $CloseWait + ' 秒内没关（保存提示里点了取消？）：改成关闭天工后再装，装完不自动打开') } else { $relaunch = $true }
+}
 W ('等天工关闭后安装 ' + $Version + '：' + $Pkg)
 while ($true) {
     while (Busy) { Start-Sleep -Seconds 3 }
@@ -299,7 +315,11 @@ while ($true) {
     if (-not (Busy)) { break }
 }
 if (-not (Test-Path -LiteralPath (Join-Path $Pkg 'tools\install.ps1'))) { W '安装包不见了，放弃'; exit 3 }
-if ($DryRun) { W ('DRYRUN 会运行 install.ps1 -Force：' + $Pkg); exit 0 }
+if ($DryRun) {
+    W ('DRYRUN 会运行 install.ps1 -Force：' + $Pkg)
+    if ($relaunch -and $CadExe) { Start-Process -FilePath $CadExe; W ('DRYRUN 已重新打开 ' + $CadExe) }
+    exit 0
+}
 $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $app = Join-Path $env:LOCALAPPDATA 'TianGongCadSuite\app'
 $out = & $ps -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Pkg 'tools\install.ps1') -LibraryPath (Join-Path $Pkg 'payload\TianGongCadSuite.dll') -StageDirectory $app -Force 2>&1
@@ -307,6 +327,11 @@ $code = $LASTEXITCODE
 $out | ForEach-Object { W ('  ' + $_) }
 $ok = ($code -eq 0) -and (($out | Out-String) -match '注册完成')
 W ('安装结束 exit=' + $code + ' ok=' + $ok)
+if ($ok -and $relaunch -and $CadExe -and (Test-Path -LiteralPath $CadExe)) {
+    Start-Process -FilePath $CadExe -WorkingDirectory (Split-Path -Parent $CadExe)
+    W ('已重新打开天工：' + $CadExe)
+    exit 0
+}
 Add-Type -AssemblyName System.Windows.Forms
 if ($ok) {
     [System.Windows.Forms.MessageBox]::Show('天工工具箱已更新到 ' + $Version + '。' + [Environment]::NewLine + '重新打开天工就是新版本。', '天工工具箱 更新', 'OK', 'Information') | Out-Null
@@ -315,15 +340,23 @@ if ($ok) {
 }
 ";
 
-        static bool LaunchWaiter(string pkg, string version, out string error){
+        static bool LaunchWaiter(string pkg, string version, bool restart, out string error){
             error = null;
             try {
+                KillWaiter();   // 已经有一个在等（比如先选了"关闭天工时再装"，又点「立即更新」）：换成新的
                 Directory.CreateDirectory(UpdatesRoot);
                 string script = Path.Combine(UpdatesRoot, "apply-update.ps1");
                 File.WriteAllText(script, WaiterScript, new UTF8Encoding(true));   // 带 BOM：Windows PowerShell 5 才按 UTF-8 读中文
                 string ps = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"WindowsPowerShell\v1.0\powershell.exe");
                 string cmd = "\"" + ps + "\" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + script + "\" -Pkg \"" + pkg
                            + "\" -Version \"" + version + "\" -Log \"" + WaiterLog + "\"" + (DryRunForTest ? " -DryRun" : "");
+                if (restart) {
+                    string exe = CadExeForTest;
+                    if (exe == null) { try { exe = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName; } catch { exe = ""; } }   // 插件就在天工进程里
+                    cmd += " -Restart -CadExe \"" + exe + "\"";
+                }
+                if (CadNameForTest != null) cmd += " -CadName \"" + CadNameForTest + "\"";
+                if (CloseWaitSecondsForTest > 0) cmd += " -CloseWait " + CloseWaitSecondsForTest;
                 // 用 WMI 起进程：父进程不是天工，天工退出（或它的作业对象被关掉）时不会把等待脚本一起带走
                 using (var cls = new System.Management.ManagementClass("Win32_Process")) {
                     var inParams = cls.GetMethodParameters("Create");
@@ -341,6 +374,15 @@ if ($ok) {
                 }
                 return true;
             } catch (Exception e) { error = "没能启动安装脚本：" + e.Message; Log.Write("UpdateWaiter", e); return false; }
+        }
+
+        static void KillWaiter(){
+            try {
+                int pid;
+                if (!File.Exists(WaiterPidFile) || !int.TryParse(File.ReadAllText(WaiterPidFile).Trim(), out pid)) return;
+                var p = System.Diagnostics.Process.GetProcessById(pid);
+                if (!p.HasExited && p.ProcessName.IndexOf("powershell", StringComparison.OrdinalIgnoreCase) >= 0) { p.Kill(); p.WaitForExit(3000); }
+            } catch { }
         }
 
         static string Hex(byte[] data){
