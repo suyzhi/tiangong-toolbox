@@ -22,6 +22,8 @@ namespace TianGongCadSuite.Licensing {
         public int Day;
         public int Left;
         public int Quota;
+        // 服务器上这个码的到期日（天数偏移，0 = 老服务端没给）。管理员在看板里延长 / 缩短后，以它为准（0.9.1）
+        public int Expires;
 
         public bool Ok { get { return Status == "ok"; } }
 
@@ -46,6 +48,7 @@ namespace TianGongCadSuite.Licensing {
             receipt.Day = (int)LicenseOnline.Number(map, "day");
             receipt.Left = (int)LicenseOnline.Number(map, "left");
             receipt.Quota = (int)LicenseOnline.Number(map, "quota");
+            receipt.Expires = (int)LicenseOnline.Number(map, "expires");
             if(receipt.CodeId == null || receipt.Machine == null || receipt.Status == null || receipt.Day <= 0)return null;
             return receipt;
         }
@@ -54,7 +57,7 @@ namespace TianGongCadSuite.Licensing {
         internal string RejectMessage(LicenseCode code){
             switch(Status){
                 case "revoked": return "该激活码已被管理员停用（作废），请联系管理员重新签发。";
-                case "expired": return "该激活码已于 " + LicenseTime.Format(code.ExpiryDate) + " 到期。";
+                case "expired": return "该激活码已于 " + LicenseTime.Format(Expires > 0 ? LicenseTime.FromDayOffset(Expires) : code.ExpiryDate) + " 到期。";
                 case "quota": return "该激活码已在另一台电脑上激活，自助换机次数已用完（共 " + Quota + " 次）。请联系管理员处理。";
                 case "moved": return "该激活码已在另一台电脑上激活。";
             }
@@ -182,6 +185,20 @@ namespace TianGongCadSuite.Licensing {
             }
         }
 
+        // 到期日：服务器回执里给了就以它为准（管理员可以随时延长 / 缩短），没给（老服务端 / 还没联网）按码里写的
+        internal static int ExpiryDay(ActivationRecord record,LicenseCode code){
+            LicenseReceipt receipt = Stored(record, code);
+            if(receipt != null && receipt.Expires > 0)return receipt.Expires;
+            LicensePlan plan = code == null ? null : code.Plan;
+            return code == null || plan == null ? 0 : code.Payload.DayOffset + plan.Days;
+        }
+
+        // 本机算出来已经到期：先问一次服务器（管理员可能已经延长了），拿到新到期日返回它，问不到返回 0
+        internal static int ExpiryAfterRefresh(LicenseCode code){
+            LicenseReceipt fresh = Refresh(code, false);
+            return fresh != null && fresh.Ok && fresh.Expires > 0 ? fresh.Expires : 0;
+        }
+
         // 激活窗口的"重新联网验证"按钮。
         internal static LicenseReport RetryNow(){
             ActivationRecord record = LicenseStore.Load();
@@ -231,6 +248,9 @@ namespace TianGongCadSuite.Licensing {
             }
 #endif
             string url = LicenseServerSlot.Url;
+#if TG_DEV_BUILD
+            if(LicenseTestHooks.ServerUrlOverride != null)url = LicenseTestHooks.ServerUrlOverride;
+#endif
             if(string.IsNullOrEmpty(url)){ error = "插件没有配置授权服务器地址（LicenseServerSlot 仍是占位），请联系管理员。"; return null; }
             try{
                 ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;

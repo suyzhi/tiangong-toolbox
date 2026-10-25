@@ -321,7 +321,7 @@
     if (ev.status === "ok") return { cls: "ok", text: { bound: "首次绑定", already: "正常", rebound: "换机转入" }[ev.result] || "通过" };
     return { cls: "bad", text: { moved: "拒绝：已转到别的机器", quota: "拒绝：换机次数用完", revoked: "拒绝：已作废", expired: "拒绝：已过期" }[ev.status] || ev.status };
   }
-  var AUDIT_TEXT = { issue: "签发", revoke: "作废", unrevoke: "恢复", unbind: "解绑", quota: "调整换机次数", meta: "修改客户/备注" };
+  var AUDIT_TEXT = { issue: "签发", revoke: "作废", unrevoke: "恢复", unbind: "解绑", quota: "调整换机次数", meta: "修改客户/备注", extend: "调整有效期" };
 
   function openDrawer(id) {
     api("GET", "/admin/api/codes/" + id).then(renderDrawer, function (e) { toast(e.message, true); });
@@ -358,11 +358,16 @@
     note.value = d.note || "";
     var quota = h("input", { type: "number", min: "0", max: "99", inputmode: "numeric" });
     quota.value = d.quota;
+    var until = h("input", { type: "date" });
+    until.value = d.expiry || "";
+    function extend(days) {
+      act("extend", { days: days }, (days > 0 ? "延长 " : "缩短 ") + Math.abs(days) + " 天？\n码不用换，客户下次联网复核时按新到期日算。");
+    }
 
     var meta = [
       ["档位", d.plan || "—"],
       ["签发日", d.issueDate || "—"],
-      ["到期", d.expiry ? d.expiry + (d.daysLeft > 0 ? "（剩 " + d.daysLeft + " 天）" : "") : "—"],
+      ["到期", d.expiry ? d.expiry + (d.daysLeft > 0 ? "（剩 " + d.daysLeft + " 天）" : "") + (d.extraDays ? "（已调整 " + (d.extraDays > 0 ? "+" : "") + d.extraDays + " 天）" : "") : "—"],
       ["绑定机器", d.machine || "未绑定"],
       ["绑定时间", d.boundAt || "—"],
       ["最近联网", d.lastSeen ? d.lastSeen + (d.lastIp ? "  ·  " + d.lastIp : "") : "从未"],
@@ -409,6 +414,14 @@
                   } }),
               h("button", { type: "button", class: "btn", text: "解绑机器", disabled: d.machine ? null : "",
                 onclick: function () { act("unbind", {}, "解绑 " + d.display + "？\n下一台输入这个码的电脑直接绑定，不占换机次数；当前机器下次复核后停用。"); } })),
+            h("div", { class: "inline" }, h("span", { class: "muted", text: "有效期" }),
+              h("button", { type: "button", class: "btn small", text: "+1 个月", onclick: function () { extend(30); } }),
+              h("button", { type: "button", class: "btn small", text: "+半年", onclick: function () { extend(183); } }),
+              h("button", { type: "button", class: "btn small", text: "+1 年", onclick: function () { extend(365); } })),
+            h("div", { class: "inline" }, h("span", { class: "muted", text: "改到" }), until,
+              h("button", { type: "button", class: "btn small", text: "保存到期日", disabled: d.expiry ? null : "", onclick: function () {
+                if (until.value) act("extend", { to: until.value }, "把 " + d.display + " 的到期日改成 " + until.value + "？");
+              } })),
             h("div", { class: "inline" }, h("span", { class: "muted", text: "换机次数" }), quota,
               h("button", { type: "button", class: "btn small", text: "保存", onclick: function () { act("quota", { quota: quota.value }); } }),
               h("button", { type: "button", class: "btn small", text: "恢复默认", onclick: function () { act("quota", { quota: null }); } }),

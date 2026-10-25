@@ -110,6 +110,51 @@ class ServerTest(unittest.TestCase):
         _, r = self.call("activate", old, "dddddddddd")
         self.assertEqual(r["status"], "expired")
 
+    def test_extend_and_shorten(self):
+        # 0.9.1：管理员延长 / 缩短有效期，码不用换；回执带 expires（插件以它为准）
+        today = srv.day_offset()
+        p = make_payload(plan=11, day=today - 25)            # 一个月档，还剩 5 天
+        cid = srv.code_id(p)
+        _, r = self.call("activate", p, "ffffffffff")
+        self.assertEqual((r["status"], r["expires"]), ("ok", today + 5))
+        self.ledger.execute("UPDATE codes SET extra_days=30 WHERE code_id=?", (cid,))
+        _, r = self.call("check", p, "ffffffffff")
+        self.assertEqual((r["status"], r["expires"]), ("ok", today + 35))
+        self.ledger.execute("UPDATE codes SET extra_days=-6 WHERE code_id=?", (cid,))
+        _, r = self.call("check", p, "ffffffffff")
+        self.assertEqual(r["status"], "expired")
+        # 已经过期的码，延长后重新能用（客户不用换码）
+        old = make_payload(plan=11, day=today - 40)
+        _, r = self.call("activate", old, "ffffffffff")
+        self.assertEqual(r["status"], "expired")
+        self.ledger.execute("UPDATE codes SET extra_days=20 WHERE code_id=?", (srv.code_id(old),))
+        _, r = self.call("activate", old, "ffffffffff")
+        self.assertEqual((r["status"], r["expires"]), ("ok", today + 10))
+
+    def test_extend_cli_and_old_db(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "old.db")
+            # 老版本台账（没有 extra_days 列）：打开时自动补列
+            import sqlite3
+            con = sqlite3.connect(db)
+            con.executescript(srv.SCHEMA.replace("first_seen   TEXT", "first_seen   TEXT"))
+            con.execute("INSERT INTO codes(code_id, plan, issue_day) VALUES('abcdefgh', 42, ?)", (srv.day_offset() - 10,))
+            con.commit(); con.close()
+            srv.main(["--db", db, "extend", "abcd-efgh", "30"])
+            led = srv.Ledger(db)
+            self.assertEqual(led.row("abcdefgh")["extra_days"], 30)
+            self.assertEqual(srv.expiry_day(led.row("abcdefgh")), srv.day_offset() - 10 + 365 + 30)
+            led.db.close()
+            srv.main(["--db", db, "extend", "abcd-efgh", "--to", "2030-01-01"])
+            led = srv.Ledger(db)
+            self.assertEqual(srv.date_text(srv.expiry_day(led.row("abcdefgh"))), "2030-01-01")
+            led.db.close()
+            # 还没联网过的码也能先延长（台账里先占一行，客户第一次联网时补上档位）
+            srv.main(["--db", db, "extend", "zzzz-zzzz", "15"])
+            led = srv.Ledger(db)
+            self.assertEqual(led.row("zzzzzzzz")["extra_days"], 15)
+            led.db.close()
+
     def test_rejects_forged_and_malformed(self):
         p = make_payload()
         code, obj = self.call("activate", p, "eeeeeeeeee", signer=ec.generate_private_key(ec.SECP256R1()))
@@ -292,8 +337,16 @@ class AdminTest(unittest.TestCase):
         self.assertEqual((d["quota"], d["quotaCustom"]), (5, True))
         self.assertFalse(post("quota", {"quota": None})["quotaCustom"])
         self.assertEqual(post("meta", {"customer": "乙公司", "note": ""})["customer"], "乙公司")
+        before = post("meta", {"customer": "乙公司"})["expiry"]
+        d = post("extend", {"days": 183})
+        self.assertEqual((d["extraDays"], d["daysLeft"]), (183, 365 + 183))
+        d = post("extend", {"to": "2031-06-30"})
+        self.assertEqual(d["expiry"], "2031-06-30")
+        self.assertNotEqual(d["expiry"], before)
+        self.assertEqual(self.req("POST", "/admin/api/codes/%s/extend" % first["id"], {"days": "x"}, cookie=cookie, csrf=csrf)[0], 400)
+        self.assertEqual(self.req("POST", "/admin/api/codes/%s/extend" % first["id"], {"to": "2031/06/30"}, cookie=cookie, csrf=csrf)[0], 400)
         actions = [a["action"] for a in post("meta", {"customer": "乙公司"})["audit"]]
-        for expected in ("issue", "revoke", "unrevoke", "unbind", "quota", "meta"):
+        for expected in ("issue", "revoke", "unrevoke", "unbind", "quota", "meta", "extend"):
             self.assertIn(expected, actions)
 
         # 每日上限 5：已签 2，再签 4 个超限

@@ -188,7 +188,14 @@ namespace TianGongCadSuite.Licensing {
                 report.Detail = "系统时间早于授权时间基准，已按时间基准计算";
             }
 
-            report.DaysLeft = code.Payload.DayOffset + plan.Days - today;
+            // 到期日以服务器回执为准（管理员延长 / 缩短，0.9.1）；本机算出已到期时先问一次服务器，可能刚被延长
+            int expiryDay = LicenseOnline.ExpiryDay(record, code);
+            if(expiryDay <= today){
+                int renewed = LicenseOnline.ExpiryAfterRefresh(code);
+                if(renewed > 0)expiryDay = renewed;
+            }
+            report.ExpiryDate = LicenseTime.FromDayOffset(expiryDay);
+            report.DaysLeft = expiryDay - today;
             if(report.DaysLeft > 0 && (scan & ~LicenseGuard.DebuggerBit) != 0){
                 report.Status = LicenseStatus.Environment;
                 report.Detail = LicenseGuard.Describe(scan) + " scan=" + scan + " override=" + LicenseTestHooks.GuardOverride;
@@ -207,6 +214,15 @@ namespace TianGongCadSuite.Licensing {
                 report.Status = online;
                 report.Detail = onlineDetail;
                 return report;
+            }
+            // 上面这一关可能刚复核过、换了一张新回执（管理员延长 / 缩短过）：按新回执的到期日重算
+            ActivationRecord latest = LicenseStore.Load();
+            int checkedExpiry = LicenseOnline.ExpiryDay(latest != null ? latest : record, code);
+            if(checkedExpiry > 0 && checkedExpiry != expiryDay){
+                expiryDay = checkedExpiry;
+                report.ExpiryDate = LicenseTime.FromDayOffset(expiryDay);
+                report.DaysLeft = expiryDay - today;
+                if(report.DaysLeft <= 0){ report.Status = LicenseStatus.Expired; return report; }
             }
 
             LicenseStore.Touch(record);
@@ -310,8 +326,7 @@ namespace TianGongCadSuite.Licensing {
             int today = Today;
             if(code.Payload.DayOffset > today + FutureTolerance)
                 return Rejected(code,"激活码签发日期晚于本机时间，请先校正系统时间。", out message);
-            if(today >= code.Payload.DayOffset + plan.Days)
-                return Rejected(code,"该激活码已于 " + LicenseTime.Format(code.ExpiryDate) + " 到期。", out message);
+            // 码里写的到期日过了也先问服务器：管理员可能已经在看板里延长了（0.9.1），到没到期由服务器说了算
             byte[] fingerprint = MachineShort;
             if(code.MachineBound && !FingerprintMatches(code.Payload.Fingerprint))
                 return Rejected(code,"该激活码是为另一台机器签发的。本机机器码：" + MachineCodeForDisplay(), out message);
@@ -447,6 +462,8 @@ namespace TianGongCadSuite.Licensing {
         public static Func<string,string> OnlineTransport;
         public static byte[] ServerKeyOverride;
         public static bool OnlineSynchronous;
+        // 联调：真 HTTP 打到本机起的 server/tg_license_server.py（不用改 LicenseServerSlot 重编）
+        public static string ServerUrlOverride;
 
         // 开发用私钥：放在 %ProgramData%\TianGongCadSuite\license-dev.key 时，
         // 本机按"自带签发权"模式运行，便于在真机上验证三档有效期；文件不存在时
@@ -475,6 +492,7 @@ namespace TianGongCadSuite.Licensing {
             OnlineTransport = null;
             ServerKeyOverride = null;
             OnlineSynchronous = false;
+            ServerUrlOverride = null;
             LicenseLibrary.ResetCache();
         }
 

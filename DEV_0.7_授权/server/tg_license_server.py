@@ -329,7 +329,16 @@ CODE_COLUMNS = {
     "issued_at": "TEXT",
     "issued_by": "TEXT",   # 签发时的登录 IP / "import"
     "source": "TEXT",      # web / import / NULL（客户端首次联网时才见到）
+    "extra_days": "INTEGER NOT NULL DEFAULT 0",   # 管理员延长（负数 = 缩短）的天数；到期日 = 签发日 + 档位天数 + 它
 }
+
+
+def expiry_day(row):
+    """这个码在服务器上的到期日（天数偏移）。还没见过码载荷（只提前作废/延长过）时为 None。"""
+    plan = PLANS.get(row["plan"])
+    if plan is None or row["issue_day"] is None:
+        return None
+    return row["issue_day"] + plan[1] + (row["extra_days"] or 0)
 
 
 def stamp():
@@ -394,7 +403,7 @@ class Ledger:
         return self.default_quota if row["quota"] is None else row["quota"]
 
     def decide(self, op, cid, plan, issue_day, machine, ip, today):
-        """核心规则。返回 (status, result, 剩余换机次数, 总次数)。
+        """核心规则。返回 (status, result, 剩余换机次数, 总次数, 到期日)。
 
         status: ok / revoked / expired / moved / quota
         result: bound（首次绑定）/ already（本机重复）/ rebound（从别的机器换过来）
@@ -428,29 +437,30 @@ class Ledger:
         row = self.row(cid)
         quota = self.quota_of(row)
         left = max(quota - row["rebinds_used"], 0)
+        expires = expiry_day(row)
 
         if row["revoked"]:
-            return "revoked", "", left, quota
-        if today >= issue_day + PLANS[plan][1]:
-            return "expired", "", left, quota
+            return "revoked", "", left, quota, expires
+        if today >= expires:
+            return "expired", "", left, quota, expires
 
         if row["machine"] is None:
             self.db.execute(
                 "UPDATE codes SET machine=?, bound_at=?, last_seen=?, last_ip=? WHERE code_id=?", (machine, now, now, ip, cid)
             )
-            return "ok", "bound", left, quota
+            return "ok", "bound", left, quota, expires
         if row["machine"] == machine:
             self.db.execute("UPDATE codes SET last_seen=?, last_ip=? WHERE code_id=?", (now, ip, cid))
-            return "ok", "already", left, quota
+            return "ok", "already", left, quota, expires
         if op == "check":
-            return "moved", "", left, quota
+            return "moved", "", left, quota, expires
         if left <= 0:
-            return "quota", "", 0, quota
+            return "quota", "", 0, quota, expires
         self.db.execute(
             "UPDATE codes SET machine=?, bound_at=?, last_seen=?, last_ip=?, rebinds_used=rebinds_used+1 WHERE code_id=?",
             (machine, now, now, ip, cid),
         )
-        return "ok", "rebound", left - 1, quota
+        return "ok", "rebound", left - 1, quota, expires
 
 
 # ---------------------------------------------------------------- HTTP 服务
@@ -507,11 +517,11 @@ class Service:
 
         now = self.clock()
         today = day_offset(now)
-        status, result, left, quota = self.ledger.decide(op, cid, info["plan"], info["day"], machine, ip, today)
+        status, result, left, quota, expires = self.ledger.decide(op, cid, info["plan"], info["day"], machine, ip, today)
         receipt = {
             "v": 1, "code": cid, "machine": machine, "nonce": fields["nonce"], "op": op,
             "status": status, "result": result, "left": left, "quota": quota,
-            "day": today, "time": int(now),
+            "expires": expires, "day": today, "time": int(now),
         }
         raw = json.dumps(receipt, separators=(",", ":"), ensure_ascii=True).encode("ascii")
         return 200, {
@@ -736,14 +746,16 @@ def cmd_import_ledger(a):
 def open_ledger(a):
     if not os.path.exists(a.db):
         sys.exit("台账不存在：" + a.db)
-    return Ledger(a.db, a.default_quota)
+    a._ledger = Ledger(a.db, a.default_quota)   # main() 跑完命令统一关掉
+    return a._ledger
 
 
 def describe(ledger, row):
     plan = PLANS.get(row["plan"], ("?", 0))
     expiry = ""
-    if row["issue_day"] is not None:
-        expiry = datetime.fromtimestamp(EPOCH + (row["issue_day"] + plan[1]) * 86400, timezone.utc).strftime("%Y-%m-%d")
+    day = expiry_day(row)
+    if day is not None:
+        expiry = date_text(day) + ("（延长 %+d 天）" % row["extra_days"] if row["extra_days"] else "")
     state = "作废" if row["revoked"] else ("已绑定" if row["machine"] else "未绑定")
     quota = ledger.quota_of(row)
     return "%s  %-4s  %-6s 到期 %-10s  机器 %-10s  换机 %d/%d  最近 %s  %s" % (
@@ -810,6 +822,36 @@ def cmd_quota(a):
     if a.count is not None:
         ledger.db.execute("UPDATE codes SET quota=? WHERE code_id=?", (a.count, cid))
     print(describe(ledger, ledger.row(cid)))
+
+
+def date_text(day):
+    return datetime.fromtimestamp(EPOCH + day * 86400, timezone.utc).strftime("%Y-%m-%d")
+
+
+def parse_date(text):
+    """YYYY-MM-DD → 天数偏移"""
+    try:
+        d = datetime.strptime(text, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        sys.exit("日期格式应为 YYYY-MM-DD：" + text)
+    return day_offset(d.timestamp())
+
+
+def cmd_extend(a):
+    ledger = open_ledger(a)
+    cid, row = require_row(ledger, a.code, create=True)   # 还没联网过的码也能先延长
+    if a.to:
+        if expiry_day(row) is None:
+            sys.exit("服务器还没见过这个码的载荷（客户没联网激活过），没法按日期算；请用天数：extend %s 30" % display_id(cid))
+        extra = (row["extra_days"] or 0) + parse_date(a.to) - expiry_day(row)
+    elif a.days is not None:
+        extra = (row["extra_days"] or 0) + a.days
+    else:
+        sys.exit("要么给延长天数（负数 = 缩短），要么给 --to YYYY-MM-DD")
+    ledger.execute("UPDATE codes SET extra_days=? WHERE code_id=?", (extra, cid))
+    ledger.audit("cli", "extend", cid, "累计 %+d 天" % extra)
+    print(describe(ledger, ledger.row(cid)))
+    print("客户的机器下次联网复核（约 1 天内；到期当天打开插件会立刻复核）就按新到期日算，不用换码")
 
 
 def cmd_events(a):
@@ -888,12 +930,23 @@ def main(argv=None):
     s.add_argument("count", type=int, nargs="?")
     s.add_argument("--reset", action="store_true", help="把已用次数清零")
     s.set_defaults(func=cmd_quota)
+    s = sub.add_parser("extend", help="延长（或缩短）一个码的有效期，不用换码")
+    s.add_argument("code")
+    s.add_argument("days", type=int, nargs="?", help="延长天数，负数 = 缩短")
+    s.add_argument("--to", help="直接改到这一天到期（YYYY-MM-DD）")
+    s.set_defaults(func=cmd_extend)
     s = sub.add_parser("events", help="最近的激活/复核记录")
     s.add_argument("--limit", type=int, default=50)
     s.set_defaults(func=cmd_events)
 
     a = p.parse_args(argv)
-    a.func(a)
+    try:
+        a.func(a)
+    finally:
+        # 命令行跑完关掉台账连接：Windows 上不关，台账文件删不掉 / 挪不动
+        ledger = getattr(a, "_ledger", None)
+        if ledger is not None:
+            ledger.db.close()
 
 
 if __name__ == "__main__":

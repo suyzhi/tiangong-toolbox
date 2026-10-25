@@ -57,6 +57,7 @@ namespace PanelTests {
                 OnlineGrace(check);
                 OnlineForgery(check);
                 OnlineLegacyRecord(check);
+                OnlineExtend(check);
             }finally{
                 server.Dispose();
                 LicenseTestHooks.Reset();
@@ -65,6 +66,90 @@ namespace PanelTests {
                 snapshot.Restore();
                 LicenseLibrary.ResetCache();
             }
+        }
+
+        // 联调（--license-live）：真 HTTP 打到本机起的 server/tg_license_server.py，
+        // 中间用它的命令行延长 / 作废 / 解绑，看插件按服务器结论走。同样先拍本机真实激活的快照、跑完放回。
+        internal static void RunLive(Action<string,bool> check, string url, string slotPath, string python, string script, string db){
+            keyBlob = LoadTestKey();
+            if(keyBlob == null || !KeyMatches(keyBlob)){ check("测试私钥与插件内嵌公钥成对（先跑 make-test-codes.ps1）", false); return; }
+            fingerprint = LicenseMachine.ShortBytes();
+            string slot = File.ReadAllText(slotPath);
+            byte[] x = HexOf(ConstOf(slot, "KeyX")), y = HexOf(ConstOf(slot, "KeyY"));
+            byte[] blob = new byte[72];
+            blob[0] = 0x45; blob[1] = 0x43; blob[2] = 0x53; blob[3] = 0x31; blob[4] = 32;
+            Buffer.BlockCopy(x, 0, blob, 8, 32); Buffer.BlockCopy(y, 0, blob, 40, 32);
+            LicenseTestHooks.Reset();
+            LicenseTestHooks.GuardOverride = 0;
+            LicenseTestHooks.GateOverride = 0;
+            LicenseTestHooks.FingerprintOverride = fingerprint;
+            LicenseTestHooks.ServerKeyOverride = blob;
+            LicenseTestHooks.ServerUrlOverride = url;
+            LicenseTestHooks.OnlineSynchronous = true;
+            Func<string, string> cli = delegate(string args){
+                var psi = new System.Diagnostics.ProcessStartInfo(python, "\"" + script + "\" --db \"" + db + "\" " + args);
+                psi.UseShellExecute = false; psi.RedirectStandardOutput = true; psi.RedirectStandardError = true; psi.CreateNoWindow = true;
+                psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
+                psi.StandardOutputEncoding = System.Text.Encoding.UTF8; psi.StandardErrorEncoding = System.Text.Encoding.UTF8;
+                using(var p = System.Diagnostics.Process.Start(psi)){
+                    string o = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd(); p.WaitForExit();
+                    Console.WriteLine("   $ " + args + " → " + o.Trim().Replace("\n", " ⏎ "));
+                    return o;
+                }
+            };
+            var snapshot = RealState.Take();
+            try{
+                string message, notice;
+                int t0 = LicenseTime.Today;
+                LicenseLibrary.Deactivate(); LicenseLibrary.ResetCache();
+                string code = Sign(LicensePlans.Monthly, null, false, t0 - 25, 81);
+                string id = LicenseCodec.Display(LicenseCodec.Parse(code).CodeId);
+                LicenseReport r = LicenseLibrary.Activate(code, out message, out notice);
+                check("真服务器：激活一个剩 5 天的月码（" + (message ?? r.Status.ToString()) + "）", message == null && r.Usable && r.DaysLeft == 5);
+                cli("extend " + id + " 30");
+                r = Reload(t0 + 1);
+                check("真服务器：命令行延长 30 天，下次复核剩 " + r.DaysLeft + " 天", r.Usable && r.DaysLeft == 34);
+                cli("revoke " + id + " --note 联调");
+                check("真服务器：作废后下次复核停用", Reload(t0 + 2).Status == LicenseStatus.Revoked);
+                cli("unrevoke " + id);
+                check("真服务器：撤销作废后恢复", Reload(t0 + 3).Usable);
+                cli("extend " + id + " -60");
+                check("真服务器：缩短到过去 → 到期", Reload(t0 + 4).Status == LicenseStatus.Expired);
+                cli("extend " + id + " --to " + LicenseTime.FromDayOffset(t0 + 100).ToString("yyyy-MM-dd"));
+                r = Reload(t0 + 5);
+                check("真服务器：到期后改到 t0+100，打开就恢复（剩 " + r.DaysLeft + " 天）", r.Usable && r.DaysLeft == 95);
+                // 换机：另一台机器主动输码 → 转过去；原机器复核 → 转出；解绑后原机器能拿回来
+                byte[] other = new byte[fingerprint.Length];
+                for(int i = 0; i < other.Length; i++)other[i] = (byte)(fingerprint[i] ^ 0x5A);
+                ActivationRecord onA = LicenseStore.Load().Clone();
+                LicenseTestHooks.FingerprintOverride = other;
+                LicenseLibrary.Deactivate(); LicenseTestHooks.TodayOverride = -1; LicenseLibrary.ResetCache();
+                r = LicenseLibrary.Activate(code, out message, out notice);
+                check("真服务器：第二台电脑输同一个码转过去（" + (notice ?? message) + "）", r.Usable && notice != null && notice.IndexOf("另一台电脑") >= 0);
+                LicenseTestHooks.FingerprintOverride = fingerprint;
+                LicenseStore.SaveForTest(onA);
+                check("真服务器：原电脑复核后停用（转出）", Reload(t0 + 6).Status == LicenseStatus.MovedAway);
+                cli("unbind " + id);
+                LicenseTestHooks.TodayOverride = -1; LicenseLibrary.ResetCache();
+                r = LicenseLibrary.Activate(code, out message, out notice);
+                check("真服务器：解绑后原电脑重新激活", r.Usable);
+                cli("show " + id);
+            }finally{
+                LicenseTestHooks.Reset();
+                LicenseLibrary.Deactivate();
+                CleanRegistry();
+                snapshot.Restore();
+                LicenseLibrary.ResetCache();
+            }
+        }
+        static string ConstOf(string source, string name){
+            var m = System.Text.RegularExpressions.Regex.Match(source, name + @"\s*=\s*""([0-9a-fA-F]*)""");
+            return m.Success ? m.Groups[1].Value : "";
+        }
+        static byte[] HexOf(string text){
+            byte[] data = new byte[text.Length / 2];
+            for(int i = 0; i < data.Length; i++)data[i] = Convert.ToByte(text.Substring(i * 2, 2), 16);
+            return data;
         }
 
         // 本机真实授权状态的快照（测试前拍、测试后还原）
@@ -522,6 +607,52 @@ namespace PanelTests {
             server.Offline = false;
             check("旧版激活文件联网后自动登记", Reload(LicenseTime.Today).Usable);
             check("补登记后回执已落盘", LicenseStore.Load().Receipt != null);
+            LicenseTestHooks.TodayOverride = -1;
+            LicenseLibrary.Deactivate();
+            LicenseLibrary.ResetCache();
+        }
+
+        // 0.9.1 服务器上延长 / 缩短有效期：码不用换，下次复核按服务器给的到期日；码里写的到期日过了也先问服务器
+        static void OnlineExtend(Action<string,bool> check){
+            Fresh();
+            string message;
+            string notice;
+            int t0 = LicenseTime.Today;
+            string code = Sign(LicensePlans.Monthly, null, false, t0 - 25, 67);   // 一个月档，还剩 5 天
+            string id = LicenseCodec.Parse(code).CodeId;
+            LicenseReport r = LicenseLibrary.Activate(code, out message, out notice);
+            check("一个月码激活，剩 5 天（实 " + r.DaysLeft + "）", r.Usable && r.DaysLeft == 5);
+            server.Extend(id, 30);
+            r = Reload(t0 + 1);
+            check("延长 30 天后下次复核按新到期日（实 剩 " + r.DaysLeft + " 天）", r.Usable && r.DaysLeft == 34);
+            check("到期日显示延长后的日期", r.ExpiryDate == LicenseTime.FromDayOffset(t0 + 35));
+            server.Offline = true;
+            check("断网时按落盘回执里的到期日（码里写的 t0+5 已过）", Reload(t0 + 6).Usable);
+            check("延长后的到期日一到照样停", Reload(t0 + 35).Status == LicenseStatus.Expired);
+            server.Offline = false;
+            server.Extend(id, 30);
+            r = Reload(t0 + 36);
+            check("已经过期再延长：打开就先问服务器，恢复可用（实 " + r.Status + " 剩 " + r.DaysLeft + "）", r.Usable && r.DaysLeft == 29);
+            server.Extend(id, -100);
+            check("缩短后下次复核停用", Reload(t0 + 37).Status == LicenseStatus.Expired);
+
+            // 码里写的已经过期、服务器上提前延长过：照样能激活
+            Fresh();
+            string late = Sign(LicensePlans.Monthly, null, false, t0 - 40, 68);
+            server.Extend(LicenseCodec.Parse(late).CodeId, 20);
+            r = LicenseLibrary.Activate(late, out message, out notice);
+            check("过期的码在服务器上延长后能激活（实 " + message + "）", message == null && r.Usable && r.DaysLeft == 10);
+            string dead = Sign(LicensePlans.Monthly, null, false, t0 - 40, 69);
+            r = LicenseLibrary.Activate(dead, out message, out notice);
+            check("没延长的过期码：服务器说到期", !r.Usable && message != null && message.IndexOf("到期") >= 0);
+
+            // 老服务端回执里没有 expires：按码里写的到期日
+            Fresh();
+            server.OmitExpires = true;
+            string plain = Sign(LicensePlans.Yearly, null, false, t0, 70);
+            r = LicenseLibrary.Activate(plain, out message, out notice);
+            check("老服务端没给到期日：按码里写的算", r.Usable && r.DaysLeft == 365);
+            server.OmitExpires = false;
             LicenseTestHooks.TodayOverride = -1;
             LicenseLibrary.Deactivate();
             LicenseLibrary.ResetCache();

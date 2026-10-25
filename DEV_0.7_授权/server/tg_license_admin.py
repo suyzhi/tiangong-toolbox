@@ -29,7 +29,7 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "admin")
 STATIC_FILES = {"/admin/": "index.html", "/admin/app.js": "app.js", "/admin/app.css": "app.css"}
 SESSION_SECONDS = 12 * 3600
 PBKDF2_ROUNDS = 300000
-ID_PATH = re.compile(r"^/admin/api/codes/([0-9a-z]{8})(?:/(revoke|unrevoke|unbind|quota|meta))?$")
+ID_PATH = re.compile(r"^/admin/api/codes/([0-9a-z]{8})(?:/(revoke|unrevoke|unbind|quota|meta|extend))?$")
 SECURITY_HEADERS = [
     ("X-Content-Type-Options", "nosniff"),
     ("Referrer-Policy", "no-referrer"),
@@ -222,7 +222,7 @@ class AdminWeb:
 
     def shape(self, row, today):
         plan = core.PLANS.get(row["plan"])
-        expiry_day = row["issue_day"] + plan[1] if plan and row["issue_day"] is not None else None
+        expiry_day = core.expiry_day(row)   # 含管理员延长 / 缩短的天数
         days_left = expiry_day - today if expiry_day is not None else None
         if row["revoked"]:
             state = "revoked"
@@ -241,6 +241,7 @@ class AdminWeb:
             "planLetter": core.LETTER_OF.get(row["plan"]),
             "issueDate": date_of(row["issue_day"]) if row["issue_day"] is not None else None,
             "expiry": date_of(expiry_day) if expiry_day is not None else None,
+            "extraDays": row["extra_days"] or 0,
             "daysLeft": days_left,
             "state": state,
             "machine": row["machine"],
@@ -370,6 +371,29 @@ class AdminWeb:
                         return self.json(400, {"error": "换机次数应为 0 ~ 99 的整数"})
                 L.execute("UPDATE codes SET quota=? WHERE code_id=?", (value, cid))
             L.audit(ip, "quota", cid, json.dumps({k: data.get(k) for k in ("quota", "reset") if k in data}))
+        elif action == "extend":
+            # 延长 / 缩短有效期：{"days": N}（负数 = 缩短）或 {"to": "YYYY-MM-DD"}。码不用换，客户下次联网复核就按新日期算
+            row = L.row(cid)
+            extra = row["extra_days"] or 0
+            if data.get("to"):
+                base = core.expiry_day(row)
+                if base is None:
+                    return self.json(400, {"error": "服务器还没见过这个码（客户没联网激活过），只能按天数延长"})
+                try:
+                    target = core.day_offset(datetime.strptime(str(data["to"]), "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
+                except ValueError:
+                    return self.json(400, {"error": "日期格式应为 YYYY-MM-DD"})
+                extra += target - base
+            else:
+                try:
+                    days = int(data.get("days"))
+                except (TypeError, ValueError):
+                    return self.json(400, {"error": "延长天数应为整数（负数 = 缩短）"})
+                if not -3650 <= days <= 3650:
+                    return self.json(400, {"error": "一次最多延长 / 缩短 3650 天"})
+                extra += days
+            L.execute("UPDATE codes SET extra_days=? WHERE code_id=?", (extra, cid))
+            L.audit(ip, "extend", cid, "累计 %+d 天" % extra)
         elif action == "meta":
             customer = str(data.get("customer") or "").strip()[:100] or None
             note = str(data.get("note") or "").strip()[:200] or None

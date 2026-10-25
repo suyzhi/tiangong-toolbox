@@ -12,6 +12,7 @@ namespace PanelTests {
             public string Machine;
             public int Used;
             public bool Revoked;
+            public int ExtraDays;
         }
 
         readonly ECDsaCng key = new ECDsaCng(256);
@@ -23,6 +24,8 @@ namespace PanelTests {
         public int Calls;
         // 故意回一个对不上的 nonce，模拟重放旧回执。
         public bool ReplayNonce;
+        // 模拟老服务端：回执里不带 expires
+        public bool OmitExpires;
 
         public FakeLicenseServer(){
             PublicBlob = key.Key.Export(CngKeyBlobFormat.EccPublicBlob);
@@ -35,6 +38,7 @@ namespace PanelTests {
         }
 
         public void Revoke(string codeId,bool revoked){ Get(codeId).Revoked = revoked; }
+        public void Extend(string codeId,int days){ Get(codeId).ExtraDays += days; }
         public string MachineOf(string codeId){ return Get(codeId).Machine; }
 
         Entry Get(string codeId){
@@ -62,8 +66,9 @@ namespace PanelTests {
             int today = LicenseLibrary.Today;
             string status = "ok", result = "";
             int left = Math.Max(Quota - entry.Used, 0);
+            int expires = parsed.DayOffset + parsed.Plan.Days + entry.ExtraDays;
             if(entry.Revoked)status = "revoked";
-            else if(today >= parsed.DayOffset + parsed.Plan.Days)status = "expired";
+            else if(today >= expires)status = "expired";
             else if(entry.Machine == null){ entry.Machine = machine; result = "bound"; }
             else if(entry.Machine == machine)result = "already";
             else if(op == "check")status = "moved";
@@ -73,7 +78,7 @@ namespace PanelTests {
             string receipt = "{\"v\":1,\"code\":\"" + codeId + "\",\"machine\":\"" + machine
                 + "\",\"nonce\":\"" + (ReplayNonce ? "00000000000000000000000000000000" : nonce)
                 + "\",\"op\":\"" + op + "\",\"status\":\"" + status + "\",\"result\":\"" + result
-                + "\",\"left\":" + left + ",\"quota\":" + Quota + ",\"day\":" + today + ",\"time\":0}";
+                + "\",\"left\":" + left + ",\"quota\":" + Quota + (OmitExpires ? "" : ",\"expires\":" + expires) + ",\"day\":" + today + ",\"time\":0}";
             byte[] raw = Encoding.ASCII.GetBytes(receipt);
             byte[] sig = key.SignData(raw, HashAlgorithmName.SHA256);
             return "{\"receipt\":\"" + Convert.ToBase64String(raw) + "\",\"sig\":\"" + Convert.ToBase64String(sig) + "\"}";
