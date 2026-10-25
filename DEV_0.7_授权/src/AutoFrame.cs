@@ -32,7 +32,7 @@ namespace TianGongCadSuite {
             var sources=Members.GroupBy(m=>m.Source??"").Select(g=>(g.Key.Length>0?g.Key:"顶层零件")+" "+g.Count()+" 根").ToList();
             string text="已读 "+Members.Count+" 根型材"+(sources.Count>1?"，来自 "+sources.Count+" 处："+string.Join("、",sources.ToArray()):"")+"。";
             if(Plates.Count>0)text+="另有 "+Plates.Count+" 块板子（不当型材，只用来标出已有板的框口）。";
-            if(Skipped.Count>0)text+="跳过 "+Skipped.Count+" 个不是直型材的零件（"+string.Join("、",Skipped.Take(2).ToArray())+(Skipped.Count>2?" 等":"")+"）。";
+            if(Skipped.Count>0)text+="跳过 "+Skipped.Count+" 个不是直型材 / 打不开的零件（"+string.Join("、",Skipped.Take(2).ToArray())+(Skipped.Count>2?" 等":"")+"）。";
             return text;
         }
     }
@@ -78,7 +78,7 @@ namespace TianGongCadSuite {
             catch(Exception e){
                 // 不是直型材（多实体标准件、曲面件……）：跳过、记下，别让整批失败
                 if(!(e is ArgumentException||e is System.Runtime.InteropServices.COMException||e is InvalidCastException))throw;
-                result.Skipped.Add(name);Log.Write("FrameReaderSkip",name+"："+e.Message);return;
+                result.Skipped.Add(name+(e.Message.StartsWith("文件打不开")?"（文件打不开）":""));Log.Write("FrameReaderSkip",name+"："+e.Message);return;
             }
             member.Source=source??"";
             if(PanelPlates.IsPlate(member.Axis,member.Points))result.Plates.Add(member);else result.Members.Add(member);
@@ -89,6 +89,7 @@ namespace TianGongCadSuite {
             bool subOverride=sub!=null&&sub.HasBodyOverride;
             bool bodyOverride=subOverride||definition.HasBodyOverride;
             var document=(occurrence!=null?occurrence.OccurrenceDocument:sub.SubOccurrenceDocument) as P.PartDocument;
+            if(document==null&&!(occurrence!=null?occurrence.OccurrenceDocument!=null:sub.SubOccurrenceDocument!=null))throw new ArgumentException("文件打不开（不在了或加载失败）");
             if(document==null||(!bodyOverride&&document.Models.Count!=1))throw new ArgumentException("自动模式目前需要单实体 PAR 型材。");
             var body=bodyOverride?(G.Body)(subOverride?sub.Body:definition.Body):(G.Body)document.Models.Item(1).Body;
             var member=new FrameMember{Name=occurrence!=null?occurrence.Name:sub.Name};

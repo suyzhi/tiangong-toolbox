@@ -369,7 +369,10 @@ namespace TianGongCadSuite {
                 highlights.RemoveAll();
                 int idx = list.SelectedIndex;
                 if (idx < 0 || idx >= shown.Count) { highlights.Draw(); return; }
-                foreach (var h in shown[idx].Holes) if (h.Selection != null) highlights.AddItem(h.Selection);
+                // 合并过的一条可能带几百个孔（同一个外购件用了 64 次 × 3 个孔）：每个孔建高亮引用都是 COM 调用，
+                // 全高亮的话每点一下卡好几秒。高亮前 60 个就够看清是哪一处了
+                int lit = 0;
+                foreach (var h in shown[idx].Holes) { if (lit >= 60) break; if (h.Selection != null) { highlights.AddItem(h.Selection); lit++; } }
                 highlights.Draw();
             } catch (Exception e) { Log.Write("AutoHoleCheckHighlight", e); }
         }
@@ -380,12 +383,14 @@ namespace TianGongCadSuite {
             if (idx < 0 || idx >= shown.Count) return;
             var it = shown[idx];
             if (it.Holes.Count == 0) return;
+            // 合并过的一条（共 N 处）：只框第一处附近（50mm 内）的孔 —— 原来框住全部几十处，镜头拉到整个装配，什么也看不清
+            var holes = it.Places > 1 ? it.Holes.Where(h => (h.Center - it.Holes[0].Center).Length < 0.05).ToList() : it.Holes;
             bool ok;
-            if (it.Holes.Count == 1 || it.Holes.All(h => (h.Center - it.Holes[0].Center).Length < 0.002))
-                ok = CadView.ZoomToHole(app, it.Holes[0].Center, it.Holes.Max(h => h.DiameterMm));
+            if (holes.Count == 1 || holes.All(h => (h.Center - holes[0].Center).Length < 0.002))
+                ok = CadView.ZoomToHole(app, holes[0].Center, holes.Max(h => h.DiameterMm));
             else
-                ok = CadView.ZoomToPoints(app, it.Holes.Select(h => h.Center).ToList(), Math.Max(0.01, it.Holes.Max(h => h.DiameterMm) * 3 / 1000.0));
-            if (ok) SetStatus("已跳到：" + it.KindName + "　" + it.Holes[0].PartName + " Φ" + it.Holes[0].DiameterMm.ToString("0.##", CultureInfo.InvariantCulture), Ui.Accent);
+                ok = CadView.ZoomToPoints(app, holes.Select(h => h.Center).ToList(), Math.Max(0.01, holes.Max(h => h.DiameterMm) * 3 / 1000.0));
+            if (ok) SetStatus("已跳到：" + it.KindName + "　" + HoleCheck.ShortPart(holes[0].PartName) + " Φ" + holes[0].DiameterMm.ToString("0.##", CultureInfo.InvariantCulture) + (it.Places > 1 ? "（第 1 处，共 " + it.Places + " 处，位置见「涉及的孔」）" : ""), Ui.Accent);
             else if (explicitly) SetStatus("没能移动视图（请确认装配窗口是当前窗口）。", Ui.Warn);
         }
 

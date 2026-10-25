@@ -182,6 +182,15 @@ namespace TianGongCadSuite {
 
         public void LoadActive(){
             if (!ConfirmDiscard()) return;
+            // 在装配里原位编辑着零件：改名时要关掉文档，原来会把这个原位编辑中的零件文档直接关掉（连带打断整个原位编辑）
+            try {
+                var ip = app == null ? null : app.ActiveDocument as SolidEdgePart.PartDocument;
+                if (ip != null && ip.InPlaceActivated) {
+                    status.Text = "天工正在原位编辑「" + ip.Name + "」：先退出原位编辑（回到顶层装配），再点「载入当前文档」。";
+                    status.ForeColor = Ui.Warn;
+                    return;
+                }
+            } catch { }
             string source;
             List<string> files;
             try { files = cad.Collect(out source); }
@@ -231,7 +240,9 @@ namespace TianGongCadSuite {
                     if (string.IsNullOrEmpty(root)) continue;
                     if (full.StartsWith(root.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase)) return "这是标准件库 / 程序目录里的文件（所有项目共用），不改名";
                 }
-                if (File.Exists(full) && (File.GetAttributes(full) & FileAttributes.ReadOnly) != 0) return "文件是只读的，改不了名（先在资源管理器里去掉「只读」）";
+                // 装配引用了、磁盘上却没有的文件（被移走 / 删了）：原来照样能填新名字，到最后一步（文档都关了）才报"被占用或只读"
+                if (!File.Exists(full)) return "文件不在了（装配引用的这个文件被移走或删了），改不了名";
+                if ((File.GetAttributes(full) & FileAttributes.ReadOnly) != 0) return "文件是只读的，改不了名（先在资源管理器里去掉「只读」）";
             } catch { }
             return "";
         }
@@ -442,7 +453,8 @@ namespace TianGongCadSuite {
             try {
                 result = cad.Run(rows, (closing, dirty) => {
                     string text = "把 " + changed.Count + " 个文件改名" + (drafts > 0 ? "（含 " + drafts + " 个跟着改的同名工程图 / 显示配置）" : "") + "？\r\n"
-                        + "装配、工程图里引用它们的地方会一起改好。";
+                        + "装配、工程图里引用它们的地方会一起改好（查的是表里的文件、这些文件所在的文件夹，和上一级文件夹往下两层的工程图；"
+                        + "放在更远地方、也引用了它们的装配不会跟着改，要改就用「添加文件…」把它加进表里）。";
                     if (closing.Length > 0) text += "\r\n\r\n天工里开着的这些文件要先关掉，改完自动重新打开：\r\n" + closing;
                     // 天工刚打开、没动过的文件也常显示"有修改"，所以只提醒、让用户自己判断
                     if (dirty.Length > 0) text += "\r\n\r\n其中这些显示有没保存的修改，关掉时不会保存：\r\n" + dirty

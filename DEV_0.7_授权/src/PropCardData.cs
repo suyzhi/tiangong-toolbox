@@ -74,7 +74,8 @@ namespace TianGongCadSuite {
         // 用户在「列」里输入的一串名字：逗号、顿号、分号、空白都能分隔，去重、去空
         public static List<string> Parse(string text){
             var list = new List<string>();
-            foreach (var raw in (text ?? "").Split(new[] { ',', '，', '、', ';', '；', '\t', '\r', '\n', ' ', '　' }, StringSplitOptions.RemoveEmptyEntries)) {
+            // 不按空格拆：属性名里可以有空格（从 SolidWorks 导过来的「Part Number」这种），原来一拆就永远加不成一列
+            foreach (var raw in (text ?? "").Split(new[] { ',', '，', '、', ';', '；', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)) {
                 string name = raw.Trim();
                 if (name.Length > 0 && !list.Contains(name)) list.Add(name);
             }

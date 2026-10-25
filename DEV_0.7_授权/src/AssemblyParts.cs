@@ -73,6 +73,8 @@ namespace TianGongCadSuite {
                     continue;
                 }
                 object doc = null; try { doc = occ.OccurrenceDocument; } catch { }
+                // 文件不在了（被移走 / 删了）、加载不了：原来一声不响地跳过，配孔检查漏查了它用户也不知道
+                if (doc == null) { Warn(warnings, name + " 的文件打不开（不在了或加载失败），这个零件没查"); continue; }
                 var part = Doc(doc);
                 if (part == null && !IsSheet(doc)) continue;
                 var bodies = part != null ? BodiesOf(part, name, warnings) : SheetBodies(doc, name, warnings);
@@ -99,6 +101,7 @@ namespace TianGongCadSuite {
                     continue;
                 }
                 object doc = null; try { doc = s.SubOccurrenceDocument; } catch { }
+                if (doc == null) { Warn(warnings, name + " 的文件打不开（不在了或加载失败），这个零件没查"); continue; }
                 var part = Doc(doc);
                 if (part == null && !IsSheet(doc)) continue;
                 var bodies = part != null ? BodiesOf(part, name, warnings) : SheetBodies(doc, name, warnings);

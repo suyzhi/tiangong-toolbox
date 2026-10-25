@@ -45,6 +45,8 @@ namespace TianGongCadSuite {
             var p=PropCardFields.Parse("零件名称、设计,  项目名称；设计\r\n表面处理");
             Check(p.Count==4&&p[0]=="零件名称"&&p[3]=="表面处理","列名：顿号/逗号/分号/换行都能分隔、去重："+PropCardFields.Join(p));
             Check(PropCardFields.Parse("  ").Count==0,"全空 = 没有列（调用方恢复默认）");
+            var sp=PropCardFields.Parse("Part Number、 零件名称 ");
+            Check(sp.Count==2&&sp[0]=="Part Number"&&sp[1]=="零件名称","属性名里的空格保留（Part Number），首尾空白去掉："+PropCardFields.Join(sp));
             Check(new List<string>(PropCardFields.Default).Contains("零件名称")&&new List<string>(PropCardFields.Default).Contains("版本号1"),"默认列包含 SK 模板标题栏引用的属性");
 
             var c=PropCardFields.ParseClipboard("A\tB\r\nC\tD\r\n");
