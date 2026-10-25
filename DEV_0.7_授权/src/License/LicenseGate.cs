@@ -34,7 +34,8 @@ namespace TianGongCadSuite.Licensing {
             }else if(report.Status == LicenseStatus.WrongMachine){
                 MessageBox.Show("本机激活记录属于另一台机器（或硬件已更换），无法在本机使用。\r\n请联系管理员重新发一个激活码；本机机器码：" + report.MachineCode + "（仅供售后核对）。",
                     "天工工具箱", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            }else if(report.Status == LicenseStatus.ClockTampered || report.Status == LicenseStatus.Environment){
+            }else if(report.Status == LicenseStatus.ClockTampered || report.Status == LicenseStatus.Environment
+                || report.Status == LicenseStatus.OnlineRequired || report.Status == LicenseStatus.MovedAway || report.Status == LicenseStatus.Revoked){
                 MessageBox.Show(report.Describe(), "天工工具箱", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
             return LicenseActivation.Show(owner);

@@ -44,3 +44,10 @@ DEV_0.2_自动框口/
 DEV_0.3_中心剖面/
 DEV_0.4_插件框架/
 DEV_0.6_打孔预览/
+
+# 联网授权服务端：回执私钥与台账只在服务器上，绝不入库
+server.key
+*.key.pem
+license.db
+license.db-*
+master.pub.json

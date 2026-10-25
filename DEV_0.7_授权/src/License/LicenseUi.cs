@@ -33,7 +33,7 @@ namespace TianGongCadSuite.Licensing {
             Controls.Add(title);
 
             Label hint = new Label();
-            hint.Text = "把管理员发来的激活码整段粘贴到下面的框里，点「激活」。激活后这个码就绑定本机，以后不用再输入。";
+            hint.Text = "把管理员发来的激活码整段粘贴到下面的框里，点「激活」。激活需要联网，激活后这个码就绑定本机。";
             hint.AutoSize = false;
             hint.Size = new Size(620, 22);
             hint.Location = new Point(22, 56);
@@ -88,6 +88,12 @@ namespace TianGongCadSuite.Licensing {
             importButton.Click += delegate { ImportFromFile(); };
             Controls.Add(importButton);
 
+            // 已激活、但超过宽限期没联网（或服务器暂时连不上）时，不用重新输码，点这里再试一次。
+            Button retryButton = Ui.Secondary("重新联网验证", 126, 38);
+            retryButton.Location = new Point(290, 403);
+            retryButton.Click += delegate { DoRetry(); };
+            Controls.Add(retryButton);
+
             Button activateButton = Ui.Primary("激活", 120, 44);
             activateButton.Location = new Point(518, 400);
             activateButton.Click += delegate { DoActivate(); };
@@ -136,10 +142,27 @@ namespace TianGongCadSuite.Licensing {
             }
         }
 
+        void DoRetry(){
+            Cursor = Cursors.WaitCursor;
+            LicenseReport report;
+            try{ report = LicenseOnline.RetryNow(); }
+            finally{ Cursor = Cursors.Default; }
+            statusLabel.ForeColor = report.Usable ? Ui.Ok : Ui.Bad;
+            statusLabel.Text = "当前状态：" + report.Describe();
+            if(report.Usable){
+                DialogResult = DialogResult.OK;
+                MessageBox.Show(this, "联网验证成功。\r\n" + report.Describe(), "天工工具箱", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                Close();
+            }
+        }
+
         void DoActivate(){
             string message;
             string notice;
-            LicenseReport report = LicenseLibrary.Activate(codeBox.Text, out message, out notice);
+            LicenseReport report;
+            Cursor = Cursors.WaitCursor;
+            try{ report = LicenseLibrary.Activate(codeBox.Text, out message, out notice); }
+            finally{ Cursor = Cursors.Default; }
             if(message != null){
                 statusLabel.ForeColor = Color.FromArgb(170, 40, 40);
                 statusLabel.Text = message;
