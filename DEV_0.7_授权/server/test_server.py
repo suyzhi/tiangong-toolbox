@@ -24,6 +24,10 @@ import tg_license_server as srv  # noqa: E402
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+# 管理员工具台账里的码是测试密钥（testmaster）签的；src 里的 LicenseKeySlot.cs 是正式公钥（2026-10-25 起）
+TEST_SLOT = os.path.join(ROOT, "tests", "fixtures", "license-test.public.cs")
+
+
 def make_payload(plan=42, day=None, bound_machine=None):
     body = bytearray(27)
     body[0] = 1 if bound_machine else 0
@@ -179,7 +183,7 @@ class ServerTest(unittest.TestCase):
     def test_unmask_repo_slot_gives_curve_point(self):
         # 仓库里提交的是 testmaster 测试公钥：还原出来的坐标必须落在 P-256 曲线上，
         # 否则说明 Python 版去掩码与 LicenseKeyMaterial.Unmask 不一致。
-        with open(os.path.join(ROOT, "src", "License", "LicenseKeySlot.cs"), encoding="utf-8-sig") as f:
+        with open(TEST_SLOT, encoding="utf-8-sig") as f:
             text = f.read()
         consts = dict(srv.re.findall(r'(\w+)\s*=\s*"([^"]*)"', text))
         x = srv.unmask(consts["MaskX"], consts["ValueX"], consts["SeedX"])
@@ -188,7 +192,7 @@ class ServerTest(unittest.TestCase):
 
 
 def repo_master():
-    with open(os.path.join(ROOT, "src", "License", "LicenseKeySlot.cs"), encoding="utf-8-sig") as f:
+    with open(TEST_SLOT, encoding="utf-8-sig") as f:
         consts = dict(srv.re.findall(r'(\w+)\s*=\s*"([^"]*)"', f.read()))
     return srv.public_key(srv.unmask(consts["MaskX"], consts["ValueX"], consts["SeedX"]),
                           srv.unmask(consts["MaskY"], consts["ValueY"], consts["SeedY"]))

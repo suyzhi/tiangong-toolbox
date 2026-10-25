@@ -23,6 +23,10 @@ if(!(Test-Path $key)){
 }
 
 # 2) 公钥槽必须与测试私钥成对，否则插件编译出来后验签必然失败。
+# 2026-10-25 起 src 里是**正式**公钥槽（密钥ID suyzhi2026，私钥只在授权服务器上）。
+# 测试构建要临时换成测试公钥；脚本结束（包括中途出错）一律把原来的槽原样放回去，免得正式构建悄悄变成测试公钥。
+$originalSlot = if(Test-Path $slotTarget){ [IO.File]::ReadAllBytes($slotTarget) } else { $null }
+try {
 $needSlot=$true
 if(Test-Path $slotTarget){
     $current=(Select-String -Path $slotTarget -Pattern 'KeyId = "([a-z0-9]+)"').Matches
@@ -57,4 +61,6 @@ foreach($plan in $plans){
 }
 Write-Output ('已签发三档真码到：' + $codes)
 & $admin list $key | Select-Object -Last 2
-Write-Output '提示：正式发布前把 src\License\LicenseKeySlot.cs 换回生产 keygen 生成的公钥。'
+} finally {
+    if($originalSlot){ [IO.File]::WriteAllBytes($slotTarget, $originalSlot); Write-Output '已把 src\License\LicenseKeySlot.cs 放回原样（测试构建用的是测试公钥）。' }
+}
