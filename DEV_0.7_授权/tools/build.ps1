@@ -60,6 +60,9 @@ if($LASTEXITCODE -ne 0){throw 'TianGongConverter build failed'}
 # 打孔工作器：插件在独立进程里调它完成写模型（进程内写会被 CAD 拒绝，见 HANDOVER 第 5 节）
 & $csc /nologo /target:exe /platform:x64 /out:"$bin\TianGongDrillWorker.exe" /reference:"$interop" /reference:"$bin\TianGongCadSuite.dll" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Data.dll /reference:Microsoft.CSharp.dll (Join-Path $PSScriptRoot 'DrillWorker.cs')
 if($LASTEXITCODE -ne 0){throw '打孔工作器编译失败'}
+# 批量改名的改文件名进程：天工进程（加密白名单）里改名，加密文件会落盘成明文，所以交给这个不在白名单里的进程做（见 RenameWorker.cs）
+& $csc /nologo /target:winexe /platform:x64 /out:"$bin\SuiteRenameWorker.exe" (Join-Path $PSScriptRoot 'RenameWorker.cs')
+if($LASTEXITCODE -ne 0){throw '改名工作器编译失败'}
 $tests=@(Get-ChildItem (Join-Path $root 'tests') -Filter '*.cs' -ErrorAction SilentlyContinue | ForEach-Object FullName)
 # 测试程序依赖开发构建才有的内部成员与测试开关，正式构建不编译它；
 # 同一输出目录里以前开发构建留下的测试程序和测试私钥也一并清掉，免得混进正式版。

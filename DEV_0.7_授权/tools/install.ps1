@@ -14,8 +14,8 @@ $prog='TianGongCadSuite.SuiteDevAddIn'
 $classPath='Software\Classes\CLSID\'+$guid
 $reg=[Microsoft.Win32.Registry]::CurrentUser
 
-# 需要连带复制的同目录文件（插件运行时要用）：互操作库、格式转换器、Lineup 默认型号表。
-$companions=@('TianGongCadSuite.dll','Interop.TG.dll','TianGongConverter.exe','lineup-models-seed.xml','lineup-sample.tsv')
+# 需要连带复制的同目录文件（插件运行时要用）：互操作库、格式转换器、Lineup 默认型号表、批量改名的改文件名进程。
+$companions=@('TianGongCadSuite.dll','Interop.TG.dll','TianGongConverter.exe','lineup-models-seed.xml','lineup-sample.tsv','SuiteRenameWorker.exe')
 
 function Get-TianGongProcesses {
     # 只认"天工 CAD 本体 + 本插件拉起的工具进程"，绝不碰别的程序。

@@ -1,5 +1,6 @@
 ﻿# 交接文档（给下一个 AI / 下一个开发者）
 
+> **2026-10-25：0.10.0（新命令 12「批量改名」）** —— 见 [DEV_0.7_授权/HANDOVER-0.10.0.md](DEV_0.7_授权/HANDOVER-0.10.0.md)。一句话：用设计管理器接口只改文件里的链接表（不加载几何），每个父文件在自己那份上 SetPath + SaveAllLinks，先改链接再改文件名；改前关掉 CAD 里用到的文档、改完按新名字重新打开，任何一步失败整体退回。
 > **2026-10-23 晚：0.8.2（属性卡写装配弹「加载后已被其他用户修改」、补属性全失败）** —— 见 [DEV_0.7_授权/HANDOVER-0.8.0.md](DEV_0.7_授权/HANDOVER-0.8.0.md) 开头。一句话：CAD 里已加载的文件只写内存不碰磁盘；属性组件改用按名字后期绑定、内存文档只用接口类型，两边都不用 `dynamic`（同一接口类型、成员编号不同，dynamic 的缓存会调错成员）。
 > **2026-10-23 晚：0.8.1（属性卡填写一打开就崩）** —— 见 [DEV_0.7_授权/HANDOVER-0.8.0.md](DEV_0.7_授权/HANDOVER-0.8.0.md) 开头。一句话：在文档的属性集合上取 `Item(0)` 越界会让 FWKAUTO.DLL 直接访问冲突、天工整个崩掉；下标起点改成写死。**测这个命令必须用加密副本。**
 > **2026-10-23：0.8.0（新命令 10「属性卡填写」）** —— 见 [DEV_0.7_授权/HANDOVER-0.8.0.md](DEV_0.7_授权/HANDOVER-0.8.0.md)。一句话：装配 / 工程图 / 零件涉及的文件列成一张表批量填自定义属性；读写走进程内属性组件 `SolidEdge.FileProperties`（加密文件可写、不打开文档、一个文件几十毫秒），打开着的文档只写内存不替用户保存；`GuiVersion` 45。
@@ -35,6 +36,7 @@
 | 2 型材自动填充 | 识别闭合框口生成内嵌板 | `AutoPanelForm.cs`、`AutoFrame.cs`、`FrameGrouping.cs`、`BatchPanels.cs`、`CadInterop.cs` |
 | 5 批量格式转换 | SolidWorks/STEP → 天工（+ 独立 exe） | `FormatConvert*.cs` |
 | 3 Lineup 模型标记 | 装配级清单录入 | `Lineup*.cs` |
+| 12 批量改名 | 改文件名 + 改好装配 / 工程图里的引用 | `BatchRename*.cs` |
 | （无按钮）授权 | 激活前拦住所有命令 | `src/License/*` |
 | 1 四面生成内嵌板 / 4 导出出图训练数据 | 已下线（`ModuleCatalog.Hidden`），实现仍在 DLL 里 | `PanelForm.cs`、`Training*.cs` |
 

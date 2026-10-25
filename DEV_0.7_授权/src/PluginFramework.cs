@@ -150,6 +150,6 @@ namespace TianGongCadSuite {
         //   4 = 导出出图训练数据（内部研究用）
         // 只影响"注册哪些按钮"；对应实现仍编译在 DLL 里，命令 ID 也永久保留。
         static readonly int[] Hidden=new int[]{1,4};
-        public static ToolRegistry Create(ToolContext context){var registry=new ToolRegistry();foreach(int id in Hidden)registry.Retire(id);registry.Add(new InsetPanelModule(context));registry.Add(new LineupModule(context));registry.Add(new TrainingExportModule(context));registry.Add(new FormatConvertModule(context));registry.Add(new AutoHoleModule(context));registry.Add(new PropCardModule(context));registry.Add(new UpdateModule(context));return registry;}
+        public static ToolRegistry Create(ToolContext context){var registry=new ToolRegistry();foreach(int id in Hidden)registry.Retire(id);registry.Add(new InsetPanelModule(context));registry.Add(new LineupModule(context));registry.Add(new TrainingExportModule(context));registry.Add(new FormatConvertModule(context));registry.Add(new AutoHoleModule(context));registry.Add(new PropCardModule(context));registry.Add(new BatchRenameModule(context));registry.Add(new UpdateModule(context));return registry;}
     }
 }

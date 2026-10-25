@@ -48,7 +48,7 @@ Write-Output '2/5 组装 payload（只带插件运行时真正要用的文件）
 $payload = Join-Path $dst 'payload'
 New-Item -ItemType Directory -Force -Path $payload | Out-Null
 # 清单含义：插件本体 / Solid Edge 互操作库 / 批量格式转换的独立进程 / Lineup 默认型号表
-foreach($f in 'TianGongCadSuite.dll','Interop.TG.dll','TianGongConverter.exe','lineup-models-seed.xml'){
+foreach($f in 'TianGongCadSuite.dll','Interop.TG.dll','TianGongConverter.exe','lineup-models-seed.xml','SuiteRenameWorker.exe'){   # + 批量改名的改文件名进程
     $src = Join-Path $bin $f
     if(Test-Path $src){ Copy-Item $src $payload -Force }
     else { Write-Output ('  （缺少 ' + $f + '，跳过；若运行中报错请检查这一项）') }
@@ -127,6 +127,17 @@ $readme = (@(
     '| 配孔检查 | 检查同轴孔是否配做、有没有漏打孔、孔是否偏心 |',
     '| 改孔型 | 点已打好的孔 → 整组换孔型 / 规格，可撤销 |',
     '| 属性卡填写 | 装配 / 工程图 / 零件涉及的所有文件列成一张表，像 Excel 一样批量填零件属性卡（0.8.0） |',
+    '| 批量改名 | 一次改一批零件 / 装配 / 工程图的文件名，装配和工程图里的引用跟着改，不断开（0.10.0） |',
+    '',
+    '### 批量改名（0.10.0）',
+    '',
+    '1. 打开装配（或工程图、零件），点「批量改名」：装配里的零件、子装配列成一张表，同文件夹里同名的工程图（.dft）跟在后面（灰字，跟着改）；',
+    '2. 在「新文件名」一列直接改（不含扩展名），或用上面的「查找 / 替换成」「前面加 / 后面加」「按模板」一次生成；',
+    '   模板里 {原名} = 原文件名，{序号} = 01、02…，{图号} 这类 = 零件的自定义属性。选中两行以上只改选中的，否则改表里筛出来的全部；',
+    '3. 新名字有问题（重名、非法字符、文件夹里已有）会标红，改好才能改名；',
+    '4. 点「改名」：天工里开着的这些文件先自动关掉（有没保存的修改会先提醒你保存），改完名、改好装配和工程图里的引用，再自动打开；',
+    '   同文件夹里别的装配、工程图用到这些文件的，也一起改好。任何一步失败都整体退回，文件和引用保持原样。',
+    '5. 注意：别的文件夹里的装配也用到这些零件的话，那边不会自动改（会找不到文件）：先点「添加文件…」把那个装配也加进表里，它里面的引用就会一起改好。',
     '',
     '### 属性卡填写（0.8.0）',
     '',
@@ -206,7 +217,17 @@ foreach($f in Get-ChildItem $dst -Recurse -File | Sort-Object FullName){
 
 $zip = Join-Path $OutputRoot ($name + '.zip')
 if(Test-Path $zip){ Remove-Item $zip -Force }
-Compress-Archive -Path (Join-Path $dst '*') -DestinationPath $zip -CompressionLevel Optimal
+# 不用 Compress-Archive：在 Windows PowerShell 5.1 里它把条目写成 payload\xxx（反斜杠，不合 zip 规范），
+# 授权服务器认不出是安装包（0.10.0 发布时被拒），自动更新解压也可能出错。自己写条目，一律正斜杠。
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$archive = [IO.Compression.ZipFile]::Open($zip, [IO.Compression.ZipArchiveMode]::Create)
+try {
+    foreach($f in (Get-ChildItem $dst -Recurse -File)){
+        $entry = $f.FullName.Substring($dst.Length).TrimStart('\','/').Replace('\','/')
+        [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $f.FullName, $entry, [IO.Compression.CompressionLevel]::Optimal)
+    }
+} finally { $archive.Dispose() }
 Write-Output ('安装包目录：' + $dst)
 Write-Output ('压缩包    ：' + $zip + '  (' + [math]::Round((Get-Item $zip).Length/1MB,2) + ' MB)')
 Write-Output ('文件数    ：' + (Get-ChildItem $dst -Recurse -File).Count)

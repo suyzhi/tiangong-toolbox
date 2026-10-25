@@ -22,7 +22,7 @@ namespace TianGongCadSuite {
             Guard.Install();
             try{addin=instance;context=new ToolContext((F.Application)application);registry=ModuleCatalog.Create(context);
                 // GuiVersion 变了 CAD 才会按新的组名重建功能区按钮（firstTime=true）；改组名/增删按钮时要跟着加一。
-                addin.Description=Product.Name+" "+Product.Version;addin.GuiVersion=46;   /* 46：0.9.1 加「检查更新」按钮 */addin.Visible=true;
+                addin.Description=Product.Name+" "+Product.Version;addin.GuiVersion=47;   /* 47：0.10.0 加「批量改名」按钮 */addin.Visible=true;
                 events=new Connection(addin.AddInEvents,typeof(F.ISEAddInEvents),this);
                 // 按命令 ID 取（不要用下标：命令 1/4 已从功能区下线，下标会错位）
 diagnostics=new Diagnostics(context.Application,()=>Run(registry.Find(1)),()=>Run(registry.Find(2)),()=>Run(registry.Find(3)));addin.Object=diagnostics;
@@ -141,6 +141,26 @@ diagnostics=new Diagnostics(context.Application,()=>Run(registry.Find(1)),()=>Ru
         // 异步版：像点功能区按钮一样在 CAD 自己的消息循环里跑（同步版是在外部 COM 调用里跑，
         // CAD 正忙着处理这次调用，嵌套调用文档会被消息筛选器拒绝 RPC_E_SERVERCALL_RETRYLATER）。跑完读 Result。
         public void StartPropCardFormTest(string field,string value,int rowCount){Result="";dispatcher.BeginInvoke((Action)(()=>{try{Result=PropCardFormTest(field,value,rowCount);}catch(Exception e){Result="EXC "+e;}}));}
+        // 0.10.0 批量改名：窗口真实路径（载入当前文档 → 查找替换 / 模板 → 改名），在 CAD 自己的消息循环里跑，跑完读 Result
+        public void StartRenameFormTest(string find,string replace,string template,string onlyUnder,bool answer){Result="";dispatcher.BeginInvoke((Action)(()=>{
+            try{var form=new BatchRenameForm(Host);try{form.Show();Result=form.TestRun(find,replace,template,onlyUnder,answer);}finally{form.TestClose();}}catch(Exception e){Result="EXC "+e;}}));}
+        // 初筛核对：文件夹里每个文件，按字节找出来的名字 vs 设计管理器列出来的链接 —— 漏一个就是 bug
+        public void StartRenameFilterAudit(string folder){Result="";dispatcher.BeginInvoke((Action)(()=>{try{Result=RenameFilterAudit(folder);}catch(Exception e){Result="EXC "+e;}}));}
+        string RenameFilterAudit(string folder){
+            var sb=new System.Text.StringBuilder();int files=0,links=0,missed=0,encrypted=0;long readMs=0;
+            var dm=(DesignManager.Application)Activator.CreateInstance(Type.GetTypeFromProgID("DesignManager.Application"));dm.DisplayAlerts=0;
+            try{
+                foreach(var ext in new[]{"*.dft","*.asm","*.par","*.psm"})foreach(var f in System.IO.Directory.GetFiles(folder,ext)){
+                    files++;
+                    var d=(DesignManager.Document)dm.Open(f);var ls=(DesignManager.LinkedDocuments)d.get_LinkedDocuments(Type.Missing);
+                    var head=new byte[16];using(var fs=System.IO.File.OpenRead(f))fs.Read(head,0,16);if(RenameRefScan.Encrypted(head))encrypted++;
+                    for(int i=1;i<=ls.Count;i++){var l=(DesignManager.Document)ls.get_Item(i);string n=System.IO.Path.GetFileName(l.FullName);links++;
+                        var sw=System.Diagnostics.Stopwatch.StartNew();bool hit=new RenameRefScan(new[]{n}).MayReference(f);readMs+=sw.ElapsedMilliseconds;
+                        if(!hit){missed++;if(missed<=20)sb.Append("MISS "+System.IO.Path.GetFileName(f)+" -> "+n+"\n");}}
+                }
+            }finally{try{dm.Quit();}catch{}}
+            return "files="+files+" links="+links+" missed="+missed+" encryptedInProc="+encrypted+" readMs="+readMs+"\n"+sb;
+        }
         public string PropCardFormTest(string field,string value,int rowCount){
             string text="";var form=new PropCardForm(Host);
             try{form.Show();form.LoadActive();text=form.TestFillAndWrite(field,value,rowCount);}finally{form.TestForceClose();}
