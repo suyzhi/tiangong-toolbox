@@ -81,7 +81,7 @@ namespace TianGongCadSuite {
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData){
             if (keyData == Keys.Escape) { if (ConfirmQuickClose("Esc")) Close(); return true; }
-            if (keyData == (Keys.Control | Keys.Enter)) { Apply(); return true; }
+            if (keyData == (Keys.Control | Keys.Enter)) { EditCommit.All(this); Apply(); return true; }
             return base.ProcessCmdKey(ref msg, keyData);
         }
 
@@ -382,6 +382,18 @@ namespace TianGongCadSuite {
         // ---------------- 应用 / 撤销 ----------------
         void Apply(){
             if (busy || closing || targets.Count == 0) return;
+            // 用户在天工里原位编辑着某个零件：只能改它，别的零件上的孔改不了（只报含糊的 COM 错误）。先说清楚
+            if (assembly != null) {
+                string ef = ""; try { var ed = app.ActiveDocument as P.PartDocument; if (ed != null) ef = ed.FullName; } catch { }
+                if (ef.Length > 0) {
+                    var others = targets.Select(t => { try { return t.Part.FullName; } catch { return ""; } })
+                                        .Where(f => f.Length > 0 && !string.Equals(f, ef, StringComparison.OrdinalIgnoreCase)).Distinct().ToList();
+                    if (others.Count > 0) {
+                        SetStatus("天工现在正在原位编辑「" + System.IO.Path.GetFileName(ef) + "」，这时只能改它。先退出原位编辑（回到顶层装配）再改「" + System.IO.Path.GetFileName(others[0]) + "」" + (others.Count > 1 ? " 等 " + others.Count + " 个零件" : "") + "上的孔。", Ui.Warn);
+                        return;
+                    }
+                }
+            }
             var spec = SpecNow();
             bool hadCommand = command != null;
             busy = true; apply.Enabled = false; UseWaitCursor = true;

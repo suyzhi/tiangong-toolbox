@@ -116,7 +116,7 @@ namespace TianGongCadSuite {
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData){
             if (keyData == Keys.Escape) { if (ConfirmQuickClose("Esc")) Close(); return true; }
-            if (keyData == (Keys.Control | Keys.Enter)) { Run(); return true; }
+            if (keyData == (Keys.Control | Keys.Enter)) { EditCommit.All(this); Run(); return true; }
             return base.ProcessCmdKey(ref msg, keyData);
         }
 
@@ -808,6 +808,15 @@ namespace TianGongCadSuite {
                 if (outside.Count == centres.Count) throw new InvalidOperationException("排出来的孔位全都落在打孔面外面（第 " + OutsideText(outside) + " 个），请检查方向边、边距和横向位置。");
                 for (int i = outside.Count - 1; i >= 0; i--) centres.RemoveAt(outside[i] - 1);
 
+                // 用户自己在天工里原位编辑着别的零件（双击进去的）：这时天工只许改那一个零件，排到别的零件上每个孔都被拒、只报含糊的 COM 错误。
+                // 自动打孔早就先说清楚了（10-22 现场），排孔漏了
+                if (assembly != null) {
+                    var editing = SafeActive() as P.PartDocument;
+                    string ef = ""; try { if (editing != null) ef = editing.FullName; } catch { }
+                    string tf = ""; try { tf = target.Part.FullName; } catch { }
+                    if (ef.Length > 0 && tf.Length > 0 && !string.Equals(ef, tf, StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidOperationException("天工现在正在原位编辑「" + System.IO.Path.GetFileName(ef) + "」，这时只能改它 —— 先在天工里退出原位编辑（回到顶层装配）再排「" + System.IO.Path.GetFileName(tf) + "」上的孔。");
+                }
                 busy = true; run.Enabled = false; run.Text = "打孔中…"; UpdatePrimary(); UseWaitCursor = true; StopCommand();
                 DrillResult res;
                 string what;

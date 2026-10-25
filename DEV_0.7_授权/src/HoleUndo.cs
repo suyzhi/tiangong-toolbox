@@ -161,14 +161,14 @@ namespace TianGongCadSuite {
                 o.Parts.Add(e.Part);
                 // ① 散掉这批新建的组（成员留着，下一步删）
                 foreach (string s in e.Groups) {
-                    var g = FindGroup(model, s);
+                    var g = InAny(e.Part, model, m => FindGroup(m, s));
                     if (g == null) continue;
                     try { g.Ungroup(); } catch (Exception ex) { Log.Write("HoleUndoUngroup", ex); }
                 }
                 // ①b 删多孔特征（输入孔跟着一起删）
                 int perMulti = e.Multis.Count == 0 ? 0 : e.MultiHoles / e.Multis.Count;
                 for (int i = e.Multis.Count - 1; i >= 0; i--) {
-                    var u = MultiRef(e.Part, e.Multis[i]) ?? FindMulti(model, e.Multis[i]);
+                    var u = MultiRef(e.Part, e.Multis[i]) ?? InAny(e.Part, model, m => FindMulti(m, e.Multis[i]));
                     if (u == null) { o.Missing += perMulti; continue; }
                     int count = HoleCombine.CountOf(u);
                     try { u.Delete(); o.Removed += count; }
@@ -177,7 +177,7 @@ namespace TianGongCadSuite {
                 // ② 删阵列（阵列挂在种子孔上，先删它；它代表的孔数算进"已撤销"）
                 int perPattern = e.Patterns.Count == 0 ? 0 : e.PatternHoles / e.Patterns.Count;
                 for (int i = e.Patterns.Count - 1; i >= 0; i--) {
-                    var pat = FindPattern(model, e.Patterns[i]);
+                    var pat = InAny(e.Part, model, m => FindPattern(m, e.Patterns[i]));
                     if (pat == null) { o.Missing += perPattern; continue; }
                     int extra = HoleGrouping.PatternExtra(pat);
                     try { pat.Delete(); o.Removed += extra; }
@@ -185,7 +185,7 @@ namespace TianGongCadSuite {
                 }
                 // ③ 删新孔、新腰孔（倒着删：后建的先删）
                 for (int i = e.Holes.Count - 1; i >= 0; i--) {
-                    var h = Ref(e.Part, e.Holes[i]) ?? FindHole(model, e.Holes[i]);
+                    var h = Ref(e.Part, e.Holes[i]) ?? InAny(e.Part, model, m => FindHole(m, e.Holes[i]));
                     if (h == null) { o.Missing++; continue; }
                     try { h.Delete(); o.Removed++; }
                     catch (Exception ex) { o.Failed++; Log.Write("HoleUndoDelete", ex); o.Notes.Add(e.PartName + "：有一个孔没能删除（" + AutoHoleWriter.Friendly(ex) + "）"); }
@@ -205,14 +205,14 @@ namespace TianGongCadSuite {
                 }
                 // ④ 旧孔改回原名
                 foreach (var kv in e.Renames) {
-                    var h = FindHole(model, kv.Key);
+                    var h = InAny(e.Part, model, m => FindHole(m, kv.Key));
                     if (h == null) continue;
                     try { h.Name = kv.Value; } catch (Exception ex) { Log.Write("HoleUndoRename", ex); }
                 }
                 // ⑤ 并组时散掉的旧组：按原成员、原名字编回去
                 foreach (var r in e.Restores) {
                     var members = new List<object>();
-                    foreach (string s in r.Members) { object m = (object)FindHole(model, s) ?? (object)FindPattern(model, s) ?? FindMulti(model, s); if (m != null) members.Add(m); }
+                    foreach (string s in r.Members) { object m = (object)InAny(e.Part, model, x => FindHole(x, s)) ?? (object)InAny(e.Part, model, x => FindPattern(x, s)) ?? InAny(e.Part, model, x => FindMulti(x, s)); if (m != null) members.Add(m); }
                     if (members.Count < 2) continue;
                     try { HoleGrouping.Regroup(model, members, r.Name, r.Key); }
                     catch (Exception ex) {
@@ -225,6 +225,14 @@ namespace TianGongCadSuite {
             return o;
         }
 
+        // 先在第 1 个实体里找，多实体零件找不到再看别的实体：原来只看第 1 个，实体 2 以后的孔（0.7.13 起按目标面所在实体建）
+        // 一旦 COM 引用失效（进出过原位编辑就会），撤销时报"已经不在模型里"、孔留着删不掉
+        static T InAny<T>(P.PartDocument part, P.Model first, Func<P.Model, T> find) where T : class {
+            var hit = find(first);
+            if (hit != null || !PartBodies.Multi(part)) return hit;
+            foreach (var m in PartBodies.All(part)) { hit = find(m); if (hit != null) return hit; }
+            return null;
+        }
         static P.Hole FindHole(P.Model model, string sys){
             int n = 0; try { n = model.Holes.Count; } catch { }
             for (int i = 1; i <= n; i++) { try { var h = model.Holes.Item(i); if (Sys(h) == sys) return h; } catch { } }

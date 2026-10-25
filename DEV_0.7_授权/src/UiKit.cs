@@ -686,6 +686,16 @@ namespace TianGongCadSuite {
 
     // Esc 关窗口（0.8.5）：窗口里已经点好东西时，按一次只提醒，3 秒内再按一次才关。
     // 原来一按就关 —— 在数值框里按 Esc 想撤销输入、点了半天的东西全没了（右键现在留给天工的 QuickPick 选遮挡面）。「关闭」按钮照旧直接关
+    // 数字框里刚敲的数还没"提交"（焦点还在框里）：读一次 Value 就会按框里的字提交并触发 ValueChanged。
+    // 快捷键（Ctrl+Enter 打孔 / 应用）不经过按钮、焦点不离开数字框，原来用的还是改之前的数（孔径敲成 8、打出来还是 6.6）
+    public static class EditCommit {
+        public static void All(Control root){
+            if (root == null) return;
+            var n = root as NumericUpDown;
+            if (n != null) { try { var v = n.Value; } catch { } return; }
+            foreach (Control c in root.Controls) All(c);
+        }
+    }
     public sealed class QuickClose {
         DateTime asked = DateTime.MinValue;
         // lost：会丢掉什么（"3 个参考孔、1 个打孔面"），空 = 没什么可丢的，直接关

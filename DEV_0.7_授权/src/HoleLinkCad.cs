@@ -231,16 +231,18 @@ namespace TianGongCadSuite {
         public static List<Entry> Read(P.PartDocument part, bool linkedOnly){
             var list = new List<Entry>();
             if (part == null) return list;
-            P.Model model = null;
-            try { if (part.Models.Count >= 1) model = part.Models.Item(1); } catch { }
-            if (model == null) return list;
+            // 多实体零件每个实体都读（0.10.1）：原来只读第 1 个实体，实体 2 以后打的插件关联孔「检查 / 同步孔位」永远看不到
+            var models = new List<P.Model>(PartBodies.All(part));
+            if (models.Count == 0) return list;
             var all = new List<P.Hole>();
-            int n = 0; try { n = model.Holes.Count; } catch { }
-            for (int i = 1; i <= n; i++) { try { all.Add(model.Holes.Item(i)); } catch { } }
-            // 多孔孔特征（0.7.9 起同规格的孔都合在里面）的输入孔不在 Model.Holes 里：原来「同步孔位」和"参考孔是哪个孔特征"都看不到它们。
-            // 0.8.4 起挂不上天工关联的孔照样进多孔特征、在输入孔上写插件关联记录（真机 LinkGroupProbe U1～U3：能写、能单独挪）
-            int un = 0; try { un = model.UserDefinedPatterns.Count; } catch { }
-            for (int i = 1; i <= un; i++) { try { all.AddRange(HoleCombine.Inputs(model.UserDefinedPatterns.Item(i))); } catch { } }
+            foreach (var model in models) {
+                int n = 0; try { n = model.Holes.Count; } catch { }
+                for (int i = 1; i <= n; i++) { try { all.Add(model.Holes.Item(i)); } catch { } }
+                // 多孔孔特征（0.7.9 起同规格的孔都合在里面）的输入孔不在 Model.Holes 里：原来「同步孔位」和"参考孔是哪个孔特征"都看不到它们。
+                // 0.8.4 起挂不上天工关联的孔照样进多孔特征、在输入孔上写插件关联记录（真机 LinkGroupProbe U1～U3：能写、能单独挪）
+                int un = 0; try { un = model.UserDefinedPatterns.Count; } catch { }
+                for (int i = 1; i <= un; i++) { try { all.AddRange(HoleCombine.Inputs(model.UserDefinedPatterns.Item(i))); } catch { } }
+            }
             foreach (var h in all) {
                 if (h == null) continue;
                 if (linkedOnly) {

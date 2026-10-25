@@ -57,11 +57,20 @@ namespace TianGongCadSuite {
             }
             // 工程图：ModelLinks 里是它引用的零件 / 装配
             if (doc is SolidEdgeDraft.DraftDocument) {
+                bool anyAssembly = false;
                 try {
-                    dynamic links = ((dynamic)doc).ModelLinks;
-                    for (int i = 1; i <= (int)links.Count; i++) Add(list, seen, Convert.ToString(links.Item(i).FileName));
+                    var links = ((SolidEdgeDraft.DraftDocument)doc).ModelLinks;
+                    for (int i = 1; i <= links.Count; i++) {
+                        var link = links.Item(i);
+                        string file = ""; try { file = link.FileName; } catch { }
+                        Add(list, seen, file);
+                        // 装配图：原来只列出装配文件本身一行，明细栏里的零件一个都不在表里。装配往下展开（同「载入装配」）
+                        A.AssemblyDocument asm = null;
+                        try { asm = link.ModelDocument as A.AssemblyDocument; } catch { }
+                        if (asm != null) { anyAssembly = true; try { Walk(asm, list, seen); } catch (Exception e) { Log.Write("PropCardDraftAsm " + file, e); } }
+                    }
                 } catch (Exception e) { Log.Write("PropCardCollect", e); }
-                source = "工程图「" + Path.GetFileName(FullName(doc)) + "」引用的模型";
+                source = "工程图「" + Path.GetFileName(FullName(doc)) + "」引用的模型" + (anyAssembly ? "（含装配里的全部零件）" : "");
                 return list;
             }
             Add(list, seen, FullName(doc));

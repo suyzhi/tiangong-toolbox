@@ -217,6 +217,10 @@ namespace TianGongCadSuite {
             Assert(!HoleCheck.CompleteJoint(twoClear), "两个过孔不是完整连接（还缺螺纹孔或螺母）");
             Assert(HoleCheck.Run(twoClear, null, false, allJ, idxBase).Count(i => i.Kind == HoleIssueKind.MissingHole) == 1, "两个过孔、下面贴着的 D 没孔：照样报");
 
+            // ②c 型材自动填充生成的板（填充板_….par）不当漏打孔的零件
+            var idxPanel = new PartRayIndex(); idxPanel.Add(Slab("子装配.asm:1/填充板_20261015_114629_005.par:1", 112, 122));
+            Assert(HoleCheck.Run(lone, null, false, new List<string>{ "A", "子装配.asm:1/填充板_20261015_114629_005.par:1" }, idxPanel).Count == 0, "孔轴线对着生成的填充板：不报漏打孔");
+
             // ③ 孔里装了螺栓/销：轴线穿过螺栓杆是正常的，不报"螺栓上漏打孔"
             var idxBolt = new PartRayIndex(); idxBolt.Add(Slab("BOLT", 90, 130));   // 螺栓杆整段压在孔附近
             var shaftOk = new List<HoleRecord>{ new HoleRecord { PartName = "BOLT", DiameterMm = 6, Center = new V3(0, 0, 0.09), Axis = new V3(0, 0, -1) } };

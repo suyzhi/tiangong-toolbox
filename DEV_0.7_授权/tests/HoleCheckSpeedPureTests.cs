@@ -36,6 +36,10 @@ namespace TianGongCadSuite {
             var merged = HoleCheck.Merge(new List<HoleIssue>{ a1, other, a2 });
             Check(merged.Count == 2 && merged[0].Places == 2 && merged[0].Holes.Count == 4 && merged[0].Message.Contains("共 2 处") && !merged[0].Message.Contains("@X"), "两处同样的配错孔合成一条：" + merged[0].Message);
             Check(merged[1].Places == 1 && merged[1].Message.Contains("@X1"), "只有一处的保留位置");
+            var i1 = new HoleIssue { Kind = HoleIssueKind.MissingHole, Message = "SR(2).par:1 上的 Φ3.4 孔（@X1 Y0 Z0）轴线穿过了 SR(1).par:1", MissingPart = "外购.asm:1/SR(1).par:1" };
+            var i2 = new HoleIssue { Kind = HoleIssueKind.MissingHole, Message = "SR(2).par:7 上的 Φ3.4 孔（@X5 Y0 Z0）轴线穿过了 SR(1).par:7", MissingPart = "外购.asm:7/SR(1).par:7" };
+            var mi = HoleCheck.Merge(new List<HoleIssue>{ i1, i2 });
+            Check(mi.Count == 1 && mi[0].Places == 2 && !mi[0].Message.Contains(".par:"), "同一个外购件的不同实例里同一处问题合成一条：" + mi[0].Message);
             Check(HoleCheck.Summary(merged, 10, 3).Contains("发现 3 处问题（同样的合成 2 条）"), "摘要按处数：" + HoleCheck.Summary(merged, 10, 3));
             Check(HoleCheck.ShortPart("总装.asm:1/子装配.asm:2/底板.par:1") == "底板.par:1" && HoleCheck.ShortPart("顶层.par:1") == "顶层.par:1", "子装配路径只留最后一级");
             // 规格本身打不出来：打之前就挡住

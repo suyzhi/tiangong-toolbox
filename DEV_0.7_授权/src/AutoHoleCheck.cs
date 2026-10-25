@@ -361,8 +361,17 @@ namespace TianGongCadSuite {
             // 有没有一个螺纹规格能同时解释两个孔（螺纹孔 / 过孔 / 沉头让位孔）。0.10.1 焊接台车实测：
             // 原来只认表里的两档过孔，Φ6（M5 粗装配过孔，HIWIN 导轨的标准孔）配 M5 螺纹孔 Φ4.13 一条导轨报 20 条「配错孔」；
             // Φ7（M6 粗装配过孔）先被认成 M8 底孔，正确的 M6 连接报「M8 与 M6」
-            foreach (var r in HoleMatcher.Table) {
-                if (Fits(r, aMm, bMm) || Fits(r, bMm, aMm)) return true;
+            // 正好等于某个规格螺纹孔直径的（Φ17.5 = M20 底孔、Φ4.13 = M5 内小径）就按那个螺纹孔读，
+            // 除非另一个也正好是螺纹孔直径 —— 两个不同规格的螺纹孔叠在一根轴上不是真设计，那就让大的那个当过孔（Φ5 + M4 螺纹孔）。
+            // 原来没有这一条：M20 螺母 Φ17.5 配 Φ19 的孔被当成「M16 螺栓穿两个过孔」放过了（OK310 围栏副本实测）
+            bool exA = ExactTapped(aMm), exB = ExactTapped(bMm);
+            if (exA != exB) {
+                double tapped = exA ? aMm : bMm, other = exA ? bMm : aMm;
+                foreach (var r in HoleMatcher.Table) if (IsTapped(r, tapped) && IsClearance(r, other)) return true;
+            } else {
+                foreach (var r in HoleMatcher.Table) {
+                    if (Fits(r, aMm, bMm) || Fits(r, bMm, aMm)) return true;
+                }
             }
             // 任一方能匹配到标准规格，另一方应能匹配到同规格的另一种孔
             var ma = HoleMatcher.Match(aMm);
@@ -394,6 +403,15 @@ namespace TianGongCadSuite {
             foreach (var f in FinePitches) {
                 if (f[0] != n) continue;
                 if (Math.Abs(d - (n - 1.0825 * f[1])) <= 0.2 || Math.Abs(d - (n - f[1])) <= 0.2) return true;
+            }
+            return false;
+        }
+        // 直径正好（±0.02mm）是某个规格的攻丝底孔 / 螺纹内小径（粗牙按表，细牙按螺距算）
+        public static bool ExactTapped(double d){
+            foreach (var r in HoleMatcher.Table) {
+                if (Math.Abs(d - r.TapDrill) <= 0.02 || Math.Abs(d - r.MinorDia) <= 0.02) return true;
+                double n = Nominal(r);
+                foreach (var f in FinePitches) if (f[0] == n && Math.Abs(d - (n - 1.0825 * f[1])) <= 0.02) return true;
             }
             return false;
         }
@@ -553,6 +571,8 @@ namespace TianGongCadSuite {
                         if (hi - lo > 0.0015 && CompleteJoint(chain)) { lo += 0.0005; hi -= 0.0005; span = 0; }
                         foreach (var other in partUniverse) {
                             if (parts.Contains(other)) continue;
+                            // 「型材自动填充」生成的内嵌板（填充板_….par）：型材侧面的扳手孔正对着槽里的板，没人会在玻璃 / 填充板上配孔（围栏副本实测 4 条）
+                            if (ShortPart(other).StartsWith(PanelNaming.Prefix, StringComparison.Ordinal)) continue;
                             if (HasCoaxialShaft(shafts, other, h)) continue;   // 同轴的螺栓杆 / 销：本来就该穿过它
                             bool hit = bodies != null ? bodies.Hits(other, o, a, lo, hi, span)
                                      : (parts.Count == 1 && rayHitsPart != null && rayHitsPart(h, other));
@@ -627,7 +647,8 @@ namespace TianGongCadSuite {
             if (issues == null) return list;
             var byKey = new Dictionary<string, HoleIssue>(StringComparer.Ordinal);
             foreach (var it in issues) {
-                string key = ((int)it.Kind) + "|" + it.MissingPart + "|" + StripPos(it.Message);
+                // 实例序号（「底板.par:3」的 :3）也不算区别：同一个外购件用了 64 次，里面同一处孔报 64 条（OK310 围栏副本实测 256 条是这种）
+                string key = ((int)it.Kind) + "|" + StripInstance(ShortPart(it.MissingPart)) + "|" + StripInstance(StripPos(it.Message));
                 HoleIssue m;
                 if (!byKey.TryGetValue(key, out m)) {
                     m = new HoleIssue { Kind = it.Kind, Message = it.Message, MissingPart = it.MissingPart, Done = it.Done, Holes = new List<HoleRecord>(it.Holes) };
@@ -636,9 +657,12 @@ namespace TianGongCadSuite {
                 }
                 m.Places++;
                 m.Holes.AddRange(it.Holes);
-                m.Message = StripPos(it.Message) + "（共 " + m.Places + " 处）";
+                m.Message = StripInstance(StripPos(it.Message)) + "（共 " + m.Places + " 处）";
             }
             return list;
+        }
+        static string StripInstance(string text){
+            return System.Text.RegularExpressions.Regex.Replace(text ?? "", @"\.(par|psm|asm):\d+", ".$1", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         }
         static string StripPos(string message){
             return System.Text.RegularExpressions.Regex.Replace(message ?? "", "（@X[^）]*）", "");

@@ -248,7 +248,7 @@ namespace TianGongCadSuite {
         // 注意不能订阅 this.KeyDown —— 本类实现的 ISECommandEvents 里有同名方法，事件被遮住了。
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData){
             if (keyData == Keys.Escape) { if (ConfirmQuickClose("Esc")) Close(); return true; }
-            if (keyData == (Keys.Control | Keys.Enter)) { RunDrill(); return true; }
+            if (keyData == (Keys.Control | Keys.Enter)) { EditCommit.All(this); RunDrill(); return true; }
             if (keyData == Keys.Delete && (ActiveControl == refList || ActiveControl == faceList)) {
                 if (ActiveControl == refList) RemoveSelected(); else RemoveSelectedFace();
                 return true;

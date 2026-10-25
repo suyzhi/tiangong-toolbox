@@ -20,7 +20,7 @@ namespace TianGongCadSuite {
     // 第 2 个以后的实体上的孔配孔检查看不到，轴线穿过它们也判不出漏打孔（见 PartBodies）。
     public sealed class AssemblyPart {
         public string Name = "";                 // 顶层：实例名；子装配里：路径
-        public P.PartDocument Part;
+        public P.PartDocument Part;              // 钣金件（.psm）为 null：只有实体（Bodies）
         public G.Body Body;
         public List<G.Body> Bodies = new List<G.Body>();
         public bool Nested;
@@ -72,9 +72,10 @@ namespace TianGongCadSuite {
                     catch (Exception e) { Warn(warnings, name + " 子装配读取失败：" + e.Message); }
                     continue;
                 }
-                var part = Doc(occ.OccurrenceDocument);
-                if (part == null) continue;
-                var bodies = BodiesOf(part, name, warnings);
+                object doc = null; try { doc = occ.OccurrenceDocument; } catch { }
+                var part = Doc(doc);
+                if (part == null && !IsSheet(doc)) continue;
+                var bodies = part != null ? BodiesOf(part, name, warnings) : SheetBodies(doc, name, warnings);
                 if (bodies.Count == 0) continue;
                 result.Add(new AssemblyPart { Name = name, Part = part, Body = bodies[0], Bodies = bodies, Top = occ, assembly = assembly, Ignored = RefOnly(occ) });
             }
@@ -97,10 +98,10 @@ namespace TianGongCadSuite {
                     catch (Exception e) { Warn(warnings, name + " 子装配读取失败：" + e.Message); }
                     continue;
                 }
-                P.PartDocument part = null;
-                try { part = Doc(s.SubOccurrenceDocument); } catch { }
-                if (part == null) continue;
-                var bodies = BodiesOf(part, name, warnings);
+                object doc = null; try { doc = s.SubOccurrenceDocument; } catch { }
+                var part = Doc(doc);
+                if (part == null && !IsSheet(doc)) continue;
+                var bodies = part != null ? BodiesOf(part, name, warnings) : SheetBodies(doc, name, warnings);
                 if (bodies.Count == 0) continue;
                 result.Add(new AssemblyPart { Name = name, Part = part, Body = bodies[0], Bodies = bodies, Nested = true, Sub = s, assembly = assembly, Ignored = parentIgnored || RefOnly(s) });
             }
@@ -151,6 +152,17 @@ namespace TianGongCadSuite {
         }
 
         static P.PartDocument Doc(object doc){ return doc as P.PartDocument; }
+        // 钣金件（.psm）：原来 as PartDocument 是 null，整个跳过 —— 钣金上的孔不查，钣金也永远不会被报成"漏打孔的那个零件"
+        // （用户的 OK310 围栏里就有十几个钣金件）。配孔检查只用它的实体、位置和引用，Part 留空
+        static bool IsSheet(object doc){ return doc is P.SheetMetalDocument; }
+        static List<G.Body> SheetBodies(object doc, string name, List<string> warnings){
+            var list = new List<G.Body>();
+            try {
+                var models = ((P.SheetMetalDocument)doc).Models;
+                for (int i = 1; i <= models.Count; i++) { var b = PartBodies.Body((P.Model)models.Item(i)); if (b != null) list.Add(b); }
+            } catch (Exception e) { Warn(warnings, name + " 读取钣金实体失败：" + e.Message); }
+            return list;
+        }
         static List<G.Body> BodiesOf(P.PartDocument part, string name, List<string> warnings){
             var list = new List<G.Body>();
             try {

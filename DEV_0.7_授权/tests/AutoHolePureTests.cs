@@ -162,6 +162,8 @@ namespace TianGongCadSuite {
             Assert(!HoleCheck.IsValidPair(5.5, 5.0, out whyPair), "M5 过孔 + M6 底孔 仍然配不上（" + whyPair + "）");
             Assert(!HoleCheck.IsValidPair(4.13, 5.0, out whyPair), "M5 螺纹孔 + Φ5（比螺钉还紧）仍然报");
             Assert(!HoleCheck.IsValidPair(12.0, 20.0, out whyPair), "Φ12 + Φ20 仍然报");
+            Assert(!HoleCheck.IsValidPair(17.5, 19.0, out whyPair), "M20 螺母 Φ17.5 配 Φ19 的孔：报（不能当成 M16 螺栓穿两个过孔）");
+            Assert(HoleCheck.IsValidPair(4.8, 3.3, out whyPair), "M4 粗装配过孔 Φ4.8 + M4 底孔");
 
             var aligned = HoleCheck.Run(new List<HoleRecord>{ h1, h2 }, null);
             Assert(aligned.Count == 0, "同轴且配做正确 -> 无问题，实得 " + aligned.Count);

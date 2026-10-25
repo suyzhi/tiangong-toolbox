@@ -78,7 +78,15 @@ namespace TianGongCadSuite {
             if (part == null || sh.Placement == null) throw new ArgumentException("读不到这个孔所在的零件，请在装配里直接点零件上的孔。");
             var c = sh.Placement.InversePoint(sh.Center);
             var ax = sh.Placement.InverseNormal(sh.Axis).Unit();
-            var model = ModelOf(part);
+            ModelOf(part);   // 没有实体模型：照原来的话报出来
+            // 多实体零件每个实体都找（0.10.1）：原来只找第 1 个实体，点实体 2 以后的孔报"不是孔特征打出来的，没法改孔型"
+            foreach (var model in PartBodies.All(part)) {
+                var hit = ResolveIn(model, part, c, ax, sh);
+                if (hit != null) return hit;
+            }
+            throw new ArgumentException("这个孔不是孔特征打出来的（可能是拉伸切除或别的特征），没法改孔型。");
+        }
+        static EditableHole ResolveIn(P.Model model, P.PartDocument part, V3 c, V3 ax, ScannedHole sh){
             int hc = 0; try { hc = model.Holes.Count; } catch { }
             for (int i = 1; i <= hc; i++) {
                 P.Hole h = null;
@@ -103,7 +111,7 @@ namespace TianGongCadSuite {
                 if (seed == null) throw new ArgumentException("点到的孔在「" + HoleGrouping.NameOf(u) + "」里，但读不到它的孔特征，没法改孔型。");
                 return At(Fill(new EditableHole { Part = part, Hole = seed, Multi = u }, model), sh);
             }
-            throw new ArgumentException("这个孔不是孔特征打出来的（可能是拉伸切除或别的特征），没法改孔型。");
+            return null;
         }
 
         // 「自动打孔 / 批量排孔」刚打的那批：按 SystemName 找回孔或阵列
@@ -111,15 +119,17 @@ namespace TianGongCadSuite {
             var list = new List<EditableHole>();
             foreach (var kv in created) {
                 try {
-                    var model = ModelOf(kv.Key);
-                    var h = FindHole(model, kv.Value);
-                    if (h != null) { list.Add(Fill(new EditableHole { Part = kv.Key, Hole = h }, model)); continue; }
-                    var p = FindPattern(model, kv.Value);
-                    var seed = p == null ? null : SeedOf(p);
-                    if (seed != null) { list.Add(Fill(new EditableHole { Part = kv.Key, Hole = seed, Pattern = p }, model)); continue; }
-                    var u = HoleUndo.FindMulti(model, kv.Value);
-                    var useed = u == null ? null : HoleCombine.SeedOf(u);
-                    if (useed != null) list.Add(Fill(new EditableHole { Part = kv.Key, Hole = useed, Multi = u }, model));
+                    ModelOf(kv.Key);
+                    foreach (var model in PartBodies.All(kv.Key)) {   // 多实体零件：刚打的孔可能在第 2 个以后的实体上
+                        var h = FindHole(model, kv.Value);
+                        if (h != null) { list.Add(Fill(new EditableHole { Part = kv.Key, Hole = h }, model)); break; }
+                        var p = FindPattern(model, kv.Value);
+                        var seed = p == null ? null : SeedOf(p);
+                        if (seed != null) { list.Add(Fill(new EditableHole { Part = kv.Key, Hole = seed, Pattern = p }, model)); break; }
+                        var u = HoleUndo.FindMulti(model, kv.Value);
+                        var useed = u == null ? null : HoleCombine.SeedOf(u);
+                        if (useed != null) { list.Add(Fill(new EditableHole { Part = kv.Key, Hole = useed, Multi = u }, model)); break; }
+                    }
                 } catch (Exception e) { Log.Write("HoleEditFromCreated", e); notes.Add("有一个孔没找回来：" + e.Message); }
             }
             return list;

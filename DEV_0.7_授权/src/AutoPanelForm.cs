@@ -416,9 +416,15 @@ namespace TianGongCadSuite {
                 cachedMembers = reread.Members; plates = reread.Plates;
                 double t = (double)thickness.Value / 1000, g = (double)gap.Value / 1000;
                 var fresh = FrameGrouping.Detect(cachedMembers, t, g, null).Select(o => o.Opening.Solve(t, g)).ToList();
-                var chosen = pick.Select(i => specs[i]).ToList();
-                foreach (var s in chosen)
-                    if (!fresh.Any(f => Key(f) == Key(s))) throw new InvalidOperationException("型材在窗口打开期间改过，框口和刚才识别的不一样了。请点「读取当前选择」重新识别。");
+                var chosen = new List<PanelSpec>();
+                foreach (var s in pick.Select(i => specs[i])) {
+                    var f = fresh.FirstOrDefault(x => Key(x) == Key(s));
+                    if (f == null) throw new InvalidOperationException("型材在窗口打开期间改过，框口和刚才识别的不一样了。请点「读取当前选择」重新识别。");
+                    // 用按现在的厚度 / 间隙重新解出来的那一块：改了板厚马上点生成（停手 350ms 的重算还没轮到），
+                    // 原来拿的是列表里按旧厚度算的板，生成出来还是旧厚度
+                    chosen.Add(f);
+                }
+                debounce.Stop();
 
                 busy = true; Enabled = false; UseWaitCursor = true;
                 SetStatus("正在生成 " + chosen.Count + " 块板子…", Ui.Accent); Application.DoEvents();
