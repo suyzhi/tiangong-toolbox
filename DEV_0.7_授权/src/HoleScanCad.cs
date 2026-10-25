@@ -363,7 +363,7 @@ namespace TianGongCadSuite {
 
         // ---- 点一个平面：面上的腰孔（0.9.1） ----
         // 原来点面只认圆孔，腰孔一条都不认（得一头一头去点圆弧）。用户实测「点面认不全面上的孔」：
-        // 在用户 30 个零件上逐面比对（tools/hole-feature-probe/FaceScanAudit.cs），圆孔没有漏的，漏掉的几乎全是腰孔（约 100 条）。
+        // 在用户 30 个零件上逐面比对（tools/hole-feature-probe/FaceScanAudit.cs），圆孔没有漏的，漏掉的是腰孔（7 条；另有约 50 个圆角矩形窗口，不是孔）。
         // 判据和点圆弧认腰孔（SlotScanCad.FromArc）一样：内环 = 两段同半径圆弧 + 两条直边；再按圆弧那头的壁判一下是不是腰形凸台。
         public static List<SlotReference> ScanFaceSlots(TargetFace target, out int skippedCount){
             skippedCount = 0;

@@ -93,12 +93,23 @@ class FaceScanAudit {
         var oddInner = new List<string>();
         var coplanarNeighbours = new HashSet<int>();
         var neighbourFaces = new List<G.Face>();
-        int slotLoops = 0;
+        int slotLoops = 0; var oddLoops = new List<string>();
         foreach (G.Loop loop in (G.Loops)face.Loops) {
             bool outer = Try(() => loop.IsOuterLoop, true);
             bool lines = false; int nArc = 0, nLine = 0;
             foreach (G.Edge e in (G.Edges)loop.Edges) { object g = Try<object>(() => e.Geometry, null); if (!(g is G.Circle)) lines = true; if (g is G.Circle) nArc++; else if (g is G.Line) nLine++; }
             if (!outer && nArc == 2 && nLine == 2 && Try(() => ((G.Edges)loop.Edges).Count, 0) == 4) slotLoops++;
+            else if (!outer && nArc > 0 && nLine + nArc > 1) {
+                // 带圆弧、又不是标准"两弧两直线"的内环：列出组成，看腰孔到底长什么样
+                var parts = new List<string>();
+                foreach (G.Edge e in (G.Edges)loop.Edges) {
+                    object g = Try<object>(() => e.Geometry, null);
+                    var ci = g as G.Circle;
+                    if (ci != null) { Array cc = new double[3], ax = new double[3]; double r = 0; ci.GetCircleData(ref cc, ref ax, out r); parts.Add("弧R" + N(r * 1000) + "@" + V3.From(cc) + (Try(() => e.IsClosed, false) ? "整" : "")); }
+                    else parts.Add(g == null ? "?" : g.GetType().Name.Replace("Class", "") + "#" + e.ID);
+                }
+                oddLoops.Add("内环[" + parts.Count + "] " + string.Join(" ", parts));
+            }
             foreach (G.Edge e in (G.Edges)loop.Edges) {
                 // 相邻面
                 int cnt = 0; Array fs = new object[0];
@@ -125,6 +136,8 @@ class FaceScanAudit {
             }
         }
         if (coplanarNeighbours.Count > 0) splitFaces++;
+        foreach (var ol in oddLoops.Take(6)) L("  实体" + mi + " 面#" + face.ID + " " + ol);
+        if (oddLoops.Count > 0) Reason("带圆弧的非标准内环");
         if (slotLoops > 0) {
             int skippedSlots; var sl = HoleScanCad.ScanFaceSlots(AutoHoleReader.ReadTarget(face), out skippedSlots);
             slotLoopsTotal += slotLoops; slotsFound += sl.Count;
