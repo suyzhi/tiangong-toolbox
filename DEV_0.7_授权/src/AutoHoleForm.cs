@@ -67,9 +67,9 @@ namespace TianGongCadSuite {
         // 被"面扫描"点过的面（只用于高亮：这些面不是打孔面，但要让用户看见自己点了哪张）。
         readonly List<object> scannedPicks = new List<object>();
 
-        // 点平面时先当"带孔的面"扫一遍（默认开）：一个面上几十个孔不用一个一个点圆边。
-        // 勾掉就是老用法 —— 点平面＝加打孔面。
-        readonly CheckBox scanFaceCheck = new CheckBox { Checked = true, Text = "点平面时自动识别面上的孔", AutoSize = true };
+        // 点平面是什么意思由当前页面决定（0.9.1，用户要的；原来的「点平面时自动识别面上的孔」开关去掉了）：
+        //   ① 参考孔页：点平面 = 把面上的孔全认成参考孔（一个面上几十个孔不用一个一个点圆边）；
+        //   ② 打孔面页及以后：点平面 = 打孔面。按住 Ctrl 点 = 反过来。点了以后不再自动翻页。
         string lastScanNote = "";   // 上一次面扫描的结论，显示在预览的说明行里
 
         readonly ListBox refList = new ListBox();
@@ -166,8 +166,6 @@ namespace TianGongCadSuite {
             WireEvents();
             RefreshAll();
             ShowLinkReport(null, assembly == null ? "（没有打开装配，不检查关联孔）" : NotScanned);
-            // 「自动识别」被用户关掉了（记住的选择）：开窗时说一句现在点平面是什么意思、Ctrl 能临时反过来
-            if (!scanFaceCheck.Checked) SetStatus("「点平面时自动识别面上的孔」关着：点平面 = 打孔面；按住 Ctrl 点带孔的面 = 把面上的孔认成参考孔。参考孔也可以点孔口圆边或孔内壁。", Ui.Muted);
             // 上次关窗口前打的那批还没撤销：接着能撤
             HoleUndo carried; List<KeyValuePair<SolidEdgePart.PartDocument, string>> carriedCreated;
             if (Carried.Take(assembly, out carried, out carriedCreated)) {
@@ -184,27 +182,26 @@ namespace TianGongCadSuite {
             // 否则第二次 command.Start() 会触发 Terminate() 把窗口关掉。
         }
 
-        // 「保持与参考孔关联」「点平面时自动识别面上的孔」记住上次的选择（0.8.4）：原来每次打开窗口都回到默认，
-        // 不要关联 / 不要自动认孔的人每次都得先去勾掉。文件 autohole.tsv：每行「名字<TAB>1/0」
+        // 「保持与参考孔关联」记住上次的选择（0.8.4）：原来每次打开窗口都回到默认，
+        // 不要关联的人每次都得先去勾掉。文件 autohole.tsv：每行「名字<TAB>1/0」。
+        // 老版本存的 scanFace（「点平面时自动识别」开关）0.9.1 起不读了：点平面的意思改由页面决定
         const string ChoicesFile = "autohole.tsv";
         void LoadChoices(){
 #if TG_DEV_BUILD
-            // 真机测试脚本（放行授权闸的那些）用默认选择：用户自己关掉的「自动识别」不能让测试的第一步就走岔（0.8.5 整批 E2E 因此误报）
+            // 真机测试脚本（放行授权闸的那些）用默认选择，用户自己的设置不能让测试的第一步就走岔（0.8.5 整批 E2E 因此误报）
             if (TianGongCadSuite.Licensing.LicenseTestHooks.GateOverride >= 0) return;
 #endif
             try {
                 foreach (var r in SettingsFile.Read(SettingsFile.PathOf(ChoicesFile))) {
                     if (r.Length < 2) continue;
                     if (r[0] == "keepLink") linkCheck.Checked = r[1] == "1";
-                    else if (r[0] == "scanFace") scanFaceCheck.Checked = r[1] == "1";
                 }
             } catch (Exception e) { Log.Write("AutoHoleChoicesLoad", e.Message); }
         }
         void SaveChoices(){
             try {
                 SettingsFile.Write(SettingsFile.PathOf(ChoicesFile), new List<string[]>{
-                    new[]{ "keepLink", linkCheck.Checked ? "1" : "0" },
-                    new[]{ "scanFace", scanFaceCheck.Checked ? "1" : "0" } },
+                    new[]{ "keepLink", linkCheck.Checked ? "1" : "0" } },
                     "天工工具箱 · 自动打孔窗口记住的选择（每行：名字<TAB>1=勾上 0=不勾）");
             } catch (Exception e) { Log.Write("AutoHoleChoicesSave", e.Message); }
         }
@@ -295,15 +292,17 @@ namespace TianGongCadSuite {
             ((FlatButton)delRef).SetFore(Ui.Text2); ((FlatButton)clrRef).SetFore(Ui.Text2);
             delRef.Click += (s, e) => RemoveSelected();
             clrRef.Click += (s, e) => { if (busy) return; groups.Clear(); slots.Clear(); slotPicks.Clear(); scannedPicks.Clear(); lastScanNote = ""; RefreshAll(); SetStatus("已清空参考孔。", Ui.Muted); };
-            shell.AddHeader(pRefs, rulesButton); shell.AddHeader(pRefs, delRef); shell.AddHeader(pRefs, clrRef);
+            // 腰孔不在列表里（只在计数里写「腰孔 N」）：点面一下认进来好几条、又不想配腰孔时，这里一键去掉（0.9.1）
+            ((FlatButton)delSlots).SetFore(Ui.Text2);
+            delSlots.Click += (s, e) => { if (busy || slots.Count == 0) return; int k = slots.Count; slots.Clear(); slotPicks.Clear(); RefreshAll(); SetStatus("已去掉 " + k + " 条参考腰孔（圆孔不动）。", Ui.Muted); };
+            tips.SetToolTip(delSlots, "去掉全部参考腰孔，圆孔留着。单条腰孔：在模型里再点一次它一头的圆弧 = 取消。");
+            shell.AddHeader(pRefs, rulesButton); shell.AddHeader(pRefs, delSlots); shell.AddHeader(pRefs, delRef); shell.AddHeader(pRefs, clrRef);
             refFlash = new Flash(refList);
             refList.IntegralHeight = false; refList.BorderStyle = BorderStyle.None;
             refList.DrawMode = DrawMode.OwnerDrawFixed; refList.ItemHeight = 62; refList.BackColor = Color.White;
             refList.DrawItem += DrawRefItem;
-            scanFaceCheck.BackColor = Ui.Bg; scanFaceCheck.ForeColor = Ui.Text;
             refCount.AutoSize = false; refCount.Font = Ui.F8; refCount.ForeColor = Ui.Muted; refCount.TextAlign = ContentAlignment.MiddleRight;
-            tips.SetToolTip(scanFaceCheck, "勾上：点一个带孔的平面，就把面上的孔全部加成参考孔（同孔径自动归一组）；面上没有孔才当打孔面（已经选了参考孔时，参考孔投得到的空位上没有孔的面也当打孔面）。\r\n按住 Ctrl 点：一律当打孔面。\r\n勾掉：点平面一律当打孔面；这时按住 Ctrl 点带孔的面 = 把面上的孔认成参考孔。");
-            ListPage(pRefs.Body, "在模型里点孔口圆边、孔内壁，或直接点一个带孔的面。同孔径的孔自动归成一组，规格按配做规则反推。", refList, refEmpty, scanFaceCheck, refCount);
+            ListPage(pRefs.Body, "在模型里点孔口圆边、孔内壁，或直接点一个带孔的面（面上的孔全部认成参考孔）。同孔径的孔自动归成一组，规格按配做规则反推。选完点「下一步」去点打孔面。", refList, refEmpty, null, refCount);
 
             // ---- ② 打孔面 ----
             var delFace = Ui.Small("移除"); var clrFace = Ui.Small("清空");
@@ -316,7 +315,7 @@ namespace TianGongCadSuite {
             faceList.DrawMode = DrawMode.OwnerDrawFixed; faceList.ItemHeight = 50; faceList.BackColor = Color.White;
             faceList.DrawItem += DrawFaceItem;
             faceCount.AutoSize = false; faceCount.Font = Ui.F8; faceCount.ForeColor = Ui.Muted; faceCount.TextAlign = ContentAlignment.MiddleRight;
-            ListPage(pFaces.Body, "点要配孔的零件平面。孔心沿参考孔轴线投到这些面上，落不到面上的会自动跳过。", faceList, faceEmpty, null, faceCount);
+            ListPage(pFaces.Body, "点要配孔的零件平面（这一步点平面就是选打孔面，面上原有的孔不会认成参考孔）。孔心沿参考孔轴线投到这些面上，落不到面上的会自动跳过。", faceList, faceEmpty, null, faceCount);
 
             // ---- ③ 孔规格：组标签 → 正在编辑谁 → 参数网格 | 孔形状 ----
             BuildSpecCard(pSpec.Body);
@@ -413,6 +412,7 @@ namespace TianGongCadSuite {
         }
 
         // 列表页：一行说明 → 列表（每一项自己画成圆角小卡片）→ 底行（左：勾选，右：计数）
+        readonly Button delSlots = Ui.Small("去掉腰孔");
         readonly EmptyHint refEmpty = new EmptyHint("正在等你在模型里点孔：孔口圆边、孔内壁，或一个带孔的面…");
         readonly EmptyHint faceEmpty = new EmptyHint("正在等你在模型里点要打孔的平面…");
         void ListPage(Panel body, string hint, ListBox list, EmptyHint empty, Control footLeft, Label footRight){
@@ -589,7 +589,6 @@ namespace TianGongCadSuite {
             // 两个勾选记住用户上次的选择（只在用户自己点的时候存：Click 不会被代码改 Checked 触发，测试脚本改它不会写进用户设置）
             linkCheck.CheckedChanged += (s, e) => { RefreshPreview(); faceList.Invalidate(); };
             linkCheck.Click += (s, e) => SaveChoices();
-            scanFaceCheck.Click += (s, e) => SaveChoices();
             // 打孔重试期间 CAD 正忙，这里把重试进度写到状态栏并让界面刷一次，
             // 用户看到的就不是"卡死了"，而是"正在重试 2/6"。
             progress = msg => {
@@ -691,7 +690,7 @@ namespace TianGongCadSuite {
             } catch (Exception e) { Log.Write("AutoHolePreselect", e.Message); return; }
             if (items.Count == 0) return;
             int refsBefore = groups.Sum(g => g.Count), facesBefore = targets.Count;
-            foreach (var o in items) AcceptPick(o);
+            foreach (var o in items) AcceptPick(o, PlanePick.Auto);
             int r = groups.Sum(g => g.Count) - refsBefore, f = targets.Count - facesBefore;
             if (r + f > 0) SetStatus("已接过天工里预先选中的对象：参考孔 " + r + " 个、打孔面 " + f + " 个。" + (f == 0 ? "再点要打孔的面。" : "检查预览后点「开始打孔」。"), Ui.Ok);
         }
@@ -703,42 +702,44 @@ namespace TianGongCadSuite {
             mouse.AddToLocateFilter((int)SolidEdgeConstants.seLocateFilterConstants.seLocateFace);
         }
 
+        // 点平面当什么：Refs = 认面上的孔（参考孔页）；Face = 打孔面（打孔面页及以后）；
+        // Auto = 老规则（面上有孔认孔、没孔或参考孔投到它的空位上就当打孔面），只给"打开窗口前在天工里已经选好的对象"用 —— 那时还没有页面可言
+        enum PlanePick { Refs, Face, Auto }
+
         // 三种点法都从这里进来：
-        //   点孔口的圆形边线 / 点孔的内壁圆柱面 → 加一个参考孔；
-        //   点平面 → 勾着"自动认孔"就先把这个面上的孔全认出来（按孔径归类），
-        //            一个孔都没扫到才当打孔面；勾掉则永远是打孔面。
+        //   点孔口的圆形边线 / 点孔的内壁圆柱面 → 加一个参考孔（哪一页都一样）；
+        //   点平面 → 在 ① 参考孔页：把这个面上的孔全认出来（按孔径归类）；在 ② 打孔面页及以后：加打孔面。
         public void AcceptPick(object selected){ AcceptPick(selected, false); }
-        // ctrl：按住 Ctrl 点的面 —— 和「点平面时自动识别面上的孔」反着来（0.8.5）：
-        //   勾着时 Ctrl 点 = 一定当打孔面（并撤掉刚从这张面认进来的参考孔）；勾掉时 Ctrl 点 = 把面上的孔认成参考孔
+        // ctrl：按住 Ctrl 点平面 = 和当前页反着来（参考孔页上当打孔面；打孔面页上认面上的孔）
         public void AcceptPick(object selected, bool ctrl){
+            bool refsPage = shell.Current == PageRefs;
+            AcceptPick(selected, refsPage != ctrl ? PlanePick.Refs : PlanePick.Face);
+        }
+        void AcceptPick(object selected, PlanePick mode){
             if (busy || closing || selected == null) return;
             var before = groups.ToDictionary(g => g, g => g.Count);
             int slotsBefore = slots.Count, facesBefore = targets.Count;
-            AcceptPickCore(selected, ctrl);
+            AcceptPickCore(selected, mode);
             AfterPick(before, slotsBefore, facesBefore);
         }
-        // 点了什么就翻到那一步，新加的那一项闪一下（点面 → ② 打孔面；点孔 → ① 参考孔）
+        // 新加的那一项闪一下。**不翻页**（0.9.1，用户要的）：原来点了面就跳到「打孔面」、点了孔就跳回「参考孔」，
+        // 在参考孔页上连着点几张带孔的面，认完一张就被带走了。左边步骤栏的计数会跟着变
         void AfterPick(Dictionary<RefGroup, int> before, int slotsBefore, int facesBefore){
             if (closing || IsDisposed) return;
-            if (targets.Count > facesBefore) {
-                for (int i = facesBefore; i < targets.Count; i++) faceFlash.Mark(targets[i]);
-                shell.Go(PageFaces);
-                return;
-            }
-            bool grew = slots.Count > slotsBefore;
-            foreach (var g in groups) { int n; if (!before.TryGetValue(g, out n) || g.Count > n) { refFlash.Mark(g); grew = true; } }
-            if (grew) shell.Go(PageRefs);
+            for (int i = facesBefore; i < targets.Count; i++) faceFlash.Mark(targets[i]);
+            foreach (var g in groups) { int n; if (!before.TryGetValue(g, out n) || g.Count > n) refFlash.Mark(g); }
         }
-        void AcceptPickCore(object selected, bool ctrl){
+        void AcceptPickCore(object selected, PlanePick mode){
             try {
                 var pg = PickGeometry.Unwrap(selected);
                 bool plane = pg.Geometry is G.Face && ((G.Face)pg.Geometry).Geometry is G.Plane;
-                if (ctrl && plane && !scanFaceCheck.Checked) { PickFaceWithHoles(selected, true); RefreshAll(); return; }
-                if (ctrl && plane) {
+                if (plane && mode == PlanePick.Refs) { PickFaceWithHoles(selected, true); RefreshAll(); return; }
+                if (plane && mode == PlanePick.Face) {
+                    // 刚才在参考孔页从这张面认进来的孔撤掉：孔投到自己这张面上全是"本来就有孔"，留着只会让人以为要打
                     var tf = AutoHoleReader.ReadTarget(selected);
                     int dropped = DropRefsOn(tf);
                     AddTargetFace(selected, tf);
-                    if (dropped > 0) SetStatus("已按 Ctrl 当打孔面：" + FaceLabel(tf) + "（刚才从这张面认进来的 " + dropped + " 个参考孔已撤掉）。", Ui.Ok);
+                    if (dropped > 0) SetStatus("已作为打孔面：" + FaceLabel(tf) + "（之前从这张面认进来的 " + dropped + " 个参考孔已撤掉）。", Ui.Ok);
                     RefreshAll();
                     return;
                 }
@@ -765,10 +766,8 @@ namespace TianGongCadSuite {
                                   + (r.MouthDiameterMm - r.DiameterMm > HoleScan.StepToleranceMm
                                      ? ("　（孔口 Φ" + Num(r.MouthDiameterMm) + "，" + r.MouthKind + "，按下面的孔径配做）") : "")
                                   + "。", Ui.Ok);
-                    } else if (scanFaceCheck.Checked) {
-                        PickFaceWithHoles(selected);
                     } else {
-                        AddTargetFace(selected, null);
+                        PickFaceWithHoles(selected, false);   // 只剩 Auto（预先选好的对象）走到这里
                     }
                 } else {
                     throw new ArgumentException("请点孔口的圆形边线、孔的内壁圆柱面（圆柱面/圆锥面），或者要打孔的平面。");
@@ -859,40 +858,50 @@ namespace TianGongCadSuite {
             } catch { return false; }
         }
 
-        // 点平面 + 勾着"自动认孔"：面上有孔就全认出来当参考孔（**不当打孔面**）；
-        // 一个孔都没有才当打孔面 —— 这样"点带孔的面"和"点要打孔的面"不用切模式。
-        void PickFaceWithHoles(object selected){ PickFaceWithHoles(selected, false); }
-        // onlyRefs：Ctrl 点的（自动识别关着时）—— 用户就是要认孔，不往打孔面上拐
+        // 点平面认孔：面上的圆孔、腰孔（0.9.1）全认出来当参考（**不当打孔面**）。
+        // onlyRefs：参考孔页上点的 —— 用户就是要认孔，没认出孔也不往打孔面上拐；
+        // 否则（预先选好的对象）一个孔都没有、或已选参考孔投到它的空位上，才当打孔面。
         void PickFaceWithHoles(object selected, bool onlyRefs){
             var t = AutoHoleReader.ReadTarget(selected);
-            string how; int notHole;
+            string how; int notHole, notSlot;
             var holes = HoleScanCad.ScanFace(t, out how, out notHole);
-            if (holes.Count == 0 && onlyRefs) { SetStatus("这张面上没有认出孔（" + FaceLabel(t) + "）。" + (how.Length > 0 ? "注意：" + how : ""), Ui.Warn); return; }
-            if (holes.Count == 0) {
+            var faceSlots = HoleScanCad.ScanFaceSlots(t, out notSlot);
+            notHole += notSlot;
+            Log.Write("AutoHoleFaceScan", FaceLabel(t) + "：圆孔 " + holes.Count + "，腰孔 " + faceSlots.Count + "，判为凸台 " + notHole + (how.Length > 0 ? "，" + how : ""));
+            if (holes.Count + faceSlots.Count == 0 && onlyRefs) {
+                SetStatus("这张面上没有认出孔（" + FaceLabel(t) + (notHole > 0 ? "，" + notHole + " 个圆/腰形判定为凸台" : "") + "）。"
+                          + "要在它上面打孔：点「下一步」到「打孔面」再点它。" + (how.Length > 0 ? "注意：" + how : ""), Ui.Warn);
+                return;
+            }
+            if (holes.Count + faceSlots.Count == 0) {
                 AddTargetFace(selected, t);
                 string inst = InstanceNote(t);
                 SetStatus("这个面上没有识别到孔，已作为打孔面：" + FaceLabel(t) + (inst.Length > 0 ? "　⚠ " + inst : "") + (how.Length > 0 ? "　注意：" + how : ""), inst.Length > 0 ? Ui.Warn : Ui.Muted);
                 return;
             }
             // 0.8.5：已经点好参考孔、再点要打孔的面，而这张面上本来就有几个别的孔（现场最常见：底板上早打过几个安装孔）——
-            // 原来一律当"带孔的面"扫成参考孔，打孔面加不进去，用户得先去勾掉「自动识别」。
-            // 现在：已选的参考孔里有能投到这张面上、而且投到的位置还空着的，这张面就是打孔面
+            // 已选的参考孔里有能投到这张面上、而且投到的位置还空着的，这张面就是打孔面。
+            // 0.9.1 起点鼠标的不走这里（按页面定），只剩预先选好的对象用这条
             int free = onlyRefs ? 0 : FreeSpots(t, holes);
             if (free > 0) {
                 AddTargetFace(selected, t);
                 SetStatus("已作为打孔面：" + FaceLabel(t) + "（面上本来有 " + holes.Count + " 个孔，没有当参考孔；已选的参考孔里 " + free + " 个投到这张面的空位上）。"
-                          + "要把面上的孔当参考孔，先在②里移除这张面、再点一次。" + (InstanceNote(t).Length > 0 ? "　⚠ " + InstanceNote(t) : ""), InstanceNote(t).Length > 0 ? Ui.Warn : Ui.Ok);
+                          + "要把面上的孔当参考孔，先在「打孔面」里移除这张面，再到「参考孔」那一步点它。" + (InstanceNote(t).Length > 0 ? "　⚠ " + InstanceNote(t) : ""), InstanceNote(t).Length > 0 ? Ui.Warn : Ui.Ok);
                 return;
             }
-            int added = 0, dup = 0;
+            int added = 0, dup = 0, slotsAdded = 0;
             foreach (var scanned in holes)
                 if (AddHole(AutoHoleReader.ToReference(scanned), null, true)) added++; else dup++;
+            foreach (var sl in faceSlots)
+                if (slots.Any(x => x.Same(sl))) dup++; else { slots.Add(sl); slotsAdded++; }
             scannedPicks.Add(selected);      // 只用于高亮：让用户看得见"刚才点的是哪张面"
-            lastScanNote = HoleScan.StatusLine(holes)
+            lastScanNote = (holes.Count > 0 ? HoleScan.StatusLine(holes) : "识别到 0 个圆孔")
+                         + (faceSlots.Count > 0 ? "；腰孔 " + faceSlots.Count + " 条（" + string.Join("、", faceSlots.GroupBy(x => x.Label).Select(x => x.Key + " ×" + x.Count()).ToArray()) + "，目标件上配同样的腰孔，通切）" : "")
                          + (dup > 0 ? "；其中 " + dup + " 个已经在列表里" : "")
-                         + (notHole > 0 ? "；另有 " + notHole + " 个圆判定为凸台/非孔，已跳过" : "")
-                         + "。要把这张面当打孔面：按住 Ctrl 再点一次（会撤掉从它认进来的参考孔）。";
-            SetStatus("已从 " + FaceLabel(t) + " 上识别到 " + holes.Count + " 个孔，共 " + groups.Count + " 组（新增 " + added + " 个）。", Ui.Ok);
+                         + (notHole > 0 ? "；另有 " + notHole + " 个圆/腰形判定为凸台，已跳过" : "")
+                         + "。要把这张面当打孔面：到「打孔面」那一步再点它（会撤掉从它认进来的参考孔）。";
+            SetStatus("已从 " + FaceLabel(t) + " 上识别到 " + holes.Count + " 个孔" + (faceSlots.Count > 0 ? "、" + faceSlots.Count + " 条腰孔" : "")
+                      + "，共 " + groups.Count + " 组（新增 " + added + " 个" + (slotsAdded > 0 ? "、腰孔 " + slotsAdded + " 条" : "") + "）。", Ui.Ok);
         }
 
         // 从这张面认进来的参考孔（同一个零件实例、孔口在这张面上）撤掉，返回撤掉几个
@@ -907,6 +916,13 @@ namespace TianGongCadSuite {
                     g.Holes.Remove(h); g.Selections.Remove(h); n++;
                 }
                 if (g.Holes.Count == 0) groups.Remove(g);
+            }
+            // 从这张面认进来的腰孔（同一个零件、中心在这张面上）
+            foreach (var sl in slots.ToList()) {
+                bool samePart = ReferenceEquals(sl.Owner, t.Part);
+                if (!samePart) { try { samePart = string.Equals(((P.PartDocument)sl.Owner).FullName, t.Part.FullName, StringComparison.OrdinalIgnoreCase); } catch { } }
+                if (!samePart || Math.Abs((sl.Center - t.Plane.Point).Dot(nrm)) > 0.0002 || !FaceFrameReader.ContainsPoint(t, sl.Center)) continue;
+                slots.Remove(sl); slotPicks.Remove(sl); n++;
             }
             if (n > 0) { scannedPicks.Clear(); lastScanNote = ""; }
             return n;
@@ -1069,7 +1085,8 @@ namespace TianGongCadSuite {
             RefreshFaces();
             RefreshList(refList.SelectedIndex);
             RefreshPreview();
-            refEmpty.Visible = groups.Count == 0;
+            refEmpty.Visible = groups.Count == 0 && slots.Count == 0;
+            delSlots.Enabled = slots.Count > 0;
             faceEmpty.Visible = targets.Count == 0;
         }
 
@@ -1499,7 +1516,10 @@ namespace TianGongCadSuite {
         public bool KeepLink { get { return linkCheck.Checked; } set { linkCheck.Checked = value; } }
         public int LocateModeForTest { get { try { return mouse == null ? -1 : mouse.LocateMode; } catch { return -2; } } }
         public void StopPickingForTest(){ StopCommand(); }
-        public bool ScanFaceOnPick { get { return scanFaceCheck.Checked; } set { scanFaceCheck.Checked = value; } }
+        // 老测试脚本的开关（0.9.1 起开关没了）：true = 翻到参考孔页（点平面认孔），false = 翻到打孔面页（点平面当打孔面）
+        public bool ScanFaceOnPick { get { return shell.Current == PageRefs; } set { shell.Go(value ? PageRefs : PageFaces, false); } }
+        // 预先在天工里选好的对象走的那条老规则（有孔认孔、没孔当打孔面），测试用
+        public void AcceptPreselectedForTest(object selected){ AcceptPick(selected, PlanePick.Auto); }
         // 不连 CAD 也能把参考孔列表填起来（界面截图 / 界面单测用）：count 个同孔径的假参考孔，规格照常自动反推
         public void AddReferenceForTest(double diameterMm, int count){
             for (int i = 0; i < count; i++)
@@ -1512,6 +1532,7 @@ namespace TianGongCadSuite {
             var sb = new System.Text.StringBuilder();
             sb.Append("参考孔 ").Append(groups.Count).Append(" 组 [");
             foreach (var g in groups) sb.Append("(").Append(g.Head).Append(" → ").Append(g.Detail).Append(") ");
+            if (slots.Count > 0) sb.Append("腰孔 ").Append(slots.Count).Append(" 条 ");
             sb.Append("] 打孔面 ").Append(targets.Count).Append(" 个 [");
             foreach (var s in targetLabels) sb.Append(s).Append(" | ");
             sb.Append("] 可打孔=").Append(run.Enabled).Append(" 徽标=").Append(chip.Text);
@@ -1573,7 +1594,7 @@ namespace TianGongCadSuite {
                 if (groups.Count == 0 && slots.Count == 0) { SetStatus("请先点一个已有的孔（点孔口圆边、孔内壁，或点一个带孔的面自动认孔；腰孔点它一头的圆弧）。", Ui.Warn); return; }
                 if (targets.Count == 0) {
                     SetStatus(lastDrilled.Length > 0 ? "上一批打孔面已经打完了，请点下一个要打孔的面（参考孔不用重选）。"
-                                                     : "请先点要打孔的面（面上有孔时会被当成参考孔；要打孔的面请点一个没有孔的面，或勾掉「点平面时自动识别面上的孔」）。", Ui.Warn);
+                                                     : "请先点要打孔的面：到「打孔面」那一步再点平面（在「参考孔」那一步点平面是认面上的孔）。", Ui.Warn);
                     return;
                 }
                 foreach (var g in groups) {

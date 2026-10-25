@@ -159,10 +159,12 @@ namespace TianGongCadSuite {
                 Assert(Math.Abs(sec.Shape.HoleDiameterMm - 3.2) < 0.01, "改孔径后剖面立刻跟着变，实得 " + sec.Shape.HoleDiameterMm);
                 kind.SelectedIndex = 0;
 
-                // ⑩ 「点平面时自动识别面上的孔」开关：默认勾选（点带孔的面 = 自动认孔），勾掉才是"点平面只当打孔面"
-                var scanBox = Chk(all, "点平面时自动识别面上的孔");
-                Assert(scanBox != null, "窗口里有「点平面时自动识别面上的孔」开关");
-                Assert(scanBox.Checked, "面扫描默认打开");
+                // ⑩ 0.9.1：点平面的意思按页面定（参考孔页 = 认面上的孔，打孔面页 = 打孔面），不再有开关
+                Assert(Chk(all, "点平面时自动识别面上的孔") == null, "「点平面时自动识别面上的孔」开关已去掉");
+                Assert(form.PageForTest == 0 && form.ScanFaceOnPick, "开窗在参考孔页：点平面 = 认面上的孔");
+                form.ScanFaceOnPick = false;
+                Assert(form.PageForTest == 1, "测试开关 ScanFaceOnPick=false 翻到打孔面页");
+                form.GoPageForTest(0);
 
                 // ⑪ 有参考孔以后：Φ6.6（M6 过孔）自动反推成 M6 螺纹孔、螺纹全长；编辑区写明正在改哪一组
                 form.AddReferenceForTest(6.6, 4);

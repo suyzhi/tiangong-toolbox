@@ -124,7 +124,7 @@ class User085E2E {
         try { app.DisplayAlerts = false; } catch { }
         L("已连上 CAD " + app.Version + "　插件 DLL " + typeof(AutoHoleForm).Assembly.GetName().Version);
         string stamp = DateTime.Now.ToString("HHmmss");
-        foreach (var s in new Action<string, string>[]{ S1, S2S3, S4, S5, S6, S7, S8, S9 }) {
+        foreach (var s in new Action<string, string>[]{ S1, S2S3, S4, S5, S6, S7, S8, S9, S10, S11 }) {
             try { s(outDir, stamp); } catch (Exception e) { L("场景异常：" + Hr(e) + "\r\n" + e.StackTrace); fail++; }
             try { while (app.Documents.Count > 0) { ((dynamic)app.Documents.Item(1)).Close(false); Pump(2); } } catch { }
         }
@@ -151,6 +151,7 @@ class User085E2E {
             f.KeepLink = true; f.ScanFaceOnPick = true;
             f.AcceptPick(a.CreateReference(o[0], FaceAtZ(ModelOf(o[0]), 0.01))); Pump(4);
             L("   点 R 顶面后：" + f.UiSummary());
+            f.ScanFaceOnPick = false;   // 0.9.1：到「打孔面」页再点 T（参考孔页点面一律认孔）
             f.AcceptPick(a.CreateReference(o[1], FaceAtZ(ModelOf(o[1]), 0.04))); Pump(4);
             string ui = f.UiSummary();
             L("   点 T 顶面后：" + ui);
@@ -281,7 +282,7 @@ class User085E2E {
             L("   再点一次：" + f.UiSummary());
             Check(f.UiSummary().IndexOf("参考孔 0 组") >= 0, "同一个孔再点一次 = 取消");
             f.AcceptPick(a.CreateReference(o[0], FaceAtZ(mao, 0.01))); Pump(4);
-            f.AcceptPick(a.CreateReference(o[1], FaceAtZ(ModelOf(o[1]), 0.005))); Pump(4);
+            f.ScanFaceOnPick = false; f.AcceptPick(a.CreateReference(o[1], FaceAtZ(ModelOf(o[1]), 0.005))); Pump(4); f.ScanFaceOnPick = true;
             L("   扫 A 顶面 + P 顶面：" + f.UiSummary());
             Check(f.UiSummary().IndexOf("参考孔 1 组") >= 0 && f.UiSummary().IndexOf("×3") >= 0, "P 上和 A 同轴的 Φ7 没再加成第二组（A 的 3 个孔一组）");
             Check(f.UiSummary().IndexOf("打孔面 1 个") >= 0, "P 只有 1 个孔、A 的另外 2 个孔投到它的空位上：P 当打孔面（它漏了孔）");
@@ -376,6 +377,39 @@ class User085E2E {
         } finally { if (f != null) try { f.Close(); } catch { } Pump(4); try { a.Close(false); } catch { } Pump(6); }
     }
 
+    // 0.9.1：点面认孔连腰孔一起认（用户「点面认不全」：在他的零件上比对，漏的几乎全是腰孔）
+    static void S11(string outDir, string stamp){
+        L("======== S11 0.9.1 点面认孔连腰孔一起认");
+        string pr = Path.Combine(outDir, "S11R_" + stamp + ".par"), pt = Path.Combine(outDir, "S11T_" + stamp + ".par");
+        var r = NewPart(); var mr = Plate(r, 0.12, 0.06, 0.01);
+        Drill(r, mr, 0.01, Req(0.02, 0.03, 0.01, Thru(6.6), "R1"), Req(0.10, 0.03, 0.01, Thru(6.6), "R2"));
+        var sr = AutoHoleWriter.DrillSlots(AutoHoleReader.ReadTarget(FaceAtZ(mr, 0.01)), new[]{ new V3(0.06, 0.03, 0.01) }, new[]{ new V3(1, 0, 0) }, 30, 9); Pump(4);
+        if (sr.Created != 1) throw new InvalidOperationException("夹具腰孔没切成：" + string.Join("；", sr.Failures));
+        r.SaveAs(pr); r.Close(false);
+        var t = NewPart(); Plate(t, 0.12, 0.06, 0.01); t.SaveAs(pt); t.Close(false);
+        A.Occurrence[] o;
+        var a = NewAsm(Path.Combine(outDir, "S11_" + stamp + ".asm"), out o, pr, new[]{ 0.0, 0.0, 0.01 }, pt, new[]{ 0.0, 0.0, 0.0 });
+        AutoHoleForm f = null;
+        try {
+            f = new AutoHoleForm(app, a); f.SuppressDialogs = true; f.Show(); Pump(6);
+            f.KeepLink = false;
+            f.AcceptPick(a.CreateReference(o[0], FaceAtZ(ModelOf(o[0]), 0.01))); Pump(4);
+            string ui = f.UiSummary(); L("   参考孔页点 R 顶面：" + ui);
+            Check(ui.IndexOf("参考孔 1 组") >= 0 && ui.IndexOf("×2") >= 0 && ui.IndexOf("腰孔 1 条") >= 0, "R 顶面：2 个 Φ6.6 + 1 条 30×9 腰孔都认出来");
+            f.AcceptPick(a.CreateReference(o[0], FaceAtZ(ModelOf(o[0]), 0.01))); Pump(4);
+            Check(f.UiSummary().IndexOf("腰孔 1 条") >= 0, "同一张面再点一次：腰孔不重复加");
+            f.ScanFaceOnPick = false;
+            f.AcceptPick(a.CreateReference(o[1], FaceAtZ(ModelOf(o[1]), 0.01))); Pump(4);
+            ui = f.UiSummary(); L("   打孔面页点 T 顶面：" + ui);
+            Check(ui.IndexOf("将打") >= 0 && ui.IndexOf("腰孔 ×1") >= 0, "预览：2 个孔 + 腰孔 ×1");
+            f.DrillForTest(); Pump(8);
+            L("   RESULT: " + R(f.LastResult));
+            var mt = ModelOf(o[1]);
+            Check(HasCircle(mt, 0.02, 0.03, 0.01) && HasCircle(mt, 0.10, 0.03, 0.01), "T 上两个圆孔打上");
+            Check(HasCircle(mt, 0.0495, 0.03, 0.01) && HasCircle(mt, 0.0705, 0.03, 0.01), "T 上 30×9 腰孔配上（两头圆弧都在）");
+        } finally { if (f != null) try { f.Close(); } catch { } Pump(4); try { a.Close(false); } catch { } Pump(6); }
+    }
+
     static void S5(string outDir, string stamp){
         L("======== S5 盲孔比板还深（10 厚板上打 15 深）");
         var p = NewPart(); var m = Plate(p, 0.1, 0.06, 0.01);
@@ -399,6 +433,57 @@ class User085E2E {
                 Check(r3.Notes.Any(x => x.IndexOf("通孔") >= 0 && x.IndexOf("沉孔深") >= 0), "5 厚板上的 M6 沉孔切穿了：结果里说清楚");
             } finally { try { p5.Close(false); } catch { } Pump(2); }
         } finally { try { p.Close(false); } catch { } Pump(4); }
+    }
+
+    // 0.9.1 用户要的：点平面的意思按页面定、点了不翻页。
+    //   参考孔页上连点两张带孔的面都认孔（第二张面上有已选参考孔投得到的空位，0.9.0 会把它当打孔面并跳到「打孔面」）；
+    //   参考孔页上点没孔的面不当打孔面；打孔面页上点带孔的面 = 打孔面（撤掉从它认进来的参考孔），Ctrl 点 = 认孔；
+    //   打孔面页上点孔口圆边照样加参考孔、不翻页；预先选好的对象仍按老规则（有空位就当打孔面）
+    static void S10(string outDir, string stamp){
+        L("======== S10 0.9.1 点平面按页面定、点了不翻页");
+        string pr = Path.Combine(outDir, "S10R_" + stamp + ".par"), pt = Path.Combine(outDir, "S10T_" + stamp + ".par");
+        var r = NewPart(); var mr = Plate(r, 0.1, 0.06, 0.01);
+        Drill(r, mr, 0.01, Req(0.03, 0.03, 0.01, Thru(6.6), "R1"), Req(0.07, 0.03, 0.01, Thru(6.6), "R2"));
+        r.SaveAs(pr); r.Close(false);
+        var t = NewPart(); var mt = Plate(t, 0.1, 0.06, 0.02);
+        Drill(t, mt, 0.02, Req(0.05, 0.048, 0.02, new HoleSpec { Kind = HoleKind.Through, HoleDiameter = 10, Depth = 8 }, "T 顶上已有的盲孔（底面要没孔）"));
+        t.SaveAs(pt); t.Close(false);
+        A.Occurrence[] o;
+        var a = NewAsm(Path.Combine(outDir, "S10_" + stamp + ".asm"), out o, pr, new[]{ 0.0, 0.0, 0.02 }, pt, new[]{ 0.0, 0.0, 0.0 });
+        AutoHoleForm f = null;
+        try {
+            f = new AutoHoleForm(app, a); f.SuppressDialogs = true; f.Show(); Pump(8);
+            f.KeepLink = false;
+            Check(f.PageForTest == 0, "开窗在参考孔页");
+            f.AcceptPick(a.CreateReference(o[0], FaceAtZ(ModelOf(o[0]), 0.01))); Pump(4);
+            string ui = f.UiSummary(); L("   参考孔页点 R 顶面：" + ui);
+            Check(ui.IndexOf("参考孔 1 组") >= 0 && ui.IndexOf("×2") >= 0 && f.PageForTest == 0, "R 顶面认出 2 个孔，还在参考孔页");
+            f.AcceptPick(a.CreateReference(o[1], FaceAtZ(ModelOf(o[1]), 0.02))); Pump(4);
+            ui = f.UiSummary(); L("   参考孔页点 T 顶面：" + ui);
+            Check(ui.IndexOf("参考孔 2 组") >= 0 && ui.IndexOf("打孔面 0 个") >= 0, "T 顶面（R 的孔投得到它的空位）照样认孔：Φ10 成第 2 组，不当打孔面");
+            Check(f.PageForTest == 0, "认完不跳到打孔面页");
+            f.AcceptPick(a.CreateReference(o[1], FaceAtZ(ModelOf(o[1]), 0.0))); Pump(4);
+            ui = f.UiSummary(); L("   参考孔页点 T 底面（没孔）：" + ui);
+            Check(ui.IndexOf("打孔面 0 个") >= 0 && ui.IndexOf("没有认出孔") >= 0 && f.PageForTest == 0, "参考孔页点没孔的面：不当打孔面、说清楚去「打孔面」那一步");
+            f.GoPageForTest(1);
+            f.AcceptPick(a.CreateReference(o[1], FaceAtZ(ModelOf(o[1]), 0.02))); Pump(4);
+            ui = f.UiSummary(); L("   打孔面页点 T 顶面：" + ui);
+            Check(ui.IndexOf("打孔面 1 个") >= 0 && ui.IndexOf("参考孔 1 组") >= 0 && f.PageForTest == 1, "打孔面页点带孔的 T 顶面 = 打孔面，从它认进来的 Φ10 撤掉，还在打孔面页");
+            Check(ui.IndexOf("将打 2 个孔") >= 0, "预览：将打 2 个孔");
+            f.AcceptPick(a.CreateReference(o[1], FaceAtZ(ModelOf(o[1]), 0.02)), true); Pump(4);
+            ui = f.UiSummary(); L("   打孔面页 Ctrl 点 T 顶面：" + ui);
+            Check(ui.IndexOf("参考孔 2 组") >= 0 && f.PageForTest == 1, "打孔面页 Ctrl 点 = 认面上的孔（Φ10 又回来了）");
+            var e10 = CircleEdge(ModelOf(o[1]), 0.05, 0.048, 0.02);
+            f.AcceptPick(a.CreateReference(o[1], e10)); Pump(4);
+            ui = f.UiSummary(); L("   打孔面页点 Φ10 孔口圆边（再点一次 = 取消）：" + ui);
+            Check(ui.IndexOf("参考孔 1 组") >= 0 && f.PageForTest == 1, "打孔面页点孔口圆边照样管参考孔、不翻页");
+            f.ClearAllForTest(); Pump(2);
+            f.AcceptPreselectedForTest(a.CreateReference(o[0], FaceAtZ(ModelOf(o[0]), 0.01))); Pump(4);
+            f.AcceptPreselectedForTest(a.CreateReference(o[1], FaceAtZ(ModelOf(o[1]), 0.02))); Pump(4);
+            ui = f.UiSummary(); L("   预先选好 R 顶面 + T 顶面：" + ui);
+            Check(ui.IndexOf("参考孔 1 组") >= 0 && ui.IndexOf("打孔面 1 个") >= 0, "预先选好的对象按老规则：T 顶面有空位 = 打孔面");
+            f.Close(); f = null; Pump(4);
+        } finally { if (f != null) try { f.Close(); } catch { } Pump(4); }
     }
 }
 

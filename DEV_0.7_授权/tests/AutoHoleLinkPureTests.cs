@@ -31,6 +31,11 @@ namespace TianGongCadSuite {
             Assert(m.Count == 3 && m.Count(c => c.Closed) == 2, "两段半圆拼成一个整圆孔口，腰孔一头的单段圆弧不算（实 " + m.Count + "）");
             var holes = HoleScan.FromCircles(new List<CircleCandidate>{ half1, half2 }, new List<CircleCandidate>{ half1, half2 });
             Assert(holes.Count == 1 && Math.Abs(holes[0].DiameterMm - 6.6) < 1e-9, "导入件拆成两段的孔口照样认出 Φ6.6");
+            // 0.9.1：两段半圆的圆心差 3µm、半径差 0.002mm（导入件常见的误差）也要拼回来；相距 0.1mm 的两段不拼
+            var near = new CircleCandidate { Center = new V3(0.010003, 0.01, 0), Axis = z, RadiusMm = 3.302, Closed = false };
+            Assert(HoleScan.MergeArcs(new List<CircleCandidate>{ half1, near }).Count(c => c.Closed) == 1, "圆心差 3µm 的两段半圆拼成一个孔口");
+            var far = new CircleCandidate { Center = new V3(0.0101, 0.01, 0), Axis = z, RadiusMm = 3.3, Closed = false };
+            Assert(HoleScan.MergeArcs(new List<CircleCandidate>{ half1, far }).Count(c => c.Closed) == 0, "圆心差 0.1mm 的两段圆弧不拼");
         }
 
         static void FaceShapePure(){

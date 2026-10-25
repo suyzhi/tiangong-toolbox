@@ -166,7 +166,9 @@ namespace TianGongCadSuite {
                         foreach (G.Edge e in (G.Edges)loop.Edges) {
                             var c = Circle(e);
                             if (c == null) continue;
-                            c.Wall = WallOf(e, face);
+                            G.Face wf;
+                            c.Wall = WallOf(e, face, out wf);
+                            c.WallFace = wf;
                             list.Add(c);
                         }
                     }
@@ -181,7 +183,9 @@ namespace TianGongCadSuite {
                     foreach (G.Edge e in (G.Edges)face.Edges) {
                         var c = Circle(e);
                         if (c == null) continue;
-                        c.Wall = WallOf(e, face);
+                        G.Face wf;
+                        c.Wall = WallOf(e, face, out wf);
+                        c.WallFace = wf;
                         list.Add(c);
                     }
                 } catch (Exception e) { Log.Write("HoleScanFaceEdges", e); }
@@ -204,7 +208,12 @@ namespace TianGongCadSuite {
             if (part == null || planarFace == null || mouth == null) return true;
             V3 outward = OutwardOf(planarFace);
             if (!outward.Finite || outward.Length < 0.5) return true;
-            var wall = WallFaceOf(part, BodyOf(part, planarFace), mouth);
+            // 0.9.1：先用孔口这条边自己旁边的那张壁面。原来按"同轴同径"去整个实体里找第一张，**不看轴向位置** ——
+            // 型材/方管上下两壁打穿的孔、两头都有同径孔的轴类件，常常找到对面那个孔的壁，
+            // 它在这张面的外侧，就把这个孔判成"凸台"跳过：点面认孔时一张面上少几个孔
+            var wall = mouth.WallFace as G.Face;
+            if (wall != null && !IsRoundWall(wall)) wall = null;
+            if (wall == null) wall = WallFaceOf(part, BodyOf(part, planarFace), mouth);
             if (wall == null) return true;
             Array lo = new double[3], hi = new double[3];
             try { wall.GetRange(ref lo, ref hi); } catch { return true; }
@@ -212,6 +221,10 @@ namespace TianGongCadSuite {
             double offsetMm = (centre - mouth.Center).Dot(outward) * 1000.0;
             if (Math.Abs(offsetMm) < 0.5) return true;      // 壁几乎不偏：判不出来，不拦
             return offsetMm < 0;
+        }
+
+        static bool IsRoundWall(G.Face f){
+            try { var g = f.Geometry; return g is G.Cylinder || g is G.Cone || g is G.Torus; } catch { return false; }
         }
 
         // 面片外法向（本工程实测并一直在用的规则：IsParamReversed 时几何法向要取反）。
@@ -274,6 +287,7 @@ namespace TianGongCadSuite {
                         if (Math.Abs(rim.RadiusMm - mouth.RadiusMm) > 0.01) continue;
                         if (!HoleScan.Parallel(rim.Axis, mouth.Axis)) continue;
                         if (HoleScan.RadialOffsetMm(mouth.Center, mouth.Axis, rim.Center) > 0.01) continue;
+                        if (Math.Abs(HoleScan.AxialOffsetMm(mouth.Center, mouth.Axis, rim.Center)) > 0.01) continue;   // 必须就是这个圆，不是同轴线上别处的同径圆
                         return w.Face;
                     }
                 }
@@ -345,6 +359,49 @@ namespace TianGongCadSuite {
             }
             if (!byLoops) how = "这个 CAD 版本读不到面的环信息，识别结果里可能混进轮廓圆角或凸台";
             return holes;
+        }
+
+        // ---- 点一个平面：面上的腰孔（0.9.1） ----
+        // 原来点面只认圆孔，腰孔一条都不认（得一头一头去点圆弧）。用户实测「点面认不全面上的孔」：
+        // 在用户 30 个零件上逐面比对（tools/hole-feature-probe/FaceScanAudit.cs），圆孔没有漏的，漏掉的几乎全是腰孔（约 100 条）。
+        // 判据和点圆弧认腰孔（SlotScanCad.FromArc）一样：内环 = 两段同半径圆弧 + 两条直边；再按圆弧那头的壁判一下是不是腰形凸台。
+        public static List<SlotReference> ScanFaceSlots(TargetFace target, out int skippedCount){
+            skippedCount = 0;
+            var list = new List<SlotReference>();
+            if (target == null || target.Face == null) return list;
+            var face = target.Face;
+            V3 n;
+            try { Array p = new double[3], nv = new double[3]; ((G.Plane)face.Geometry).GetPlaneData(ref p, ref nv); n = V3.From(nv).Unit(); }
+            catch { return list; }
+            try {
+                foreach (G.Loop loop in (G.Loops)face.Loops) {
+                    bool outer = true;
+                    try { outer = loop.IsOuterLoop; } catch { }
+                    if (outer) continue;
+                    var arcs = new List<CircleCandidate>(); var arcEdges = new List<G.Edge>(); int lines = 0, others = 0;
+                    foreach (G.Edge e in (G.Edges)loop.Edges) {
+                        object g = null; try { g = e.Geometry; } catch { }
+                        if (g is G.Circle) { var c = Circle(e); if (c == null) others++; else { arcs.Add(c); arcEdges.Add(e); } }
+                        else if (g is G.Line) lines++;
+                        else others++;
+                    }
+                    if (arcs.Count != 2 || lines != 2 || others != 0) continue;
+                    if (Math.Abs(arcs[0].RadiusMm - arcs[1].RadiusMm) > 0.001 || !HoleScan.Parallel(arcs[0].Axis, n) || !HoleScan.Parallel(arcs[1].Axis, n)) continue;
+                    double dist = (arcs[1].Center - arcs[0].Center).Length;
+                    if (dist < 1e-6) continue;   // 两段圆弧同心 = 拆成两半的圆孔，归 ScanFace 管
+                    G.Face wf; WallOf(arcEdges[0], face, out wf); arcs[0].WallFace = wf;
+                    if (!LooksLikeHole(target.Part, face, arcs[0])) { skippedCount++; continue; }
+                    var mid = (arcs[0].Center + arcs[1].Center) * 0.5;
+                    list.Add(new SlotReference {
+                        Center = target.Placement.Point(mid),
+                        Axis = target.Placement.Vector(n).Unit(),
+                        Direction = target.Placement.Vector((arcs[1].Center - arcs[0].Center) * (1.0 / dist)).Unit(),
+                        LengthMm = dist * 1000.0 + 2 * arcs[0].RadiusMm, WidthMm = 2 * arcs[0].RadiusMm,
+                        Owner = target.Part, Source = target.Label
+                    });
+                }
+            } catch (Exception e) { Log.Write("HoleScanSlots", e); }
+            return list;
         }
 
         // ---- 点一个圆柱面/圆锥面/圆环面：认出这一个孔 ----

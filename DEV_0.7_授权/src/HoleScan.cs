@@ -14,6 +14,7 @@ namespace TianGongCadSuite {
         public string Wall = "";    // 这个圆旁边的壁面类型：Cylinder / Cone / Torus / ""（只用于措辞）
         public string Source = "";  // 来源（边号等），出问题时能说清是哪个圆
         public object Tag;          // 原始 CAD 对象，调用方自己用
+        public object WallFace;     // 这个圆旁边那张壁面（CAD 面对象；面扫描判"孔还是凸台"用，读不到为 null）
         public double DiameterMm { get { return RadiusMm * 2.0; } }
         public override string ToString(){
             return "Φ" + HoleScan.N(DiameterMm) + " @ " + Center + " 轴 " + Axis + (Wall.Length > 0 ? " 壁=" + Wall : "");
@@ -148,11 +149,12 @@ namespace TianGongCadSuite {
                 for (int j = i + 1; j < arcs.Count; j++) {
                     if (used[j]) continue;
                     var a = arcs[i]; var b = arcs[j];
-                    if ((a.Center - b.Center).Length < 1e-6 && Math.Abs(a.RadiusMm - b.RadiusMm) < 0.001 && Parallel(a.Axis, b.Axis)) { used[j] = true; n++; }
+                    // 圆心差 0.01mm、半径差 0.005mm 以内算同一个圆（0.9.1：原来 0.001mm / 0.001mm，导入件拆开的两段半圆常有这点误差，拼不回去就漏认）
+                    if ((a.Center - b.Center).Length < 1e-5 && Math.Abs(a.RadiusMm - b.RadiusMm) < 0.005 && Parallel(a.Axis, b.Axis)) { used[j] = true; n++; }
                 }
                 var first = arcs[i];
                 if (n < 2) { result.Add(first); continue; }
-                result.Add(new CircleCandidate { Center = first.Center, Axis = first.Axis, RadiusMm = first.RadiusMm, Closed = true, Wall = first.Wall, Source = first.Source + "（" + n + " 段圆弧拼成）", Tag = first.Tag });
+                result.Add(new CircleCandidate { Center = first.Center, Axis = first.Axis, RadiusMm = first.RadiusMm, Closed = true, Wall = first.Wall, Source = first.Source + "（" + n + " 段圆弧拼成）", Tag = first.Tag, WallFace = first.WallFace });
             }
             return result;
         }
