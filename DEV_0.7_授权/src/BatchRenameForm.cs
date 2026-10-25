@@ -215,11 +215,25 @@ namespace TianGongCadSuite {
                 if (ext != ".par" && ext != ".psm" && ext != ".asm" && ext != ".dft") continue;
                 RenameRow old;
                 if (have.TryGetValue(f, out old)) { if (old.Master != null) { old.Master = null; old.Pinned = false; } continue; }
-                var row = new RenameRow { Path = f };
+                var row = new RenameRow { Path = f, Locked = LockReason(f) };
                 rows.Add(row); have[f] = row;
             }
             SyncFollowers();
             Rebuild();
+        }
+
+        // 装配引用的标准件库（天工安装目录、Program Files 下的）是所有项目共用的：查找替换一不小心把库里的螺钉改了名，
+        // 别的项目全部找不到件。只读的文件到最后一步才报"改不了"（那时文档都关了）。载入时就标出来，改了新名字直接报问题
+        static string LockReason(string path){
+            try {
+                string full = Path.GetFullPath(path);
+                foreach (var root in new[]{ Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData) }) {
+                    if (string.IsNullOrEmpty(root)) continue;
+                    if (full.StartsWith(root.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase)) return "这是标准件库 / 程序目录里的文件（所有项目共用），不改名";
+                }
+                if (File.Exists(full) && (File.GetAttributes(full) & FileAttributes.ReadOnly) != 0) return "文件是只读的，改不了名（先在资源管理器里去掉「只读」）";
+            } catch { }
+            return "";
         }
 
         // 跟随行：勾着「跟着改名」时，每个零件 / 装配后面挂上同文件夹里的同名工程图、.cfg；没勾就全拿掉
@@ -231,7 +245,7 @@ namespace TianGongCadSuite {
             foreach (var r in rows) {
                 next.Add(r);
                 foreach (var c in RenameRules.Companions(r, Listing(r.Folder), have)) {
-                    next.Add(new RenameRow { Path = c, Master = r });
+                    next.Add(new RenameRow { Path = c, Master = r, Locked = LockReason(c) });
                     have.Add(c);
                 }
             }
@@ -257,10 +271,11 @@ namespace TianGongCadSuite {
 
         // 选中两行以上 = 选中的；否则 = 表里筛出来的全部（跟随行不算：它们跟着主行变）
         List<RenameRow> Targets(){
-            var picked = SelectedRows(false);
+            // 标准件库里的、只读的不参与批量改（改了也只会标红、把整批挡住）
+            var picked = SelectedRows(false).Where(r => r.Locked.Length == 0).ToList();
             if (picked.Count >= 2) return picked;
             var list = new List<RenameRow>();
-            foreach (DataGridViewRow g in grid.Rows) { var r = (RenameRow)g.Tag; if (r.Master == null) list.Add(r); }
+            foreach (DataGridViewRow g in grid.Rows) { var r = (RenameRow)g.Tag; if (r.Master == null && r.Locked.Length == 0) list.Add(r); }
             return list;
         }
         List<RenameRow> SelectedRows(bool withFollowers = true){
@@ -374,6 +389,7 @@ namespace TianGongCadSuite {
 
         static string Note(RenameRow r){
             if (r.Problem.Length > 0) return r.Problem;
+            if (r.Locked.Length > 0) return "（" + r.Locked + "）";
             if (r.Master != null) return r.Pinned ? "同名" + r.Kind + "（单独改过名字）" : "跟着「" + r.Master.FileName + "」改名";
             if (r.Changed) return "→ " + r.NewFileName;
             return "";

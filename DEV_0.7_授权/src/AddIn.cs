@@ -62,9 +62,15 @@ diagnostics=new Diagnostics(context.Application,()=>Run(registry.Find(1)),()=>Ru
         static bool on;
         public static void Install(){ if(on)return; try{Application.ThreadException+=OnThread;AppDomain.CurrentDomain.UnhandledException+=OnDomain;on=true;}catch{} }
         public static void Remove(){ if(!on)return; try{Application.ThreadException-=OnThread;AppDomain.CurrentDomain.UnhandledException-=OnDomain;}catch{} on=false; }
+        // 同一个错误反复出（画界面、定时器里出的错每次重画都会再来一次）：原来每次都弹一个框，点掉马上又弹，天工整个被框堵死。
+        // 同样的错 30 秒内只弹一次、正在弹着的时候不再叠第二个，其余只记日志
+        static string lastShown="";static DateTime lastAt=DateTime.MinValue;static bool showing;
         static void OnThread(object sender,System.Threading.ThreadExceptionEventArgs e){
             try{Log.Write("Unhandled",e.Exception);}catch{}
-            try{MessageBox.Show("天工工具箱出了一个意外错误（已记进 panel.log），可以继续使用：\r\n"+(e.Exception==null?"":e.Exception.Message),"天工工具箱",MessageBoxButtons.OK,MessageBoxIcon.Warning);}catch{}
+            string key=e.Exception==null?"":e.Exception.GetType().FullName+"|"+e.Exception.Message;
+            if(showing||(key==lastShown&&(DateTime.UtcNow-lastAt).TotalSeconds<30))return;
+            lastShown=key;lastAt=DateTime.UtcNow;showing=true;
+            try{MessageBox.Show("天工工具箱出了一个意外错误（已记进 panel.log），可以继续使用：\r\n"+(e.Exception==null?"":e.Exception.Message),"天工工具箱",MessageBoxButtons.OK,MessageBoxIcon.Warning);}catch{}finally{showing=false;}
         }
         static void OnDomain(object sender,UnhandledExceptionEventArgs e){ try{Log.Write("UnhandledDomain",Convert.ToString(e.ExceptionObject));}catch{} }
     }

@@ -45,6 +45,7 @@ namespace TianGongCadSuite {
             object doc = null;
             try { doc = app.ActiveDocument; } catch { }
             root = doc;
+            rootPath = doc == null ? "" : FullName(doc);
             opened = null;
             occurrences.Clear(); skippedSubs.Clear();
             if (doc == null) return list;
@@ -94,6 +95,28 @@ namespace TianGongCadSuite {
                     catch (Exception e) { Log.Write("PropCardWalk " + file, e); skippedSubs.Add(System.IO.Path.GetFileName(file)); }
                 }
             }
+        }
+
+        // 收集时的那个文档还活着吗（窗口开着时用户关掉又打开了装配、天工重新加载过）：
+        // 死了的话记下的"哪些文件在内存里"全作废，写入会退回写磁盘 —— 而这些文件现在又被新打开的装配加载着，
+        // 正是 0.8.1 的「加载后已被其他用户修改」对话框。没有收集过文档（只「添加文件」）算活着
+        string rootPath = "";
+        // 写之前调：文档死了但用户又把同一个文件打开着（关掉重开过）→ 按新打开的那份重新记一遍"哪些文件在内存里"，表里的修改不动；
+        // 当前文档换成了别的文件 → 返回 false，让用户先切回去
+        public bool Rebind(){
+            if (RootAlive()) return true;
+            object doc = null;
+            try { doc = app.ActiveDocument; } catch { }
+            if (doc == null || !string.Equals(FullName(doc), rootPath, StringComparison.OrdinalIgnoreCase)) return false;
+            string ignored;
+            Collect(out ignored);
+            return true;
+        }
+        public string RootName { get { return Path.GetFileName(rootPath); } }
+        public bool RootAlive(){
+            if (root == null) return true;
+            try { var n = Convert.ToString(root.GetType().InvokeMember("FullName", BindingFlags.GetProperty, null, root, null)); return true; }
+            catch { return false; }
         }
 
         static bool Add(List<string> list, HashSet<string> seen, string file){

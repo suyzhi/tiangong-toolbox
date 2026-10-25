@@ -218,6 +218,8 @@ namespace TianGongCadSuite {
             busy = true;
             try {
                 if (assembly == null) throw new InvalidOperationException("请先打开装配文件。");
+                // 窗口开着时装配被关掉（或关了又打开）：原来往下走报一句看不懂的"对象已断开"
+                try { var nm = assembly.Name; } catch { throw new InvalidOperationException("打开这个窗口时的装配已经关掉了。请关掉这个窗口，在装配里重新点「配孔检查」。"); }
                 run.Enabled = false; run.Text = "检查中…"; UseWaitCursor = true;
                 SetStatus("正在读取装配里的孔…", Ui.Accent);
                 Application.DoEvents();

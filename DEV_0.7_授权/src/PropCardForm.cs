@@ -154,6 +154,7 @@ namespace TianGongCadSuite {
             grid.CellBeginEdit += (s, e) => {
                 var r = e.RowIndex >= 0 ? grid.Rows[e.RowIndex].Tag as PropCardRow : null;
                 if (r != null && r.Problem.Length > 0) { e.Cancel = true; status.Text = "这个文件读取失败，不能改（" + r.Problem + "）"; }
+                else if (r != null && r.Locked.Length > 0) { e.Cancel = true; status.Text = r.FileName + "：" + r.Locked; }
             };
             grid.CellValueChanged += (s, e) => {
                 if (loading || e.RowIndex < 0 || e.ColumnIndex < FixedColumns) return;
@@ -210,7 +211,9 @@ namespace TianGongCadSuite {
                     n++;
                     Pulse("读取中 " + n + " / " + files.Count + " …");
                     if (!have.Add(f)) continue;
-                    rows.Add(cad.Read(f));
+                    var row = cad.Read(f);
+                    row.Locked = LockReason(f);
+                    rows.Add(row);
                 }
             } finally { EndBusy(); }
             Rebuild();
@@ -225,6 +228,19 @@ namespace TianGongCadSuite {
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
             rows.RemoveAll(r => drop.Contains(r));
             Rebuild();
+        }
+
+        // 装配引用的标准件库（天工安装目录、Program Files 下）是所有项目共用的：整列填「项目名称」时把库里的螺钉也写了，
+        // 保存装配时要么改了共用库、要么因为只读一个个弹框。这些行灰掉、不参与填值
+        static string LockReason(string path){
+            try {
+                string full = System.IO.Path.GetFullPath(path);
+                foreach (var root in new[]{ Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData) }) {
+                    if (string.IsNullOrEmpty(root)) continue;
+                    if (full.StartsWith(root.TrimEnd(System.IO.Path.DirectorySeparatorChar) + System.IO.Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return "标准件库 / 程序目录里的共用文件，不写属性";
+                }
+            } catch { }
+            return "";
         }
 
         // ---------- 表格 ----------
@@ -266,7 +282,8 @@ namespace TianGongCadSuite {
             if (r == null) return;
             var cell = grid.Rows[e.RowIndex].Cells[e.ColumnIndex];
             if (e.ColumnIndex < FixedColumns) {
-                cell.ToolTipText = r.Problem.Length > 0 ? r.Problem : r.Path;
+                cell.ToolTipText = r.Problem.Length > 0 ? r.Problem : r.Locked.Length > 0 ? r.Path + "\r\n" + r.Locked : r.Path;
+                if (r.Locked.Length > 0) e.CellStyle.ForeColor = Ui.Muted;
                 if (r.Problem.Length > 0) e.CellStyle.ForeColor = Ui.Bad;
                 return;
             }
@@ -280,6 +297,7 @@ namespace TianGongCadSuite {
             if (column < FixedColumns) return;
             var r = (PropCardRow)gridRow.Tag;
             if (r.Problem.Length > 0) return;   // 读失败的文件不改（见 WriteAll）
+            if (r.Locked.Length > 0) return;    // 标准件库里的共用件：整列填值、粘贴都跳过
             string field = (string)grid.Columns[column].Tag;
             r.Set(field, value);
             loading = true;
@@ -335,6 +353,11 @@ namespace TianGongCadSuite {
 
         void WriteAll(){
             if (grid.IsCurrentCellInEditMode) grid.EndEdit();
+            if (!cad.Rebind()) {
+                status.Text = "载入这张表的「" + cad.RootName + "」已经关掉了：在天工里重新打开它（设成当前文档）再点写入，表里改过的值都还在。";
+                status.ForeColor = Ui.Bad;
+                return;
+            }
             int ok = 0, total = 0, unsaved = 0;
             var problems = new List<string>();
             BeginBusy();

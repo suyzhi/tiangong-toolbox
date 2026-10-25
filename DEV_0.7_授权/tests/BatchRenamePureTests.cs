@@ -48,6 +48,8 @@ namespace TianGongCadSuite {
             Check(RenameRules.Validate(rows,disk)==1&&rows[0].Problem.Contains("已经有"),"撞上磁盘上已有的文件");
             rows[0].SetNewBase("新");rows[1].SetNewBase("新");
             Check(RenameRules.Validate(rows,disk)==2&&rows[1].Problem.Contains("同一个名字")&&rows[0].Problem.Contains("同一个名字"),"两个文件改成同一个名字（两行都标出来）");
+            rows[0].Revert();rows[1].Revert();rows[2].Locked="标准件库";rows[2].SetNewBase("改它");
+            Check(RenameRules.Validate(rows,disk)==1&&rows[2].Problem=="标准件库","标准件库里的文件改了新名字：报问题、不让改");rows[2].Revert();rows[2].Locked="";
             rows[0].SetNewBase("B");rows[1].SetNewBase("A");
             Check(RenameRules.Validate(rows,disk)==0,"互换名字可以（两步改名）");
             rows[0].SetNewBase("C");rows[1].Revert();

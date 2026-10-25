@@ -1017,7 +1017,7 @@ namespace TianGongCadSuite {
         protected override void OnActivated(EventArgs e){
             base.OnActivated(e);
             if (!paused || closing || busy || command != null) return;
-            paused = false;
+            try { var nm = assembly != null ? assembly.Name : partDoc.Name; } catch { SetStatus("打开这个窗口时的文档已经关掉了。请关掉这个窗口重新打开「批量排孔」。", Ui.Bad); return; } paused = false;
             try { StartPicking(); SetStatus("接着选。", Ui.Muted); } catch (Exception ex) { SetStatus(AutoHoleWriter.Friendly(ex), Ui.Warn); }
         }
         public void Idle(int n, out bool more){ more = false; }

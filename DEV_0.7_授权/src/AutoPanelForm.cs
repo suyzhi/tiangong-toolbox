@@ -258,6 +258,7 @@ namespace TianGongCadSuite {
 
         // append=true：这次的选择加到已读的上面（FrameReader 按实例去重，重复选不会算两次）
         internal void ReadSelection(bool append){
+            if (busy) return;   // 读型材 / 生成时泵消息，别再点进来
             var previous = selection; var previousMembers = cachedMembers; var previousPlates = plates; string previousInfo = memberInfo.Text;
             string summary = null;
             try {
@@ -268,7 +269,18 @@ namespace TianGongCadSuite {
                 List<FrameMember> members = null, newPlates = new List<FrameMember>();
                 if (next.Count > 0) {
                     UseWaitCursor = true;
-                    var read = FrameReader.ReadAll(assembly, next);
+                    // 读的时候泵消息（整个围栏要读好一阵，原来不泵消息天工被判成"未响应"）；泵消息期间窗口不许关（busy）
+                    busy = true;
+                    var tick = System.Diagnostics.Stopwatch.StartNew();
+                    FrameSelection read;
+                    try {
+                        read = FrameReader.ReadAll(assembly, next, n => {
+                            if (tick.ElapsedMilliseconds < 300) return;
+                            tick.Restart();
+                            SetStatus("正在读取型材… 已读 " + n + " 个零件", Ui.Accent);
+                            try { status.Update(); Application.DoEvents(); } catch { }
+                        });
+                    } finally { busy = false; }
                     summary = read.Summary();
                     tips.SetToolTip(memberInfo, summary + (read.Skipped.Count > 0 ? "\n跳过的零件：" + string.Join("、", read.Skipped.ToArray()) : ""));
                     if (read.Members.Count < 4) throw new ArgumentException("请至少选择围成框口的四根型材，或选择包含它们的框架子装配。");
@@ -293,6 +305,7 @@ namespace TianGongCadSuite {
         }
 
         void ClearMembers(){
+            if (busy) return;
             selection = new List<object>(); cachedMembers = null; plates = new List<FrameMember>();
             generated.Clear();
             memberInfo.Text = Hint; tips.SetToolTip(memberInfo, "");
@@ -411,7 +424,18 @@ namespace TianGongCadSuite {
                 if (pick.Count == 0) { SetStatus("先勾上要生成的框口。", Ui.Warn); return; }
                 if (outputDir.Length == 0 || !Directory.Exists(outputDir)) { if (!PickOutputDir()) return; }
                 // 生成前按当前选择重读一遍型材（几何可能在窗口开着的时候改过），框口对不上就不生成
-                var reread = FrameReader.ReadAll(assembly, selection);
+                // 重读同样要泵消息（整个围栏要读好一阵）
+                FrameSelection reread;
+                busy = true;
+                try {
+                    var rt = System.Diagnostics.Stopwatch.StartNew();
+                    reread = FrameReader.ReadAll(assembly, selection, n => {
+                        if (rt.ElapsedMilliseconds < 300) return;
+                        rt.Restart();
+                        SetStatus("生成前核对型材… 已读 " + n + " 个零件", Ui.Accent);
+                        try { status.Update(); Application.DoEvents(); } catch { }
+                    });
+                } finally { busy = false; }
                 if (reread.Members.Count < 4) throw new InvalidOperationException("型材在窗口打开期间改过（读到的型材不足 4 根）。请重新选择型材后点「读取当前选择」。");
                 cachedMembers = reread.Members; plates = reread.Plates;
                 double t = (double)thickness.Value / 1000, g = (double)gap.Value / 1000;

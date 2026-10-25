@@ -382,6 +382,9 @@ namespace TianGongCadSuite {
         // ---------------- 应用 / 撤销 ----------------
         void Apply(){
             if (busy || closing || targets.Count == 0) return;
+            // 窗口开着时文档被关掉（或关了又打开）：选好的孔全失效，原来报一句看不懂的"对象已断开"
+            try { var nm = assembly != null ? assembly.Name : partDoc.Name; }
+            catch { SetStatus("打开这个窗口时的文档已经关掉了。请关掉这个窗口，重新点「改孔型」再选孔。", Ui.Bad); return; }
             // 用户在天工里原位编辑着某个零件：只能改它，别的零件上的孔改不了（只报含糊的 COM 错误）。先说清楚
             if (assembly != null) {
                 string ef = ""; try { var ed = app.ActiveDocument as P.PartDocument; if (ed != null) ef = ed.FullName; } catch { }
@@ -563,7 +566,7 @@ namespace TianGongCadSuite {
         protected override void OnActivated(EventArgs e){
             base.OnActivated(e);
             if (!paused || closing || busy || command != null) return;
-            paused = false;
+            try { var nm = assembly != null ? assembly.Name : partDoc.Name; } catch { SetStatus("打开这个窗口时的文档已经关掉了。请关掉这个窗口，重新点「改孔型」再选孔。", Ui.Bad); return; } paused = false;
             try { StartPicking(); SetStatus("接着选。", Ui.Muted); } catch (Exception ex) { SetStatus(AutoHoleWriter.Friendly(ex), Ui.Warn); }
         }
         public void Idle(int n, out bool more){ more = false; }

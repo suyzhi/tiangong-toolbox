@@ -82,8 +82,14 @@ namespace TianGongCadSuite {
             f.Font = F9;
             f.BackColor = Bg;
             f.ForeColor = Text;
-            f.ClientSize = new Size(w, h);
-            f.MinimumSize = new Size(minW, minH);
+            // 小屏幕（1366×768 的笔记本，任务栏一占只剩 728 高）：原来窗口固定 790 高、最小 680，底部「开始打孔」那一栏落在屏幕外，
+            // 最小尺寸又不让缩。按 CAD 所在屏幕的工作区收一收（留出标题栏和边框），最小尺寸也不超过它
+            Rectangle area;
+            try { area = Screen.FromPoint(Cursor.Position).WorkingArea; } catch { area = new Rectangle(0, 0, 1920, 1040); }
+            int chromeW = 16, chromeH = 40;
+            int maxW = Math.Max(400, area.Width - chromeW - 20), maxH = Math.Max(300, area.Height - chromeH - 20);
+            f.ClientSize = new Size(Math.Min(w, maxW), Math.Min(h, maxH));
+            f.MinimumSize = new Size(Math.Min(minW, maxW + chromeW), Math.Min(minH, maxH + chromeH));
             f.FormBorderStyle = FormBorderStyle.SizableToolWindow;
             f.StartPosition = FormStartPosition.CenterParent;
             f.ShowInTaskbar = false;

@@ -49,12 +49,14 @@ namespace TianGongCadSuite {
         //     坐标是顶层装配的 —— 原来直接取 Reference.Object，拿到的是子装配自己文档里的实例，报「选择不属于当前装配」；
         //   · 整个子装配选上时，里面不是直型材的零件（多实体的标准件、铰链……）跳过并记下，不再整批失败；
         //   · 薄板（以前生成的填充板、玻璃板）放进 Plates，不当型材。
-        public static FrameSelection ReadAll(A.AssemblyDocument assembly,IEnumerable<object> selection){
+        public static FrameSelection ReadAll(A.AssemblyDocument assembly,IEnumerable<object> selection){return ReadAll(assembly,selection,null);}
+        // progress(已读几个零件)：整个围栏几百根型材（每根读边、面、三角面）要读好一阵，窗口拿它刷状态栏、泵消息
+        public static FrameSelection ReadAll(A.AssemblyDocument assembly,IEnumerable<object> selection,Action<int> progress){
             var result=new FrameSelection();var seen=new HashSet<string>();
-            foreach(var item in selection)ReadOne(assembly,item,result,seen,null);
+            foreach(var item in selection)ReadOne(assembly,item,result,seen,null,progress);
             return result;
         }
-        static void ReadOne(A.AssemblyDocument assembly,object selected,FrameSelection result,HashSet<string> seen,string source){
+        static void ReadOne(A.AssemblyDocument assembly,object selected,FrameSelection result,HashSet<string> seen,string source,Action<int> progress){
             object instance=OccurrencePick.Instance(selected);
             if(instance==null){var reference=selected as F.Reference;if(reference!=null)instance=reference.Object;}
             selected=instance??selected;
@@ -67,9 +69,10 @@ namespace TianGongCadSuite {
             if(!seen.Add(identity))return;
             if(source==null)source=OccurrencePick.TopName(selected);
             bool isAssembly=occurrence!=null?occurrence.Subassembly:sub.Subassembly;
-            if(isAssembly){foreach(A.SubOccurrence child in occurrence!=null?occurrence.SubOccurrences:sub.SubOccurrences)ReadOne(assembly,child,result,seen,source);return;}
+            if(isAssembly){foreach(A.SubOccurrence child in occurrence!=null?occurrence.SubOccurrences:sub.SubOccurrences)ReadOne(assembly,child,result,seen,source,progress);return;}
             if(result.Members.Count>=MaxMembers)throw new ArgumentException("单次最多读取 "+MaxMembers+" 根型材，请分批选取。");
             string name=occurrence!=null?occurrence.Name:sub.Name;
+            if(progress!=null){try{progress(result.Members.Count+result.Plates.Count+result.Skipped.Count+1);}catch{}}
             FrameMember member;
             try{member=ReadPart(assembly,selected,occurrence,sub);}
             catch(Exception e){

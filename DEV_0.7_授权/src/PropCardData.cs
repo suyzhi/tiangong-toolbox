@@ -13,6 +13,7 @@ namespace TianGongCadSuite {
         public string Path = "";
         public string Material = "";   // 只读显示（材料走材料库，不在这里改）
         public string Problem = "";    // 读的时候出的问题，显示在材料列旁边
+        public string Locked = "";     // 不该写的原因（标准件库 / 程序目录里的共用文件）：整列填值时跳过
         public readonly Dictionary<string, string> Original = new Dictionary<string, string>();
         public readonly Dictionary<string, string> Edited = new Dictionary<string, string>();
 

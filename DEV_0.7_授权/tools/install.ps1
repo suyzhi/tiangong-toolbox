@@ -150,9 +150,15 @@ $key.Dispose();$server.Dispose()
 # 事故经过：这条记录被清过一次（CAD 会把它重建为 AutoConnect=0），此后每一次安装都
 # "注册完成"、插件一次都没连上过。所以安装时必须把它拉回 1，并且回读确认。
 # 只改这一个值：描述名、Cookie 原样保留；**绝不删除整条记录**（删了 CAD 只重建、不加载）。
-$ndsRoot='Software\NDS\TianGong\Version 225\AddIns'
-$ndsPath=$ndsRoot+'\'+$guid
+# 天工的版本号不一定是 225（2024 版 = Version 224、新版可能是 226……）：原来写死 225，别的版本上这条记录写错了地方，
+# 正是上面说的"注册完成、插件一次都没连上"。本机有哪几个版本的键就每个都处理；一个都没有时按 225 预置。
+$ndsVersions=@()
+$tg=$reg.OpenSubKey('Software\NDS\TianGong')
+if($tg -ne $null){ $ndsVersions=@($tg.GetSubKeyNames() | Where-Object { $_ -match '^Version \d+$' }); $tg.Dispose() }
+if($ndsVersions.Count -eq 0){ $ndsVersions=@('Version 225') }
 $display='天工工具箱 '+$shownVersion
+foreach($ver in $ndsVersions){
+$ndsPath='Software\NDS\TianGong\'+$ver+'\AddIns\'+$guid
 $nds=$reg.OpenSubKey($ndsPath,$true)
 if($nds -eq $null){
     # 本机还没有这条记录（从没成功加载过）：按 CAD 自己的格式预置一份。
@@ -176,6 +182,7 @@ if($nds -ne $null){
     $now=$nds.GetValue('AutoConnect')
     $nds.Dispose()
     if("$now" -ne '1'){ throw ('加载项记录没能改成 1（当前值 ' + $now + '），CAD 不会加载本插件：' + $ndsPath) }
+}
 }
 
 # 换版本时的坑（实测）：只改 COM 注册、直接重启 CAD，CAD 有时仍加载**上一次**那份 DLL

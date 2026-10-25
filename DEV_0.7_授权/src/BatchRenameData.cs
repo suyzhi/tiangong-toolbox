@@ -13,6 +13,7 @@ namespace TianGongCadSuite {
         public string Path = "";
         public string Problem = "";          // 校验出的问题（空 = 可以改）
         public string ReadProblem = "";      // 读属性时出的问题（只影响「按属性命名」）
+        public string Locked = "";           // 不该 / 不能改名的原因（标准件库里的、只读的）：载入时查一次，改了新名字就报问题
         public RenameRow Master;             // 跟随谁（同名工程图 / .cfg）；null = 普通行
         public bool Pinned;                  // 跟随行被用户直接改过：不再跟着主行变
         public readonly Dictionary<string, string> Props = new Dictionary<string, string>();
@@ -106,7 +107,7 @@ namespace TianGongCadSuite {
             foreach (var r in rows) {
                 r.Problem = "";
                 if (!r.Changed) continue;
-                string p = CheckName(r.NewBase);
+                string p = r.Locked.Length > 0 ? r.Locked : CheckName(r.NewBase);
                 if (p.Length == 0 && r.NewPath.Length > MaxPath) p = "改完路径太长（" + r.NewPath.Length + " 个字符，最多 " + MaxPath + "）";
                 if (p.Length == 0) {
                     RenameRow other;

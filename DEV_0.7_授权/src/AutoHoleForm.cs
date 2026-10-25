@@ -1447,9 +1447,15 @@ namespace TianGongCadSuite {
                 try { status.Update(); System.Windows.Forms.Application.DoEvents(); } catch { }
             };
         }
+        // 窗口开着时装配被关掉了：关联孔检查 / 同步原来报一句看不懂的"对象已断开"
+        bool AssemblyAlive(){
+            try { var nm = assembly.Name; return true; }
+            catch { SetStatus("打开这个窗口时的装配已经关掉了。请关掉这个窗口，在装配里重新点「自动打孔」。", Ui.Bad); return false; }
+        }
         void ScanLinks(bool manual){
             if (assembly == null || closing) return;
             if (busy) return;
+            if (!AssemblyAlive()) return;
             try {
                 UseWaitCursor = true; busy = true; rescanButton.Enabled = false; syncButton.Enabled = false; run.Enabled = false;
                 var report = HoleSync.Scan(assembly, LinkPulse());
@@ -1466,6 +1472,7 @@ namespace TianGongCadSuite {
         // 一键同步：先重新查一遍（别拿着几分钟前的结果去改模型），再把错位的孔挪回去。
         void SyncLinks(){
             if (assembly == null || busy || closing) return;
+            if (!AssemblyAlive()) return;
             hadCommand = command != null;
             try {
                 busy = true; UseWaitCursor = true; syncButton.Enabled = false; run.Enabled = false;
@@ -2100,7 +2107,7 @@ namespace TianGongCadSuite {
         protected override void OnActivated(EventArgs e){
             base.OnActivated(e);
             if (!paused || closing || busy || command != null) return;
-            paused = false;
+            if (!AssemblyAlive()) return; paused = false;
             try { StartPicking(); SetStatus("接着选。", Ui.Muted); } catch (Exception ex) { SetStatus(AutoHoleWriter.Friendly(ex), Ui.Warn); }
         }
         public void Idle(int n, out bool more){ more = false; }
