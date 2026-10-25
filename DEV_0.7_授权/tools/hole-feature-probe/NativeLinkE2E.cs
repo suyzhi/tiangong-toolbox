@@ -244,7 +244,8 @@ class NativeLinkE2E {
             form.KeepLink = true;
             L("① 点 A 顶面"); Retry(delegate { form.AcceptPick(refA); }, "点 A"); Pump(5);
             L("   UI: " + form.UiSummary());
-            L("② 点 B 底面"); Retry(delegate { form.AcceptPick(refB); }, "点 B"); Pump(5);
+            // 0.9.1 起点平面的意思由页面决定：像用户一样翻到「打孔面」再点（原来靠"面上没孔就当打孔面"）
+            L("② 点 B 底面"); form.ScanFaceOnPick = false; Retry(delegate { form.AcceptPick(refB); }, "点 B"); form.ScanFaceOnPick = true; Pump(5);
             Check(form.UiSummary().IndexOf("将打 6 个孔") >= 0, "预览：将打 6 个孔");
             L("③ 开始打孔");
             var t0 = DateTime.Now;
@@ -393,7 +394,7 @@ class NativeLinkE2E {
             Retry(delegate { form.Show(); }, "显示窗口");
             Pump(10);
             Retry(delegate { form.AcceptPick(refA); }, "点 A2"); Pump(5);
-            Retry(delegate { form.AcceptPick(refB); }, "点 B2"); Pump(5);
+            form.ScanFaceOnPick = false; Retry(delegate { form.AcceptPick(refB); }, "点 B2"); form.ScanFaceOnPick = true; Pump(5);
             L("   UI: " + form.UiSummary());
             Retry(delegate { form.DrillForTest(); }, "打孔");
             Pump(10);

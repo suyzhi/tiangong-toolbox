@@ -88,9 +88,9 @@ namespace TianGongCadSuite {
             shell.AddHeader(page, remove); shell.AddHeader(page, revert);
             var stack = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = 10, AutoScroll = false };
             page.Body.Controls.Add(stack);
-            stack.Add(ToolRow(
-                Label("查找"), Box(findBox, 150), Label("替换成"), Box(replaceBox, 150), Act("替换", ApplyReplace), FieldGrid.Space(24),
-                Label("前面加"), Box(prefixBox, 110), Label("后面加"), Box(suffixBox, 110), Act("加上", ApplyAffix)));
+            // 查找替换、前后加字各占一行：原来挤在一行、不换行，窗口窄一点（1366 宽的屏幕）「前面加 / 后面加 / 加上」就被截在外面点不到
+            stack.Add(ToolRow(Label("查找"), Box(findBox, 150), Label("替换成"), Box(replaceBox, 150), Act("替换", ApplyReplace)));
+            stack.Add(ToolRow(Label("前面加"), Box(prefixBox, 150), Label("后面加"), Box(suffixBox, 150), Act("加上", ApplyAffix)));
             var tip = Ui.Muted8("{原名} 原文件名　{序号} 01、02…（{序号:3} 三位）　{属性名} 零件的自定义属性，比如 {图号}"); tip.BackColor = Ui.Bg; tip.AutoSize = true;
             stack.Add(ToolRow(Label("按模板"), Box(templateBox, 260), Act("生成", ApplyTemplate), FieldGrid.Space(12), tip));
             findBox.KeyDown += OnEnter(ApplyReplace); replaceBox.KeyDown += OnEnter(ApplyReplace);

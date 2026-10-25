@@ -195,8 +195,13 @@ namespace TianGongCadSuite {
 
                 // 4. 要动的文件都没被占用
                 var busy = new List<string>();
+                // 天工刚关掉文档时句柄会晚一点放，所以第一个占用的文件等一等（最多 1.2 秒）；之后的不再每个都等 ——
+                // 别人电脑开着几十个文件时，原来每个等 1.2 秒、期间不泵消息，天工"未响应"将近一分钟才报出来
+                bool lockWaited = false; int checkedN = 0;
                 foreach (var path in map.Keys.Concat(fixer.Parents.Select(p => p.Path)).Distinct(StringComparer.OrdinalIgnoreCase)) {
-                    string why = Locked(path);
+                    if (++checkedN % 20 == 0) pulse("检查文件有没有被占用… " + checkedN);
+                    string why = Locked(path, lockWaited ? 0 : 6);
+                    if (why.Length > 0) lockWaited = true;
                     if (why.Length > 0) busy.Add(Path.GetFileName(path) + "：" + why);
                 }
                 if (busy.Count > 0) throw new InvalidOperationException("这些文件改不了（被占用或只读）。天工里别的打开的文件在用它们？或者别人的电脑开着？\r\n" + string.Join("\r\n", busy.Take(10).ToArray()));
@@ -295,12 +300,12 @@ namespace TianGongCadSuite {
         }
 
         // 能不能独占打开（= 没人占着、不是只读）。空串 = 可以
-        static string Locked(string path){
+        static string Locked(string path, int retries){
             for (int i = 0; ; i++) {
                 try { using (new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { } return ""; }
                 catch (UnauthorizedAccessException) { return "只读或没有权限"; }
                 catch (FileNotFoundException) { return "文件不在了"; }
-                catch (IOException e) { if (i >= 6) return "被占用（" + e.Message.Trim() + "）"; System.Threading.Thread.Sleep(200); }
+                catch (IOException e) { if (i >= retries) return "被占用（" + e.Message.Trim() + "）"; System.Threading.Thread.Sleep(200); }
             }
         }
 

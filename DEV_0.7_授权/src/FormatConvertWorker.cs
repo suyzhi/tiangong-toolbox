@@ -18,7 +18,7 @@ namespace TianGongCadSuite {
                 try{
                     ConvertLog.Append(args[2],ConvertProtocol.Line("FATAL",
                         "未激活或授权已失效，转换器拒绝工作。请先在天工CAD里打开插件任意命令完成激活，"
-                        +"或在本机运行 LicenseActivate.exe 输入激活码。"));
+                        +"再回来点「开始转换」（激活工具不随安装包提供，只能在天工里激活）。"));
                     ConvertLog.Append(args[2],ConvertProtocol.Line(ConvertProtocol.Exit,"1"));
                 }catch{}
                 return 1;
@@ -81,7 +81,7 @@ namespace TianGongCadSuite {
                 try{
                     if(!TianGongCadSuite.Licensing.LicenseGate.Pass())
                         detail="未激活或授权已失效，转换器拒绝工作。请先在天工CAD里打开插件的任意命令完成激活，"
-                            +"或在本机运行 LicenseActivate.exe 输入激活码。转换器的并行进程不会弹出激活窗口。"
+                            +"再回来点「开始转换」。转换器的并行进程不会弹出激活窗口。"
                             +"（原始信息："+detail+"）";
                 }catch{}
                 try{ if(statusFile!=null)ConvertLog.Append(statusFile,ConvertProtocol.Line("FATAL",detail)); }catch{}

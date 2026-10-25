@@ -41,7 +41,8 @@ class LinkSyncE2E {
     }
     static void PickUntilAccepted(AutoHoleForm form, object sel, string what){
         for (int i = 0; i < 6; i++) {
-            Retry(delegate { form.AcceptPick(sel); }, what);
+            // 0.9.1 起点平面的意思按页面定；这个探针的步骤按"面上有孔认孔、没孔当打孔面"写的，用同一条老规则的测试缝
+            Retry(delegate { form.AcceptPreselectedForTest(sel); }, what);
             Pump(8);
             string ui = form.UiSummary();
             if (ui.IndexOf("0x80010001") < 0 && ui.IndexOf("拒绝接收呼叫") < 0) return;

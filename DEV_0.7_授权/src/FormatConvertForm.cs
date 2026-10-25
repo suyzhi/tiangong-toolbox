@@ -120,7 +120,7 @@ namespace TianGongCadSuite {
             autoWorkers.CheckedChanged+=delegate{ workers.Enabled=!autoWorkers.Checked; };workers.Enabled=false;
             opts.Add("并行进程",autoWorkers,workers);
             opts.Height=opts.PreferredHeight;
-            estimate.AutoSize=false;estimate.ForeColor=Ui.Muted;estimate.Font=Ui.F8;estimate.BackColor=Ui.Bg;estimate.Height=40;
+            estimate.AutoSize=false;estimate.ForeColor=Ui.Muted;estimate.Font=Ui.F8;estimate.BackColor=Ui.Bg;estimate.Height=64;   // 40 高时窗口一窄，第三行「转换器完成」被截掉
             estimate.Text="并行>1 为实验特性：实测仅快约 1.2 倍，且个别零件可能保存失败。\r\n输出格式：装配 .asm、零件 .par、钣金 .psm、工程图 .dft；转换由天工CAD自带的 SolidWorks / STEP 转换器完成。";
             outStack.Add(outRow);outStack.Add(opts);outStack.Add(estimate);
 

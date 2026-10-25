@@ -157,7 +157,7 @@ namespace TianGongCadSuite {
             fstack.Add(faceCard);
 
             // ---- ② 排布：左参数，右示意 ----
-            var lcols = new SplitColumns(0.56f) { Gap = 20 };
+            var lcols = new SplitColumns(0.6f) { Gap = 20 };   // 0.56 时窗口一缩小，「末端 … mm」的单位被截掉
             var lb = new Panel { BackColor = Ui.Bg };
             layoutGrid.BackColor = Ui.Bg;
             lb.Controls.Add(layoutGrid);
