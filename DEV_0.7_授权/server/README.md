@@ -13,6 +13,17 @@
 > 另外**强烈建议**在 Caddyfile 里把 `/admin` 限制成只有你自己的 IP 能访问（`deploy/Caddyfile` 里有现成的两行，去掉注释即可）。
 > 不想让服务器签发，就不给 `--signing-key`、改用 `--admin`：看板照常管理，签发继续用本机的管理员工具。
 
+## 现网部署（2026-10-25）
+
+- 地址：`https://license.suyzhi.icu`（VPS 69.63.223.0，Debian 12）。443 被 s-ui 占着、80/8443 被别的项目的 Caddy 占着，
+  所以**不开端口**：服务只听 `127.0.0.1:8750`，经**独立的 Cloudflare Tunnel `tg-license`**（`/etc/cloudflared/tg-license.yml`，
+  服务 `cloudflared-tg-license`）对外；VPS 上原有的 `cloudflared`（vpn-cdn / cdn.suyzhi.icu）、s-ui、docker 都没动。
+- 服务：`tg-license.service`，用户 `tglicense`，目录 `/opt/tg-license`，用系统自带的 python3 + python3-cryptography（Debian 包）。
+- 回执私钥 `/opt/tg-license/server.key`（只在服务器上）；插件公钥槽已拷回 `src/License/LicenseServerSlot.cs`。
+- ⚠ `master.pub.json` 暂时是测试签发公钥（testmaster），只为了先把服务和隧道跑通；定了正式签发密钥后替换。
+- 看板（/admin）还没开：要先 `set-password`，再在服务里加 `--admin` 或 `--signing-key`。
+- 注意：从 Windows 连续开很多 SSH 连接偶尔会被重置（fail2ban / MaxStartups），隔几秒重试即可。
+
 ## 上线清单（2026-10-25，0.9.1 合并后）
 
 不需要服务器的部分已经做完：联网激活合进 0.9.1、延长 / 缩短有效期（服务端 + 看板 + 插件）、本机真 HTTP 联调（`PanelTests --license-live`）。
