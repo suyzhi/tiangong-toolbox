@@ -3,6 +3,7 @@
 起一个真实 HTTP 服务，用临时生成的"管理员签发密钥"签激活码，按插件的协议走一遍。
 """
 import base64
+import io
 import json
 import os
 import secrets
@@ -11,6 +12,7 @@ import tempfile
 import threading
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import ThreadingHTTPServer
 
@@ -369,6 +371,143 @@ class AdminTest(unittest.TestCase):
             self.assertGreater(len(rows), 0)
             self.assertTrue(all(r["code_text"] and r["source"] == "import" for r in rows))
             ledger.db.close()
+
+
+
+def make_installer_zip(extra=None, missing=None):
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for name in ("payload/TianGongCadSuite.dll", "tools/install.ps1", "安装.cmd"):
+            if name != missing:
+                z.writestr(name, b"x" * 100)
+        for name, data in (extra or {}).items():
+            z.writestr(name, data)
+    return buf.getvalue()
+
+
+class UpdateTest(unittest.TestCase):
+    """版本发布：签名清单、下载、看板上传、各种不合格的安装包"""
+
+    @classmethod
+    def setUpClass(cls):
+        import tg_license_admin
+        import tg_license_update
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.master = ec.generate_private_key(ec.SECP256R1())
+        cls.server_key = ec.generate_private_key(ec.SECP256R1())
+        cls.ledger = srv.Ledger(os.path.join(cls.tmp.name, "u.db"))
+        cls.ledger.set_setting("admin_password", tg_license_admin.hash_password("pw for test", rounds=1000))
+        cls.service = srv.Service(cls.ledger, cls.master.public_key(), cls.server_key)
+        cls.service.updates = tg_license_update.Updates(os.path.join(cls.tmp.name, "updates"), cls.server_key, srv.sign_p1363)
+        cls.admin = tg_license_admin.AdminWeb(cls.service, None, secure_cookie=False)
+        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), srv.make_handler(cls.service, cls.admin))
+        cls.base = "http://127.0.0.1:%d" % cls.httpd.server_address[1]
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        cls.ledger.db.close()
+        cls.tmp.cleanup()
+
+    def get(self, path):
+        try:
+            with urllib.request.urlopen(self.base + path) as r:
+                return r.status, r.read()
+        except urllib.error.HTTPError as e:
+            with e:
+                return e.code, e.read()
+
+    def test_publish_sign_download(self):
+        import hashlib
+        import tg_license_update
+        empty = tg_license_update.Updates(os.path.join(self.tmp.name, "empty"), self.server_key, srv.sign_p1363)
+        self.assertIsNone(empty.latest())                        # 还没发布过
+        data = make_installer_zip()
+        m = self.service.updates.publish(data, "天工工具箱_DEV0.9.2_安装包_20261030.zip", None, "自动打孔：修复 A\n修复 B")
+        self.assertEqual(m["version"], "0.9.2")                  # 从文件名认出版本
+        code, body = self.get("/api/v1/update")
+        self.assertEqual(code, 200)
+        signed = json.loads(body)
+        raw = base64.b64decode(signed["manifest"])
+        self.assertTrue(srv.verify_p1363(self.server_key.public_key(), raw, base64.b64decode(signed["sig"])))
+        manifest = json.loads(raw.decode("utf-8"))
+        self.assertEqual((manifest["kind"], manifest["version"], manifest["size"]), ("update", "0.9.2", len(data)))
+        self.assertEqual(manifest["sha256"], hashlib.sha256(data).hexdigest())
+        # 中文文件名下载（URL 编码）
+        code, got = self.get("/api/v1/update/file/" + urllib.parse.quote(manifest["file"]))
+        self.assertEqual((code, got), (200, data))
+        self.assertEqual(self.get("/api/v1/update/file/..%2Fu.db")[0], 404)
+        self.assertEqual(self.get("/api/v1/update/file/latest.json")[0], 404)
+
+    def test_rejects_bad_packages(self):
+        u = self.service.updates
+        with self.assertRaises(ValueError):
+            u.publish(b"not a zip", "x_DEV1.0.0.zip", None, "")
+        with self.assertRaises(ValueError):
+            u.publish(make_installer_zip(missing="tools/install.ps1"), "x_DEV1.0.0.zip", None, "")
+        # 带路径的文件名只取文件名部分，落在 updates 目录里（不会写到外面）
+        m = u.publish(make_installer_zip(), "../evil.zip", "0.0.1", "")
+        self.assertEqual(m["file"], "evil.zip")
+        self.assertTrue(os.path.isfile(os.path.join(u.folder, "evil.zip")))
+        with self.assertRaises(ValueError):
+            u.publish(make_installer_zip(), "evil name;rm.zip", "1.0.0", "")
+        with self.assertRaises(ValueError):
+            u.publish(make_installer_zip(), "noversion.zip", None, "")
+        with self.assertRaises(ValueError):
+            u.publish(make_installer_zip(extra={"../../evil.txt": b"x"}), "x_DEV1.0.0.zip", None, "")
+
+    def test_admin_upload(self):
+        # 登录
+        req = urllib.request.Request(self.base + "/admin/api/login", data=json.dumps({"password": "pw for test"}).encode(),
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req) as r:
+            cookie = r.headers["Set-Cookie"].split(";")[0]
+            csrf = json.loads(r.read())["csrf"]
+        data = make_installer_zip()
+        q = "?name=" + urllib.parse.quote("天工工具箱_DEV0.9.3_安装包_20261101.zip") + "&version=0.9.3&notes=" + urllib.parse.quote("看板发布")
+
+        def upload(token):
+            req = urllib.request.Request(self.base + "/admin/api/updates" + q, data=data, method="POST",
+                                         headers={"Content-Type": "application/zip", "Cookie": cookie, "X-TG-CSRF": token})
+            try:
+                with urllib.request.urlopen(req) as r:
+                    return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                with e:
+                    return e.code, json.loads(e.read())
+        self.assertEqual(upload("wrong")[0], 403)               # 没带对 CSRF
+        code, state = upload(csrf)
+        self.assertEqual(code, 200, state)
+        self.assertEqual((state["latest"]["version"], state["latest"]["notes"]), ("0.9.3", "看板发布"))
+        self.assertEqual(state["history"][0]["version"], "0.9.3")
+        # 没登录不能发布
+        req = urllib.request.Request(self.base + "/admin/api/updates" + q, data=data, method="POST",
+                                     headers={"Content-Type": "application/zip"})
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(req)
+        self.assertEqual(cm.exception.code, 401)
+        cm.exception.close()
+
+    def test_cli_publish(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            key = os.path.join(tmp, "server.key")
+            from cryptography.hazmat.primitives import serialization
+            k = ec.generate_private_key(ec.SECP256R1())
+            with open(key, "wb") as f:
+                f.write(k.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+            z = os.path.join(tmp, "天工工具箱_DEV1.2.3_安装包_20270101.zip")
+            with open(z, "wb") as f:
+                f.write(make_installer_zip())
+            upd = os.path.join(tmp, "updates")
+            srv.main(["publish", z, "--notes", "命令行发布", "--updates", upd, "--key", key])
+            with open(os.path.join(upd, "latest.json"), encoding="utf-8") as f:
+                signed = json.load(f)
+            raw = base64.b64decode(signed["manifest"])
+            self.assertTrue(srv.verify_p1363(k.public_key(), raw, base64.b64decode(signed["sig"])))
+            self.assertEqual(json.loads(raw)["version"], "1.2.3")
 
 
 if __name__ == "__main__":

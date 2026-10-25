@@ -117,6 +117,7 @@
       $("app").hidden = false;
       renderHeader();
       renderPlans();
+      loadReleases();
       return load(true);
     });
   }
@@ -217,6 +218,51 @@
       renderRows(animate);
     });
   }
+
+  // ---------- 版本发布 ----------
+
+  function loadReleases() {
+    return api("GET", "/admin/api/updates").then(renderReleases).catch(function (e) { toast(e.message, true); });
+  }
+
+  function renderReleases(data) {
+    var now = $("release-now"), list = $("release-history");
+    clear(now); clear(list);
+    $("release-form").hidden = !data.enabled;
+    if (!data.enabled) { append(now, h("p", { class: "hint", text: "服务器没有配置版本发布目录（serve --updates）。" })); return; }
+    var m = data.latest;
+    if (!m) append(now, h("p", { class: "hint", text: "还没有发布过版本。" }));
+    else append(now, [h("div", { class: "ver", text: m.version }),
+      h("div", { class: "sub", text: m.date + " · " + (m.size / 1048576).toFixed(1) + " MB · " + m.file }),
+      m.notes ? h("pre", { text: m.notes }) : null]);
+    (data.history || []).forEach(function (r) {
+      append(list, h("li", null, h("span", { class: "v", text: r.version }), (r.at || "") + (r.replaced ? "（替换 " + r.replaced + "）" : "")));
+    });
+  }
+
+  $("release-file").addEventListener("change", function () {
+    var f = this.files[0], m = f && /DEV(\d+\.\d+\.\d+)/.exec(f.name);
+    if (m && !$("release-version").value) $("release-version").value = m[1];
+  });
+
+  $("release-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var f = $("release-file").files[0], ver = $("release-version").value.trim(), btn = $("release-btn");
+    if (!f) return;
+    if (!confirm("发布 " + ver + "？\n大家下次打开天工就会收到更新提示。")) return;
+    btn.disabled = true; btn.classList.add("busy");
+    var q = "?name=" + encodeURIComponent(f.name) + "&version=" + encodeURIComponent(ver) + "&notes=" + encodeURIComponent($("release-notes").value);
+    fetch("/admin/api/updates" + q, { method: "POST", credentials: "same-origin",
+      headers: { "Content-Type": "application/zip", "X-TG-CSRF": state.csrf || "" }, body: f })
+      .then(function (res) {
+        return res.json().catch(function () { return {}; }).then(function (data) {
+          if (!res.ok) throw new Error(data.error || ("发布失败（" + res.status + "）"));
+          renderReleases(data); toast("已发布 " + ver); $("release-form").reset();
+        });
+      })
+      .catch(function (e) { toast(e.message, true); })
+      .then(function () { btn.disabled = false; btn.classList.remove("busy"); });
+  });
 
   // 数字从旧值滚到新值
   var shown = {};
@@ -321,7 +367,7 @@
     if (ev.status === "ok") return { cls: "ok", text: { bound: "首次绑定", already: "正常", rebound: "换机转入" }[ev.result] || "通过" };
     return { cls: "bad", text: { moved: "拒绝：已转到别的机器", quota: "拒绝：换机次数用完", revoked: "拒绝：已作废", expired: "拒绝：已过期" }[ev.status] || ev.status };
   }
-  var AUDIT_TEXT = { issue: "签发", revoke: "作废", unrevoke: "恢复", unbind: "解绑", quota: "调整换机次数", meta: "修改客户/备注", extend: "调整有效期" };
+  var AUDIT_TEXT = { issue: "签发", revoke: "作废", unrevoke: "恢复", unbind: "解绑", quota: "调整换机次数", meta: "修改客户/备注", extend: "调整有效期", publish: "发布版本" };
 
   function openDrawer(id) {
     api("GET", "/admin/api/codes/" + id).then(renderDrawer, function (e) { toast(e.message, true); });

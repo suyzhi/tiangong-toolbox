@@ -95,6 +95,9 @@ class AdminWeb:
             sent = headers.get("X-TG-CSRF", "")
             if not hmac.compare_digest(sent.encode(), session["csrf"].encode()):
                 return self.json(403, {"error": "页面已过期，请刷新后重试"})
+            if route == "/admin/api/updates":
+                # 发布新版本：请求体就是安装包 zip 原文（不是 JSON），文件名 / 版本 / 说明放在查询参数里
+                return self.publish_update(parse_qs(url.query), body, ip)
             try:
                 data = json.loads(body.decode("utf-8") or "{}")
             except (ValueError, UnicodeDecodeError):
@@ -114,6 +117,8 @@ class AdminWeb:
         if method == "GET" and route == "/admin/api/events":
             limit = min(int((query.get("limit") or ["100"])[0] or 100), 500)
             return self.json(200, {"events": self.events(None, limit)})
+        if method == "GET" and route == "/admin/api/updates":
+            return self.json(200, self.updates_state())
         if method == "POST" and route == "/admin/api/issue":
             return self.issue(data, ip)
         m = ID_PATH.match(route)
@@ -126,6 +131,26 @@ class AdminWeb:
             if method == "POST" and action:
                 return self.act(cid, action, data, ip)
         return self.json(404, {"error": "not found"})
+
+    # ------------------------------------------------------------ 版本发布
+
+    def updates_state(self):
+        u = self.service.updates
+        if u is None:
+            return {"enabled": False, "latest": None, "history": []}
+        return {"enabled": True, "latest": u.latest_manifest(), "history": u.history(10)}
+
+    def publish_update(self, query, body, ip):
+        u = self.service.updates
+        if u is None:
+            return self.json(400, {"error": "服务器没有配置版本发布目录"})
+        first = lambda k: (query.get(k) or [""])[0]
+        try:
+            m = u.publish(body, first("name"), first("version"), first("notes"), by=ip)
+        except ValueError as e:
+            return self.json(400, {"error": str(e)})
+        self.ledger.audit(ip, "publish", None, "%s %s" % (m["version"], m["file"]))
+        return self.json(200, self.updates_state())
 
     # ------------------------------------------------------------ 响应
 

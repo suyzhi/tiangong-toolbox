@@ -45,7 +45,8 @@ $shared=@(
     ('/reference:' + $interop),
     '/reference:System.Web.Extensions.dll','/reference:System.Data.dll',
     '/reference:System.Windows.Forms.dll','/reference:System.Drawing.dll',
-    '/reference:Microsoft.CSharp.dll','/reference:System.Management.dll'
+    '/reference:Microsoft.CSharp.dll','/reference:System.Management.dll',
+    '/reference:System.IO.Compression.dll','/reference:System.IO.Compression.FileSystem.dll'
 )
 if($DevBuild){$shared+='/define:TG_DEV_BUILD'}
 & $csc ($shared + $sources)

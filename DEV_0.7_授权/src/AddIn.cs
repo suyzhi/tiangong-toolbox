@@ -22,13 +22,15 @@ namespace TianGongCadSuite {
             Guard.Install();
             try{addin=instance;context=new ToolContext((F.Application)application);registry=ModuleCatalog.Create(context);
                 // GuiVersion 变了 CAD 才会按新的组名重建功能区按钮（firstTime=true）；改组名/增删按钮时要跟着加一。
-                addin.Description=Product.Name+" "+Product.Version;addin.GuiVersion=45;addin.Visible=true;
+                addin.Description=Product.Name+" "+Product.Version;addin.GuiVersion=46;   /* 46：0.9.1 加「检查更新」按钮 */addin.Visible=true;
                 events=new Connection(addin.AddInEvents,typeof(F.ISEAddInEvents),this);
                 // 按命令 ID 取（不要用下标：命令 1/4 已从功能区下线，下标会错位）
 diagnostics=new Diagnostics(context.Application,()=>Run(registry.Find(1)),()=>Run(registry.Find(2)),()=>Run(registry.Find(3)));addin.Object=diagnostics;
                 diagnostics.QueryCommand=id=>{int flags=0,bitmap=0;string text;OnCommandUpdateUI(id,ref flags,out text,ref bitmap);return flags;};
                 diagnostics.GetNativeId=id=>registry.NativeId(id);
             }catch(Exception e){Log.Write("Connect",e);OnDisconnection(default(F.SeDisconnectMode));throw;}
+            // 自动更新：后台问一次有没有新版本（不挡 CAD 启动；查到了等用户点命令时再提示）
+            try{AutoUpdate.StartBackgroundCheck();}catch(Exception e){Log.Write("UpdateStart",e);}
         }
         public void OnConnectToEnvironment(string category,object environment,bool firstTime){
             if(!SupportedEnvironment(category))return;
@@ -43,8 +45,11 @@ diagnostics=new Diagnostics(context.Application,()=>Run(registry.Find(1)),()=>Ru
         }
         static bool SupportedEnvironment(string category){foreach(string id in new[]{AssemblyCategory,TGSDK.CATID.TGPart,TGSDK.CATID.TGDraft,TGSDK.CATID.TGSheetMetal,TGSDK.CATID.TGDMPart,TGSDK.CATID.TGDMSheetMetal})if(string.Equals(category.Trim('{','}'),id.Trim('{','}'),StringComparison.OrdinalIgnoreCase))return true;return false;}
         void Run(ToolCommand c){if(c==null)return;try{
-            // 命令入口栅栏：未激活、过期、换机器、时间回调或环境异常都在此拦截。
-            if(!TianGongCadSuite.Licensing.LicenseGate.EnsureInteractive(context==null?null:new CadOwner(context.Application.ActiveFramehWnd)))return;
+            var owner=context==null?null:new CadOwner(context.Application.ActiveFramehWnd);
+            // 有新版本：先提示一次（每次开天工最多一次；「稍后提醒」一天内不再提示）。提示完照常执行命令
+            if(c.Id!=UpdateModule.CommandId){try{AutoUpdate.PromptIfDue(owner);}catch(Exception e){Log.Write("UpdatePrompt",e);}}
+            // 命令入口栅栏：未激活、过期、换机器、时间回调或环境异常都在此拦截。「检查更新」不拦（授权出问题时也要能装新版本）
+            if(c.Id!=UpdateModule.CommandId&&!TianGongCadSuite.Licensing.LicenseGate.EnsureInteractive(owner))return;
             if(!c.CanExecute())throw new InvalidOperationException("请先打开适用的 CAD 文件。");c.Execute();}catch(Exception e){Log.Write(c.Title,e);MessageBox.Show(e.Message,"天工工具箱",MessageBoxButtons.OK,MessageBoxIcon.Error);}}
         public void OnCommand(int id){if(diagnostics!=null)diagnostics.LastCommand=id;if(registry!=null)Run(registry.Find(id));}
         public void OnCommandHelp(int id,int frame,int help){var c=registry==null?null:registry.Find(id);if(c!=null)MessageBox.Show(c.Help,c.Title);}

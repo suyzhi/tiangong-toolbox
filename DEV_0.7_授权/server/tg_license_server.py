@@ -34,11 +34,14 @@ import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import unquote
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature, encode_dss_signature
+
+from tg_license_update import MAX_ZIP as UPDATE_MAX_ZIP, Updates
 
 ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
 EPOCH = datetime(2020, 1, 1, tzinfo=timezone.utc).timestamp()
@@ -475,6 +478,7 @@ class Service:
         self.hits = defaultdict(deque)
         self.hits_lock = threading.Lock()
         self.clock = time.time  # 测试可替换
+        self.updates = None     # 版本发布（tg_license_update.Updates），serve 时挂上
 
     def allow(self, ip):
         now = time.monotonic()
@@ -569,7 +573,9 @@ def make_handler(service, admin=None):
                     length = int(self.headers.get("Content-Length", "0"))
                 except ValueError:
                     length = -1
-                if length < 0 or length > MAX_BODY * 4:
+                # 发布新版本（看板上传安装包）放宽到安装包的上限，其余管理请求仍是小 JSON
+                limit = UPDATE_MAX_ZIP if self.path.split("?")[0] == "/admin/api/updates" else MAX_BODY * 4
+                if length < 0 or length > limit:
                     return self.reply(413, {"error": "请求体大小不对"})
                 body = self.rfile.read(length)
             try:
@@ -584,7 +590,32 @@ def make_handler(service, admin=None):
                 return self.to_admin("GET")
             if self.path == "/api/v1/health":
                 return self.reply(200, {"ok": True, "day": day_offset(service.clock())})
+            if self.path == "/api/v1/update" or self.path.startswith("/api/v1/update?"):
+                # 插件问「有没有新版本」：回签过名的清单（插件自己比版本号），没发布过回 404
+                signed = service.updates.latest() if service.updates else None
+                if not signed:
+                    return self.reply(404, {"error": "还没有发布版本"})
+                return self.reply(200, signed)
+            if self.path.startswith("/api/v1/update/file/"):
+                return self.send_update_file(unquote(self.path[len("/api/v1/update/file/"):].split("?")[0]))
             self.reply(404, {"error": "not found"})
+
+        def send_update_file(self, name):
+            path = service.updates.file_path(name) if service.updates else None
+            if path is None:
+                return self.reply(404, {"error": "没有这个安装包"})
+            size = os.path.getsize(path)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Length", str(size))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            with open(path, "rb") as f:
+                while True:
+                    chunk = f.read(1 << 16)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
 
         def do_POST(self):
             if self.path.startswith("/admin/"):
@@ -658,6 +689,7 @@ def cmd_serve(a):
     ledger = Ledger(a.db, a.default_quota)
     master = load_master(a.master)
     service = Service(ledger, master, load_server_key(a.key), a.trust_proxy, a.rate)
+    service.updates = Updates(a.updates, service.server_key, sign_p1363)
     admin = None
     if a.signing_key or a.admin:
         import tg_license_admin
@@ -854,6 +886,28 @@ def cmd_extend(a):
     print("客户的机器下次联网复核（约 1 天内；到期当天打开插件会立刻复核）就按新到期日算，不用换码")
 
 
+def cmd_publish(a):
+    """在服务器上发布一个版本（安装包已经传到服务器上时用；平时用看板「版本发布」或本机 tools/publish-update.ps1）"""
+    notes = a.notes or ""
+    if a.notes_file:
+        with open(a.notes_file, encoding="utf-8-sig") as f:
+            notes = f.read()
+    with open(a.zip, "rb") as f:
+        data = f.read()
+    updates = Updates(a.updates, load_server_key(a.key), sign_p1363)
+    try:
+        m = updates.publish(data, os.path.basename(a.zip), a.version, notes, by="cli")
+    except ValueError as e:
+        sys.exit("发布失败：" + str(e))
+    print("已发布 %s（%s，%.1f MB，sha256 %s…）。插件下次启动后检查更新就会提示。" % (m["version"], m["file"], m["size"] / 1048576.0, m["sha256"][:12]))
+
+
+def cmd_releases(a):
+    updates = Updates(a.updates, None, None)
+    for row in updates.history(a.limit):
+        print("%s  %-8s %s  %s" % (row.get("at"), row.get("version"), row.get("file"), (row.get("notes") or "").splitlines()[0][:60] if row.get("notes") else ""))
+
+
 def cmd_events(a):
     ledger = open_ledger(a)
     for ev in ledger.db.execute("SELECT * FROM events ORDER BY id DESC LIMIT ?", (a.limit,)):
@@ -909,6 +963,7 @@ def main(argv=None):
     s.add_argument("--admin", action="store_true", help="只开看板（管理、不签发），不需要签发私钥")
     s.add_argument("--max-issue-per-day", type=int, default=50, help="网页每天最多签发多少个码（防口令泄露后被刷）")
     s.add_argument("--insecure-cookie", action="store_true", help="本机 http 调试用：会话 Cookie 不加 Secure")
+    s.add_argument("--updates", default="updates", help="版本发布目录（安装包 + 签名清单）")
     s.set_defaults(func=cmd_serve)
 
     sub.add_parser("list", help="列出所有码").set_defaults(func=cmd_list)
@@ -935,6 +990,18 @@ def main(argv=None):
     s.add_argument("days", type=int, nargs="?", help="延长天数，负数 = 缩短")
     s.add_argument("--to", help="直接改到这一天到期（YYYY-MM-DD）")
     s.set_defaults(func=cmd_extend)
+    s = sub.add_parser("publish", help="发布新版本：插件启动后会提示用户更新")
+    s.add_argument("zip", help="make-installer.ps1 打出来的安装包 zip")
+    s.add_argument("--version", help="版本号（默认从文件名里的 DEV0.9.2 认）")
+    s.add_argument("--notes", help="更新说明（显示给用户）")
+    s.add_argument("--notes-file", help="更新说明文件（UTF-8）")
+    s.add_argument("--updates", default="updates")
+    s.add_argument("--key", default="server.key", help="服务端回执私钥（清单用它签名）")
+    s.set_defaults(func=cmd_publish)
+    s = sub.add_parser("releases", help="发布记录")
+    s.add_argument("--updates", default="updates")
+    s.add_argument("--limit", type=int, default=20)
+    s.set_defaults(func=cmd_releases)
     s = sub.add_parser("events", help="最近的激活/复核记录")
     s.add_argument("--limit", type=int, default=50)
     s.set_defaults(func=cmd_events)
