@@ -46,6 +46,7 @@ namespace TianGongCadSuite {
         // 当前文档涉及的文件（同属性卡：装配逐层去重 / 工程图 + 它引用的模型 / 零件自己）
         public readonly List<string> SkippedSubs = new List<string>();
         string rootPath = "";   // 收集时的当前文档：它把整棵装配树都加载着，改名前一定要关
+        string activePath = ""; // 点「改名」时的当前文档：改完最后重新打开它，用户回来看到的还是它
         public List<string> Collect(out string source){
             var cad = new PropCardCad(app);
             var list = cad.Collect(out source);
@@ -138,6 +139,19 @@ namespace TianGongCadSuite {
                     foreach (var f in Files(folder, "*.dft")) consider(f);
                     foreach (var f in Files(folder, "*.asm")) consider(f);
                 }
+                // 工程图常放在旁边的文件夹里（「项目\工程图\」「…加工件清单\」）：原来只查零件所在的文件夹，那些图改完名就断了。
+                // 再查上一级文件夹往下两层的工程图（先按字节初筛，真链着的才交给设计管理器）；有上限，超了在结果里说
+                var extraBudget = Stopwatch.StartNew(); int extra = 0; bool cut = false;
+                foreach (var root in changed.Select(r => Path.GetDirectoryName(r.Folder.TrimEnd('\\')) ?? "").Where(d => d.Length > 3).Distinct(StringComparer.OrdinalIgnoreCase)) {
+                    pulse("查找别的文件夹里引用这些文件的工程图…　" + root);
+                    foreach (var f in DraftsUnder(root, 2)) {
+                        if (extra >= 400 || extraBudget.ElapsedMilliseconds > 6000) { cut = true; break; }
+                        if (seen.Contains(Full(f))) continue;
+                        extra++; consider(f);
+                    }
+                    if (cut) break;
+                }
+                if (cut) result.Warnings.Add("上一级文件夹里的工程图太多，没有全部查完（查了 " + extra + " 张）：别处的工程图要是也引用了这些文件，用「添加文件…」把它加进表里一起改");
             }
             result.FilterMs = sw.ElapsedMilliseconds;
             Log.Write("RenameFilter", "候选 " + candidates.Count + " 个，初筛排除 " + result.Skipped + " 个，" + sw.ElapsedMilliseconds + " ms");
@@ -147,6 +161,8 @@ namespace TianGongCadSuite {
             var touched = new HashSet<string>(map.Keys, StringComparer.OrdinalIgnoreCase);
             foreach (var c in candidates) touched.Add(c);
             // 当前文档（装配）把整棵树都加载着；别的打开着的文档只关真用到的。没关、又占着文件的，第 4 步会查出来
+            activePath = "";
+            try { activePath = Full(FullName(app.ActiveDocument)); } catch { }
             var toClose = OpenDocuments().Where(d => touched.Contains(d.Key) || string.Equals(d.Key, rootPath, StringComparison.OrdinalIgnoreCase)).ToList();
             var dirty = toClose.Where(d => Dirty(d.Value)).Select(d => "　" + Path.GetFileName(d.Key)).ToArray();
             if (confirm != null && !confirm(string.Join("\r\n", toClose.Select(d => "　" + Path.GetFileName(d.Key)).ToArray()), string.Join("\r\n", dirty))) { result.Error = "已取消"; return result; }
@@ -289,7 +305,10 @@ namespace TianGongCadSuite {
         }
 
         void Reopen(List<string> closed, Dictionary<string, string> map, Result result){
-            foreach (var path in closed) {
+            // 改名前用户正在看的那个文档最后打开：最后打开的就是当前窗口。原来按文档顺序重开，
+            // 改完名用户面前常常是一张工程图，而不是刚才在改的装配
+            var order = closed.OrderBy(p => string.Equals(p, activePath, StringComparison.OrdinalIgnoreCase) ? 1 : 0).ToList();
+            foreach (var path in order) {
                 string target = path, mapped;
                 if (map != null && map.TryGetValue(path, out mapped)) target = mapped;
                 try { app.Documents.Open(target); result.Reopened.Add(target); }
@@ -318,6 +337,18 @@ namespace TianGongCadSuite {
         static void Late(object o, string name, params object[] args){ o.GetType().InvokeMember(name, BindingFlags.InvokeMethod, null, o, args); }
 
         void Idle(){ for (int i = 0; i < 3; i++) { try { app.DoIdle(); } catch { } } }
+
+        // folder 下（含 depth 层子文件夹）的工程图；读不了的文件夹跳过
+        static IEnumerable<string> DraftsUnder(string folder, int depth){
+            foreach (var f in Files(folder, "*.dft")) yield return f;
+            if (depth <= 0) yield break;
+            string[] subs;
+            try { subs = Directory.GetDirectories(folder); } catch { yield break; }
+            foreach (var d in subs) {
+                try { if ((File.GetAttributes(d) & (FileAttributes.ReparsePoint | FileAttributes.Hidden | FileAttributes.System)) != 0) continue; } catch { continue; }
+                foreach (var f in DraftsUnder(d, depth - 1)) yield return f;
+            }
+        }
 
         static IEnumerable<string> Files(string folder, string pattern){
             try { return Directory.GetFiles(folder, pattern); } catch { return new string[0]; }

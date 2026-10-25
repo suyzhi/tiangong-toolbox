@@ -996,9 +996,13 @@ namespace TianGongCadSuite {
         // 别的命令接管了鼠标：一般就关窗口（和原来一样）。但如果是我们自己点「改孔型…」开的窗口接管的，
         // 这个窗口说好了要留着（参考孔、规格都还在）—— 原来照样被关掉。现在只是暂停选择，用户回到这个窗口时自动接着选
         bool handingOver, paused;
+        bool HasPicks { get { return target != null || (lastUndo != null && !lastUndo.IsEmpty); } }
         public void Terminate(){
             if (closing || busy) return;
             if (handingOver) { handingOver = false; paused = true; BeginInvoke((Action)(() => { StopCommand(); SetStatus("选择已暂停（改孔型窗口在用鼠标）。回到这个窗口点一下就接着选。", Ui.Muted); })); return; }
+            // 用户在天工里点了别的命令（选择工具、测量、隐藏零件……）：原来窗口直接关掉，选好的参考孔、打孔面全丢，还得从头点。
+            // 已经选了东西就只暂停选择、窗口留着，回到窗口点一下接着选；什么都没选才照旧关掉
+            if (HasPicks) { paused = true; BeginInvoke((Action)(() => { StopCommand(); SetStatus("天工里开始了别的命令，选择已暂停（已选的都还在）。回到这个窗口点一下就接着选。", Ui.Muted); })); return; }
             BeginInvoke((Action)(() => Close()));
         }
         protected override void OnActivated(EventArgs e){

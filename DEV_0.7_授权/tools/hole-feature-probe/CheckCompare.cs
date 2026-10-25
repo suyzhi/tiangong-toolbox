@@ -31,6 +31,7 @@ class CheckCompare {
             var bodies = AutoHoleWriter.OccurrenceBodies.Build(parts);
             var names = parts.Select(p => p.Name).Distinct().ToList();
             var issues = HoleCheck.Run(holes, null, true, names, bodies, shafts);
+            try { typeof(AutoHoleCheckForm).GetMethod("MarkFailedFeatures").Invoke(null, new object[]{ issues, parts }); } catch { }   // 0.10.1 起窗口里会标"孔特征出错"，旧构建没有这个方法
             L("用时 " + (DateTime.Now - t0).TotalSeconds.ToString("0.0") + "s　零件 " + parts.Count + "　孔 " + holes.Count + "　凸台 " + shafts.Count + "　警告 " + warnings.Count);
             foreach (var g in issues.GroupBy(i => i.KindName)) L("  " + g.Key + "：" + g.Count());
             foreach (var it in issues.Where(i => i.Kind != HoleIssueKind.Unpaired).OrderBy(i => i.Message))

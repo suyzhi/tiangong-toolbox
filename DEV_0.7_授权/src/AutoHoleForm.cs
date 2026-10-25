@@ -788,8 +788,17 @@ namespace TianGongCadSuite {
         public void PreloadReferences(IList<HoleRecord> holes, string missingPart){
             if (holes == null || holes.Count == 0) return;
             int added = 0;
-            foreach (var byPart in holes.GroupBy(h => h.PartName)) {
-                var list = byPart.ToList();
+            // 按「零件 + 同一根轴线」分：配孔检查把同样的几处漏孔合成了一条（HoleCheck.Merge），同一个零件上有好几个位置，
+            // 只按零件分会把它们并成一个参考孔、只打一个
+            var clusters = new List<List<HoleRecord>>();
+            foreach (var h in holes) {
+                var home = clusters.FirstOrDefault(c => c[0].PartName == h.PartName && SameAxisRec(c[0], h));
+                if (home == null) { home = new List<HoleRecord>(); clusters.Add(home); }
+                home.Add(h);
+            }
+            foreach (var cl in clusters) {
+                var list = cl;
+                string partKey = cl[0].PartName;
                 var bottom = list.OrderBy(h => h.DiameterMm).First();
                 ReferenceHole r = null;
                 try {
@@ -803,13 +812,23 @@ namespace TianGongCadSuite {
                 } catch (Exception e) { Log.Write("AutoHolePreloadRead", e.Message); r = null; }
                 if (r == null) r = new ReferenceHole { Center = bottom.Center, Axis = bottom.Axis };
                 r.DiameterMm = bottom.DiameterMm; r.MouthDiameterMm = Math.Max(r.MouthDiameterMm, list.Max(h => h.DiameterMm));
-                r.Source = byPart.Key + "（配孔检查）";
+                r.Source = HoleCheck.ShortPart(partKey) + "（配孔检查）";
                 if (r.MouthDiameterMm - r.DiameterMm > HoleScan.StepToleranceMm && string.IsNullOrEmpty(r.MouthKind)) r.MouthKind = "孔口台阶";
                 try { if (AddHole(r, bottom.Selection, true)) added++; } catch (Exception e) { Log.Write("AutoHolePreload", e); }
             }
             RefreshList(groups.Count - 1);
             RefreshPreview();
             SetStatus("已从配孔检查带入 " + added + " 个参考孔。请点" + (string.IsNullOrEmpty(missingPart) ? "要打孔的零件" : "「" + missingPart + "」") + "上要打孔的面，再点「开始打孔」。", Ui.Accent);
+        }
+
+        // 同一个零件上的两条圆边是不是同一个孔（同一根轴线，横向 0.5mm 以内：沉孔的过孔边 + 沉头边）
+        static bool SameAxisRec(HoleRecord a, HoleRecord b){
+            try {
+                var n = a.Axis.Unit();
+                if (Math.Abs(Math.Abs(n.Dot(b.Axis.Unit())) - 1) > 1e-3) return false;
+                var d = b.Center - a.Center;
+                return (d - n * d.Dot(n)).Length < 0.0005;
+            } catch { return false; }
         }
 
         bool AddHole(ReferenceHole r, object selection, bool batch){
@@ -2069,9 +2088,13 @@ namespace TianGongCadSuite {
         // 别的命令接管了鼠标：一般就关窗口（和原来一样）。但如果是我们自己点「改孔型…」开的窗口接管的，
         // 这个窗口说好了要留着（参考孔、规格都还在）—— 原来照样被关掉。现在只是暂停选择，用户回到这个窗口时自动接着选
         bool handingOver, paused;
+        bool HasPicks { get { return groups.Count > 0 || slots.Count > 0 || targets.Count > 0 || (lastUndo != null && !lastUndo.IsEmpty); } }
         public void Terminate(){
             if (closing || busy) return;
             if (handingOver) { handingOver = false; paused = true; BeginInvoke((Action)(() => { StopCommand(); SetStatus("选择已暂停（改孔型窗口在用鼠标）。回到这个窗口点一下就接着选。", Ui.Muted); })); return; }
+            // 用户在天工里点了别的命令（选择工具、测量、隐藏零件……）：原来窗口直接关掉，选好的参考孔、打孔面全丢，还得从头点。
+            // 已经选了东西就只暂停选择、窗口留着，回到窗口点一下接着选；什么都没选才照旧关掉
+            if (HasPicks) { paused = true; BeginInvoke((Action)(() => { StopCommand(); SetStatus("天工里开始了别的命令，选择已暂停（已选的都还在）。回到这个窗口点一下就接着选。", Ui.Muted); })); return; }
             BeginInvoke((Action)(() => Close()));
         }
         protected override void OnActivated(EventArgs e){

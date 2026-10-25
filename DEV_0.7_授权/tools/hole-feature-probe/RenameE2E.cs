@@ -58,6 +58,7 @@ class RenameE2E {
             else if (mode == "lock") LockRun(dir);
             else if (mode == "dirty") DirtyRun(dir);
             else if (mode == "stale") StaleRun(dir);
+            else if (mode == "propcard") PropCardRun(dir, args.Length > 3 ? args[3] : Asm);
         } catch (Exception e) { L("FAIL 异常 " + e); fails++; }
         stop = true;
         L("对话框 " + dialogs.Count + " 个" + (dialogs.Count > 0 ? "：" + string.Join(" | ", dialogs.ToArray()) : ""));
@@ -278,6 +279,25 @@ class RenameE2E {
         string active = Try(() => (string)((dynamic)app.ActiveDocument).FullName, "");
         Check(Path.GetFileName(active) == Asm && Try(() => (bool)((dynamic)app.ActiveDocument).Dirty, false), "装配还开着、内存里的修改还在（没被关掉丢掉）");
         Check(Directory.GetFiles(dir, "DIRTY-TEST*").Length == 0, "没有改名");
+    }
+
+    // 0.10.1：属性卡填写走窗口真实路径 —— 打开大装配（几百个零件、加密副本），「批次」列前 120 行填同一个值再写入；
+    // 必须全写进内存、不弹「加载后已被其他用户修改」对话框（0.8.1 现场），再改一次（第二轮）也一样
+    static void PropCardRun(string dir, string asmName){
+        var t0 = DateTime.Now;
+        Open(Path.Combine(dir, asmName));
+        L("   打开 " + asmName + " " + (DateTime.Now - t0).TotalSeconds.ToString("0.0") + "s");
+        for (int round = 1; round <= 2; round++) {
+            int before = dialogs.Count;
+            var t1 = DateTime.Now;
+            diag.StartPropCardFormTest("批次", "E2E-" + round, 120);
+            string r = Wait(20);
+            L("   第 " + round + " 轮 " + (DateTime.Now - t1).TotalSeconds.ToString("0.0") + "s：" + r);
+            var m = System.Text.RegularExpressions.Regex.Match(r, @"after: 写好 (\d+) / (\d+) ");
+            Check(m.Success && m.Groups[1].Value == m.Groups[2].Value && int.Parse(m.Groups[1].Value) > 50, "第 " + round + " 轮全部写好（" + (m.Success ? m.Value : "没找到") + "）");
+            Check(!r.Contains("problems: ") || r.TrimEnd().EndsWith("problems:"), "第 " + round + " 轮没有失败的文件");
+            Check(dialogs.Count == before, "第 " + round + " 轮没有弹对话框");
+        }
     }
 
     // ---------- 对话框监视：这个桌面上冒出来的 #32770 都记下来，点默认按钮 ----------

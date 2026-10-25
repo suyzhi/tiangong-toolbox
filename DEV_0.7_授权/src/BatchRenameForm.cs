@@ -112,7 +112,11 @@ namespace TianGongCadSuite {
             shell.Footer.AddRight(close); shell.Footer.AddRight(run);
             shell.Footer.Status = status;
             status.ForeColor = Ui.Muted;
-            FormClosing += (s, e) => { if (busy && e.CloseReason == CloseReason.UserClosing) e.Cancel = true; };
+            FormClosing += (s, e) => {
+                if (busy && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; status.Text = "正在改名，做完再关。"; status.ForeColor = Ui.Warn; return; }
+                // 填了一表新名字、手一滑点了关闭（或点了功能区别的命令）：原来一声不响全丢
+                if (!quiet && e.CloseReason == CloseReason.UserClosing && !ConfirmDiscard()) e.Cancel = true;
+            };
             UpdateStatus();
         }
 
@@ -322,7 +326,14 @@ namespace TianGongCadSuite {
             int top = int.MaxValue;
             foreach (DataGridViewCell c in grid.SelectedCells) top = Math.Min(top, c.RowIndex);
             if (top == int.MaxValue) return;
-            for (int i = 0; i < block.Count && top + i < grid.Rows.Count; i++) ((RenameRow)grid.Rows[top + i].Tag).SetNewBase(block[i][0]);
+            // 跟着改名的同名工程图（灰字行）夹在零件中间：从 Excel 粘一列零件新名字时跳过它们，
+            // 原来逐行往下填，第一张工程图之后的名字全错位一行（工程图拿到下一个零件的名字）
+            int at = top;
+            for (int i = 0; i < block.Count && at < grid.Rows.Count; i++, at++) {
+                while (at < grid.Rows.Count && ((RenameRow)grid.Rows[at].Tag).Master != null && at != top) at++;
+                if (at >= grid.Rows.Count) break;
+                ((RenameRow)grid.Rows[at].Tag).SetNewBase(block[i][0]);
+            }
             Refresh2();
         }
 

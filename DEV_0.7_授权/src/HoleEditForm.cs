@@ -541,7 +541,19 @@ namespace TianGongCadSuite {
         public new void MouseMove(short b, short s, double x, double y, double z, object w, int k, object g){ }
         public void MouseDblClick(short b, short s, double x, double y, double z, object w, int k, object g){ }
         public void MouseDrag(short b, short s, double x, double y, double z, object w, short ds, int k, object g){ }
-        public void Terminate(){ if (!closing && !busy) BeginInvoke((Action)(() => Close())); }
+        // 用户在天工里点了别的命令：选了孔就只暂停选择（原来窗口直接关掉，选好的孔全丢），回到窗口点一下接着选
+        bool paused;
+        public void Terminate(){
+            if (closing || busy) return;
+            if (targets.Count > 0 || (lastUndo != null && !lastUndo.IsEmpty)) { paused = true; BeginInvoke((Action)(() => { StopCommand(); SetStatus("天工里开始了别的命令，选择已暂停（已选的孔都还在）。回到这个窗口点一下就接着选。", Ui.Muted); })); return; }
+            BeginInvoke((Action)(() => Close()));
+        }
+        protected override void OnActivated(EventArgs e){
+            base.OnActivated(e);
+            if (!paused || closing || busy || command != null) return;
+            paused = false;
+            try { StartPicking(); SetStatus("接着选。", Ui.Muted); } catch (Exception ex) { SetStatus(AutoHoleWriter.Friendly(ex), Ui.Warn); }
+        }
         public void Idle(int n, out bool more){ more = false; }
         void F.ISECommandEvents.Activate(){ }
         void F.ISECommandEvents.Deactivate(){ }

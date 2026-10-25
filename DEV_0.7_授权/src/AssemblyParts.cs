@@ -67,7 +67,8 @@ namespace TianGongCadSuite {
                 bool sub = false;
                 try { sub = occ.Subassembly; } catch { }
                 if (sub) {
-                    try { Walk(assembly, occ.SubOccurrences, name, 1, result, warnings); }
+                    // 整个子装配隐藏 / 只作参考：里面的零件一样不当"漏打孔的那个零件"（原来只看零件自己，隐藏的整套包络件照样被报）
+                    try { Walk(assembly, occ.SubOccurrences, name, 1, result, warnings, RefOnly(occ)); }
                     catch (Exception e) { Warn(warnings, name + " 子装配读取失败：" + e.Message); }
                     continue;
                 }
@@ -80,7 +81,7 @@ namespace TianGongCadSuite {
             return result;
         }
 
-        static void Walk(A.AssemblyDocument assembly, A.SubOccurrences subs, string parent, int depth, List<AssemblyPart> result, List<string> warnings){
+        static void Walk(A.AssemblyDocument assembly, A.SubOccurrences subs, string parent, int depth, List<AssemblyPart> result, List<string> warnings, bool parentIgnored){
             if (subs == null || depth > MaxDepth) return;
             int n = 0; try { n = subs.Count; } catch { }
             for (int i = 1; i <= n; i++) {
@@ -92,7 +93,7 @@ namespace TianGongCadSuite {
                 bool sub = false;
                 try { sub = s.Subassembly; } catch { }
                 if (sub) {
-                    try { Walk(assembly, s.SubOccurrences, name, depth + 1, result, warnings); }
+                    try { Walk(assembly, s.SubOccurrences, name, depth + 1, result, warnings, parentIgnored || RefOnly(s)); }
                     catch (Exception e) { Warn(warnings, name + " 子装配读取失败：" + e.Message); }
                     continue;
                 }
@@ -101,7 +102,7 @@ namespace TianGongCadSuite {
                 if (part == null) continue;
                 var bodies = BodiesOf(part, name, warnings);
                 if (bodies.Count == 0) continue;
-                result.Add(new AssemblyPart { Name = name, Part = part, Body = bodies[0], Bodies = bodies, Nested = true, Sub = s, assembly = assembly, Ignored = RefOnly(s) });
+                result.Add(new AssemblyPart { Name = name, Part = part, Body = bodies[0], Bodies = bodies, Nested = true, Sub = s, assembly = assembly, Ignored = parentIgnored || RefOnly(s) });
             }
         }
 

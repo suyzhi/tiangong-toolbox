@@ -22,6 +22,18 @@ namespace TianGongCadSuite {
             try { return (P.Model)part.Models.Item(index); } catch { }
             try { return (P.Model)part.Models.Item(1); } catch { return null; }
         }
+        // 零件里出错（特征树里标红、没生成出来）的孔特征个数。配孔检查报"漏打孔"时要说：孔特征在、只是没生成，
+        // 照着去补打一个会重复（0.10.1 焊接台车：17 号板 4 个孔特征全挂，配孔检查对它报了 16 条漏打孔）
+        public static int FailedHoles(P.PartDocument part){
+            int bad = 0;
+            foreach (var m in All(part)) {
+                try {
+                    var hs = m.Holes; int n = hs.Count;
+                    for (int i = 1; i <= n; i++) { try { object d; if ((int)hs.Item(i).GetStatusEx(out d) != (int)P.FeatureStatusConstants.igFeatureOK) bad++; } catch { } }
+                } catch { }
+            }
+            return bad;
+        }
         public static G.Body Body(P.Model model){ try { return model == null ? null : (G.Body)model.Body; } catch { return null; } }
         public static IEnumerable<P.Model> All(P.PartDocument part){
             int n = Count(part);

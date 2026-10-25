@@ -29,6 +29,15 @@ namespace TianGongCadSuite {
             Check(bad.Selection == null, "建引用失败返回 null 不抛");
             JunctionLoop();
             LockedSettings();
+            // 0.10.1：同样的问题只是位置不同 → 合成一条，孔全部保留，摘要按"处"数
+            var a1 = new HoleIssue { Kind = HoleIssueKind.WrongSpec, Message = "A Φ5 与 B Φ4 规格不同（@X1 Y2 Z3）", Holes = new List<HoleRecord>{ new HoleRecord(), new HoleRecord() } };
+            var a2 = new HoleIssue { Kind = HoleIssueKind.WrongSpec, Message = "A Φ5 与 B Φ4 规格不同（@X9 Y2 Z3）", Holes = new List<HoleRecord>{ new HoleRecord(), new HoleRecord() } };
+            var other = new HoleIssue { Kind = HoleIssueKind.MissingHole, Message = "A 上的 Φ5 孔（@X1 Y2 Z3）轴线穿过了 C", MissingPart = "C", Holes = new List<HoleRecord>{ new HoleRecord() } };
+            var merged = HoleCheck.Merge(new List<HoleIssue>{ a1, other, a2 });
+            Check(merged.Count == 2 && merged[0].Places == 2 && merged[0].Holes.Count == 4 && merged[0].Message.Contains("共 2 处") && !merged[0].Message.Contains("@X"), "两处同样的配错孔合成一条：" + merged[0].Message);
+            Check(merged[1].Places == 1 && merged[1].Message.Contains("@X1"), "只有一处的保留位置");
+            Check(HoleCheck.Summary(merged, 10, 3).Contains("发现 3 处问题（同样的合成 2 条）"), "摘要按处数：" + HoleCheck.Summary(merged, 10, 3));
+            Check(HoleCheck.ShortPart("总装.asm:1/子装配.asm:2/底板.par:1") == "底板.par:1" && HoleCheck.ShortPart("顶层.par:1") == "顶层.par:1", "子装配路径只留最后一级");
             // 规格本身打不出来：打之前就挡住
             Check(new HoleSpec { Kind = HoleKind.Counterbore, HoleDiameter = 12, CounterboreDiameter = 11, CounterboreDepth = 6.5 }.SpecProblem.Contains("沉孔直径"), "沉孔直径不大于孔径：挡住");
             Check(new HoleSpec { Kind = HoleKind.Counterbore, HoleDiameter = 6.6, CounterboreDiameter = 11, CounterboreDepth = 0 }.SpecProblem.Contains("沉孔深度"), "沉孔深度 0：挡住");

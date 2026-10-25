@@ -47,7 +47,7 @@ namespace TianGongCadSuite {
             rows[0].SetNewBase("已有");
             Check(RenameRules.Validate(rows,disk)==1&&rows[0].Problem.Contains("已经有"),"撞上磁盘上已有的文件");
             rows[0].SetNewBase("新");rows[1].SetNewBase("新");
-            Check(RenameRules.Validate(rows,disk)==1&&rows[1].Problem.Contains("同一个名字"),"两个文件改成同一个名字");
+            Check(RenameRules.Validate(rows,disk)==2&&rows[1].Problem.Contains("同一个名字")&&rows[0].Problem.Contains("同一个名字"),"两个文件改成同一个名字（两行都标出来）");
             rows[0].SetNewBase("B");rows[1].SetNewBase("A");
             Check(RenameRules.Validate(rows,disk)==0,"互换名字可以（两步改名）");
             rows[0].SetNewBase("C");rows[1].Revert();

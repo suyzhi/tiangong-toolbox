@@ -84,9 +84,11 @@ namespace TianGongCadSuite {
         }
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData){
-            if (keyData == Keys.Escape) { Close(); return true; }
+            // 跨子装配一根根点好的型材、识别出的框口：一个 Esc 就全没了。读过型材时要连按两次（和打孔窗口一样）
+            if (keyData == Keys.Escape) { if (busy) return true; if (quickClose.Confirm("Esc", cachedMembers != null && cachedMembers.Count > 0 ? "已读的 " + cachedMembers.Count + " 根型材和识别出的框口" : "", m => SetStatus(m, Ui.Warn))) Close(); return true; }
             return base.ProcessCmdKey(ref msg, keyData);
         }
+        readonly QuickClose quickClose = new QuickClose();
 
         // 0.9.0「D · 侧栏向导」：① 型材（读取 / 追加选择）→ ② 板子（厚度、间隙、材质）→ ③ 框口（勾选 + 右边位置预览）。
         // 读到型材、识别出框口后自动翻到「框口」；输出目录在侧栏底部；主按钮「生成 N 块板子」。

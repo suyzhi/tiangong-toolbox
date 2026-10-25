@@ -77,6 +77,7 @@ namespace TianGongCadSuite {
         public string Message = "";
         public string MissingPart = "";   // 漏打孔：没打孔的那个零件（「去配孔」时提示用户点它的面）
         public string Done = "";          // 「去配孔」以后打上了：写一句（"已配 2 个孔"），列表里标出来（0.8.5）
+        public int Places = 1;            // 合并了几处一模一样的问题（HoleCheck.Merge）
         public List<HoleRecord> Holes = new List<HoleRecord>();
         public string KindName {
             get {
@@ -355,6 +356,14 @@ namespace TianGongCadSuite {
         // 两个直径是否构成合法的"配做"关系：底孔+过孔（同规格），或过孔+沉孔。
         public static bool IsValidPair(double aMm, double bMm, out string why){
             why = "";
+            // 几乎一样大（Φ6.6 与 Φ6.65）：同一把钻头打的孔。原来 Φ6.65 先被认成 M8 螺纹内小径，报「M6 与 M8 规格不同」
+            if (Math.Abs(aMm - bMm) <= SameDrillMm) return true;
+            // 有没有一个螺纹规格能同时解释两个孔（螺纹孔 / 过孔 / 沉头让位孔）。0.10.1 焊接台车实测：
+            // 原来只认表里的两档过孔，Φ6（M5 粗装配过孔，HIWIN 导轨的标准孔）配 M5 螺纹孔 Φ4.13 一条导轨报 20 条「配错孔」；
+            // Φ7（M6 粗装配过孔）先被认成 M8 底孔，正确的 M6 连接报「M8 与 M6」
+            foreach (var r in HoleMatcher.Table) {
+                if (Fits(r, aMm, bMm) || Fits(r, bMm, aMm)) return true;
+            }
             // 任一方能匹配到标准规格，另一方应能匹配到同规格的另一种孔
             var ma = HoleMatcher.Match(aMm);
             var mb = HoleMatcher.Match(bMm);
@@ -366,6 +375,62 @@ namespace TianGongCadSuite {
             // 有一个匹配不上标准表：只要直径差不超过 1mm，按自定义配孔放过
             if (Math.Abs(aMm - bMm) <= 1.0) return true;
             why = "直径相差 " + Math.Abs(aMm - bMm).ToString("0.##", CultureInfo.InvariantCulture) + "mm，且至少一个不在标准螺纹表内";
+            return false;
+        }
+
+        const double SameDrillMm = 0.1;
+        // 细牙螺距（常见的几档）：M20×1.5 螺母的内小径 18.38、M12×1 的 10.92 这种原来全按「不在标准表」报配错孔
+        static readonly double[][] FinePitches = {
+            new[]{ 8, 1.0 }, new[]{ 10, 1.25 }, new[]{ 10, 1.0 }, new[]{ 12, 1.5 }, new[]{ 12, 1.25 }, new[]{ 12, 1.0 }, new[]{ 14, 1.5 },
+            new[]{ 16, 1.5 }, new[]{ 20, 1.5 }, new[]{ 20, 2.0 }, new[]{ 24, 2.0 }, new[]{ 24, 1.5 }, new[]{ 30, 2.0 }
+        };
+        static double Nominal(ThreadRow r){
+            double n; return double.TryParse(r.Size.TrimStart('M', 'm'), NumberStyles.Float, CultureInfo.InvariantCulture, out n) ? n : 0;
+        }
+        // 这个直径是不是规格 r 的螺纹孔（底孔 / 内小径，粗牙按表，细牙按螺距算）
+        public static bool IsTapped(ThreadRow r, double d){
+            if (Math.Abs(d - r.TapDrill) <= HoleMatcher.Tolerance || Math.Abs(d - r.MinorDia) <= HoleMatcher.Tolerance) return true;
+            double n = Nominal(r);
+            foreach (var f in FinePitches) {
+                if (f[0] != n) continue;
+                if (Math.Abs(d - (n - 1.0825 * f[1])) <= 0.2 || Math.Abs(d - (n - f[1])) <= 0.2) return true;
+            }
+            return false;
+        }
+        // 这个直径能不能让规格 r 的螺钉穿过：比公称直径大、不超过粗装配过孔（≈ 公称 ×1.25，GB/T 5277 粗装配 M5 5.8、M6 7、M8 10……）；
+        // M12 以上的铰制孔 / 配合孔（孔径 = 公称直径）也算
+        public static bool IsClearance(ThreadRow r, double d){
+            double n = Nominal(r);
+            if (n <= 0) return false;
+            // 正好也是别的规格攻丝底孔的直径（Φ5 = M6 底孔）照样算：两种读法里「两个不同规格的螺纹孔叠在一根轴上」不是真设计，
+            // 「M4 螺钉穿 Φ5 孔拧进 M4 螺纹孔」才是（用户 10-25 就照着把手底座的 Φ5 孔打了 M4 螺纹孔）
+            // 下限按 GB/T 5277 精装配（M4 4.3、M6 6.4、M10 10.5……）：Φ4.13 这种 M5 螺纹孔不能当 M4 过孔
+            if (d >= n + Math.Max(0.2, 0.05 * n) - 0.01 && d <= n * 1.25 + 0.2) return true;
+            return n >= 12 && Math.Abs(d - n) <= 0.05;
+        }
+        // small 和 big 在规格 r 上配得上：螺纹孔 + 过孔、过孔 + 过孔（螺栓 + 螺母），
+        // 或者 small 是过孔、big 是螺钉头的让位孔（≈ 沉头直径：沉孔分在两块板上做）。螺纹孔直接配沉头直径的孔不算（中间少了过孔）
+        static bool Fits(ThreadRow r, double small, double big){
+            bool smallClear = IsClearance(r, small);
+            if (!smallClear && !IsTapped(r, small)) return false;
+            if (IsClearance(r, big)) return true;
+            // 让位孔只配真正的过孔（Φ12 正好等于 M12 公称直径的配合孔不算：Φ12 + Φ20 照样报）
+            bool realClear = smallClear && Math.Abs(small - Nominal(r)) > 0.05;
+            return realClear && big >= r.CounterboreDia - HoleMatcher.Tolerance && big <= r.CounterboreDia + 1.0;
+        }
+
+        // 这一串孔是不是一个完整的螺纹连接（同一规格：一个零件上是螺纹孔、另一个零件上是过孔）。
+        // 完整的连接，螺钉到螺纹孔就到头了：轴线再往外穿过的零件（螺纹孔下面垫着的底板、螺钉头上面盖着的盖板）不需要孔，
+        // 原来照样报「漏打孔」—— 焊接台车上 17 号板的 M6 螺纹孔下面是 002 底板，一个螺钉报一条
+        public static bool CompleteJoint(IList<HoleRecord> chain){
+            if (chain == null || chain.Count < 2) return false;
+            var minByPart = chain.GroupBy(h => h.PartName).Select(g => g.Min(x => x.DiameterMm)).ToList();
+            if (minByPart.Count < 2) return false;
+            foreach (var r in HoleMatcher.Table) {
+                int tapped = 0, clear = 0;
+                foreach (var d in minByPart) { if (IsTapped(r, d)) tapped++; else if (IsClearance(r, d)) clear++; }
+                if (tapped > 0 && clear > 0) return true;
+            }
             return false;
         }
 
@@ -483,10 +548,13 @@ namespace TianGongCadSuite {
                     {
                         var h = chain[0];
                         V3 o, a; double lo, hi; ChainSpan(chain, out o, out a, out lo, out hi);
+                        // 已经是完整的螺纹连接（螺纹孔 + 过孔）：只查夹在这串孔中间的零件，两头外面贴着的不算漏孔（见 CompleteJoint）
+                        double span = tol;
+                        if (hi - lo > 0.0015 && CompleteJoint(chain)) { lo += 0.0005; hi -= 0.0005; span = 0; }
                         foreach (var other in partUniverse) {
                             if (parts.Contains(other)) continue;
                             if (HasCoaxialShaft(shafts, other, h)) continue;   // 同轴的螺栓杆 / 销：本来就该穿过它
-                            bool hit = bodies != null ? bodies.Hits(other, o, a, lo, hi, tol)
+                            bool hit = bodies != null ? bodies.Hits(other, o, a, lo, hi, span)
                                      : (parts.Count == 1 && rayHitsPart != null && rayHitsPart(h, other));
                             if (hit) { hitPart = other; break; }
                         }
@@ -504,7 +572,7 @@ namespace TianGongCadSuite {
                         var h = chain[0];
                         if (hitPart == null && reportUnpaired) {
                             issues.Add(new HoleIssue { Kind = HoleIssueKind.Unpaired, Holes = chain,
-                                Message = h.PartName + " 上的 Φ" + N(h.DiameterMm) + " 孔" + Pos(h) + "是孤孔（附近其他零件上没有同轴孔）" });
+                                Message = ShortPart(h.PartName) + " 上的 Φ" + N(h.DiameterMm) + " 孔" + Pos(h) + "是孤孔（附近其他零件上没有同轴孔）" });
                         }
                         continue;
                     }
@@ -516,7 +584,7 @@ namespace TianGongCadSuite {
                             if (chain[i].PartName != chain[j].PartName) maxLateral = Math.Max(maxLateral, LateralMm(chain[i], chain[j]));
                     if (maxLateral > AxisOffsetTolMm) {
                         issues.Add(new HoleIssue { Kind = HoleIssueKind.Misaligned, Holes = chain,
-                            Message = "同组孔最大偏心 " + N(maxLateral) + "mm（容差 " + N(AxisOffsetTolMm) + "mm），涉及 " + string.Join("、", parts.ToArray()) + Pos(chain[0]) });
+                            Message = "同组孔最大偏心 " + N(maxLateral) + "mm（容差 " + N(AxisOffsetTolMm) + "mm），涉及 " + string.Join("、", parts.Select(ShortPart).ToArray()) + Pos(chain[0]) });
                         continue;
                     }
 
@@ -532,7 +600,7 @@ namespace TianGongCadSuite {
                             string why;
                             if (!IsValidPair(byPart[i].Dia, byPart[j].Dia, out why)) {
                                 issues.Add(new HoleIssue { Kind = HoleIssueKind.WrongSpec, Holes = chain,
-                                    Message = byPart[i].Part + " Φ" + N(byPart[i].Dia) + " 与 " + byPart[j].Part + " Φ" + N(byPart[j].Dia) + " " + why + Pos(chain[0]) });
+                                    Message = ShortPart(byPart[i].Part) + " Φ" + N(byPart[i].Dia) + " 与 " + ShortPart(byPart[j].Part) + " Φ" + N(byPart[j].Dia) + " " + why + Pos(chain[0]) });
                                 i = byPart.Count; break;
                             }
                         }
@@ -541,8 +609,8 @@ namespace TianGongCadSuite {
                     var mi = missingByPart[part];
                     var owners = mi.Holes.Select(x => x.PartName).Distinct().ToList();
                     var first = mi.Holes[0];
-                    mi.Message = string.Join("、", owners.ToArray()) + " 上的 Φ" + N(first.DiameterMm) + " 孔" + Pos(first)
-                               + "轴线穿过了 " + part + "，但 " + part + " 在这里没有对应的孔（疑似漏打孔）";
+                    mi.Message = string.Join("、", owners.Select(ShortPart).ToArray()) + " 上的 Φ" + N(first.DiameterMm) + " 孔" + Pos(first)
+                               + "轴线穿过了 " + ShortPart(part) + "，但 " + ShortPart(part) + " 在这里没有对应的孔（疑似漏打孔）";
                     issues.Add(mi);
                 }
             }
@@ -550,6 +618,39 @@ namespace TianGongCadSuite {
         }
 
         static string N(double v){ return v.ToString("0.##", CultureInfo.InvariantCulture); }
+
+        // 只有位置不同、别的完全一样的问题合成一条（「…（共 8 处）」）：一条导轨 20 个螺钉孔、一排 8 个安装孔，
+        // 原来列表里一个位置一条，几十条一模一样的字把别的问题都淹了（0.10.1 焊接台车：152 条里大半是这种）。
+        // 涉及的孔全部保留（高亮、跳转、去配孔都还能用到每个位置）
+        public static List<HoleIssue> Merge(IList<HoleIssue> issues){
+            var list = new List<HoleIssue>();
+            if (issues == null) return list;
+            var byKey = new Dictionary<string, HoleIssue>(StringComparer.Ordinal);
+            foreach (var it in issues) {
+                string key = ((int)it.Kind) + "|" + it.MissingPart + "|" + StripPos(it.Message);
+                HoleIssue m;
+                if (!byKey.TryGetValue(key, out m)) {
+                    m = new HoleIssue { Kind = it.Kind, Message = it.Message, MissingPart = it.MissingPart, Done = it.Done, Holes = new List<HoleRecord>(it.Holes) };
+                    byKey[key] = m; list.Add(m);
+                    continue;
+                }
+                m.Places++;
+                m.Holes.AddRange(it.Holes);
+                m.Message = StripPos(it.Message) + "（共 " + m.Places + " 处）";
+            }
+            return list;
+        }
+        static string StripPos(string message){
+            return System.Text.RegularExpressions.Regex.Replace(message ?? "", "（@X[^）]*）", "");
+        }
+
+        // 子装配里的零件实例名是一整条路径（「总装.asm:1/子装配.asm:1/托盘.asm:1/底板.par:1」）：问题列表一行只放得下这条路径，
+        // 「漏打孔 / 配错孔」到底说的是什么全被截掉了（0.10.1 焊接台车实测）。提示语里只写最后一级零件名，完整路径在「涉及的孔」里
+        public static string ShortPart(string partName){
+            if (string.IsNullOrEmpty(partName)) return partName ?? "";
+            int i = partName.LastIndexOf('/');
+            return i >= 0 && i < partName.Length - 1 ? partName.Substring(i + 1) : partName;
+        }
 
         // 孔心坐标（装配坐标，毫米）—— 同规格的多个孔只有靠位置才区分得开
         static string Pos(HoleRecord h){
@@ -561,14 +662,16 @@ namespace TianGongCadSuite {
         public static string Summary(IList<HoleIssue> issues, int holeCount, int groupCount){
             if (issues == null || issues.Count == 0)
                 return "检查了 " + holeCount + " 个孔（" + groupCount + " 组同轴孔），没有发现问题。";
-            int miss = issues.Count(i => i.Kind == HoleIssueKind.MissingHole);
-            int mis = issues.Count(i => i.Kind == HoleIssueKind.Misaligned);
-            int wrong = issues.Count(i => i.Kind == HoleIssueKind.WrongSpec);
+            // 按"处"数（合并过的一条算它合并的几处），列表条数少于处数时说一句
+            int miss = issues.Where(i => i.Kind == HoleIssueKind.MissingHole).Sum(i => i.Places);
+            int mis = issues.Where(i => i.Kind == HoleIssueKind.Misaligned).Sum(i => i.Places);
+            int wrong = issues.Where(i => i.Kind == HoleIssueKind.WrongSpec).Sum(i => i.Places);
+            int places = issues.Sum(i => i.Places);
             var parts = new List<string>();
             if (miss > 0) parts.Add("漏打孔 " + miss);
             if (mis > 0) parts.Add("孔偏了 " + mis);
             if (wrong > 0) parts.Add("配错孔 " + wrong);
-            return "检查了 " + holeCount + " 个孔（" + groupCount + " 组同轴孔），发现 " + issues.Count + " 处问题：" + string.Join("，", parts.ToArray());
+            return "检查了 " + holeCount + " 个孔（" + groupCount + " 组同轴孔），发现 " + places + " 处问题" + (places > issues.Count ? "（同样的合成 " + issues.Count + " 条）" : "") + "：" + string.Join("，", parts.ToArray());
         }
     }
 }

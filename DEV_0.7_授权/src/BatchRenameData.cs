@@ -111,7 +111,11 @@ namespace TianGongCadSuite {
                 if (p.Length == 0) {
                     RenameRow other;
                     bool caseOnly = string.Equals(r.NewPath, r.Path, StringComparison.OrdinalIgnoreCase);
-                    if (targets.TryGetValue(r.NewPath, out other)) p = "和「" + other.FileName + "」改成了同一个名字";
+                    if (targets.TryGetValue(r.NewPath, out other)) {
+                        p = "和「" + other.FileName + "」改成了同一个名字";
+                        // 先出现的那一行也标出来：原来只有后一行标红，前一行看着没问题，用户不知道该改哪个
+                        if (other.Problem.Length == 0) { other.Problem = "和「" + r.FileName + "」改成了同一个名字"; problems++; }
+                    }
                     // A 改成 B，B 在表里却没改名
                     else if (!caseOnly && staying.TryGetValue(r.NewPath, out other)) p = "「" + other.FileName + "」还在用这个名字（它没改名）";
                     else if (!caseOnly && !leaving.Contains(r.NewPath) && exists(r.NewPath)) p = "文件夹里已经有「" + r.NewFileName + "」了";

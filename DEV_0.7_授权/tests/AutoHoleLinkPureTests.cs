@@ -170,8 +170,8 @@ namespace TianGongCadSuite {
             Assert(HoleCheck.Run(farPair, null, true).Count(i => i.Kind == HoleIssueKind.Unpaired) == 2, "要求报孤孔时两个都是孤孔");
             Assert(HoleCheck.CountGroups(farPair) == 2, "摘要里按 2 组同轴孔计");
             // 挨着（间隙 2mm）照样配对、照样能报配错孔
-            var near = new List<HoleRecord>{ Rec("A", 0, 20, 8.5), Rec("C", 22, 42, 6.8) };
-            Assert(HoleCheck.Run(near, null).Count(i => i.Kind == HoleIssueKind.WrongSpec) == 1, "间隙 2mm 仍算一对：M10 底孔配 M8 底孔 -> 配错孔");
+            var near = new List<HoleRecord>{ Rec("A", 0, 20, 8.5), Rec("C", 22, 42, 3.3) };
+            Assert(HoleCheck.Run(near, null).Count(i => i.Kind == HoleIssueKind.WrongSpec) == 1, "间隙 2mm 仍算一对：M10 底孔配 M4 底孔 -> 配错孔");
             Assert(HoleCheck.CountGroups(new List<HoleRecord>{ Rec("A", 0, 20, 8.5), Rec("A", 0, 20, 2.0) }) == 1, "组数只算 3~25mm 的孔（Φ2 不计）");
 
             // ② 漏打孔只看孔附近
@@ -202,6 +202,20 @@ namespace TianGongCadSuite {
             moved.Add(PartRayTarget.WithBoxes("B", Transform.Frame(new V3(0, 0, 0.111), new V3(1, 0, 0), new V3(0, 1, 0), new V3(0, 0, 1)),
                 (o, d) => { double a0, a1; return slabLocal.Clip(o, d, out a0, out a1) ? new List<Box3>{ slabLocal } : new List<Box3>(); }));
             Assert(HoleCheck.Run(lone, null, false, all, moved).Count == 1, "零件平移到 z111 后按装配位置判：紧挨着 -> 漏打孔");
+
+            // ②b 完整的螺纹连接（0.10.1 焊接台车实测）：A 板 M6 过孔 z0~10、C 板 M6 螺纹孔 z10~20，
+            // 螺钉到 C 就到头了，C 下面贴着的底板 D（z20~30）不需要孔 —— 原来一个螺钉报一条「D 漏打孔」
+            var joint = new List<HoleRecord>{ Rec("A", 0, 10, 6.6), Rec("C", 10, 20, 4.92) };
+            var idxBase = new PartRayIndex(); idxBase.Add(Slab("D", 20, 30));
+            var allJ = new List<string>{ "A", "C", "D" };
+            Assert(HoleCheck.CompleteJoint(joint), "M6 过孔 + M6 螺纹孔 = 完整连接");
+            Assert(HoleCheck.Run(joint, null, false, allJ, idxBase).Count(i => i.Kind == HoleIssueKind.MissingHole) == 0, "螺纹孔下面贴着的底板不报漏打孔");
+            var idxMid = new PartRayIndex(); idxMid.Add(Slab("D", 10, 20));
+            var jointGap = new List<HoleRecord>{ Rec("A", 0, 10, 6.6), Rec("C", 20, 30, 4.92) };
+            Assert(HoleCheck.Run(jointGap, null, false, allJ, idxMid).Count(i => i.Kind == HoleIssueKind.MissingHole) == 1, "夹在过孔和螺纹孔中间的板没孔：照样报");
+            var twoClear = new List<HoleRecord>{ Rec("A", 0, 10, 6.6), Rec("C", 10, 20, 6.6) };
+            Assert(!HoleCheck.CompleteJoint(twoClear), "两个过孔不是完整连接（还缺螺纹孔或螺母）");
+            Assert(HoleCheck.Run(twoClear, null, false, allJ, idxBase).Count(i => i.Kind == HoleIssueKind.MissingHole) == 1, "两个过孔、下面贴着的 D 没孔：照样报");
 
             // ③ 孔里装了螺栓/销：轴线穿过螺栓杆是正常的，不报"螺栓上漏打孔"
             var idxBolt = new PartRayIndex(); idxBolt.Add(Slab("BOLT", 90, 130));   // 螺栓杆整段压在孔附近

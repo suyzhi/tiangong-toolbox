@@ -129,8 +129,19 @@ namespace TianGongCadSuite {
             TianGongCadSuite.Licensing.LicenseGate.Require();
             var working=active as IBusyTool;
             if(working!=null&&!active.IsDisposed&&working.Busy)throw new InvalidOperationException("「"+active.Text+"」正在"+working.BusyWhat+"，等它做完再点别的命令。");
-            Dispose();var next=create();active=next;
+            // 上一个窗口里有没写入的修改（属性卡、批量改名）：它的关闭确认里点了「否」= 用户要留着它，新命令就不开了。
+            // 原来不管点了什么都接着 Dispose，修改照样全丢
+            if(!CloseActive())return;
+            var next=create();active=next;
             try{next.Show(new CadOwner(Application.ActiveFramehWnd));if(start!=null)start(next);}catch{Dispose();throw;}
+        }
+        bool CloseActive(){
+            if(active==null)return true;
+            if(!active.IsDisposed){
+                active.Close();
+                if(!active.IsDisposed&&active.Visible){try{active.Activate();}catch{}return false;}
+            }
+            active.Dispose();active=null;return true;
         }
         public void Dispose(){if(active!=null){if(!active.IsDisposed)active.Close();active.Dispose();active=null;}}
     }

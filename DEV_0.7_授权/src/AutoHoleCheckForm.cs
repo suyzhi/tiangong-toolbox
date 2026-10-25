@@ -68,7 +68,8 @@ namespace TianGongCadSuite {
         }
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData){
-            if (keyData == Keys.Escape) { Close(); return true; }
+            // 大装配查一遍要一两分钟：查完一个 Esc 就把结果全关掉了。有结果时要连按两次（和自动打孔一样）
+            if (keyData == Keys.Escape) { if (busy) return true; if (quickClose.Confirm("Esc", checkedOnce && issues.Count > 0 ? "这次检查的结果" : "", m => SetStatus(m, Ui.Warn))) Close(); return true; }
             // RunCheck 内部会 Application.DoEvents()，Ctrl+Enter 能绕开按钮禁用再进来一次，
             // 两次并发扫描会同时读写 issues/list 并对同一批 COM 对象重入 —— 必须挡。
             if (keyData == (Keys.Control | Keys.Enter)) { if (!busy) RunCheck(); return true; }
@@ -87,6 +88,8 @@ namespace TianGongCadSuite {
         // 侧栏里的四类是可以同时勾几类的筛选（孤孔默认不显示），不是单选。
         readonly WizardShell shell = new WizardShell { StepCaption = false };
         readonly Label countLine = new Label();
+        readonly QuickClose quickClose = new QuickClose();
+        List<string> lastWarnings = new List<string>();   // 这次读取失败的零件（状态栏只说个数，悬停 / 复制结果里列出是哪些）
 
         void BuildLayout(){
             Controls.Add(shell);
@@ -186,7 +189,7 @@ namespace TianGongCadSuite {
             TextRenderer.DrawText(g, tagText, Ui.F8, tag, done ? Ui.Ok : c, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
             int x = tag.Right + 12, w = Math.Max(10, r.Right - x - 12);
             TextRenderer.DrawText(g, it.Message, Ui.F9, new Rectangle(x, r.Y + 10, w, 22), Ui.Text, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
-            var parts = it.Holes.Select(h => h.PartName).Distinct().ToArray();
+            var parts = it.Holes.Select(h => HoleCheck.ShortPart(h.PartName)).Distinct().ToArray();
             TextRenderer.DrawText(g, it.Holes.Count + " 个孔 · " + parts.Length + " 个零件：" + string.Join("、", parts), Ui.F8,
                 new Rectangle(x, r.Y + 34, w, 18), Ui.Muted, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
         }
@@ -242,19 +245,38 @@ namespace TianGongCadSuite {
                 lastHoles = holes; lastShafts = shafts;
                 SetStatus("读到 " + holes.Count + " 个孔，正在配对…", Ui.Accent); Application.DoEvents();
                 // 孤孔一律算出来，显示与否交给筛选胶囊（不用为了看孤孔再检查一遍）
-                ShowIssues(HoleCheck.Run(holes, null, true, allNames, bodies, shafts, (i, n) => pulse("正在配对同轴孔", i, n)), HoleCheck.Relevant(holes).Count, HoleCheck.CountGroups(holes));
-                failedParts = warnings.Count;
+                var found = HoleCheck.Run(holes, null, true, allNames, bodies, shafts, (i, n) => pulse("正在配对同轴孔", i, n));
+                MarkFailedFeatures(found, parts);
+                ShowIssues(HoleCheck.Merge(found), HoleCheck.Relevant(holes).Count, HoleCheck.CountGroups(holes));
+                failedParts = warnings.Count; lastWarnings = warnings;
                 string s = summary.Text;
                 if (nested > 0) s += "　（含子装配里的 " + nested + " 个零件）";
                 if (ignored > 0) s += "　（" + ignored + " 个隐藏 / 参考零件不查漏孔）";
                 if (warnings.Count > 0) s += "　（" + warnings.Count + " 个零件读取失败）";
                 SetStatus(s, issues.Count(i => i.Kind != HoleIssueKind.Unpaired) == 0 ? Ui.Ok : Ui.Warn);
+                // 读取失败的是哪几个零件：原来只说"N 个零件读取失败"，不知道是哪几个、漏查了谁
+                if (warnings.Count > 0) tips.SetToolTip(status, s + "\r\n\r\n读取失败的零件（这些零件上的孔没查）：\r\n· " + string.Join("\r\n· ", warnings.Take(20).ToArray()) + (warnings.Count > 20 ? "\r\n……共 " + warnings.Count + " 个" : ""));
             } catch (Exception e) {
                 Log.Write("AutoHoleCheck", e);
                 SetStatus(AutoHoleWriter.Friendly(e), Ui.Bad);
                 MessageBox.Show(this, AutoHoleWriter.Friendly(e), "配孔检查", MessageBoxButtons.OK, MessageBoxIcon.Error);
             } finally {
                 busy = false; run.Enabled = true; run.Text = checkedOnce ? "重新检查" : "开始检查"; UseWaitCursor = false;
+            }
+        }
+
+        // 被报"漏打孔"的零件里有出错的孔特征：多半孔本来打了、只是没生成出来（参考零件挪了、链接断了……），先说清楚
+        public static void MarkFailedFeatures(List<HoleIssue> found, List<AssemblyPart> parts){
+            var bad = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var it in found) {
+                if (it.Kind != HoleIssueKind.MissingHole || string.IsNullOrEmpty(it.MissingPart)) continue;
+                int n;
+                if (!bad.TryGetValue(it.MissingPart, out n)) {
+                    var ap = parts.FirstOrDefault(p => p.Name == it.MissingPart);
+                    n = ap == null ? 0 : PartBodies.FailedHoles(ap.Part);
+                    bad[it.MissingPart] = n;
+                }
+                if (n > 0) it.Message += "　⚠ 这个零件有 " + n + " 个孔特征出错（特征树里标红，孔没生成出来），先在天工里修好它们再看这条";
             }
         }
 
@@ -288,7 +310,7 @@ namespace TianGongCadSuite {
                 var counted = issues.Where(i => i.Kind != HoleIssueKind.Unpaired || cUnpaired.Checked).ToList();
                 summary.Text = HoleCheck.Summary(counted, holeCount, groupCount);
                 summary.ForeColor = counted.Count == 0 ? Ui.Ok : Ui.Warn;
-                shell.SetTitle(counted.Count == 0 ? "没有发现问题" : "发现 " + counted.Count + " 处问题", "点一条在模型里高亮");
+                shell.SetTitle(counted.Count == 0 ? "没有发现问题" : "发现 " + counted.Sum(i => i.Places) + " 处问题", "点一条在模型里高亮");
                 countLine.Text = holeCount + " 个孔 · " + groupCount + " 组同轴孔";
             }
             ShowDetail();
@@ -324,6 +346,7 @@ namespace TianGongCadSuite {
                 sb.AppendLine("配孔检查 " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
                 sb.AppendLine("装配：" + (assembly != null ? assembly.FullName : ""));
                 sb.AppendLine(summary.Text);
+                if (lastWarnings.Count > 0) { sb.AppendLine("读取失败的零件（没查）："); foreach (var w in lastWarnings) sb.AppendLine("    " + w); }
                 sb.AppendLine();
                 foreach (var i in shown) {
                     sb.AppendLine("【" + i.KindName + "】" + i.Message);
@@ -370,18 +393,26 @@ namespace TianGongCadSuite {
             if (idx < 0 || idx >= shown.Count || GoDrill == null) return;
             var it = shown[idx];
             if (it.Kind != HoleIssueKind.MissingHole) { SetStatus("只有「漏打孔」能直接去配孔。", Ui.Warn); return; }
+            // 上一条「去配孔」开的打孔窗口还开着：没在打孔就先关掉它（原来一条开一个，窗口越叠越多，抢同一个鼠标选择）
+            if (lastDrill != null && !lastDrill.IsDisposed) {
+                if (lastDrill.Busy) { SetStatus("上一个「去配孔」的打孔窗口正在打孔，等它打完。", Ui.Warn); return; }
+                lastDrill.Close();
+                if (!lastDrill.IsDisposed) return;
+            }
             try {
-                var f = GoDrill(new List<HoleRecord>(it.Holes), it.MissingPart);
+                var f = GoDrill(new List<HoleRecord>(it.Holes), HoleCheck.ShortPart(it.MissingPart));
+                lastDrill = f;
                 // 去配孔打完：这一条标成"已配"（0.8.5）。原来检查窗口里这条一直挂着红的「漏打孔」，配了哪几条、还剩哪几条只能再整装配查一遍
                 if (f != null) f.DrillDone += made => {
                     if (made <= 0 || IsDisposed) return;
                     it.Done = "已配 " + made + " 个孔";
-                    try { list.Invalidate(); ShowDetail(); SetStatus("「" + it.MissingPart + "」上配好了 " + made + " 个孔（这一条已标成已配；要确认可以点「重新检查」）。", Ui.Ok); } catch { }
+                    try { list.Invalidate(); ShowDetail(); SetStatus("「" + HoleCheck.ShortPart(it.MissingPart) + "」上配好了 " + made + " 个孔（这一条已标成已配；要确认可以点「重新检查」）。", Ui.Ok); } catch { }
                 };
             }
             catch (Exception e) { Log.Write("AutoHoleCheckGoDrill", e); SetStatus("打不开自动打孔：" + e.Message, Ui.Bad); }
         }
 
+        AutoHoleForm lastDrill;
         void EditOptions(){
             // 检查中（会泵消息）改口径：HoleCheck.Run 一半用旧口径一半用新口径，结果对不上
             if (busy) { SetStatus("正在检查，做完再改判定口径。", Ui.Warn); return; }
@@ -395,6 +426,8 @@ namespace TianGongCadSuite {
 
         void Cleanup(){
             if (highlights != null) { try { highlights.Delete(); } catch { } highlights = null; }
+            // 检查窗口关了（点了别的命令）：它开的「去配孔」窗口不归 ToolContext 管，没在打孔就一起关
+            if (lastDrill != null && !lastDrill.IsDisposed && !lastDrill.Busy) { try { lastDrill.Close(); } catch { } }
             try { tips.Dispose(); } catch { }
         }
 

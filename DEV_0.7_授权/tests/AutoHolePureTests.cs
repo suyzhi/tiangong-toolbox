@@ -148,8 +148,20 @@ namespace TianGongCadSuite {
             string whyPair;
             Assert(HoleCheck.IsValidPair(8.5, 11.0, out whyPair), "M10 底孔 + M10 过孔 是合法配做");
             Assert(HoleCheck.IsValidPair(13.5, 10.2, out whyPair), "M12 过孔 + M12 底孔 是合法配做");
-            Assert(!HoleCheck.IsValidPair(8.5, 6.8, out whyPair), "M10 底孔 + M8 底孔 配不上（" + whyPair + "）");
+            Assert(!HoleCheck.IsValidPair(8.5, 3.3, out whyPair), "M10 底孔 + M4 底孔 配不上（" + whyPair + "）");
+            Assert(HoleCheck.IsValidPair(8.5, 6.8, out whyPair), "Φ8.5 + M8 螺纹孔：M8 螺钉穿得过（两个不同规格螺纹孔叠一起不是真设计）");
             Assert(HoleCheck.IsValidPair(7.5, 8.0, out whyPair), "非标准表内、直径差 ≤1mm 放过");
+            // 0.10.1 焊接台车实测的误报
+            Assert(HoleCheck.IsValidPair(6.0, 4.13, out whyPair), "Φ6（M5 粗装配过孔，HIWIN 导轨）+ M5 螺纹孔 是合法配做（原来报直径差 1.87）");
+            Assert(HoleCheck.IsValidPair(7.0, 5.0, out whyPair), "Φ7（M6 粗装配过孔）+ M6 底孔 是合法配做（原来 Φ7 被认成 M8 底孔）");
+            Assert(HoleCheck.IsValidPair(6.6, 6.65, out whyPair), "Φ6.6 与 Φ6.65 是同一把钻头（原来报 M6 与 M8）");
+            Assert(HoleCheck.IsValidPair(5.0, 3.24, out whyPair), "Φ5 过孔 + M4 螺纹孔（MISUMI 把手底座，用户实际这么配）");
+            Assert(HoleCheck.IsValidPair(20.0, 18.38, out whyPair), "M20×1.5 细牙螺母 + Φ20 配合孔");
+            Assert(HoleCheck.IsValidPair(11.0, 6.6, out whyPair), "M6 过孔上面一块板开 Φ11 让螺钉头（沉孔分两块板做）");
+            Assert(!HoleCheck.IsValidPair(6.6, 4.13, out whyPair), "M6 过孔 + M5 螺纹孔 仍然配不上（" + whyPair + "）");
+            Assert(!HoleCheck.IsValidPair(5.5, 5.0, out whyPair), "M5 过孔 + M6 底孔 仍然配不上（" + whyPair + "）");
+            Assert(!HoleCheck.IsValidPair(4.13, 5.0, out whyPair), "M5 螺纹孔 + Φ5（比螺钉还紧）仍然报");
+            Assert(!HoleCheck.IsValidPair(12.0, 20.0, out whyPair), "Φ12 + Φ20 仍然报");
 
             var aligned = HoleCheck.Run(new List<HoleRecord>{ h1, h2 }, null);
             Assert(aligned.Count == 0, "同轴且配做正确 -> 无问题，实得 " + aligned.Count);
@@ -173,8 +185,8 @@ namespace TianGongCadSuite {
             MisalignmentAndRay();
             var wrongSpec = HoleCheck.Run(new List<HoleRecord>{
                 new HoleRecord{ Center=new V3(0,0,0), Axis=new V3(0,0,1), DiameterMm=8.5, PartName="A", AxialMax=0.02 },
-                new HoleRecord{ Center=new V3(0,0,0.02), Axis=new V3(0,0,1), DiameterMm=6.8, PartName="B", AxialMax=0.02 } }, null);
-            Assert(wrongSpec.Count == 1 && wrongSpec[0].Kind == HoleIssueKind.WrongSpec, "M10 底孔配 M8 底孔 -> 配错孔");
+                new HoleRecord{ Center=new V3(0,0,0.02), Axis=new V3(0,0,1), DiameterMm=3.3, PartName="B", AxialMax=0.02 } }, null);
+            Assert(wrongSpec.Count == 1 && wrongSpec[0].Kind == HoleIssueKind.WrongSpec, "M10 底孔配 M4 底孔 -> 配错孔");
 
             // 漏打孔：装配里有 A、B 两个零件，射线说 A 的孔穿过了 B，但 B 上没有孔
             var parts = new List<string>{ "A", "B" };
