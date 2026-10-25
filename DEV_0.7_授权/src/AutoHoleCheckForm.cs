@@ -62,6 +62,13 @@ namespace TianGongCadSuite {
             try { HoleCheck.Options = HoleCheckOptions.Load(SettingsFile.PathOf(HoleCheckOptions.FileName)); }
             catch (Exception e) { Log.Write("HoleCheckOptionsLoad", e); }
             cUnpaired.Checked = false;
+            // 显示哪几类、选中即跳转：记住上次的（0.10.2）
+            foreach (var kv in new[]{ new KeyValuePair<ToggleChip, string>(cMissing, "check.missing"), new KeyValuePair<ToggleChip, string>(cMis, "check.misaligned"), new KeyValuePair<ToggleChip, string>(cWrong, "check.wrong"), new KeyValuePair<ToggleChip, string>(cUnpaired, "check.unpaired") }) {
+                var chip = kv.Key; string key = kv.Value;
+                chip.Checked = Choices.Get(key, chip.Checked ? "1" : "0") == "1";
+                chip.Click += (s, e) => Choices.Set(key, chip.Checked ? "1" : "0");
+            }
+            Choices.Bind(autoJump, "check.autoJump");
             BuildLayout();
             ApplyFilter();
             FormClosed += (s, e) => Cleanup();

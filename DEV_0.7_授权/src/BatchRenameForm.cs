@@ -70,7 +70,7 @@ namespace TianGongCadSuite {
             filter.TextChanged += (s, e) => Rebuild();
             var foot = new Panel { BackColor = Ui.Rail, Height = 64 };
             follow.Text = "同文件夹里同名的工程图（.dft）、显示配置（.cfg）跟着改名";
-            follow.Checked = true; follow.AutoSize = false; follow.BackColor = Ui.Rail; follow.Font = Ui.F8;
+            follow.Checked = true; Choices.Bind(follow, "rename.follow"); follow.AutoSize = false; follow.BackColor = Ui.Rail; follow.Font = Ui.F8;
             follow.CheckAlign = ContentAlignment.TopLeft; follow.TextAlign = ContentAlignment.TopLeft;
             follow.Dock = DockStyle.Fill;
             follow.CheckedChanged += (s, e) => { SyncFollowers(); Rebuild(); };

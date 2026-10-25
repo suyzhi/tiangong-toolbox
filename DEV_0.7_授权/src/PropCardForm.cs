@@ -73,7 +73,7 @@ namespace TianGongCadSuite {
             // 侧栏底部：顺便补齐缺的属性
             var foot = new Panel { BackColor = Ui.Rail, Height = 64 };
             fillMissing.Text = "写入时顺便补齐缺的属性（标题栏不再显示“错误：没有参考”）";
-            fillMissing.Checked = true; fillMissing.AutoSize = false; fillMissing.BackColor = Ui.Rail; fillMissing.Font = Ui.F8;
+            fillMissing.Checked = true; Choices.Bind(fillMissing, "propcard.fillMissing"); fillMissing.AutoSize = false; fillMissing.BackColor = Ui.Rail; fillMissing.Font = Ui.F8;
             fillMissing.CheckAlign = ContentAlignment.TopLeft; fillMissing.TextAlign = ContentAlignment.TopLeft;
             fillMissing.Dock = DockStyle.Fill;
             foot.Controls.Add(fillMissing);

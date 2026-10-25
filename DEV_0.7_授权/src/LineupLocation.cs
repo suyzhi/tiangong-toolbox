@@ -38,12 +38,25 @@ namespace TianGongCadSuite {
             }
             throw new InvalidOperationException("CAD 返回空白截图，请等待模型显示稳定后重试。");
         }
+        // 整张图一次读成 ARGB 数组（LockBits）。原来逐个像素 GetPixel（每次都锁一遍位图）：1600×1000 的图三张一比就是几百万次，
+        // 一条记录要好几秒，几十条记录导出时天工（窗口还藏着）卡几分钟，看着像死了
+        static int[] Pixels(Bitmap bitmap){
+            var rect=new Rectangle(0,0,bitmap.Width,bitmap.Height);
+            var data=bitmap.LockBits(rect,System.Drawing.Imaging.ImageLockMode.ReadOnly,System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            try{
+                var all=new int[bitmap.Width*bitmap.Height];
+                for(int y=0;y<bitmap.Height;y++)System.Runtime.InteropServices.Marshal.Copy(data.Scan0+y*data.Stride,all,y*bitmap.Width,bitmap.Width);
+                return all;
+            }finally{bitmap.UnlockBits(data);}
+        }
+        static int R(int c){return (c>>16)&255;} static int G(int c){return (c>>8)&255;} static int B(int c){return c&255;}
         public static LineupLocationPoint DetectDifference(Bitmap background,Bitmap first,Bitmap second){
             if(background.Size!=first.Size||first.Size!=second.Size)throw new InvalidDataException("截图尺寸发生变化。");
             var points=new List<Point>();double sx=0,sy=0;
-            for(int y=0;y<first.Height;y++)for(int x=0;x<first.Width;x++){
-                var a=background.GetPixel(x,y);var b=first.GetPixel(x,y);var c=second.GetPixel(x,y);
-                int delta=Math.Abs(a.R-b.R)+Math.Abs(a.G-b.G)+Math.Abs(a.B-b.B),stable=Math.Abs(c.R-b.R)+Math.Abs(c.G-b.G)+Math.Abs(c.B-b.B);
+            int[] pa=Pixels(background),pb=Pixels(first),pc=Pixels(second);int w=first.Width;
+            for(int y=0;y<first.Height;y++)for(int x=0;x<w;x++){
+                int a=pa[y*w+x],b=pb[y*w+x],c=pc[y*w+x];
+                int delta=Math.Abs(R(a)-R(b))+Math.Abs(G(a)-G(b))+Math.Abs(B(a)-B(b)),stable=Math.Abs(R(c)-R(b))+Math.Abs(G(c)-G(b))+Math.Abs(B(c)-B(b));
                 if(delta>100&&stable<15){points.Add(new Point(x,y));sx+=x;sy+=y;}
             }
             if(points.Count<6||points.Count>first.Width*first.Height/3)return new LineupLocationPoint{State="unresolved",Reason="高亮差分缺失或影响范围过大",Pixels=points.Count};
@@ -54,9 +67,10 @@ namespace TianGongCadSuite {
         public static LineupLocationPoint Detect(Bitmap first,Bitmap second){
             if(first.Size!=second.Size)throw new InvalidDataException("截图尺寸发生变化。");
             var points=new List<Point>();double sx=0,sy=0;
-            for(int y=0;y<first.Height;y++)for(int x=0;x<first.Width;x++){
-                Color a=first.GetPixel(x,y),b=second.GetPixel(x,y);
-                bool yellow=a.R>150&&a.G>150&&a.B<140,magenta=b.R>150&&b.B>150&&b.G<140;
+            int[] pa=Pixels(first),pb=Pixels(second);int w=first.Width;
+            for(int y=0;y<first.Height;y++)for(int x=0;x<w;x++){
+                int a=pa[y*w+x],b=pb[y*w+x];
+                bool yellow=R(a)>150&&G(a)>150&&B(a)<140,magenta=R(b)>150&&B(b)>150&&G(b)<140;
                 if(yellow&&magenta){points.Add(new Point(x,y));sx+=x;sy+=y;}
             }
             if(points.Count<6)return new LineupLocationPoint{State="unresolved",Reason="未识别到足够的双色高亮像素；请调整视角或检查遮挡",Pixels=points.Count};

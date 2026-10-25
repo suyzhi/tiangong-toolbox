@@ -151,6 +151,9 @@ namespace TianGongCadSuite {
 
             timer.Interval=500;timer.Tick+=delegate{ Poll(); };
             AcceptButton=null;
+            // 记住上次的勾选（0.10.2）：原来每次打开都回到默认，转工程图、不镜像的人每次重新勾
+            Choices.Bind(parts,"convert.parts");Choices.Bind(assemblies,"convert.assemblies");Choices.Bind(drawings,"convert.drawings");Choices.Bind(step,"convert.step");
+            Choices.Bind(recursive,"convert.recursive");Choices.Bind(mirror,"convert.mirror");Choices.Bind(force,"convert.force");Choices.Bind(verify,"convert.verify");Choices.Bind(autoWorkers,"convert.autoWorkers");
             RefreshRail();
         }
         public void GoPageForTest(int i){ shell.Go(i,false); }
@@ -183,7 +186,7 @@ namespace TianGongCadSuite {
                 dialog.Multiselect=true;dialog.Filter="CAD 文件|*.sldasm;*.SLDASM;*.sldprt;*.SLDPRT;*.slddrw;*.SLDDRW;*.stp;*.STP;*.step;*.STEP|SolidWorks|*.sldasm;*.SLDASM;*.sldprt;*.SLDPRT;*.slddrw;*.SLDDRW|STEP|*.stp;*.STP;*.step;*.STEP|所有文件|*.*";
                 if(dialog.ShowDialog(this)!=DialogResult.OK)return;
                 foreach(string file in dialog.FileNames)AddSource(file);
-                if(output.Text.Length==0)output.Text=Path.GetDirectoryName(dialog.FileNames[0]);
+                if(output.Text.Length==0)output.Text=Path.Combine(Path.GetDirectoryName(dialog.FileNames[0]),"天工格式输出");   // 和加文件夹一样放子文件夹：原来直接输出到源文件旁边，转出来的 .par 和 SolidWorks 原件混在一起
             }
         }
         void AddFolder(){
