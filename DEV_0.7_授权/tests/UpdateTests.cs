@@ -17,6 +17,8 @@ namespace PanelTests {
     //   --update-live <url> <LicenseServerSlot.cs> <截图/输出目录>
     //                       打本机起的 server/tg_license_server.py：取清单 → 下载 → 校验 → 解压 → 起等待脚本（只写日志不装）
     //                       本机真实的 update.tsv / updates 目录先拍快照、跑完放回
+    //   --update-live <url> <slot> <dir> --real
+    //                       真装：等待脚本真的运行安装包的 install.ps1 -Force（天工关着时马上装），用来给本机装正式版、验证整条更新链路
     internal static class UpdateTests {
         internal static void Run(Action<string, bool> check, string shotDir){
             check("更新地址跟着授权地址走", AutoUpdate.UpdateUrlFor("https://license.example.com/api/v1/license") == "https://license.example.com/api/v1/update");
@@ -102,10 +104,12 @@ namespace PanelTests {
         // ---------- 真服务器 ----------
 
         internal static void RunLive(Action<string, bool> check, string url, string slotPath, string outDir, string tamperZip){
+            bool real = tamperZip == "--real";
+            if (real) tamperZip = null;
             string slot = File.ReadAllText(slotPath);
             LicenseTestHooks.ServerKeyOverride = Blob(Const(slot, "KeyX"), Const(slot, "KeyY"));
             LicenseTestHooks.ServerUrlOverride = url;
-            AutoUpdate.DryRunForTest = true;
+            AutoUpdate.DryRunForTest = !real;
             string state = SettingsFile.PathOf("update.tsv");
             byte[] savedState = File.Exists(state) ? File.ReadAllBytes(state) : null;
             bool hadRoot = Directory.Exists(AutoUpdate.UpdatesRoot);
@@ -114,7 +118,8 @@ namespace PanelTests {
                 string error;
                 var m = AutoUpdate.Fetch(out error);
                 check("真服务器：取到签名清单（" + (error ?? (m == null ? "没发布" : m.Version)) + "）", m != null && error == null);
-                check("真服务器：清单版本比本机新（" + m.Version + " > " + AutoUpdate.Current + "）", AutoUpdate.IsNewer(m));
+                if (!real) check("真服务器：清单版本比本机新（" + m.Version + " > " + AutoUpdate.Current + "）", AutoUpdate.IsNewer(m));
+                else Console.WriteLine("   清单 " + m.Version + "（" + m.Date + "，" + m.SizeText + "）：" + m.Notes.Replace("\n", " ⏎ "));
                 long last = 0; int calls = 0;
                 string pkg = AutoUpdate.Download(m, (got, total) => { last = got; calls++; }, () => false);
                 check("真服务器：下载完、大小对、SHA-256 对（" + last + " 字节，进度回调 " + calls + " 次）", last == m.Size && calls > 0);
@@ -127,9 +132,10 @@ namespace PanelTests {
                 if (cad) {
                     Console.WriteLine("SKIP: 本机天工开着，等待脚本会一直等它关掉 —— 不等 DRYRUN 行（关掉天工后看 " + log + "）");
                 } else {
-                    string text = "";
-                    for (int i = 0; i < 60 && text.IndexOf("DRYRUN") < 0; i++) { Thread.Sleep(500); try { text = File.ReadAllText(log); } catch { } }
-                    check("真服务器：等待脚本发现天工没开，走到安装那一步（DRYRUN 只写日志）", text.IndexOf("DRYRUN") >= 0);
+                    string text = "", want = real ? "安装结束" : "DRYRUN";
+                    for (int i = 0; i < (real ? 360 : 60) && text.IndexOf(want) < 0; i++) { Thread.Sleep(500); try { text = File.ReadAllText(log); } catch { } }
+                    if (real) check("真装：等待脚本运行 install.ps1 -Force 成功（" + (text.IndexOf("ok=True") >= 0 ? "ok" : "看 update.log") + "）", text.IndexOf("ok=True") >= 0);
+                    else check("真服务器：等待脚本发现天工没开，走到安装那一步（DRYRUN 只写日志）", text.IndexOf("DRYRUN") >= 0);
                     Console.WriteLine("   update.log: " + text.Trim().Replace("\r\n", " ⏎ "));
                 }
                 // 服务器上的安装包被人换了（清单没变）：下载完校验不过，不装

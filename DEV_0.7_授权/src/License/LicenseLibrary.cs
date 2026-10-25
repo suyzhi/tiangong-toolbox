@@ -40,7 +40,10 @@ namespace TianGongCadSuite.Licensing {
                 case LicenseStatus.Missing: return "未激活。请输入管理员发来的激活码。";
                 case LicenseStatus.Expired: return PlanName + " 授权已于 " + LicenseTime.Format(ExpiryDate) + " 到期，请向管理员续期。";
                 case LicenseStatus.WrongMachine: return "本机激活记录属于另一台机器（或硬件已更换），无法使用。请联系管理员重新签发激活码。";
-                case LicenseStatus.BadCode: return "激活码无效或已损坏，请重新核对（注意区分 0/O、1/I）。";
+                // 0.9.2 换了正式签发密钥：老版本发的码在本机激活文件里能解析、验签不过（Detail 以 unsigned 开头）——说清楚是"旧码要换"，不是抄错了
+                case LicenseStatus.BadCode: return Detail != null && Detail.StartsWith("unsigned")
+                    ? "这是旧版本的激活码：天工工具箱 0.9.2 起换了新的激活码，旧码不能再用。请向管理员要一个新的激活码，在这里粘贴激活（激活需要联网）。"
+                    : "激活码无效或已损坏，请重新核对（注意区分 0/O、1/I）。";
                 case LicenseStatus.ClockTampered: return "检测到系统时间被回调，授权已暂停。请把系统时间校正后重新激活。";
                 case LicenseStatus.Environment: return "运行环境异常，授权校验被阻止。" + Detail;
                 case LicenseStatus.Revoked: return "该激活码已被管理员停用（作废），请联系管理员重新签发。";

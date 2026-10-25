@@ -541,6 +541,10 @@ def make_handler(service, admin=None):
 
         def client_ip(self):
             if service.trust_proxy:
+                # 经 Cloudflare Tunnel 进来：CF-Connecting-IP 是客户端真实 IP（X-Forwarded-For 可能被客户端自己塞值）
+                real = self.headers.get("CF-Connecting-IP", "").strip()
+                if real:
+                    return real
                 forwarded = self.headers.get("X-Forwarded-For", "")
                 if forwarded:
                     return forwarded.split(",")[0].strip()
