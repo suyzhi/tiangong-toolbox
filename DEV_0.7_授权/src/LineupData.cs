@@ -33,7 +33,13 @@ namespace TianGongCadSuite {
             LineupProject p;
             using(var stream=File.OpenRead(file))p=(LineupProject)new XmlSerializer(typeof(LineupProject)).Deserialize(stream);
             if(p.Version!=1)throw new InvalidDataException("不支持的 Lineup 文件版本。");
-            if(!string.Equals(Path.GetFullPath(p.AssemblyFile),Path.GetFullPath(assembly),StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("Lineup 数据属于另一装配，请使用导入功能重新绑定模型。");
+            if(!string.Equals(Path.GetFullPath(p.AssemblyFile),Path.GetFullPath(assembly),StringComparison.OrdinalIgnoreCase)){
+                // 0.10.3：数据文件就是这个装配旁边、同名的那个 .lineup.xml → 装配连同文件夹被拷走 / 挪走 / 改过名（记的还是老路径）。
+                // 原来一律报"属于另一装配"、Lineup 打不开：H 盘上到处是「项目 - 副本」，拷一份接着做就再也打不开清单。
+                // 记录靠装配里的持久化关联键找模型，和文件夹在哪无关，所以直接改记成现在的路径（下次保存时写回）
+                if(string.Equals(Path.GetFullPath(file),Path.GetFullPath(Path.ChangeExtension(assembly,".lineup.xml")),StringComparison.OrdinalIgnoreCase)){p.AssemblyFile=Path.GetFullPath(assembly);return p;}
+                throw new InvalidDataException("Lineup 数据属于另一装配，请使用导入功能重新绑定模型。");
+            }
             return p;
         }
         public List<string> Validate() {

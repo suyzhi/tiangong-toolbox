@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -152,6 +152,19 @@ namespace TianGongCadSuite {
                     if (cut) break;
                 }
                 if (cut) result.Warnings.Add("上一级文件夹里的工程图太多，没有全部查完（查了 " + extra + " 张）：别处的工程图要是也引用了这些文件，用「添加文件…」把它加进表里一起改");
+                // 旁边文件夹里的装配（0.10.3）：零件放在「项目\参考\…」、装配在「项目\焊接台车\」这种（用户的 YF25.07 就是），
+                // 原来只查上一级往下的工程图，改了参考件的名字，旁边文件夹里用到它的装配全断了。上一级和它下面一层的装配也初筛一遍（有上限，超了说）
+                var asmBudget = Stopwatch.StartNew(); int asmN = 0; bool asmCut = false;
+                foreach (var root in changed.Select(r => Path.GetDirectoryName(r.Folder.TrimEnd('\\')) ?? "").Where(d => d.Length > 3).Distinct(StringComparer.OrdinalIgnoreCase)) {
+                    pulse("查找旁边文件夹里引用这些文件的装配…　" + root);
+                    foreach (var f in AssembliesNear(root)) {
+                        if (asmN >= 300 || asmBudget.ElapsedMilliseconds > 8000) { asmCut = true; break; }
+                        if (seen.Contains(Full(f))) continue;
+                        asmN++; consider(f);
+                    }
+                    if (asmCut) break;
+                }
+                if (asmCut) result.Warnings.Add("旁边文件夹里的装配太多，没有全部查完（查了 " + asmN + " 个）：别处的装配要是也用了这些文件，用「添加文件…」把它加进表里一起改");
             }
             result.FilterMs = sw.ElapsedMilliseconds;
             Log.Write("RenameFilter", "候选 " + candidates.Count + " 个，初筛排除 " + result.Skipped + " 个，" + sw.ElapsedMilliseconds + " ms");
@@ -241,6 +254,16 @@ namespace TianGongCadSuite {
                 if (fixer != null) foreach (var f in fixer.Revert()) result.Warnings.Add("引用没能改回：" + f);
             } finally {
                 if (fixer != null) fixer.Dispose();
+            }
+
+            // 装配旁边的 Lineup 数据（「装配名.lineup.xml」，0.10.3）：按名字找的，装配改了名不跟着改，Lineup 打开就是空的（像是清单全丢了）
+            if (done) foreach (var r in changed) {
+                if (!r.Path.EndsWith(".asm", StringComparison.OrdinalIgnoreCase)) continue;
+                foreach (var tail in new[] { ".lineup.xml", ".lineup.xml.bak" }) {
+                    string from = Path.ChangeExtension(r.Path, null) + tail, to = Path.ChangeExtension(r.NewPath, null) + tail;
+                    try { if (File.Exists(from) && !File.Exists(to)) File.Move(from, to); }
+                    catch (Exception e) { Log.Write("RenameLineup " + from, e); if (tail == ".lineup.xml") result.Warnings.Add("Lineup 清单「" + Path.GetFileName(from) + "」没能跟着改名（" + e.Message + "），手动改成「" + Path.GetFileName(to) + "」"); }
+                }
             }
 
             // 6. 重新打开
@@ -344,6 +367,16 @@ namespace TianGongCadSuite {
         void Idle(){ for (int i = 0; i < 3; i++) { try { app.DoIdle(); } catch { } } }
 
         // folder 下（含 depth 层子文件夹）的工程图；读不了的文件夹跳过
+        // 上一级文件夹里的装配 + 它下面一层各文件夹里的装配（不再往深走：大项目一层就有几百个装配、几百 MB 要读）
+        static IEnumerable<string> AssembliesNear(string folder){
+            foreach (var f in Files(folder, "*.asm")) yield return f;
+            string[] subs;
+            try { subs = Directory.GetDirectories(folder); } catch { yield break; }
+            foreach (var d in subs) {
+                try { if ((File.GetAttributes(d) & (FileAttributes.ReparsePoint | FileAttributes.Hidden | FileAttributes.System)) != 0) continue; } catch { continue; }
+                foreach (var f in Files(d, "*.asm")) yield return f;
+            }
+        }
         static IEnumerable<string> DraftsUnder(string folder, int depth){
             foreach (var f in Files(folder, "*.dft")) yield return f;
             if (depth <= 0) yield break;

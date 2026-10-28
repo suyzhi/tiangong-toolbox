@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using A=SolidEdgeAssembly;
 using F=SolidEdgeFramework;
@@ -26,7 +26,7 @@ namespace TianGongCadSuite {
                     "选好以后在天工里点了别的命令（测量、隐藏零件……），窗口只是暂停选择，回到窗口点一下接着选。\n" +
                     "参考件上是腰孔：点它一头的圆弧，目标件上配同样的腰孔。关窗口按 Esc（选了东西时要按两次）。",
                     context.HasEditableContext,
-                    () => { var doc = context.RequireEditableAssembly(); context.Show(() => new AutoHoleForm(context.Application, doc), f => ((AutoHoleForm)f).StartPicking()); });
+                    () => { var doc = context.RequireEditableAssembly(); context.Show(() => new AutoHoleForm(context.Application, doc), f => ((AutoHoleForm)f).StartPicking(), f => f is AutoHoleForm && ((AutoHoleForm)f).ReuseFor(doc)); });
                 yield return new ToolCommand(7, "批量排孔",
                     "在一个面上沿线等分/定距排孔，或沿圆周均布",
                     "① 点要打孔的面（方向自动取该面最长的边）→ ② 选排布方式并填孔数或间距 → ③ 点「开始打孔」。\n" +
@@ -35,8 +35,8 @@ namespace TianGongCadSuite {
                     () => context.HasEditableContext() || StandalonePart() != null,
                     () => {
                         var part = context.HasEditableContext() ? null : StandalonePart();
-                        if (part != null) { context.Show(() => new AutoHolePatternForm(context.Application, part), f => ((AutoHolePatternForm)f).StartPicking()); return; }
-                        var doc = context.RequireEditableAssembly(); context.Show(() => new AutoHolePatternForm(context.Application, doc), f => ((AutoHolePatternForm)f).StartPicking());
+                        if (part != null) { context.Show(() => new AutoHolePatternForm(context.Application, part), f => ((AutoHolePatternForm)f).StartPicking(), f => f is AutoHolePatternForm && ((AutoHolePatternForm)f).ReuseFor(part)); return; }
+                        var doc = context.RequireEditableAssembly(); context.Show(() => new AutoHolePatternForm(context.Application, doc), f => ((AutoHolePatternForm)f).StartPicking(), f => f is AutoHolePatternForm && ((AutoHolePatternForm)f).ReuseFor(doc));
                     });
                 yield return new ToolCommand(9, "改孔型",
                     "把已经打好的孔换成别的孔型/规格（整组一起改），不用删了重打",
@@ -47,8 +47,8 @@ namespace TianGongCadSuite {
                     () => context.HasEditableContext() || StandalonePart() != null,
                     () => {
                         var part = context.HasEditableContext() ? null : StandalonePart();
-                        if (part != null) { context.Show(() => new HoleEditForm(context.Application, part), f => ((HoleEditForm)f).StartPicking()); return; }
-                        var doc = context.RequireEditableAssembly(); context.Show(() => new HoleEditForm(context.Application, doc), f => ((HoleEditForm)f).StartPicking());
+                        if (part != null) { context.Show(() => new HoleEditForm(context.Application, part), f => ((HoleEditForm)f).StartPicking(), f => f is HoleEditForm && ((HoleEditForm)f).ReuseFor(part)); return; }
+                        var doc = context.RequireEditableAssembly(); context.Show(() => new HoleEditForm(context.Application, doc), f => ((HoleEditForm)f).StartPicking(), f => f is HoleEditForm && ((HoleEditForm)f).ReuseFor(doc));
                     });
                 yield return new ToolCommand(8, "配孔检查",
                     "扫一遍装配，查漏打孔、孔偏了、配错孔",
@@ -58,32 +58,47 @@ namespace TianGongCadSuite {
                     context.HasAssembly,
                     () => {
                         var doc = context.RequireAssembly();
-                        context.Show(() => new AutoHoleCheckForm(context.Application, doc) { GoDrill = (holes, part) => OpenDrillFromCheck(doc, holes, part) }, null);
+                        context.ShowCompanion(() => new AutoHoleCheckForm(context.Application, doc) { GoDrill = (holes, part) => OpenDrillFromCheck(doc, holes, part) },
+                            f => f is AutoHoleCheckForm,
+                            f => { var c = (AutoHoleCheckForm)f; if (!ReferenceEquals(c.Assembly, doc)) return false; c.NoteReopened(); return true; });
                     });
             }
         }
         // 配孔检查里的「去配孔」：另开一个自动打孔窗口（检查窗口留着，还能接着看下一条），
         // 把漏打孔那一条的孔带进去当参考孔，用户只要再点没打孔那个零件上的面。
+        // 走 ToolContext（0.10.3）：检查窗口不再随换命令关掉以后，「去配孔」开的打孔窗口和功能区开的打孔 / 改孔型窗口会同时开着、抢同一个鼠标选择。
+        // 现在它就是"当前命令"：换命令时照常关掉（有选好的东西会先问）
         AutoHoleForm OpenDrillFromCheck(A.AssemblyDocument doc, List<HoleRecord> holes, string missingPart){
             if (!TianGongCadSuite.Licensing.LicenseGate.EnsureInteractive(new CadOwner(context.Application.ActiveFramehWnd))) return null;
-            var f = new AutoHoleForm(context.Application, doc);
-            f.Show(new CadOwner(context.Application.ActiveFramehWnd));
-            f.StartPicking();
-            f.PreloadReferences(holes, missingPart);
-            return f;
+            AutoHoleForm made = null;
+            context.Show(() => made = new AutoHoleForm(context.Application, doc), f => { ((AutoHoleForm)f).StartPicking(); ((AutoHoleForm)f).PreloadReferences(holes, missingPart); });
+            return made;
         }
         // 「自动打孔 / 批量排孔」的「改孔型…」：另开改孔型窗口，把刚打的那批孔带进去（打孔窗口留着）
-        internal static void OpenEdit(F.Application app, SolidEdgePart.PartDocument part, IList<KeyValuePair<SolidEdgePart.PartDocument, string>> created){
-            var f = new HoleEditForm(app, part);
-            f.Show(new CadOwner(app.ActiveFramehWnd));
-            f.StartPicking();
-            f.Preload(created);
+        // 「改孔型…」开的窗口不归 ToolContext 管：原来每点一次开一个，几个改孔型窗口抢同一个鼠标选择（同 0.10.1 修的「去配孔」）。
+        // 上一个没在改就先关掉；正在改就不开新的（0.10.3）
+        static HoleEditForm lastEdit;
+        static bool ReplaceLastEdit(){
+            if (lastEdit == null || lastEdit.IsDisposed) return true;
+            if (lastEdit.Busy) { try { lastEdit.Activate(); } catch { } return false; }
+            try { lastEdit.Close(); } catch { }
+            return lastEdit.IsDisposed;
         }
-        internal static void OpenEdit(F.Application app, A.AssemblyDocument doc, IList<KeyValuePair<SolidEdgePart.PartDocument, string>> created){
-            var f = new HoleEditForm(app, doc);
+        internal static bool OpenEdit(F.Application app, SolidEdgePart.PartDocument part, IList<KeyValuePair<SolidEdgePart.PartDocument, string>> created){
+            if (!ReplaceLastEdit()) return false;
+            var f = new HoleEditForm(app, part); lastEdit = f;
             f.Show(new CadOwner(app.ActiveFramehWnd));
             f.StartPicking();
             f.Preload(created);
+            return true;
+        }
+        internal static bool OpenEdit(F.Application app, A.AssemblyDocument doc, IList<KeyValuePair<SolidEdgePart.PartDocument, string>> created){
+            if (!ReplaceLastEdit()) return false;
+            var f = new HoleEditForm(app, doc); lastEdit = f;
+            f.Show(new CadOwner(app.ActiveFramehWnd));
+            f.StartPicking();
+            f.Preload(created);
+            return true;
         }
         // 单独打开的零件（不是在装配里原位编辑）：批量排孔、改孔型在这里也能用（0.8.5）。原来这两个按钮在零件环境里一直是灰的
         SolidEdgePart.PartDocument StandalonePart(){

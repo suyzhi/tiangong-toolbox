@@ -735,6 +735,9 @@ namespace TianGongCadSuite {
             if (miss > 0) parts.Add("漏打孔 " + miss);
             if (mis > 0) parts.Add("孔偏了 " + mis);
             if (wrong > 0) parts.Add("配错孔 " + wrong);
+            // 勾着「孤孔」时它也算进来：原来不列，只剩孤孔时结论是"发现 12 处问题："冒号后面什么都没有
+            int lone = issues.Where(i => i.Kind == HoleIssueKind.Unpaired).Sum(i => i.Places);
+            if (lone > 0) parts.Add("孤孔 " + lone);
             return "检查了 " + holeCount + " 个孔（" + groupCount + " 组同轴孔），发现 " + places + " 处问题" + (places > issues.Count ? "（同样的合成 " + issues.Count + " 条）" : "") + "：" + string.Join("，", parts.ToArray());
         }
     }

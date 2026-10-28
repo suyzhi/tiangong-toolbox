@@ -46,7 +46,20 @@ namespace TianGongCadSuite {
                         item.Root=parts[2];
                         item.Worker=parts.Length>3?int.Parse(parts[3]):0;
                         try{ item.Size=new FileInfo(item.Source).Length; }catch{ item.Size=0; }
-                        item.Target=ConvertPlanner.TopTarget(item,options);
+                        // 路径太长（0.10.3）：原来这里抛 PathTooLongException 冒到外层，这个 worker 后面的文件一个都不转了。只让这一个失败、说清楚
+                        string tooLong=null;
+                        if(item.Source.Length>259)tooLong="源文件路径太长（"+item.Source.Length+" 个字符，Windows 最多 259），天工打不开。把项目文件夹挪到浅一点的地方（比如 D:\\项目\\）再转。";
+                        else{ try{ item.Target=ConvertPlanner.TopTarget(item,options); if(item.Target.Length>259)tooLong="输出路径太长（"+item.Target.Length+" 个字符，Windows 最多 259），存不上。把输出目录选短一点（比如 D:\\转换输出），或者不勾「镜像源目录结构」。"; }
+                              catch(PathTooLongException){ tooLong="输出路径太长（超过 Windows 的 259 个字符），存不上。把输出目录选短一点（比如 D:\\转换输出），或者不勾「镜像源目录结构」。"; } }
+                        if(tooLong!=null){
+                            ConvertLog.Append(statusFile,ConvertProtocol.Line(ConvertProtocol.End,item.Index.ToString(),"fail",item.Source,"0","0","0","0",item.Target??"",item.Worker.ToString(),tooLong));
+                            continue;
+                        }
+                        // 勾了「覆盖」：这次前面的装配已经把它一起转好存出来了，不用再单独转一遍
+                        if(options.Force&&session.WroteThisRun(ConvertPlanner.CandidateTargets(item,options))){
+                            ConvertLog.Append(statusFile,ConvertProtocol.Line(ConvertProtocol.End,item.Index.ToString(),"skip",item.Source,"0","0","0","0",item.Target,item.Worker.ToString(),"这次已随装配一起转好"));
+                            continue;
+                        }
                         if(!options.Force&&ConvertPlanner.IsAlreadyConverted(item,options)){
                             ConvertLog.Append(statusFile,ConvertProtocol.Line(ConvertProtocol.End,item.Index.ToString(),"skip",item.Source,"0","0","0","0",item.Target,item.Worker.ToString(),"输出已存在"));
                             continue;

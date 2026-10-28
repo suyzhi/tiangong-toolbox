@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -59,6 +59,7 @@ class RenameE2E {
             else if (mode == "dirty") DirtyRun(dir);
             else if (mode == "stale") StaleRun(dir);
             else if (mode == "propcard") PropCardRun(dir, args.Length > 3 ? args[3] : Asm);
+            else if (mode == "sibling") SiblingRun(dir, args.Length > 3 ? args[3] : "");
         } catch (Exception e) { L("FAIL 异常 " + e); fails++; }
         stop = true;
         L("对话框 " + dialogs.Count + " 个" + (dialogs.Count > 0 ? "：" + string.Join(" | ", dialogs.ToArray()) : ""));
@@ -236,6 +237,35 @@ class RenameE2E {
             } catch (Exception e) { L("   打不开 " + n + "：" + e.Message); }
             finally { try { if (doc != null) ((dynamic)doc).Close(false); } catch { } Idle(3); }
         }
+    }
+
+    // 0.10.3：零件在 dir\零件\、装配在旁边的 dir\装配\（YF25.07 的 参考\ 和 焊接台车\ 就是这样）。
+    // 打开零件本身、只改它的名字：旁边文件夹里用到它的装配也要跟着改好、0 缺件。seed = 拿来当零件的一个现成 .par 副本
+    static void SiblingRun(string dir, string seed){
+        string st = DateTime.Now.ToString("HHmmss");
+        string partDir = Path.Combine(dir, "零件"), asmDir = Path.Combine(dir, "装配");
+        Directory.CreateDirectory(partDir); Directory.CreateDirectory(asmDir);
+        string part = Path.Combine(partDir, "SibA_" + st + ".par"), top = Path.Combine(asmDir, "SibTop_" + st + ".asm");
+        if (seed.Length > 0) File.Copy(seed, part, true);
+        else { var pd = app.Documents.Add("SolidEdge.PartDocument"); Idle(10); ((dynamic)pd).SaveAs(part); Idle(5); ((dynamic)pd).Close(false); Idle(5); }   // 新建空零件（拿现成零件当种子会带着别的装配的关联，一打开就问要不要开那个装配）
+        var asm = (A.AssemblyDocument)app.Documents.Add("SolidEdge.AssemblyDocument"); Idle(10);
+        asm.Occurrences.AddByFilename(part); Idle(10);
+        asm.SaveAs(top); Idle(10);
+        CloseAll();
+        Open(part);
+        diag.StartRenameFormTest("SibA_" + st, "SibB_" + st, "", dir, true);
+        string r = Wait(10);
+        L(r);
+        Check(r.Contains("error= "), "只改零件名没有报错");
+        string renamed = Path.Combine(partDir, "SibB_" + st + ".par");
+        Check(File.Exists(renamed) && !File.Exists(part), "零件改好了名");
+        CloseAll();
+        var doc = Open(top) as A.AssemblyDocument;
+        string occ = Try(() => doc.Occurrences.Item(1).OccurrenceFileName, "");
+        bool missing = Try(() => doc.Occurrences.Item(1).FileMissing(), true);
+        L("   旁边文件夹的装配现在引用：" + occ + (missing ? "（缺）" : ""));
+        Check(string.Equals(occ, renamed, StringComparison.OrdinalIgnoreCase) && !missing, "旁边文件夹（装配\\）里用到它的装配跟着改好、0 缺件");
+        CloseAll();
     }
 
     static void LockRun(string dir){

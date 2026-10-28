@@ -75,7 +75,7 @@ namespace TianGongCadSuite {
             var addFiles=Ui.Small("添加文件…");addFiles.Click+=delegate{ AddFiles();RefreshRail(); };
             var addFolder=Ui.Small("添加文件夹…");addFolder.Click+=delegate{ AddFolder();RefreshRail(); };
             var remove=Ui.Small("移除选中");((FlatButton)remove).SetFore(Ui.Text2);remove.Click+=delegate{ RemoveSelected();RefreshRail(); };
-            var clear=Ui.Small("清空");((FlatButton)clear).SetFore(Ui.Text2);clear.Click+=delegate{ if(timer.Enabled)return;sources.Clear();items.Clear();scanned=false;RefreshList();RefreshRail(); };
+            var clear=Ui.Small("清空");((FlatButton)clear).SetFore(Ui.Text2);clear.Click+=delegate{ if(timer.Enabled)return;sources.Clear();items.Clear();scanned=false;AutoOutput();RefreshList();RefreshRail(); };
             shell.AddHeader(pIn,addFiles);shell.AddHeader(pIn,addFolder);shell.AddHeader(pIn,remove);shell.AddHeader(pIn,clear);
             var inStack=new VerticalStack{ Dock=DockStyle.Fill,Padding=new Padding(0),Gap=10,AutoScroll=false };
             pIn.Body.Controls.Add(inStack);
@@ -106,7 +106,7 @@ namespace TianGongCadSuite {
             var openDir=Ui.Ghost("打开");openDir.Click+=delegate{ OpenOutputFolder(); };
             outRow.Controls.AddRange(new Control[]{ outLabel,output,browse,openDir });
             outRow.Resize+=delegate{ int w=outRow.Width;output.SetBounds(0,28,Math.Max(80,w-180),28);browse.Location=new Point(output.Right+8,27);openDir.Location=new Point(browse.Right+6,27); };
-            output.TextChanged+=delegate{ RefreshRail(); };
+            output.TextChanged+=delegate{ if(!settingOutput)outputAuto=output.Text.Trim().Length==0; RefreshRail(); };
             openOutput.Visible=false;
             var opts=new FieldGrid{ BackColor=Ui.Bg,LabelWidth=84 };
             mirror.Text="镜像源目录结构（推荐，避免同名覆盖）";mirror.Checked=true;mirror.AutoSize=true;mirror.CheckedChanged+=delegate{ Unscan(); };
@@ -153,7 +153,9 @@ namespace TianGongCadSuite {
             AcceptButton=null;
             // 记住上次的勾选（0.10.2）：原来每次打开都回到默认，转工程图、不镜像的人每次重新勾
             Choices.Bind(parts,"convert.parts");Choices.Bind(assemblies,"convert.assemblies");Choices.Bind(drawings,"convert.drawings");Choices.Bind(step,"convert.step");
-            Choices.Bind(recursive,"convert.recursive");Choices.Bind(mirror,"convert.mirror");Choices.Bind(force,"convert.force");Choices.Bind(verify,"convert.verify");Choices.Bind(autoWorkers,"convert.autoWorkers");
+            Choices.Bind(recursive,"convert.recursive");Choices.Bind(mirror,"convert.mirror");Choices.Bind(verify,"convert.verify");
+            // 「覆盖已存在的转换结果」不记（0.10.3）：转出来的 .par / .asm 常常接着在天工里改（打孔、改属性）。
+            // 记住的话，哪天往同一个输出文件夹补转几个新文件，前面改过的全被重新转换覆盖掉、一声不响。每次要覆盖就当场勾Choices.Bind(autoWorkers,"convert.autoWorkers");
             RefreshRail();
         }
         public void GoPageForTest(int i){ shell.Go(i,false); }
@@ -174,19 +176,38 @@ namespace TianGongCadSuite {
             inputEmpty.Visible=n==0;
             UpdatePrimary();
         }
+        // 从天工里点「批量格式转换」时带进来的是当前文档所在的文件夹。0.10.3：只有那里真有 SolidWorks / STEP 文件才填。
+        // 原来天工里开着自己的装配（一个天工项目文件夹）点进来，这个文件夹照样成了输入、输出目录也建在它里面；
+        // 用户再「添加文件夹」加 SolidWorks 项目时输出目录不跟着变，转出来的东西全写进了自己正在做的天工项目里
         public void PrefillInput(string folder){
             if(folder==null||folder.Length==0||!Directory.Exists(folder))return;
+            if(!HasConvertible(folder))return;
             AddSource(folder);
-            if(output.Text.Length==0)output.Text=Path.Combine(folder,"天工格式输出");
             RefreshRail();
+        }
+        static bool HasConvertible(string folder){
+            int seen=0;
+            try{ foreach(string f in Directory.EnumerateFiles(folder)){ if(ConvertPlanner.IsSupported(f))return true; if(++seen>5000)return false; } }catch{}
+            // 往下看一层：SolidWorks 项目常把零件、装配体分两个子文件夹放
+            try{ foreach(string d in Directory.EnumerateDirectories(folder))foreach(string f in Directory.EnumerateFiles(d)){ if(ConvertPlanner.IsSupported(f))return true; if(++seen>5000)return false; } }catch{}
+            return false;
+        }
+        // 输出目录没被用户改过时跟着第一个输入走（「第一个输入\天工格式输出」）：原来只在输出框为空时填一次，
+        // 移掉 / 清空输入再加别的文件夹，输出还指着上一个文件夹
+        bool outputAuto=true,settingOutput;
+        void AutoOutput(){
+            if(!outputAuto)return;
+            string first=sources.Count==0?null:sources[0];
+            string dir=first==null?"":(File.Exists(first)?Path.GetDirectoryName(first):first);
+            settingOutput=true;
+            try{ output.Text=dir.Length==0?"":Path.Combine(dir,"天工格式输出"); }finally{ settingOutput=false; }
         }
 
         void AddFiles(){
             using(var dialog=new OpenFileDialog()){
                 dialog.Multiselect=true;dialog.Filter="CAD 文件|*.sldasm;*.SLDASM;*.sldprt;*.SLDPRT;*.slddrw;*.SLDDRW;*.stp;*.STP;*.step;*.STEP|SolidWorks|*.sldasm;*.SLDASM;*.sldprt;*.SLDPRT;*.slddrw;*.SLDDRW|STEP|*.stp;*.STP;*.step;*.STEP|所有文件|*.*";
                 if(dialog.ShowDialog(this)!=DialogResult.OK)return;
-                foreach(string file in dialog.FileNames)AddSource(file);
-                if(output.Text.Length==0)output.Text=Path.Combine(Path.GetDirectoryName(dialog.FileNames[0]),"天工格式输出");   // 和加文件夹一样放子文件夹：原来直接输出到源文件旁边，转出来的 .par 和 SolidWorks 原件混在一起
+                foreach(string file in dialog.FileNames)AddSource(file);   // 输出目录（没改过时）和加文件夹一样放「天工格式输出」子文件夹：原来直接输出到源文件旁边，转出来的 .par 和 SolidWorks 原件混在一起
             }
         }
         void AddFolder(){
@@ -194,12 +215,12 @@ namespace TianGongCadSuite {
                 dialog.Description="选择包含 SolidWorks 文件的文件夹（可重复添加多个）";
                 if(dialog.ShowDialog(this)!=DialogResult.OK)return;
                 AddSource(dialog.SelectedPath);
-                if(output.Text.Length==0)output.Text=Path.Combine(dialog.SelectedPath,"天工格式输出");
             }
         }
         void AddSource(string path){
             if(timer.Enabled)return;
             if(!sources.Contains(path,StringComparer.OrdinalIgnoreCase))sources.Add(path);
+            AutoOutput();
             Unscan();
         }
         // 输入、类型勾选、目录结构变了：上次扫到的文件清单作废，列表回到用户加的文件 / 文件夹
@@ -220,6 +241,7 @@ namespace TianGongCadSuite {
                 foreach(string c in chosen)inputs.Items.Remove(c);
             }else{
                 foreach(string c in chosen){ sources.RemoveAll(x=>string.Equals(x,c,StringComparison.OrdinalIgnoreCase));inputs.Items.Remove(c); }
+                AutoOutput();
             }
         }
         void BrowseOutput(){
@@ -232,7 +254,8 @@ namespace TianGongCadSuite {
         void OpenOutputFolder(){
             string path=output.Text;
             try{
-                if(path!=null&&path.Length>0){ Directory.CreateDirectory(path); Process.Start("explorer.exe","\""+path+"\""); }
+                // 输出目录选的是盘符根（D:\）时原来拼成 "D:\""，\" 被当成引号，打开的是「文档」
+                if(path!=null&&path.Length>0){ Directory.CreateDirectory(path); Process.Start("explorer.exe",CommandLine.Quote(path)); }
             }catch(Exception e){ MessageBox.Show(this,"无法打开目录："+e.Message,"天工格式转换"); }
         }
         void RefreshList(){
@@ -279,7 +302,18 @@ namespace TianGongCadSuite {
             // 扫描后列表里手动移掉的文件，重扫（勾了覆盖 / 校验时开始转换会自动重扫）也别再加回来
             HashSet<string> keep=null;
             if(scanned&&keepRemovals){ keep=new HashSet<string>(StringComparer.OrdinalIgnoreCase);foreach(var i in items)keep.Add(i.Source); }
-            var fresh=ConvertPlanner.Scan(options);
+            // 后台扫（0.10.3）：加了一个大文件夹（宝马托盘资料整理：5 万个 SolidWorks 文件）时，原来在界面线程上扫，
+            // 天工（插件里打开时）和转换窗口一起"未响应"半分钟以上。扫的时候窗口禁用、照常刷新
+            List<ConvertItem> fresh=null;Exception scanError=null;
+            var worker=new System.Threading.Thread(()=>{ try{ fresh=ConvertPlanner.Scan(options); }catch(Exception e){ scanError=e; } });
+            worker.IsBackground=true;worker.Start();
+            if(!worker.Join(300)){
+                bool was=Enabled;Enabled=false;Cursor=Cursors.WaitCursor;
+                status.Text="正在扫描文件夹…";status.Refresh();
+                try{ while(!worker.Join(100)){ try{ Application.DoEvents(); }catch{} } }
+                finally{ Enabled=was;Cursor=Cursors.Default; }
+            }
+            if(scanError!=null){ Log.Write("ConvertScan",scanError); MessageBox.Show(this,"扫描输入失败："+scanError.Message,"天工格式转换"); return; }
             items.Clear();
             foreach(var i in fresh)if(keep==null||keep.Contains(i.Source))items.Add(i);
             for(int i=0;i<items.Count;i++)items[i].Index=i;
@@ -288,8 +322,32 @@ namespace TianGongCadSuite {
             long bytes=0;foreach(ConvertItem item in items)bytes+=item.Size;
             status.Text="已发现 "+items.Count+" 个要转换的文件（SolidWorks / STEP），合计 "+(bytes/1048576.0).ToString("F1")+" MB。";
             AppendLog(status.Text);
+            // 路径太长（0.10.3）：H 盘的 SolidWorks 项目里几百个文件超过 220 个字符（最长 266），默认输出目录又在输入文件夹里面、再套一层，
+            // 转出来的路径超过 Windows 的 259 个字符就存不上，原来每个只报一句看不懂的保存失败。扫描完就先说
+            string warn=LongPathWarning(options);
+            if(warn!=null){ AppendLog(warn); status.Text+="　"+warn; }
             if(items.Count==0)MessageBox.Show(this,"没有找到可转换的文件。请检查输入路径、扩展名勾选和“包含子文件夹”。","天工格式转换");
         }
+        // 源文件 / 输出路径超过 259 个字符的有几个（输出只算得出顶层文件，零件按同一层估）
+        string LongPathWarning(ConvertOptions options){
+            int src=0,dst=0;string example=null;
+            bool hasOut=!string.IsNullOrEmpty(options.OutputRoot)&&options.OutputRoot.Trim().Length>0;   // 还没选输出目录时只查源文件
+            foreach(ConvertItem item in items){
+                if(item.Source.Length>MaxPath){ src++; if(example==null)example=item.Source; }
+                else if(hasOut){
+                    bool tooLong;
+                    try{ tooLong=ConvertPlanner.TopTarget(item,options).Length>MaxPath; }catch(PathTooLongException){ tooLong=true; }catch{ tooLong=false; }
+                    if(tooLong){ dst++; if(example==null)example=item.Source; }
+                }
+            }
+            if(src==0&&dst==0)return null;
+            var sb=new StringBuilder("注意：");
+            if(src>0)sb.Append(src+" 个文件本身的路径超过 "+MaxPath+" 个字符，天工打不开（把项目文件夹挪到浅一点的地方，比如 D:\\项目\\）；");
+            if(dst>0)sb.Append(dst+" 个文件转出来的路径会超过 "+MaxPath+" 个字符、存不上（把输出目录选短一点，比如 D:\\转换输出，或者不勾「镜像源目录结构」）；");
+            sb.Append("例如 "+Path.GetFileName(example)+"。");
+            return sb.ToString();
+        }
+        const int MaxPath=259;
         void StartConversion(){
             if(timer.Enabled)return;
             var options=BuildOptions();
@@ -396,7 +454,7 @@ namespace TianGongCadSuite {
                 if(ConvertProtocol.TryParseEnd(parts,out row)){
                     rows[row.Index]=row;
                     if(row.Status=="ok")AppendLog("完成 "+(row.TotalSeconds).ToString("F1")+" 秒（打开 "+row.OpenSeconds.ToString("F1")+" / 保存 "+row.SaveSeconds.ToString("F1")+"，"+row.Documents+" 个文档） "+Path.GetFileName(row.Source));
-                    else if(row.Status=="skip")AppendLog("跳过（输出已存在） "+Path.GetFileName(row.Source));
+                    else if(row.Status=="skip")AppendLog("跳过（"+(string.IsNullOrEmpty(row.Error)?"输出已存在":row.Error)+"） "+Path.GetFileName(row.Source));
                     else AppendLog("失败 "+Path.GetFileName(row.Source)+"："+row.Error);
                 }
             }else if(parts[0]==ConvertProtocol.Ready){
@@ -420,7 +478,7 @@ namespace TianGongCadSuite {
                 }
             }
             double wall=(DateTime.Now-startedAt).TotalSeconds;
-            var summary=ConvertSummary.From(list,wall);
+            var summary=ConvertSummary.From(list,wall);summary.Workers=processes.Count;
             try{
                 File.WriteAllText(reportPath,summary.ToCsv(list),new UTF8Encoding(true));
                 AppendLog("报告已写入 "+reportPath);

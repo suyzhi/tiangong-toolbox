@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -8,15 +8,18 @@ using System.Threading;
 
 // 0.10.2：格式转换真机——把一个真实的 SolidWorks 装配（零件、装配体分在不同文件夹）用转换器的 worker 转成天工格式。
 // 转换器要独占一个天工：先把队列起的私有桌面天工关掉，再起 worker（它自己 CreateInstance 一个隐藏的天工）。
-// 用法: ConvertE2E.exe <输出目录> <TianGongConverter.exe> <源装配> <源根目录> <flat 0/1> [分钟]
+// 用法: ConvertE2E.exe <输出目录> <TianGongConverter.exe> <源装配> <源根目录> <flat 0/1> [分钟] [校验 0/1]
 class ConvertE2E {
     static void L(string s){ Console.WriteLine(s); Console.Out.Flush(); }
     static int Main(string[] args){
         Console.OutputEncoding = Encoding.UTF8;
         string outDir = Path.GetFullPath(args[0]), exe = args[1], src = args[2], root = args[3], flat = args[4];
         int minutes = args.Length > 5 ? int.Parse(args[5]) : 30;
+        string verify = args.Length > 6 ? args[6] : "0";   // 1 = 转完重新打开校验引用（转换器的「校验」勾选）
+        bool keep = args.Length > 7 && args[7] == "keepcad";   // 0.10.3：天工开着时转（和在插件里点「开始转换」一样），看转换器能不能另起一个
         // ① 关掉队列起的天工（就是这个私有桌面上的那个）
-        try {
+        if (keep) L("天工开着转（keepcad）");
+        else try {
             dynamic app = Marshal.GetActiveObject("SolidEdge.Application");
             int pid = 0; try { pid = app.ProcessID; } catch { }
             try { app.Quit(); } catch { }
@@ -32,7 +35,7 @@ class ConvertE2E {
         File.WriteAllText(job, lines.ToString(), new UTF8Encoding(false));
         File.WriteAllText(status, "", new UTF8Encoding(false));
         var t0 = DateTime.Now;
-        var p = Process.Start(new ProcessStartInfo(exe, "--worker \"" + job + "\" \"" + status + "\" \"" + output + "\" " + flat + " 0 1 \"" + work + "\"") { UseShellExecute = false, CreateNoWindow = true });
+        var p = Process.Start(new ProcessStartInfo(exe, "--worker \"" + job + "\" \"" + status + "\" \"" + output + "\" " + flat + " " + verify + " 1 \"" + work + "\"") { UseShellExecute = false, CreateNoWindow = true });
         if (!p.WaitForExit(minutes * 60000)) { L("FAIL 超时 " + minutes + " 分钟，杀掉 worker"); try { p.Kill(); } catch { } }
         L("worker 退出码 " + (p.HasExited ? p.ExitCode.ToString() : "?") + "，用时 " + (DateTime.Now - t0).TotalSeconds.ToString("0") + "s");
         foreach (var line in File.ReadAllLines(status, Encoding.UTF8)) L("  " + (line.Length > 300 ? line.Substring(0, 300) + "…" : line));

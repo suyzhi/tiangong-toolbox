@@ -46,7 +46,14 @@ namespace TianGongCadSuite {
                 +"转换在独立的隐藏 CAD 进程中进行，不占用当前窗口；同目录下的 "+ConverterHost.ExeName+" 是独立运行版本。",
                 delegate{ return true; },Execute);
         }}
+        // 已经开着的转换窗口（0.10.3）：它不走 ToolContext（转换在后台跑好久，不能因为点了别的命令就关掉），
+        // 原来每点一次功能区按钮就多开一个 —— 两个窗口各起一批隐藏的天工往同一个输出目录写。再点就把开着的那个提到前面
+        FormatConvertForm open;
         void Execute(){
+            if(open!=null&&!open.IsDisposed){
+                try{ if(open.WindowState==FormWindowState.Minimized)open.WindowState=FormWindowState.Normal; open.Activate(); }catch{}
+                return;
+            }
             string initial=null;
             try{
                 object document=context.Application.ActiveDocument;
@@ -55,6 +62,8 @@ namespace TianGongCadSuite {
             }catch{}
             var form=new FormatConvertForm();
             form.PrefillInput(initial);
+            open=form;
+            form.FormClosed+=delegate{ if(open==form)open=null; };
             form.Show(new CadOwner(context.Application.ActiveFramehWnd));
         }
         public void Dispose(){}

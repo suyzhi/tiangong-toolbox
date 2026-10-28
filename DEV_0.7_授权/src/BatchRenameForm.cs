@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
@@ -348,7 +348,8 @@ namespace TianGongCadSuite {
             try { if (Clipboard.ContainsText()) text = Clipboard.GetText(); } catch { }
             var block = PropCardFields.ParseClipboard(text);
             if (block.Count == 0) return;
-            if (block.Count == 1) { foreach (var r in SelectedRows()) r.SetNewBase(block[0][0]); Refresh2(); return; }
+            // 标准件库里的 / 只读的 / 不在了的文件（灰的「不改名」行）不填：原来照样填上新名字，整批被它们挡住、还得一行行按 Delete 恢复（0.10.3）
+            if (block.Count == 1) { foreach (var r in SelectedRows()) if (r.Locked.Length == 0) r.SetNewBase(block[0][0]); Refresh2(); return; }
             int top = int.MaxValue;
             foreach (DataGridViewCell c in grid.SelectedCells) top = Math.Min(top, c.RowIndex);
             if (top == int.MaxValue) return;
@@ -356,7 +357,7 @@ namespace TianGongCadSuite {
             // 原来逐行往下填，第一张工程图之后的名字全错位一行（工程图拿到下一个零件的名字）
             int at = top;
             for (int i = 0; i < block.Count && at < grid.Rows.Count; i++, at++) {
-                while (at < grid.Rows.Count && ((RenameRow)grid.Rows[at].Tag).Master != null && at != top) at++;
+                while (at < grid.Rows.Count && (((RenameRow)grid.Rows[at].Tag).Locked.Length > 0 || (((RenameRow)grid.Rows[at].Tag).Master != null && at != top))) at++;
                 if (at >= grid.Rows.Count) break;
                 ((RenameRow)grid.Rows[at].Tag).SetNewBase(block[i][0]);
             }
@@ -453,7 +454,7 @@ namespace TianGongCadSuite {
             try {
                 result = cad.Run(rows, (closing, dirty) => {
                     string text = "把 " + changed.Count + " 个文件改名" + (drafts > 0 ? "（含 " + drafts + " 个跟着改的同名工程图 / 显示配置）" : "") + "？\r\n"
-                        + "装配、工程图里引用它们的地方会一起改好（查的是表里的文件、这些文件所在的文件夹，和上一级文件夹往下两层的工程图；"
+                        + "装配、工程图里引用它们的地方会一起改好（查的是表里的文件、这些文件所在的文件夹、上一级文件夹往下两层的工程图，和旁边文件夹里的装配；"
                         + "放在更远地方、也引用了它们的装配不会跟着改，要改就用「添加文件…」把它加进表里）。";
                     if (closing.Length > 0) text += "\r\n\r\n天工里开着的这些文件要先关掉，改完自动重新打开：\r\n" + closing;
                     // 天工刚打开、没动过的文件也常显示"有修改"，所以只提醒、让用户自己判断

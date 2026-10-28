@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
@@ -246,6 +246,24 @@ namespace TianGongCadSuite {
         // ---------- 表格 ----------
 
         void Rebuild(){
+            // 写入 / 换筛选 / 改列以后表格是重建的：原来排序、滚动位置、当前格子全回到开头 ——
+            // 一百多行的表按某列排好、填到一半点「写入」，又得重新排、重新找到刚才那一行（0.10.3）
+            var sortCol = grid.SortedColumn; string sortField = sortCol == null ? null : (sortCol.Tag as string ?? "#" + sortCol.Index);
+            var sortDir = grid.SortOrder == SortOrder.Descending ? System.ComponentModel.ListSortDirection.Descending : System.ComponentModel.ListSortDirection.Ascending;
+            int firstRow = -1; try { firstRow = grid.FirstDisplayedScrollingRowIndex; } catch { }
+            PropCardRow curRow = grid.CurrentCell != null && grid.CurrentCell.RowIndex >= 0 ? grid.Rows[grid.CurrentCell.RowIndex].Tag as PropCardRow : null;
+            string curField = grid.CurrentCell != null ? (grid.Columns[grid.CurrentCell.ColumnIndex].Tag as string ?? "#" + grid.CurrentCell.ColumnIndex) : null;
+            RebuildRows();
+            try {
+                if (sortField != null) foreach (DataGridViewColumn c in grid.Columns) if ((c.Tag as string ?? "#" + c.Index) == sortField) { grid.Sort(c, sortDir); break; }
+                if (curRow != null) foreach (DataGridViewRow r in grid.Rows) if (r.Tag == curRow) {
+                    foreach (DataGridViewColumn c in grid.Columns) if ((c.Tag as string ?? "#" + c.Index) == curField && c.Visible) { grid.CurrentCell = r.Cells[c.Index]; break; }
+                    break;
+                }
+                if (firstRow >= 0 && grid.Rows.Count > 0) grid.FirstDisplayedScrollingRowIndex = Math.Min(firstRow, grid.Rows.Count - 1);
+            } catch (Exception e) { Log.Write("PropCardRestoreView", e.Message); }
+        }
+        void RebuildRows(){
             loading = true;
             grid.SuspendLayout();
             try {

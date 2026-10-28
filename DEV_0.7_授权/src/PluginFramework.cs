@@ -125,8 +125,15 @@ namespace TianGongCadSuite {
             return assembly;
         }
         // All modeless tools share one selection session; switching tools closes the previous form.
-        public void Show(Func<Form> create,Action<Form> start){
+        // reuse：现在开着的窗口能不能直接接着用（同一个命令、同一个装配）→ 是就提到前面，不重开。
+        // 0.10.3：配孔检查查了十分钟，在功能区上再点一下「配孔检查」（想把窗口找出来 / 想再查一遍），原来直接把窗口连同结果关掉重开
+        public void Show(Func<Form> create,Action<Form> start,Func<Form,bool> reuse=null){
             TianGongCadSuite.Licensing.LicenseGate.Require();
+            ThrowIfCompanionBusy();
+            if(reuse!=null&&active!=null&&!active.IsDisposed&&active.Visible&&reuse(active)){
+                try{ if(active.WindowState==FormWindowState.Minimized)active.WindowState=FormWindowState.Normal; active.Activate(); }catch{}
+                return;
+            }
             var working=active as IBusyTool;
             if(working!=null&&!active.IsDisposed&&working.Busy)throw new InvalidOperationException("「"+active.Text+"」正在"+working.BusyWhat+"，等它做完再点别的命令。");
             // 上一个窗口里有没写入的修改（属性卡、批量改名）：它的关闭确认里点了「否」= 用户要留着它，新命令就不开了。
@@ -143,7 +150,35 @@ namespace TianGongCadSuite {
             }
             active.Dispose();active=null;return true;
         }
-        public void Dispose(){if(active!=null){if(!active.IsDisposed)active.Close();active.Dispose();active=null;}}
+        // 伴随窗口（0.10.3）：不参与"换命令就关掉"。配孔检查查一次要好几分钟（OK310 十分钟），报了「配错孔」用户自然去点「改孔型」、
+        // 报了「孔偏了」去点「自动打孔」——原来一点别的命令检查窗口就连同结果被关掉，改一处就得重查一遍。
+        // 它正忙（检查中泵消息）时同样不许开别的命令。同一种窗口只留一个：reuse 说能接着用就提到前面，不能（换了装配）就关掉旧的开新的
+        readonly List<Form> companions=new List<Form>();
+        void ThrowIfCompanionBusy(){
+            companions.RemoveAll(f=>f.IsDisposed);
+            foreach(var f in companions){var b=f as IBusyTool;if(b!=null&&b.Busy)throw new InvalidOperationException("「"+f.Text+"」正在"+b.BusyWhat+"，等它做完再点别的命令。");}
+        }
+        public void ShowCompanion(Func<Form> create,Func<Form,bool> sameKind,Func<Form,bool> reuse){
+            TianGongCadSuite.Licensing.LicenseGate.Require();
+            ThrowIfCompanionBusy();
+            var working=active as IBusyTool;
+            if(working!=null&&!active.IsDisposed&&working.Busy)throw new InvalidOperationException("「"+active.Text+"」正在"+working.BusyWhat+"，等它做完再点别的命令。");
+            foreach(var f in companions.ToArray()){
+                if(!sameKind(f))continue;
+                if(f.Visible&&reuse(f)){try{if(f.WindowState==FormWindowState.Minimized)f.WindowState=FormWindowState.Normal;f.Activate();}catch{}return;}
+                f.Close();
+                if(!f.IsDisposed)return;   // 它的关闭确认里点了「否」
+                companions.Remove(f);
+            }
+            var next=create();companions.Add(next);
+            next.FormClosed+=delegate{companions.Remove(next);};
+            next.Show(new CadOwner(Application.ActiveFramehWnd));
+        }
+        public void Dispose(){
+            foreach(var f in companions.ToArray())try{if(!f.IsDisposed)f.Close();f.Dispose();}catch{}
+            companions.Clear();
+            if(active!=null){if(!active.IsDisposed)active.Close();active.Dispose();active=null;}
+        }
     }
     public sealed class InsetPanelModule : IToolModule {
         readonly ToolContext context;
@@ -151,7 +186,7 @@ namespace TianGongCadSuite {
         public string Id {get{return "inset-panel";}}
         public IEnumerable<ToolCommand> Commands {get{
             yield return new ToolCommand(1,"四面生成内嵌板","四面和定位点生成独立板子","选四个内侧平面 → 定位点 → 厚度和间隙 → 保存新 PAR。",context.HasAssembly,()=>{var doc=context.RequireAssembly();context.Show(()=>new PanelForm(context.Application,doc),f=>((PanelForm)f).StartPicking());});
-            yield return new ToolCommand(2,"型材自动填充","识别型材闭合框口并生成板子","在装配中多选型材，再设置板厚及间隙，检查框口并生成。",context.HasAssembly,()=>{var doc=context.RequireAssembly();context.Show(()=>new AutoPanelForm(context.Application,doc),null);});
+            yield return new ToolCommand(2,"型材自动填充","识别型材闭合框口并生成板子","在装配中多选型材，再设置板厚及间隙，检查框口并生成。",context.HasAssembly,()=>{var doc=context.RequireAssembly();context.Show(()=>new AutoPanelForm(context.Application,doc),null,f=>{var p=f as AutoPanelForm;if(p==null||!ReferenceEquals(p.Assembly,doc))return false;p.NoteReopened();return true;});});
         }}
         public void Dispose(){}
     }

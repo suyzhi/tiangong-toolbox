@@ -52,7 +52,17 @@ namespace TianGongCadSuite {
             SetupModelEditing();InitializeHierarchy();Reload(null);InitializeEntry();UpdateStatus("已加载");
         }
         void Button(FlowLayoutPanel p,string title,Action action){var b=title.StartsWith("加入",StringComparison.Ordinal)?Ui.Primary(title,TextRenderer.MeasureText(title,Ui.F9B).Width+28,32):Ui.Secondary(title,TextRenderer.MeasureText(title,Ui.F9).Width+24,32);b.Margin=new Padding(4,1,2,1);b.Click+=(s,e)=>Try(action);p.Controls.Add(b);}
-        void Try(Action action){try{action();}catch(Exception ex){status.Text=ex.Message;if(pickingMode&&pickingLabel!=null)pickingLabel.Text=ex.Message;}}
+        void Try(Action action){try{action();}catch(Exception ex){string m=Plain(ex);status.Text=m;if(pickingMode&&pickingLabel!=null)pickingLabel.Text=m;}}
+        // 天工 COM 错误翻成人话（0.10.3）：定位 / 绑定时原来直接显示「…（异常来自 HRESULT:0x80010108 (RPC_E_DISCONNECTED)）」
+        static string Plain(Exception ex){
+            if(ex is System.Reflection.TargetInvocationException&&ex.InnerException!=null)ex=ex.InnerException;
+            if(!(ex is System.Runtime.InteropServices.COMException))return ex.Message;
+            int hr=ex.HResult;string m=ex.Message??"";
+            if(hr==unchecked((int)0x80010001)||hr==unchecked((int)0x8001010A)||m.Contains("拒绝"))return "天工正忙，请稍后再点一次。";
+            if(hr==unchecked((int)0x80010108)||m.Contains("断开"))return "选中的模型已经失效（装配刚重新加载过），请在装配里重新选一次。";
+            string brief=System.Text.RegularExpressions.Regex.Replace(m,@"\s*[（(]异常来自 HRESULT[^)）]*[)）]","").Trim();
+            return "天工没能完成这一步（"+(brief.Length>0?brief:"0x"+hr.ToString("X8"))+"）。请再试一次。";
+        }
         void EnsureFile(){if(!string.Equals(LineupCad.AssemblyFile(assembly),file,StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("装配已另存，请重新打开 Lineup。");}
         void Ensure(){if(!string.Equals(LineupCad.AssemblyFile(assembly),file,StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("装配已另存，请重新打开 Lineup。");if(!string.Equals(Convert.ToString(((dynamic)app.ActiveDocument).FullName),file,StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("请先激活本清单所属装配。");}
         string ActiveCategory {get{return category.SelectedIndex>=1&&category.SelectedIndex<=5?Convert.ToString(category.SelectedItem):"气缸";}}

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using F=SolidEdgeFramework;
@@ -167,6 +167,10 @@ diagnostics=new Diagnostics(context.Application,()=>Run(registry.Find(1)),()=>Ru
             }finally{try{dm.Quit();}catch{}}
             return "files="+files+" links="+links+" missed="+missed+" encryptedInProc="+encrypted+" readMs="+readMs+"\n"+sb;
         }
+        // 0.10.3 窗口管理真机：插件现在开着哪些窗口（类型|标题|可见|配孔检查的状态栏），功能区命令用 StartCommand 点
+        public string OpenFormsReport(){var sb=new System.Text.StringBuilder();foreach(System.Windows.Forms.Form f in System.Windows.Forms.Application.OpenForms){var c=f as AutoHoleCheckForm;sb.Append(f.GetType().Name+"|"+f.Text+"|"+f.Visible+(c!=null?"|"+c.StatusForTest.Replace("\n"," "):"")+"\n");}return sb.ToString();}
+        public void StartCheckRun(){Result="";dispatcher.BeginInvoke((Action)(()=>{try{foreach(System.Windows.Forms.Form f in System.Windows.Forms.Application.OpenForms){var c=f as AutoHoleCheckForm;if(c!=null){c.RunCheckForTest();Result="ran: "+c.SummaryText;return;}}Result="no check form";}catch(Exception e){Result="EXC "+e;}}));}
+        public void StartCloseForms(){Result="";dispatcher.BeginInvoke((Action)(()=>{int n=0;foreach(var f in System.Linq.Enumerable.ToList(System.Linq.Enumerable.Cast<System.Windows.Forms.Form>(System.Windows.Forms.Application.OpenForms))){try{f.Close();n++;}catch{}}Result="closed "+n;}));}
         public string PropCardFormTest(string field,string value,int rowCount){
             string text="";var form=new PropCardForm(Host);
             try{form.Show();form.LoadActive();text=form.TestFillAndWrite(field,value,rowCount);}finally{form.TestForceClose();}

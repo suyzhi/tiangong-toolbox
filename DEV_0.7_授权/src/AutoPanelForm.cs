@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
@@ -38,6 +38,14 @@ namespace TianGongCadSuite {
 
         readonly F.Application app;
         readonly A.AssemblyDocument assembly;
+        internal A.AssemblyDocument Assembly { get { return assembly; } }
+        // 功能区上又点了「型材自动填充」：窗口提到前面，已读的型材和框口留着（见 ToolContext.Show 的 reuse）。
+        // 没读过型材时照旧读一下当前选择（原来重开窗口就是为了读新选的型材）
+        internal void NoteReopened(){
+            if (busy) return;
+            if (cachedMembers == null || cachedMembers.Count == 0) { ReadSelection(); return; }
+            SetStatus("窗口一直开着，已读的 " + cachedMembers.Count + " 根型材还在。要换型材：在装配里选好后点「读取当前选择」（或「追加选择」）。", Ui.Accent);
+        }
         readonly NumericUpDown thickness = Ui.Num(0.1M, 500M, 6M, 2, 0.5M, 80);
         readonly NumericUpDown gap = Ui.Num(0M, 100M, 0M, 2, 0.5M, 80);
         readonly ComboBox material = new ComboBox { DropDownStyle = ComboBoxStyle.DropDown, Width = 150 };
@@ -294,13 +302,13 @@ namespace TianGongCadSuite {
                 if (append && previous.Count > 0) {
                     // 追加失败不丢掉已读的：保持上一次的型材和框口
                     selection = previous; cachedMembers = previousMembers; plates = previousPlates; memberInfo.Text = previousInfo;
-                    SetStatus("追加失败（已读的型材保持不变）：" + e.Message, Ui.Bad); tips.SetToolTip(status, e.Message);
+                    SetStatus("追加失败（已读的型材保持不变）：" + Friendly(e), Ui.Bad); tips.SetToolTip(status, Friendly(e));
                     return;
                 }
                 selection = new List<object>(); cachedMembers = null; plates = new List<FrameMember>();
                 memberInfo.Text = summary ?? Hint;
-                ClearResult(e.Message);
-                tips.SetToolTip(status, e.Message);
+                ClearResult(Friendly(e));
+                tips.SetToolTip(status, Friendly(e));
             } finally { UseWaitCursor = false; }
         }
 
@@ -382,8 +390,8 @@ namespace TianGongCadSuite {
                 if (specs.Count > 0 && shell.Current == PageMembers) shell.Go(PageOpenings);
                 tips.SetToolTip(status, msg + (notes.Count > 2 ? detail : ""));
             } catch (Exception e) {
-                ClearResult(e.Message);
-                tips.SetToolTip(status, e.Message);
+                ClearResult(Friendly(e));
+                tips.SetToolTip(status, Friendly(e));
                 Log.Write("AutoDetect", e);
             }
             UpdateGenerateButton();
@@ -472,12 +480,22 @@ namespace TianGongCadSuite {
             } catch (Exception e) {
                 Log.Write("AutoGenerate", e);
                 busy = false; Enabled = true; UseWaitCursor = false;
-                SetStatus(e.Message, Ui.Bad);
-                tips.SetToolTip(status, e.Message);
+                SetStatus(Friendly(e), Ui.Bad);
+                tips.SetToolTip(status, Friendly(e));
                 UpdateGenerateButton();
             }
         }
 
         void SetStatus(string text, Color color){ status.Text = text; status.ForeColor = color; }
+        // 天工报的 COM 错误翻成人话（0.10.3）：原来读型材 / 生成时直接显示「…（异常来自 HRESULT:0x80010108 (RPC_E_DISCONNECTED)）」。原始错误在 panel.log
+        static string Friendly(Exception e){
+            if (!(e is System.Runtime.InteropServices.COMException)) return e.Message;
+            int hr = e.HResult; string m = e.Message ?? "";
+            if (hr == unchecked((int)0x80010001) || hr == unchecked((int)0x8001010A) || m.Contains("拒绝")) return "天工正忙，请稍后再点一次。";
+            if (hr == unchecked((int)0x80010108) || hr == unchecked((int)0x800401FD) || m.Contains("断开"))
+                return "选的型材已经失效（装配刚被关掉、重新打开或重新加载过）。请在装配里重新选型材，再点「读取当前选择」。";
+            string brief = System.Text.RegularExpressions.Regex.Replace(m, @"\s*[（(]异常来自 HRESULT[^)）]*[)）]", "").Trim();
+            return "天工没能完成这一步（" + (brief.Length > 0 ? brief : "0x" + hr.ToString("X8")) + "）。请再试一次；还不行就重新选型材后点「读取当前选择」。";
+        }
     }
 }

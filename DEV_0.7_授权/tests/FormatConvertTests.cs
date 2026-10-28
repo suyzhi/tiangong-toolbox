@@ -94,9 +94,12 @@ static class FormatConvertTests {
             sample.Source=Path.Combine(root,"a.SLDASM");sample.Root=root;
             var inside=ConvertPlanner.ComponentTarget(Path.Combine(sub,"p.par"),"p.par",sample,options);
             Assert(inside.EndsWith(Path.Combine("子目录","p.par")),"component inside the root mirrors its folder: "+inside);
-            // A rooted folder outside the input root (temp path, so it is rooted on every platform).
-            var outside=ConvertPlanner.ComponentTarget(Path.Combine(Path.GetTempPath(),"elsewhere-"+Guid.NewGuid().ToString("N"),"q.par"),"q.par",sample,options);
+            // A rooted folder outside the input root and outside its parent (drive root, so it is rooted on every platform).
+            var outside=ConvertPlanner.ComponentTarget(Path.Combine(Path.GetPathRoot(Path.GetTempPath()),"elsewhere-"+Guid.NewGuid().ToString("N"),"q.par"),"q.par",sample,options);
             Assert(outside.IndexOf("_外部",StringComparison.Ordinal)>=0,"component outside the root is bucketed: "+outside);
+            // 零件在输入文件夹的兄弟文件夹里（零件\ 装配体\ 分开放）：按相对上一级的位置放，不进 _外部
+            var sibling=ConvertPlanner.ComponentTarget(Path.Combine(Path.GetDirectoryName(root),"零件-"+Guid.NewGuid().ToString("N").Substring(0,6),"s.par"),"s.par",sample,options);
+            Assert(sibling.IndexOf("_外部",StringComparison.Ordinal)<0&&Path.GetFileName(Path.GetDirectoryName(sibling)).StartsWith("零件-",StringComparison.Ordinal)&&string.Equals(Path.GetDirectoryName(Path.GetDirectoryName(sibling)),Path.GetFullPath(options.OutputRoot),StringComparison.OrdinalIgnoreCase),"component in a sibling folder mirrors as a sibling: "+sibling);
 
             var planItems=new List<ConvertItem>();
             long[] sizes={100,200,300,400,500,600,700,800,900,1000};
@@ -116,6 +119,12 @@ static class FormatConvertTests {
             var sharedPlan=ConvertPlanner.Plan(sharedRoot,4);
             int occupied=0;foreach(List<ConvertItem> bucket in sharedPlan)if(bucket.Count>0)occupied++;
             Assert(occupied==1,"files from one input folder never run in two workers at once: "+occupied);
+            // 装配先转（它会把零件一起存出来，轮到零件时直接跳过），哪怕零件文件更大
+            var mixed=new List<ConvertItem>();
+            string[] names={"big.SLDPRT","small.SLDASM","mid.sldprt","b.sldasm"};long[] msz={9000,100,5000,300};
+            for(int i=0;i<names.Length;i++){ var ci=new ConvertItem();ci.Index=200+i;ci.Size=msz[i];ci.Source=@"C:\mix\"+names[i];ci.Root=@"C:\mix";mixed.Add(ci); }
+            var mixedPlan=ConvertPlanner.Plan(mixed,1)[0];
+            Assert(mixedPlan[0].Source.EndsWith("b.sldasm")&&mixedPlan[1].Source.EndsWith("small.SLDASM")&&mixedPlan[2].Source.EndsWith("big.SLDPRT"),"assemblies are converted before (larger) parts: "+string.Join(",",mixedPlan.ConvertAll(x=>System.IO.Path.GetFileName(x.Source)).ToArray()));
             Assert(ConvertPlanner.SuggestedWorkers(0,16,8192)==1,"no files means one worker");
             Assert(ConvertPlanner.SuggestedWorkers(1000,64,65536)==1,"sequential is the measured default");
 

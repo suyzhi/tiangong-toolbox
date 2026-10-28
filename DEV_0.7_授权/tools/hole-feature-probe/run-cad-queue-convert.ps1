@@ -29,6 +29,8 @@ function Others([int]$mine) {
     if ($id -eq $mine) { return $false }
     # 格式转换的 worker 用 CreateInstance 拉起的天工：父进程是 svchost（DCOM），不是用户双击开的（父 = explorer）
     $par = (Get-CimInstance Win32_Process -Filter ("ProcessId=" + $_.Id) -ErrorAction SilentlyContinue).ParentProcessId
+    # 进程刚退出（查不到父进程）：PS5 里 Get-Process -Id $null 是参数绑定错误、整个队列就断了（0.10.3 实测）。当它已经没了
+    if (-not $par) { return $false }
     $pn = (Get-Process -Id $par -ErrorAction SilentlyContinue).ProcessName
     $pn -ne 'svchost'
   }

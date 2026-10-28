@@ -2048,7 +2048,7 @@ namespace TianGongCadSuite {
         void OpenEdit(){
             if (busy || closing || lastCreated == null || lastCreated.Count == 0) return;
             handingOver = command != null;
-            try { AutoHoleModule.OpenEdit(app, assembly, lastCreated); }
+            try { if (!AutoHoleModule.OpenEdit(app, assembly, lastCreated)) { handingOver = false; SetStatus("上一个改孔型窗口正在改孔，等它改完再点。", Ui.Warn); } }
             catch (Exception e) { handingOver = false; Log.Write("AutoHoleOpenEdit", e); SetStatus("打不开改孔型窗口：" + e.Message, Ui.Bad); }
         }
         public List<KeyValuePair<SolidEdgePart.PartDocument, string>> LastCreatedForTest { get { return lastCreated; } }
@@ -2100,6 +2100,13 @@ namespace TianGongCadSuite {
         // 这个窗口说好了要留着（参考孔、规格都还在）—— 原来照样被关掉。现在只是暂停选择，用户回到这个窗口时自动接着选
         bool handingOver, paused;
         bool HasPicks { get { return groups.Count > 0 || slots.Count > 0 || targets.Count > 0 || (lastUndo != null && !lastUndo.IsEmpty); } }
+        // 功能区上又点了本命令（0.10.3）：已经选了东西就把这个窗口提到前面、接着选，不再连同选好的东西关掉重开
+        // （窗口暂停选择以后，用户很自然地再点一下功能区按钮想"接着来"）。见 ToolContext.Show 的 reuse
+        internal bool ReuseFor(object doc){
+            if (closing || IsDisposed || !ReferenceEquals(assembly, doc) || !(HasPicks)) return false;
+            BeginInvoke((Action)(() => OnActivated(EventArgs.Empty)));
+            return true;
+        }
         public void Terminate(){
             if (closing || busy) return;
             if (handingOver) { handingOver = false; paused = true; BeginInvoke((Action)(() => { StopCommand(); SetStatus("选择已暂停（改孔型窗口在用鼠标）。回到这个窗口点一下就接着选。", Ui.Muted); })); return; }

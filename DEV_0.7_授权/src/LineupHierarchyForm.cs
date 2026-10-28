@@ -16,7 +16,8 @@ namespace TianGongCadSuite {
             next.Records.Insert(index<0?next.Records.Count:index+(after?1:0),row);data.DefaultView.Sort="";Commit(next,row.Id,"已插入，可撤销");
         }
         internal void MoveRows(int direction){
-            if(data.DefaultView.Sort.Length>0)throw new InvalidOperationException("请先取消列排序（重新打开清单），再调整行位置。");
+            // 点过列头排序后不能挪行：原来让用户"重新打开清单"取消排序；这里直接恢复清单原顺序（0.10.3）
+            if(data.DefaultView.Sort.Length>0){data.DefaultView.Sort="";throw new InvalidOperationException("已取消列排序、恢复清单原来的顺序（排序时挪不了行）。看准位置后再点一次上移 / 下移。");}
             var ids=SelectedIds();if(ids.Count==0)return;var visible=grid.Rows.Cast<DataGridViewRow>().Select(r=>Convert.ToString(((DataRowView)r.DataBoundItem)["Id"])).ToList();
             var next=Snapshot();LineupHierarchy.Move(next,visible,ids,direction);Commit(next,ids[0],"行位置已保存，可撤销");
             grid.ClearSelection();foreach(DataGridViewRow r in grid.Rows)if(ids.Contains(Convert.ToString(((DataRowView)r.DataBoundItem)["Id"])))r.Cells[1].Selected=true;

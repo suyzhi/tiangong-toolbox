@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
@@ -31,6 +31,12 @@ namespace TianGongCadSuite {
 
         readonly F.Application app;
         readonly A.AssemblyDocument assembly;
+        internal A.AssemblyDocument Assembly { get { return assembly; } }
+        // 功能区上又点了「配孔检查」：窗口提到前面，结果留着（见 ToolContext.Show 的 reuse）
+        internal void NoteReopened(){
+            if (busy) return;
+            SetStatus(checkedOnce ? "窗口一直开着，上次的检查结果还在。改过模型要按现在的再查，点「重新检查」（Ctrl+Enter）。" : "点「开始检查」（Ctrl+Enter）。", Ui.Accent);
+        }
         F.HighlightSet highlights;
         List<HoleIssue> issues = new List<HoleIssue>();
         List<HoleIssue> shown = new List<HoleIssue>();

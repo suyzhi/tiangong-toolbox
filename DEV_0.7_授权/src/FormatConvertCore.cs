@@ -118,7 +118,10 @@ namespace TianGongCadSuite {
                 }
             }
             items.Sort(delegate(ConvertItem a,ConvertItem b){ int c=string.Compare(a.Source,b.Source,StringComparison.OrdinalIgnoreCase); return c; });
-            for(int i=0;i<items.Count;i++){ items[i].Index=i; items[i].Target=TopTarget(items[i],options); }
+            // 还没选输出目录也能扫（0.10.3）：原来按空的输出目录算输出路径，Path.GetFullPath("") 直接抛「路径的形式不合法」，点「扫描文件」就弹未处理的异常
+            bool hasOut=!string.IsNullOrWhiteSpace(options.OutputRoot);
+            // 路径超长（H 盘 SolidWorks 项目里有 266 个字符的）算不出输出路径时这一个 Target 留空，别让整次扫描失败
+            for(int i=0;i<items.Count;i++){ items[i].Index=i; try{ items[i].Target=hasOut?TopTarget(items[i],options):null; }catch(PathTooLongException){ items[i].Target=null; } }
             return items;
         }
         static void Add(List<ConvertItem> items,HashSet<string> seen,HashSet<string> wanted,string file,string root){
@@ -140,16 +143,22 @@ namespace TianGongCadSuite {
         // 真机（宝马托盘 140-2线：零件、装配体分两个文件夹）：天工只在装配自己的文件夹里找它引用的零件，找不到就静默打开成空装配，
         // 原来照样存出一个空的 .asm、报"成功"。从用户加的输入文件夹（就是装配所在文件夹时退一级到上级）里收 .sldprt/.sldasm，
         // 同名的只要第一个（拷到一个文件夹里放不下两个同名的），源装配自己排第一。不扫整个盘符，最多 3000 个。
+        // 收哪个文件夹（null = 不收）：输入文件夹；输入就是装配所在文件夹时退一级；盘符根不收
+        public static string StageFolder(string source,string root){
+            if(string.IsNullOrEmpty(source))return null;
+            try{
+                string own=Path.GetDirectoryName(Path.GetFullPath(source));
+                string dir;
+                if(!string.IsNullOrEmpty(root)&&Directory.Exists(root)&&!SameDir(root,own))dir=Path.GetFullPath(root);
+                else dir=Path.GetDirectoryName(own);
+                if(dir!=null&&SameDir(dir,Path.GetPathRoot(dir)))dir=null;
+                return dir;
+            }catch{ return null; }
+        }
         public static List<string> StageSources(string source,string root){
             var list=new List<string>();
             if(string.IsNullOrEmpty(source))return list;
-            string own=Path.GetDirectoryName(Path.GetFullPath(source));
-            string dir=null;
-            try{
-                if(!string.IsNullOrEmpty(root)&&Directory.Exists(root)&&!SameDir(root,own))dir=root;
-                else dir=Path.GetDirectoryName(own);
-                if(dir!=null&&SameDir(dir,Path.GetPathRoot(dir)))dir=null;
-            }catch{ dir=null; }
+            string dir=StageFolder(source,root);
             var names=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             list.Add(Path.GetFullPath(source));names.Add(Path.GetFileName(source));
             if(dir==null)return list;
@@ -241,7 +250,9 @@ namespace TianGongCadSuite {
             try{ if(assignedPath!=null&&Path.IsPathRooted(assignedPath))folder=Path.GetDirectoryName(assignedPath); }catch{}
             if(folder==null||folder.Length==0)folder=Path.GetDirectoryName(item.Source);
             string rel=RelativeFolder(folder,item.Root);
-            if(rel.StartsWith("_外部",StringComparison.Ordinal)){ rel=Path.Combine("_外部",SanitizeFolder(folder)); }
+            // 0.10.3：零件在输入文件夹的「兄弟」文件夹里（SolidWorks 项目常把 零件\ 装配体\ 分开放，用户只加了装配所在的那个）：
+            // 按和上一级的相对位置放（输出里也是 零件\），原来塞进「_外部\<整条源路径拼成的文件夹名>」，又难找、深路径下还会超过 260 字符存不上
+            if(rel.StartsWith("_外部",StringComparison.Ordinal)){ string sibling=SiblingFolder(folder,item.Root); if(sibling!=null)rel=sibling; }
             return Path.Combine(outRoot,rel,Sanitize(name));
         }
         static string RelativeFolder(string folder,string root){
@@ -253,6 +264,17 @@ namespace TianGongCadSuite {
                     return full.Substring(rootFull.Length+1);
             }catch{}
             return Path.Combine("_外部",SanitizeFolder(folder));
+        }
+        // folder 在 root 的上一级文件夹里（不在 root 里）→ 相对上一级的路径；上一级是盘符根（太宽）或不相干 → null
+        static string SiblingFolder(string folder,string root){
+            try{
+                string parent=Path.GetDirectoryName(Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar));
+                if(string.IsNullOrEmpty(parent)||SameDir(parent,Path.GetPathRoot(parent)))return null;
+                string full=Path.GetFullPath(folder).TrimEnd(Path.DirectorySeparatorChar);
+                string p=parent.TrimEnd(Path.DirectorySeparatorChar)+Path.DirectorySeparatorChar;
+                if(!full.StartsWith(p,StringComparison.OrdinalIgnoreCase))return null;
+                return full.Substring(p.Length);
+            }catch{ return null; }
         }
         static string SanitizeFolder(string folder){
             try{
@@ -281,7 +303,9 @@ namespace TianGongCadSuite {
             var groups=new List<List<ConvertItem>>();
             var index=new Dictionary<string,List<ConvertItem>>(StringComparer.OrdinalIgnoreCase);
             var ordered=new List<ConvertItem>(items);
-            ordered.Sort(delegate(ConvertItem a,ConvertItem b){ int c=b.Size.CompareTo(a.Size); if(c!=0)return c; return a.Index.CompareTo(b.Index); });
+            // 装配排在零件前面（0.10.3）：转一个装配会把它用到的零件一起存出来，轮到这些零件时就是「输出已存在」直接跳过。
+            // 原来只按大小排，零件文件常比装配文件大，先一个个单独打开转一遍，装配再把它们全部重新存一遍 —— 整个项目转两遍
+            ordered.Sort(delegate(ConvertItem a,ConvertItem b){ int c=Rank(a).CompareTo(Rank(b)); if(c!=0)return c; c=b.Size.CompareTo(a.Size); if(c!=0)return c; return a.Index.CompareTo(b.Index); });
             foreach(ConvertItem item in ordered){
                 string key=item.Root==null?"":item.Root;
                 List<ConvertItem> group;
@@ -297,6 +321,13 @@ namespace TianGongCadSuite {
                 loads[best]+=weight;
             }
             return buckets;
+        }
+        static int Rank(ConvertItem item){
+            string ext=(Path.GetExtension(item.Source)??"").ToLowerInvariant();
+            if(ext==".sldasm")return 0;
+            if(ext==".stp"||ext==".step")return 1;
+            if(ext==".sldprt")return 2;
+            return 3;
         }
         // Sequential is the default on purpose. Measured on a 16-core machine: four concurrent CAD
         // sessions were only 1.23x faster than one (165.7 s vs 204.4 s) while inflating per-file
@@ -376,7 +407,8 @@ namespace TianGongCadSuite {
         }
     }
     public sealed class ConvertSummary {
-        public int Total,Converted,Skipped,Failed;
+        public int Total,Converted,Skipped,Failed,Pending;
+        public int Workers=1;   // 只有真的并行（>1 个进程）才报"并行加速"：单进程时报出"并行加速 0.93 倍"让人以为出了问题
         public double SourceSeconds,WallSeconds;
         public double SpeedupFactor { get { return WallSeconds<=0?0:SourceSeconds/WallSeconds; } }
         public static ConvertSummary From(List<ConvertRow> rows,double wallSeconds){
@@ -384,16 +416,19 @@ namespace TianGongCadSuite {
             foreach(ConvertRow r in rows){
                 if(r.Status=="ok"){s.Converted++;s.SourceSeconds+=r.TotalSeconds;}
                 else if(r.Status=="skip")s.Skipped++;
-                else if(r.Status=="pending"){ }
+                else if(r.Status=="pending")s.Pending++;
                 else s.Failed++;
             }
             return s;
         }
         public string Describe(){
             var sb=new StringBuilder();
-            sb.Append("总计 ").Append(Total).Append(" 个文件：成功 ").Append(Converted).Append("，跳过 ").Append(Skipped).Append("，失败 ").Append(Failed).Append("。");
+            sb.Append("总计 ").Append(Total).Append(" 个文件：成功 ").Append(Converted).Append("，跳过 ").Append(Skipped).Append("，失败 ").Append(Failed);
+            // 停止了 / 工作进程中途退出（未激活、天工崩了）时剩下的文件一个都没转：原来不提，50 个只转了 3 个也报"成功 3，失败 0"像是全做完了
+            if(Pending>0)sb.Append("，没转 ").Append(Pending).Append("（转换被停止或工作进程中途退出，见日志；再点「开始转换」会接着转）");
+            sb.Append("。");
             sb.Append(" 单件累计 ").Append(SourceSeconds.ToString("F1")).Append(" 秒，实际耗时 ").Append(WallSeconds.ToString("F1")).Append(" 秒");
-            if(WallSeconds>0.5)sb.Append("（并行加速 ").Append(SpeedupFactor.ToString("F2")).Append(" 倍）");
+            if(Workers>1&&WallSeconds>0.5)sb.Append("（并行加速 ").Append(SpeedupFactor.ToString("F2")).Append(" 倍）");
             sb.Append("。");
             return sb.ToString();
         }

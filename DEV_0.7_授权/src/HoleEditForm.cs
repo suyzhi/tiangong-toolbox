@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
@@ -558,6 +558,13 @@ namespace TianGongCadSuite {
         public void MouseDrag(short b, short s, double x, double y, double z, object w, short ds, int k, object g){ }
         // 用户在天工里点了别的命令：选了孔就只暂停选择（原来窗口直接关掉，选好的孔全丢），回到窗口点一下接着选
         bool paused;
+        // 功能区上又点了本命令（0.10.3）：已经选了东西就把这个窗口提到前面、接着选，不再连同选好的东西关掉重开
+        // （窗口暂停选择以后，用户很自然地再点一下功能区按钮想"接着来"）。见 ToolContext.Show 的 reuse
+        internal bool ReuseFor(object doc){
+            if (closing || IsDisposed || !ReferenceEquals((object)assembly ?? partDoc, doc) || !(targets.Count > 0 || (lastUndo != null && !lastUndo.IsEmpty))) return false;
+            BeginInvoke((Action)(() => OnActivated(EventArgs.Empty)));
+            return true;
+        }
         public void Terminate(){
             if (closing || busy) return;
             if (targets.Count > 0 || (lastUndo != null && !lastUndo.IsEmpty)) { paused = true; BeginInvoke((Action)(() => { StopCommand(); SetStatus("天工里开始了别的命令，选择已暂停（已选的孔都还在）。回到这个窗口点一下就接着选。", Ui.Muted); })); return; }
