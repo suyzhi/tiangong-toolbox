@@ -172,6 +172,11 @@ namespace TianGongCadSuite {
             // 挨着（间隙 2mm）照样配对、照样能报配错孔
             var near = new List<HoleRecord>{ Rec("A", 0, 20, 8.5), Rec("C", 22, 42, 3.3) };
             Assert(HoleCheck.Run(near, null).Count(i => i.Kind == HoleIssueKind.WrongSpec) == 1, "间隙 2mm 仍算一对：M10 底孔配 M4 底孔 -> 配错孔");
+            // 0.10.2：插进去的接头 / 衬套：Φ3 气道在 Φ8.57 螺纹口里面（沿轴线重叠 8mm）不是一对连接孔
+            var insert = new List<HoleRecord>{ Rec("气缸", 0, 10, 8.57), Rec("节流阀", 2, 30, 3.0) };
+            Assert(HoleCheck.Run(insert, null).Count(i => i.Kind == HoleIssueKind.WrongSpec) == 0, "接头的气道伸进气缸的螺纹口里：不报配错孔");
+            var touching = new List<HoleRecord>{ Rec("A", 0, 20, 8.5), Rec("C", 19.5, 40, 3.3) };
+            Assert(HoleCheck.Run(touching, null).Count(i => i.Kind == HoleIssueKind.WrongSpec) == 1, "首尾挨着（只差 0.5mm 的建模误差）照样报配错孔");
             Assert(HoleCheck.CountGroups(new List<HoleRecord>{ Rec("A", 0, 20, 8.5), Rec("A", 0, 20, 2.0) }) == 1, "组数只算 3~25mm 的孔（Φ2 不计）");
 
             // ② 漏打孔只看孔附近

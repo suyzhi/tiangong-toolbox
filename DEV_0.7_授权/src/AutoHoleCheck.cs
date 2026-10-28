@@ -498,6 +498,15 @@ namespace TianGongCadSuite {
             double x1 = t0 + s * h.AxialMin, x2 = t0 + s * h.AxialMax;
             lo = Math.Min(x1, x2); hi = Math.Max(x1, x2);
         }
+        // 两个零件的孔在链轴线上的重叠长度（米）；不重叠 / 只是首尾相接返回 ≤ 0
+        static double Overlap(IList<HoleRecord> a, IList<HoleRecord> b, V3 o, V3 axis){
+            double alo, ahi, blo, bhi; Range(a, o, axis, out alo, out ahi); Range(b, o, axis, out blo, out bhi);
+            return Math.Min(ahi, bhi) - Math.Max(alo, blo);
+        }
+        static void Range(IList<HoleRecord> holes, V3 o, V3 axis, out double lo, out double hi){
+            lo = double.PositiveInfinity; hi = double.NegativeInfinity;
+            foreach (var h in holes) { double l, u; Span(h, o, axis, out l, out u); lo = Math.Min(lo, l); hi = Math.Max(hi, u); }
+        }
         static void ChainSpan(IList<HoleRecord> chain, out V3 o, out V3 a, out double lo, out double hi){
             Frame(chain, out o, out a);
             lo = double.PositiveInfinity; hi = double.NegativeInfinity;
@@ -614,10 +623,15 @@ namespace TianGongCadSuite {
                     // 所以这里会拿到两个直径。真正跟螺钉杆配合、决定螺纹规格的是**过孔**那个
                     // 较小直径；拿 Φ18 去比对对方零件的螺纹底孔必然对不上，会把一个打得完全
                     // 正确的"沉孔 + 螺纹孔"组合误报成配错孔。
-                    var byPart = chain.GroupBy(x => x.PartName).Select(x => new { Part = x.Key, Dia = x.Min(y => y.DiameterMm) }).ToList();
+                    var byPart = chain.GroupBy(x => x.PartName).Select(x => new { Part = x.Key, Dia = x.Min(y => y.DiameterMm), Holes = x.ToList() }).ToList();
+                    V3 co, ca; double clo, chi; ChainSpan(chain, out co, out ca, out clo, out chi);
                     for (int i = 0; i < byPart.Count; i++)
                         for (int j = i + 1; j < byPart.Count; j++) {
                             string why;
+                            // 0.10.2：一个零件的孔沿轴线伸进了另一个零件的孔里（重叠 > 1mm）= 插进去的东西（气管接头、节流阀、衬套、销）
+                            // 自己的通道，不是一对连接孔。真机（SolidWorks 转过来的宝马托盘升降门）：FESTO 气缸 G1/8 口 Φ8.57 和拧在里面的
+                            // 节流阀 Φ3 气道报"配错孔 M10 与 M2.5"。螺钉连接的两个孔沿轴线是首尾挨着的，不会重叠
+                            if (Overlap(byPart[i].Holes, byPart[j].Holes, co, ca) > 0.001) continue;
                             if (!IsValidPair(byPart[i].Dia, byPart[j].Dia, out why)) {
                                 issues.Add(new HoleIssue { Kind = HoleIssueKind.WrongSpec, Holes = chain,
                                     Message = ShortPart(byPart[i].Part) + " Φ" + N(byPart[i].Dia) + " 与 " + ShortPart(byPart[j].Part) + " Φ" + N(byPart[j].Dia) + " " + why + Pos(chain[0]) });
