@@ -375,8 +375,16 @@ namespace TianGongCadSuite {
                     long offset=offsets[statusFile];
                     if(offset>stream.Length)offset=0;
                     stream.Seek(offset,SeekOrigin.Begin);
-                    using(var reader=new StreamReader(stream,Encoding.UTF8)){ string line; while((line=reader.ReadLine())!=null)HandleLine(line); }
-                    offsets[statusFile]=stream.Position;
+                    // 只读到最后一个换行（0.10.2）：worker 正写到一半的那行留到下次。原来 ReadLine 把半行当一整行吃掉、偏移挪到末尾，
+                    // 剩下半行下次又当一行 —— 正好切开的是 END 行时，这个文件在报告里成了"没转"（其实转好了）
+                    var buffer=new byte[stream.Length-offset];
+                    int got=0,n;
+                    while(got<buffer.Length&&(n=stream.Read(buffer,got,buffer.Length-got))>0)got+=n;
+                    int end=Array.LastIndexOf(buffer,(byte)'\n',Math.Max(0,got-1));
+                    if(got==0||end<0)return;
+                    string text=new UTF8Encoding(false).GetString(buffer,0,end+1);
+                    foreach(string line in text.Split('\n')){ string l=line.TrimEnd('\r'); if(l.Length>0)HandleLine(l); }
+                    offsets[statusFile]=offset+end+1;
                 }
             }catch{}
         }

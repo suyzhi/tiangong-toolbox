@@ -27,7 +27,9 @@ class ConvertE2E {
         string work = Path.Combine(outDir, "work"); Directory.CreateDirectory(work);
         string output = Path.Combine(outDir, "out"); Directory.CreateDirectory(output);
         string job = Path.Combine(work, "job-0.txt"), status = Path.Combine(work, "status-0.txt");
-        File.WriteAllText(job, "0\t" + src + "\t" + root + "\t0\r\n", new UTF8Encoding(false));
+        var lines = new StringBuilder(); int k = 0;
+        foreach (var one in src.Split(';')) if (one.Trim().Length > 0) lines.Append(k++).Append('\t').Append(one.Trim()).Append('\t').Append(root).Append("\t0\r\n");   // 多个源用 ; 隔开
+        File.WriteAllText(job, lines.ToString(), new UTF8Encoding(false));
         File.WriteAllText(status, "", new UTF8Encoding(false));
         var t0 = DateTime.Now;
         var p = Process.Start(new ProcessStartInfo(exe, "--worker \"" + job + "\" \"" + status + "\" \"" + output + "\" " + flat + " 0 1 \"" + work + "\"") { UseShellExecute = false, CreateNoWindow = true });

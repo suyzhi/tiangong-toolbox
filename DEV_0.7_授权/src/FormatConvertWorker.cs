@@ -63,7 +63,7 @@ namespace TianGongCadSuite {
                             ConvertLog.Append(statusFile,ConvertProtocol.Line("LOG","重试 "+item.Source));
                             row=session.Convert(item,options);
                         }
-                        if(row.Status=="ok"){
+                        if(row.Status=="ok"||row.NoRetry){   // NoRetry：根本没写出东西（打不开的工程图），续做标记留着只会在输出文件夹里多一堆 .tgconvert-pending
                             try{ ConvertPlanner.ClearPending(item,options); }
                             catch(Exception e){ ConvertLog.Append(statusFile,ConvertProtocol.Line("LOG","无法清除续做标记："+e.Message)); }
                         }
