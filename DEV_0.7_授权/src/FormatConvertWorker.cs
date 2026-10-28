@@ -57,7 +57,7 @@ namespace TianGongCadSuite {
                         try{ ConvertPlanner.MarkPending(item,options); }
                         catch(Exception e){ ConvertLog.Append(statusFile,ConvertProtocol.Line("LOG","无法写入续做标记："+e.Message)); }
                         ConvertRow row=session.Convert(item,options);
-                        if(row.Status=="fail"){
+                        if(row.Status=="fail"&&!row.NoRetry){
                             // One retry: transient translator/save conflicts are recoverable, and a failed
                             // document would otherwise leave a half-converted assembly behind.
                             ConvertLog.Append(statusFile,ConvertProtocol.Line("LOG","重试 "+item.Source));

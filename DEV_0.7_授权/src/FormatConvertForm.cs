@@ -88,7 +88,7 @@ namespace TianGongCadSuite {
             kinds.Controls.Add(kindsLabel);
             parts.Text="零件 .SLDPRT";parts.Checked=true;
             assemblies.Text="装配 .SLDASM";assemblies.Checked=true;
-            drawings.Text="工程图 .SLDDRW";
+            drawings.Text="工程图 .SLDDRW（天工 2025 打不开，一般不勾）";   // 0.10.2 真机：宝马托盘里试了 2 张（一张零件图、一张装配图），一打开都是 E_FAIL
             step.Text="STEP .stp/.step";step.Checked=true;
             recursive.Text="包含子文件夹";recursive.Checked=true;
             foreach(var c in new[]{ parts,assemblies,drawings,step,recursive }){ c.AutoSize=true;c.BackColor=Ui.Bg;c.Margin=new Padding(0,4,18,4);kinds.Controls.Add(c); c.CheckedChanged+=delegate{ Unscan(); }; }

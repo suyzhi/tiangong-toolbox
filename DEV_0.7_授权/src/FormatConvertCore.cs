@@ -310,6 +310,7 @@ namespace TianGongCadSuite {
     public sealed class ConvertRow {
         public int Index;public string Source;public string Status;public double OpenSeconds;public double SaveSeconds;
         public double TotalSeconds;public int Documents;public string Target;public string Error;public int Worker;
+        public bool NoRetry;   // 重试也没用的失败（天工打不开 SolidWorks 工程图），worker 不再白转一遍
         public ConvertRow Clone(){var r=new ConvertRow();r.Index=Index;r.Source=Source;r.Status=Status;r.OpenSeconds=OpenSeconds;r.SaveSeconds=SaveSeconds;r.TotalSeconds=TotalSeconds;r.Documents=Documents;r.Target=Target;r.Error=Error;r.Worker=Worker;return r;}
     }
     // The worker writes one tab-separated line per event, flushed immediately, so the UI can tail it

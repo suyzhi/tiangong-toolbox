@@ -199,6 +199,12 @@ namespace TianGongCadSuite {
                 else row.Status="ok";
             }catch(Exception e){
                 row.Status="fail";row.Error=e.Message+Hr(e);
+                // 0.10.2：SolidWorks 工程图天工打不开（宝马托盘里试了一张零件图、一张装配图，都是一打开就 E_FAIL）。
+                // 原来每张报一句"未指定的错误"、再白重试一遍；这里说清楚、不重试
+                if(top==null&&string.Equals(Path.GetExtension(item.Source),".slddrw",StringComparison.OrdinalIgnoreCase)){
+                    row.Error="天工打不开这张 SolidWorks 工程图（.slddrw）：天工的 SolidWorks 转换只认零件和装配。工程图请对转好的模型在天工里重新出图，或者在 SolidWorks 里另存为 DWG / DXF 再导入天工。";
+                    row.NoRetry=true;
+                }
                 log("转换失败 "+Path.GetFileName(item.Source)+"："+e.Message+Hr(e));
             }finally{
                 CloseAll();
