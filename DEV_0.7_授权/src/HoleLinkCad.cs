@@ -330,9 +330,11 @@ namespace TianGongCadSuite {
         // 给界面的一句话
         public string Summary {
             get {
+                // 0.10.2：原生关联只数链接状态，看不出孔有没有跟上 —— 真机（LinkSyncE2E ⑤）在装配里挪了参考零件，孔实际错开 5.8mm，
+                // 这里照样说"天工自己跟着走"，用户以为没事就存了。天工要「更新链接」（= 同步孔位）孔才过去，所以话里说清楚
                 // 0.7.9 起保持关联走天工原生关联；原来这里只数插件关联记录，刚打完 6 个原生关联孔点「检查」说"还没有关联孔"，
                 // 用户会以为关联没挂上。0.8.4 起两种都数、各说各的
-                string native = NativeLinks == 0 ? "" : "天工关联的孔位链接 " + NativeLinks + " 个" + (NativeBroken > 0 ? "（" + NativeBroken + " 个断了：参考零件被删掉或换掉了）" : "（天工自己跟着参考孔走）");
+                string native = NativeLinks == 0 ? "" : "天工关联的孔位链接 " + NativeLinks + " 个" + (NativeBroken > 0 ? "（" + NativeBroken + " 个断了：参考零件被删掉或换掉了）" : "（天工自己跟着参考孔走；参考零件刚挪过的话，要点「同步孔位」孔才更新过去）");
                 if (Linked == 0)
                     return native.Length > 0 ? native + "；没有插件关联的孔。" : "没有关联孔。用「保持与参考孔关联」打的孔才会出现在这里。";
                 string s = "插件关联的孔 " + Linked + " 个";
