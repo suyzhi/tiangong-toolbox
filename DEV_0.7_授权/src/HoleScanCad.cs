@@ -419,9 +419,10 @@ namespace TianGongCadSuite {
             var pg = PickGeometry.Unwrap(selection);
             var face = pg.Geometry as G.Face;
             if (face == null) throw new ArgumentException("请点孔的内壁（圆柱面），或者孔口的圆锥面、圆角面。");
-            P.PartDocument part = null;
-            try { part = face.Document as P.PartDocument; } catch { }
-            if (part == null) throw new ArgumentException("这个面不属于零件文档，请在装配里直接点零件上的孔内壁。");
+            P.PartDocument part = null; object owner = null;
+            try { owner = face.Document; part = owner as P.PartDocument; } catch { }
+            // 钣金件（.psm）上的孔内壁也认（0.10.2；和点钣金件孔边一样，part 为空：只用这个面所在实体的圆边）
+            if (part == null && !(owner is P.SheetMetalDocument)) throw new ArgumentException("这个面不属于零件文档，请在装配里直接点零件上的孔内壁。");
 
             var all = BodyCircles(part, face);
             var geometry = face.Geometry;

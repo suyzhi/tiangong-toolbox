@@ -881,7 +881,8 @@ namespace TianGongCadSuite {
         // onlyRefs：参考孔页上点的 —— 用户就是要认孔，没认出孔也不往打孔面上拐；
         // 否则（预先选好的对象）一个孔都没有、或已选参考孔投到它的空位上，才当打孔面。
         void PickFaceWithHoles(object selected, bool onlyRefs){
-            var t = AutoHoleReader.ReadTarget(selected);
+            bool sheetMetal;
+            var t = AutoHoleReader.ReadScanFace(selected, out sheetMetal);   // 钣金件的面也能认参考孔（0.10.2），只是不能当打孔面
             string how; int notHole, notSlot, odd;
             var holes = HoleScanCad.ScanFace(t, out how, out notHole);
             var faceSlots = HoleScanCad.ScanFaceSlots(t, out notSlot, out odd);
@@ -894,6 +895,7 @@ namespace TianGongCadSuite {
                 return;
             }
             if (holes.Count + faceSlots.Count == 0) {
+                if (sheetMetal) throw new ArgumentException("这张钣金件的面上没有认出孔。" + AutoHoleReader.SheetMetalTargetMessage);
                 AddTargetFace(selected, t);
                 string inst = InstanceNote(t);
                 SetStatus("这个面上没有识别到孔，已作为打孔面：" + FaceLabel(t) + (oddNote.Length > 0 ? "（" + oddNote + "）" : "") + (inst.Length > 0 ? "　⚠ " + inst : "") + (how.Length > 0 ? "　注意：" + how : ""), inst.Length > 0 ? Ui.Warn : Ui.Muted);
@@ -902,7 +904,7 @@ namespace TianGongCadSuite {
             // 0.8.5：已经点好参考孔、再点要打孔的面，而这张面上本来就有几个别的孔（现场最常见：底板上早打过几个安装孔）——
             // 已选的参考孔里有能投到这张面上、而且投到的位置还空着的，这张面就是打孔面。
             // 0.9.1 起点鼠标的不走这里（按页面定），只剩预先选好的对象用这条
-            int free = onlyRefs ? 0 : FreeSpots(t, holes);
+            int free = onlyRefs || sheetMetal ? 0 : FreeSpots(t, holes);
             if (free > 0) {
                 AddTargetFace(selected, t);
                 SetStatus("已作为打孔面：" + FaceLabel(t) + "（面上本来有 " + holes.Count + " 个孔，没有当参考孔；已选的参考孔里 " + free + " 个投到这张面的空位上）。"
