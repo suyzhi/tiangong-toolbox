@@ -132,8 +132,20 @@ class LinkedDrillE2E {
             string targetFull = target.Part.FullName;
             var cands = new List<HoleRecord>();
             var own = holes.Where(x => x.PartName == target.Name).ToList();
+            // 先用目标的装配包围盒在内存里筛（大装配几千个孔逐个问 CAD 要半小时，0.10.2 LIFT_DOOR 实测）
+            Box3? world = null;
+            try {
+                var place = target.Placement; V3 lo = new V3(1e9, 1e9, 1e9), hi = new V3(-1e9, -1e9, -1e9);
+                foreach (var b in target.Bodies) {
+                    Array mn = new double[3], mx = new double[3]; b.GetRange(ref mn, ref mx); V3 a = V3.From(mn), z = V3.From(mx);
+                    for (int k = 0; k < 8; k++) { var p = place.Point(new V3((k & 1) == 0 ? a.X : z.X, (k & 2) == 0 ? a.Y : z.Y, (k & 4) == 0 ? a.Z : z.Z));
+                        lo = new V3(Math.Min(lo.X, p.X), Math.Min(lo.Y, p.Y), Math.Min(lo.Z, p.Z)); hi = new V3(Math.Max(hi.X, p.X), Math.Max(hi.Y, p.Y), Math.Max(hi.Z, p.Z)); }
+                }
+                world = new Box3(lo, hi);
+            } catch { }
             foreach (var h in holes) {
                 if (h.PartName == target.Name || h.Selection == null) continue;
+                if (world.HasValue && !PartRayTarget.NearBox(world.Value, h.Center, h.Axis, h.AxialMin - 0.005, h.AxialMax + 0.005, 0.005)) continue;
                 // 目标零件在这根轴线上已经有孔了（配孔检查采到的目标零件的孔，装配坐标里比）就不要
                 V3 ax = h.Axis.Unit();
                 if (own.Any(o => { var d = o.Center - h.Center; var radial = d - ax * d.Dot(ax); return Math.Abs(o.Axis.Unit().Dot(ax)) > 0.999 && radial.Length < 0.001; })) continue;
