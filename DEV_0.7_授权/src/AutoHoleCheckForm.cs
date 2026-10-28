@@ -407,6 +407,11 @@ namespace TianGongCadSuite {
             if (idx < 0 || idx >= shown.Count || GoDrill == null) return;
             var it = shown[idx];
             if (it.Kind != HoleIssueKind.MissingHole) { SetStatus("只有「漏打孔」能直接去配孔。", Ui.Warn); return; }
+            // 0.10.2：钣金件进了配孔检查（0.10.1），漏打孔可能就在钣金件上 —— 原来照样打开自动打孔，用户点了钣金件的面才被告知打不了
+            if (System.Text.RegularExpressions.Regex.IsMatch(it.MissingPart ?? "", @"\.psm(:\d+)?\s*$", System.Text.RegularExpressions.RegexOptions.IgnoreCase)) {
+                SetStatus("漏打孔在钣金件「" + HoleCheck.ShortPart(it.MissingPart) + "」上：自动打孔只能在普通零件（.par）上打，钣金件请用天工自己的「孔」命令。点「跳转到孔」可以看位置。", Ui.Warn);
+                return;
+            }
             // 上一条「去配孔」开的打孔窗口还开着：没在打孔就先关掉它（原来一条开一个，窗口越叠越多，抢同一个鼠标选择）
             if (lastDrill != null && !lastDrill.IsDisposed) {
                 if (lastDrill.Busy) { SetStatus("上一个「去配孔」的打孔窗口正在打孔，等它打完。", Ui.Warn); return; }
