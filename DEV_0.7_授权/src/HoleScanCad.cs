@@ -16,6 +16,17 @@ namespace TianGongCadSuite {
         static readonly Dictionary<string, DateTime> stamps = new Dictionary<string, DateTime>();
         const double CacheSeconds = 30;
 
+        // 过期的缓存项清掉（0.10.2）：原来过了 30 秒只是不再用，项还一直留着 —— 每个点过的零件的圆边 / 壁面 COM 对象
+        // 在整个天工会话里都攥在手里，零件关掉了也放不掉（点过几百个零件的大装配，内存只涨不落）
+        static void Prune(){
+            var now = DateTime.UtcNow;
+            foreach (var pair in new[]{ new KeyValuePair<System.Collections.IDictionary, Dictionary<string, DateTime>>(circles, stamps), new KeyValuePair<System.Collections.IDictionary, Dictionary<string, DateTime>>(walls, wallStamps) }) {
+                var drop = new List<string>();
+                foreach (var kv in pair.Value) if ((now - kv.Value).TotalSeconds >= CacheSeconds) drop.Add(kv.Key);
+                foreach (var k in drop) { pair.Key.Remove(k); pair.Value.Remove(k); }
+            }
+        }
+
         public static void Invalidate(P.PartDocument part){
             string key = Key(part);
             if (key.Length == 0) { circles.Clear(); stamps.Clear(); walls.Clear(); wallStamps.Clear(); return; }
@@ -147,6 +158,7 @@ namespace TianGongCadSuite {
                 }
             } catch (Exception e) { Log.Write("HoleScanBodyCircles", e); }
 
+            Prune();
             if (key.Length > 0) { circles[key] = list; stamps[key] = DateTime.UtcNow; }
             return list;
         }
@@ -278,6 +290,7 @@ namespace TianGongCadSuite {
                 }
             } catch (Exception e) { Log.Write("HoleScanWallFaces", e); }
 
+            Prune();
             if (key.Length > 0) { walls[key] = list; wallStamps[key] = DateTime.UtcNow; }
             return list;
         }
