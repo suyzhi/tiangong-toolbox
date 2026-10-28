@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -154,12 +154,38 @@ namespace TianGongCadSuite {
             IList<Box3> boxes;
             try { boxes = boxesLocal(origin, dir); } catch { return false; }
             if (boxes == null) return false;
+            const double eps = 1e-4;
+            double beyondHi = double.PositiveInfinity, beforeLo = double.NegativeInfinity;
             foreach (var b in boxes) {
                 double t0, t1;
                 if (!b.Clip(origin, dir, out t0, out t1)) continue;
-                if (t1 >= lo - tol && t0 <= hi + tol) return true;
+                if (t1 < lo - tol || t0 > hi + tol) continue;
+                if (t1 > lo + eps && t0 < hi - eps) return true;      // 面横穿孔自己的那一段：两个零件在这里叠着
+                if (t0 >= hi - eps) beyondHi = Math.Min(beyondHi, t0);
+                else beforeLo = Math.Max(beforeLo, t1);
             }
-            return false;
+            // 0.10.2：孔口贴着对方零件的外轮廓、却没贴着材料（中间空了 > SlotGap）= 孔正对着对方的 T 型槽口 / 凹槽，
+            // 螺钉进的是槽里的 T 型螺母，对方本来就不打孔。真机（宝马托盘升降门，SolidWorks 转过来的）：支架 Φ6.2 孔正对铝型材的槽口，
+            // 型材材料在孔口外 3mm 才开始（RayDebug），按"3mm 以内算挨着"报了漏打孔；型材上这类误报 40 来条。
+            // 孔口在对方外轮廓之外（两个零件之间本来就隔着垫片 / 支座的空当）照旧按 tol 算
+            bool hitHi = !double.IsPositiveInfinity(beyondHi), hitLo = !double.IsNegativeInfinity(beforeLo);
+            var unit = axisAssembly.Unit();
+            if (hitHi && beyondHi - hi > SlotGap && InsideWorld(originAssembly + unit * hi)) hitHi = false;
+            if (hitLo && lo - beforeLo > SlotGap && InsideWorld(originAssembly + unit * lo)) hitLo = false;
+            return hitHi || hitLo;
+        }
+        const double SlotGap = 0.0005;   // 孔口和对方材料之间空出来超过 0.5mm 才算"对着槽口"
+        // 零件自己坐标里的包围盒（各实体局部范围的并集）。判"孔口在不在对方外轮廓里"用它 —— 斜放的零件，World 换到装配坐标再取范围会胖一圈
+        public Box3? Local;
+        bool InsideWorld(V3 p){
+            const double pad = 0.0002;
+            if (Local.HasValue) {
+                var q = Placement.InversePoint(p); var l = Local.Value;
+                return q.X >= l.Lo.X - pad && q.X <= l.Hi.X + pad && q.Y >= l.Lo.Y - pad && q.Y <= l.Hi.Y + pad && q.Z >= l.Lo.Z - pad && q.Z <= l.Hi.Z + pad;
+            }
+            if (!World.HasValue) return false;
+            var w = World.Value;
+            return p.X >= w.Lo.X - pad && p.X <= w.Hi.X + pad && p.Y >= w.Lo.Y - pad && p.Y <= w.Hi.Y + pad && p.Z >= w.Lo.Z - pad && p.Z <= w.Hi.Z + pad;
         }
     }
 

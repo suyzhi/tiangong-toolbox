@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using A=SolidEdgeAssembly;
@@ -1890,12 +1890,25 @@ namespace TianGongCadSuite {
                         return all;
                     });
                     target.World = WorldBox(bodies, placement);
+                    target.Local = LocalBox(bodies);
                     index.Add(target);
                 }
                 return index;
             }
         }
 
+        static Box3? LocalBox(IList<G.Body> bodies){
+            if (bodies == null || bodies.Count == 0) return null;
+            V3 lo = new V3(double.MaxValue, double.MaxValue, double.MaxValue), hi = new V3(double.MinValue, double.MinValue, double.MinValue);
+            foreach (var b in bodies) {
+                Array mn = new double[3], mx = new double[3];
+                try { b.GetRange(ref mn, ref mx); } catch { return null; }
+                V3 a = V3.From(mn), z = V3.From(mx);
+                if (!a.Finite || !z.Finite) return null;
+                lo = new V3(Math.Min(lo.X, a.X), Math.Min(lo.Y, a.Y), Math.Min(lo.Z, a.Z)); hi = new V3(Math.Max(hi.X, z.X), Math.Max(hi.Y, z.Y), Math.Max(hi.Z, z.Z));
+            }
+            return new Box3(lo, hi);
+        }
         // 实例的全部实体在装配坐标里的包围盒（局部包围盒 8 个角变换过去再取范围）。任何一个实体读不到就返回 null（不预筛）
         static Box3? WorldBox(IList<G.Body> bodies, Transform placement){
             if (bodies == null || bodies.Count == 0 || placement == null) return null;

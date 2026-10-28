@@ -179,6 +179,19 @@ namespace TianGongCadSuite {
             Assert(HoleCheck.Run(touching, null).Count(i => i.Kind == HoleIssueKind.WrongSpec) == 1, "首尾挨着（只差 0.5mm 的建模误差）照样报配错孔");
             Assert(HoleCheck.CountGroups(new List<HoleRecord>{ Rec("A", 0, 20, 8.5), Rec("A", 0, 20, 2.0) }) == 1, "组数只算 3~25mm 的孔（Φ2 不计）");
 
+            // 0.10.2：孔正对着型材的 T 型槽口：型材外轮廓从孔口开始（z=3），材料在 z=6 才有 → 不算穿过
+            {
+                Func<double, double, double, PartRayTarget> profile = (outer, matLo, matHi) => {
+                    var mat = new Box3(new V3(-0.1, -0.1, matLo / 1000.0), new V3(0.1, 0.1, matHi / 1000.0));
+                    var t = PartRayTarget.WithBoxes("型材", Transform.Identity, (o, d) => { double ta, tb; return mat.Clip(o, d, out ta, out tb) ? new List<Box3>{ mat } : new List<Box3>(); });
+                    t.World = new Box3(new V3(-0.1, -0.1, outer / 1000.0), new V3(0.1, 0.1, 0.05));
+                    return t;
+                };
+                var z = new V3(0, 0, 1);
+                Assert(!profile(3, 6, 8).Hits(new V3(0, 0, 0), z, 0, 0.003, 0.003), "孔口对着槽口（材料在孔口外 3mm、孔口在型材外轮廓上）：不算漏打孔");
+                Assert(profile(3, 3, 8).Hits(new V3(0, 0, 0), z, 0, 0.003, 0.003), "孔口贴着材料：照样算穿过");
+                Assert(profile(5, 5, 8).Hits(new V3(0, 0, 0), z, 0, 0.003, 0.003), "两个零件之间隔着 2mm（孔口在对方外轮廓之外）：照旧按 3mm 以内算挨着");
+            }
             // ② 漏打孔只看孔附近
             var idx = new PartRayIndex();
             idx.Add(Slab("B", 10, 20));         // 夹在 A、C 中间
