@@ -1467,7 +1467,7 @@ namespace TianGongCadSuite {
             } catch (Exception e) {
                 busy = false;
                 Log.Write("AutoHoleLinkScan", e);
-                ShowLinkReport(null, "检查失败：" + e.Message);
+                ShowLinkReport(null, "检查失败：" + AutoHoleWriter.Friendly(e));
             } finally { busy = false; UseWaitCursor = false; RefreshPreview(); }
         }
 
@@ -1678,7 +1678,7 @@ namespace TianGongCadSuite {
                     try { t = ResolvedFace(ti); }
                     catch (Exception e) {
                         Log.Write("AutoHoleFaceRead", e);
-                        AddProblem(y.Problems, targetLabels[ti] + "：读不到这张面了（" + e.Message + "），没有打。请重新点一次这张面。");
+                        AddProblem(y.Problems, targetLabels[ti] + "：读不到这张面了（" + AutoHoleWriter.Friendly(e) + "），没有打。请重新点一次这张面。");
                         y.Failed++;
                         continue;
                     }
@@ -1690,7 +1690,7 @@ namespace TianGongCadSuite {
                         V3 centre;
                         try { centre = AutoHoleReader.Intersect(hole, t); }
                         catch (ObliqueHoleException e) { y.Failed++; y.Outcomes.Add(new ResultList.Item(ResultList.Kind.Fail, partName + " Φ" + Num(hole.DiameterMm) + "：" + e.Message).At(hole.Center, hole.DiameterMm)); continue; }
-                        catch (Exception e) { y.Skipped++; AddProblem(y.Problems, partName + " Φ" + Num(hole.DiameterMm) + " 无法定位：" + e.Message); continue; }
+                        catch (Exception e) { y.Skipped++; AddProblem(y.Problems, partName + " Φ" + Num(hole.DiameterMm) + " 无法定位：" + AutoHoleWriter.Friendly(e)); continue; }
                         if (!FaceFrameReader.ContainsPoint(t, centre)) { y.Skipped++; continue; }
                         // 这个位置本来就有孔：先在这里挡掉（0.8.5）。原来照样进原位编辑（深一点的子装配 8～12 秒、窗口闪几下），
                         // 进去了才发现一个都不用打 —— 现场日志 19:39 那次就是这样，2 个孔、等了 8 秒、什么也没做
