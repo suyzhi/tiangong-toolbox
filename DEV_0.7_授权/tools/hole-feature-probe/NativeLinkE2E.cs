@@ -152,7 +152,7 @@ class NativeLinkE2E {
 
     static string MakeA(string path){
         var a = (P.PartDocument)app.Documents.Add("SolidEdge.PartDocument", Tpl + "iso metric part.par");
-        a.ModelingMode = P.ModelingModeConstants.seModelingModeOrdered;
+        Retry(delegate { a.ModelingMode = P.ModelingModeConstants.seModelingModeOrdered; }, "顺序建模");
         var ma = Plate(a, 0.1, 0.1, 0.01);
         var topA = a.RefPlanes.AddParallelByDistance(FaceAtZ(ma, 0.01), 0.0, P.ReferenceElementConstants.igNormalSide, M, M, M, M);
         foreach (var c in Clear) Hole(a, ma, topA, c[0], c[1], 0.01, 0.0066);
@@ -162,7 +162,7 @@ class NativeLinkE2E {
     }
     static string MakePlate(string path){
         var b = (P.PartDocument)app.Documents.Add("SolidEdge.PartDocument", Tpl + "iso metric part.par");
-        b.ModelingMode = P.ModelingModeConstants.seModelingModeOrdered;
+        Retry(delegate { b.ModelingMode = P.ModelingModeConstants.seModelingModeOrdered; }, "顺序建模");
         Plate(b, 0.1, 0.1, 0.01);
         b.SaveAs(path); b.Close(false);
         return path;
@@ -207,7 +207,7 @@ class NativeLinkE2E {
         string pd = Path.Combine(outDir, "ND_" + stamp + ".par");
         {   // D：只有 2 个 Φ6.6，给⑤第二批用（孔心和 A 的孔错开）
             var d = (P.PartDocument)app.Documents.Add("SolidEdge.PartDocument", Tpl + "iso metric part.par");
-            d.ModelingMode = P.ModelingModeConstants.seModelingModeOrdered;
+            Retry(delegate { d.ModelingMode = P.ModelingModeConstants.seModelingModeOrdered; }, "顺序建模");
             var md = Plate(d, 0.1, 0.1, 0.01);
             var topD = d.RefPlanes.AddParallelByDistance(FaceAtZ(md, 0.01), 0.0, P.ReferenceElementConstants.igNormalSide, M, M, M, M);
             Hole(d, md, topD, 0.035, 0.05, 0.01, 0.0066); Hole(d, md, topD, 0.065, 0.05, 0.01, 0.0066);

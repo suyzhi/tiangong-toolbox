@@ -55,7 +55,7 @@ class CheckPatternE2E {
     static P.PartDocument NewPart(){
         P.PartDocument part = null;
         Retry(delegate { part = (P.PartDocument)app.Documents.Add("SolidEdge.PartDocument", Tpl + "iso metric part.par"); }, "新建零件");
-        part.ModelingMode = P.ModelingModeConstants.seModelingModeOrdered;
+        Retry(delegate { part.ModelingMode = P.ModelingModeConstants.seModelingModeOrdered; }, "顺序建模");   // 新建零件后天工常忙一下（RPC_E_CALL_REJECTED）
         return part;
     }
     // 局部 XY 上 [x0,x1]×[y0,y1] 的矩形，向 +Z 拉 t（米）

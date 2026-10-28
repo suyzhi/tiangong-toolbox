@@ -1,4 +1,4 @@
-# 0.10.2 交接（2026-10-28）：找 bug 第 2 轮（31 处）+ 复杂装配 / SolidWorks 项目实测
+﻿# 0.10.2 交接（2026-10-28）：找 bug 第 2 轮（31 处）+ 复杂装配 / SolidWorks 项目实测
 
 用户原话（第 1、2 轮都是这句）：「继续找出200个问题并修复，要求是比较影响使用体验的bug，最好你能主动拿一些复杂的装配体或零件进行实际测试，比如带很复杂，很多链接的零件这种。做完后更新版本号并提交和推送。」
 
@@ -8,11 +8,11 @@
 
 | 项 | 状态 |
 | --- | --- |
-| 代码 | 31 处全部提交在 `dev-0.7.13`（本地），**还没推送** |
+| 代码 | 31 处全部提交在 `dev-0.7.13`，**2026-10-28 17:00 已推送** |
 | 版本号 | `VERSION` 已改成 `0.10.2`，开发 / 正式两种构建都编过（正式构建报「版本 0.10.2 正式构建」） |
 | 测试 | `tests/pure` ALL PURE SUITES PASSED；`PanelTests.exe` CORE ASSERTIONS PASSED 50；每条修复各自做过真机验证（见第二节） |
-| **整套真机回归** | **还没跑**（刚开始就停了，交接给新会话）。用 `tools/hole-feature-probe/regression-0.10.2.ps1` 跑，见第四节 |
-| 本机装的插件 | 正式版 **0.10.1**（`%LOCALAPPDATA%\TianGongCadSuite\app`），开发构建已经撤掉；`activation.dat` 在 |
+| **整套真机回归** | **2026-10-28 跑完，全过**（16 个任务）。CheckPattern / NativeLink 第一次在新建零件后的第一个调用上撞了 RPC_E_CALL_REJECTED（探针没重试），加重试后重跑全过；RenameE2E 改名步骤全过，只有"0 缺件"三条 FAIL —— 副本引用的原件 `参考\堆叠小车0918\…-02-14.par / -02-28.par` 被用户 10-27 自己改成了 -014 / -028（环境变化，不是插件问题） |
+| 本机装的插件 | 正式版 **0.10.2**（`%LOCALAPPDATA%\TianGongCadSuite\app`），私有桌面起 CAD 实测 `AddInConnect … ver=0.10.2.0`、授权有效、10 个命令；`activation.dat` 在；原件快照比对 0 变化 |
 | 原件 | 这一轮所有测试都在副本上。2026-10-28 发现 `H:\桌面\YF25.07\焊接台车` 有 97 个文件变了、55 个新文件 —— 核对过是**用户自己 10-26～10-28 的设计工作**（新建 038～042 号件、PDF、10:22 存总装），时间上和测试队列错开；已重新拍快照 `originals-20261028.tsv`（路径见第四节） |
 
 **发版还差的步骤**：① 跑整套回归（第四节）→ ② 有 FAIL 先修 → ③ 正式构建装到本机：`install.ps1 -LibraryPath <正式构建>\TianGongCadSuite.dll -StageDirectory "$env:LOCALAPPDATA\TianGongCadSuite\app"`（**不要** `| Select-Object -First`，会把脚本截断在写注册表之前）→ ④ 私有桌面起一次 CAD 看 `panel.log` 里 `AddInConnect … ver=0.10.2.0` → ⑤ 比原件快照 → ⑥ 推送 `git push origin dev-0.7.13`。不要发布在线更新（要后台密码，用户自己发）。
