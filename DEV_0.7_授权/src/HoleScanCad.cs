@@ -47,6 +47,8 @@ namespace TianGongCadSuite {
         }
 
         // 一条边 -> 一个圆候选（读不到 / 半径 0 就返回 null）。
+        static object DocOf(object topology){ try { return ((dynamic)topology).Document; } catch { return null; } }
+
         static CircleCandidate Circle(G.Edge edge){
             G.Circle circle = null;
             try { circle = edge.Geometry as G.Circle; } catch { return null; }
@@ -330,7 +332,7 @@ namespace TianGongCadSuite {
             if (hole == null) throw new ArgumentException("这条边读不出孔径，请重新点一次孔口的圆形边线。");
             hole.Center = pg.Transform.Point(hole.Center);
             hole.Axis = pg.Transform.Vector(hole.Axis).Unit();
-            hole.Owner = part; hole.Placement = pg.Transform;
+            hole.Owner = (object)part ?? DocOf(edge); hole.Placement = pg.Transform;   // 钣金件：记下钣金件文档（0.10.2，原来是空，挂不了天工关联、提示"读不到所在零件"）
             hole.Pick = selection; hole.SourceFace = wallFace;
             hole.Source = "孔口圆边";
             return hole;
@@ -353,7 +355,7 @@ namespace TianGongCadSuite {
             foreach (var h in holes) {
                 h.Center = target.Placement.Point(h.Center);
                 h.Axis = target.Placement.Vector(h.Axis).Unit();
-                h.Owner = target.Part; h.Placement = target.Placement;
+                h.Owner = (object)target.Part ?? DocOf(target.Face); h.Placement = target.Placement;
                 h.Pick = target.Pick; h.SourceFace = target.Face;
                 h.Source = target.Label;
             }
@@ -403,7 +405,7 @@ namespace TianGongCadSuite {
                         Axis = target.Placement.Vector(n).Unit(),
                         Direction = target.Placement.Vector((arcs[1].Center - arcs[0].Center) * (1.0 / dist)).Unit(),
                         LengthMm = dist * 1000.0 + 2 * arcs[0].RadiusMm, WidthMm = 2 * arcs[0].RadiusMm,
-                        Owner = target.Part, Source = target.Label
+                        Owner = (object)target.Part ?? DocOf(target.Face), Source = target.Label
                     });
                 }
             } catch (Exception e) { Log.Write("HoleScanSlots", e); }
@@ -468,7 +470,7 @@ namespace TianGongCadSuite {
             if (hole == null) throw new ArgumentException("没能从这条面上算出孔径，请重新点一次。");
             hole.Center = pg.Transform.Point(hole.Center);
             hole.Axis = pg.Transform.Vector(hole.Axis).Unit();
-            hole.Owner = part; hole.Placement = pg.Transform;
+            hole.Owner = (object)part ?? owner; hole.Placement = pg.Transform;
             hole.Pick = selection; hole.SourceFace = face;
             hole.Source = label;
             return hole;

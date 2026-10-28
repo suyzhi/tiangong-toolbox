@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using A=SolidEdgeAssembly;
 using F=SolidEdgeFramework;
@@ -88,7 +88,7 @@ namespace TianGongCadSuite {
         // 选择引用（Reference / TopologyReference）+ 零件文档 + 零件局部→顶层的变换 → 实例链。
         // 先用引用自己给的顶层实例（不用遍历整个装配 —— 遍历会把所有零件加载一遍，就是"点命令卡很久"那个问题）；
         // 引用给不出来时只在顶层实例里按文件名 + 矩阵找。
-        public static OccChain ChainOf(A.AssemblyDocument top, object pick, P.PartDocument part, Transform placement, out string why){
+        public static OccChain ChainOf(A.AssemblyDocument top, object pick, object part, Transform placement, out string why){   // part：零件或钣金件文档（0.10.2 钣金件的孔也能当参考孔挂关联）
             why = "";
             if (top == null || part == null || placement == null) { why = "读不到零件或它在装配里的位置"; return null; }
             string full = FullName(part);
@@ -421,8 +421,8 @@ namespace TianGongCadSuite {
                     if (key.Length == 0) { r.LinkWhy = "读不到参考孔所在零件在装配里的位置"; continue; }
                     if (!refs.ContainsKey(key)) {
                         string why;
-                        var chain = ChainOf(top, h.Pick, refPart, h.Placement, out why);
-                        if (chain == null) { Note("参考孔：" + why); refs[key] = null; refWhy[key] = "参考零件「" + SafeName(refPart) + "」：" + why; }
+                        var chain = ChainOf(top, h.Pick, h.Owner, h.Placement, out why);
+                        if (chain == null) { Note("参考孔：" + why); refs[key] = null; refWhy[key] = "参考零件「" + SafeName(h.Owner) + "」：" + why; }
                         else {
                             try { refs[key] = ReferenceTo(top, chain, h.SourceFace); }
                             catch (Exception e) { Log.Write("NativeRef", e); Note("参考孔的装配引用建不出来（" + e.Message + "）"); refs[key] = null; refWhy[key] = "参考孔的装配引用建不出来（" + e.Message + "）"; }
