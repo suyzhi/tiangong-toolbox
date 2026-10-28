@@ -62,6 +62,8 @@ static class LineupTableTests {
             Check(form.CurrentProject.Records[1].Number=="OK170-Y1C02","duplicate paste rolls back without data loss");
             form.Grid.ClearSelection();form.Grid.Rows[0].Cells[6].Selected=true;form.Grid.Rows[1].Cells[6].Selected=true;form.FillDown();
             Check(form.CurrentProject.Records[1].Brand=="批量测试品牌","selected column fill-down updates both rows");
+            form.Grid.ClearSelection();form.Grid.CurrentCell=form.Grid.Rows[0].Cells[6];form.Grid.Rows[1].Cells[6].Selected=true;form.PasteCells("粘贴品牌\r\n");
+            Check(form.CurrentProject.Records[0].Brand=="粘贴品牌"&&form.CurrentProject.Records[1].Brand=="粘贴品牌","one copied cell pasted into every selected cell");
             form.Grid.CurrentCell=form.Grid.Rows[0].Cells[1];doc.SelectSet.RemoveAll();doc.SelectSet.Add(one);form.BindAndNext();
             Check(form.CurrentProject.Records[0].ReferenceKey.Length>0&&form.Grid.CurrentCell.RowIndex==1,"bind current row advances to next row");
             doc.SelectSet.Add(two);Check(form.AddSelectedModels()==1&&form.RecordCount==274,"multi-pick adds unbound instance and skips existing binding");

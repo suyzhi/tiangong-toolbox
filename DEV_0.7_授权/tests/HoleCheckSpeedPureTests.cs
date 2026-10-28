@@ -1,4 +1,5 @@
-﻿using System;
+﻿using System.Linq;
+using System;
 using System.Collections.Generic;
 
 namespace TianGongCadSuite {
@@ -29,6 +30,7 @@ namespace TianGongCadSuite {
             Check(bad.Selection == null, "建引用失败返回 null 不抛");
             JunctionLoop();
             LockedSettings();
+            UserTextEncoding();
             // 0.10.1：同样的问题只是位置不同 → 合成一条，孔全部保留，摘要按"处"数
             var a1 = new HoleIssue { Kind = HoleIssueKind.WrongSpec, Message = "A Φ5 与 B Φ4 规格不同（@X1 Y2 Z3）", Holes = new List<HoleRecord>{ new HoleRecord(), new HoleRecord() } };
             var a2 = new HoleIssue { Kind = HoleIssueKind.WrongSpec, Message = "A Φ5 与 B Φ4 规格不同（@X9 Y2 Z3）", Holes = new List<HoleRecord>{ new HoleRecord(), new HoleRecord() } };
@@ -64,6 +66,15 @@ namespace TianGongCadSuite {
             SettingsFile.Write(path, new[]{ new[]{ "预设A", "孔数", "4" }, new[]{ "预设B", "孔数", "2" } }, "测试");
             Check(SettingsFile.Read(path).Count == 2, "重新读成功以后可以写");
             try { System.IO.File.Delete(path); } catch { }
+        }
+        // 导入的表格文本：BOM / UTF-8 / GBK（WPS、Excel 另存 CSV 的默认）都认
+        static void UserTextEncoding(){
+            string text = "类别,型号\r\n气缸,CDJ2B16-50";
+            Check(SettingsFile.DecodeUserText(new System.Text.UTF8Encoding(true).GetPreamble().Concat(System.Text.Encoding.UTF8.GetBytes(text)).ToArray()) == text, "UTF-8 带 BOM");
+            Check(SettingsFile.DecodeUserText(System.Text.Encoding.UTF8.GetBytes(text)) == text, "UTF-8 不带 BOM");
+            Check(SettingsFile.DecodeUserText(new byte[]{ 0xFF, 0xFE }.Concat(System.Text.Encoding.Unicode.GetBytes(text)).ToArray()) == text, "UTF-16 LE");
+            System.Text.Encoding gbk = null; try { gbk = System.Text.Encoding.GetEncoding(936); } catch { }
+            if (gbk != null) Check(SettingsFile.DecodeUserText(gbk.GetBytes(text)) == text, "GBK（Excel 另存的 CSV）");
         }
         // 格式转换扫描目录：指回上级的目录联接不能让扫描转圈（只在 Windows 上测，需要 mklink）
         static void JunctionLoop(){

@@ -67,6 +67,26 @@ namespace TianGongCadSuite {
             else File.Move(tmp, path);
         }
 
+        // 用户自己拿来导入的表格文本（排位表清单 / 型号库 CSV）（0.10.2）：
+        //   · 原来按 UTF-8 读：WPS / Excel「另存为 CSV」在中文 Windows 上默认是 GBK，导进来中文全成乱码；
+        //   · 原来 File.ReadAllText：文件还在 Excel 里开着就"被另一进程占用"直接失败。
+        // 有 BOM 按 BOM；没有就先按严格 UTF-8 解，解不通再按 GBK（GB18030 兼容）。共享读。
+        public static string ReadUserText(string path){
+            byte[] data;
+            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            using (var ms = new MemoryStream()) { fs.CopyTo(ms); data = ms.ToArray(); }
+            return DecodeUserText(data);
+        }
+        public static string DecodeUserText(byte[] data){
+            if (data == null || data.Length == 0) return "";
+            if (data.Length >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF) return Encoding.UTF8.GetString(data, 3, data.Length - 3);
+            if (data.Length >= 2 && data[0] == 0xFF && data[1] == 0xFE) return Encoding.Unicode.GetString(data, 2, data.Length - 2);
+            if (data.Length >= 2 && data[0] == 0xFE && data[1] == 0xFF) return Encoding.BigEndianUnicode.GetString(data, 2, data.Length - 2);
+            try { return new UTF8Encoding(false, true).GetString(data); }
+            catch (DecoderFallbackException) { }
+            try { return Encoding.GetEncoding(936).GetString(data); } catch (Exception) { return Encoding.Default.GetString(data); }
+        }
+
         public static string Escape(string s){
             if (string.IsNullOrEmpty(s)) return "";
             var sb = new StringBuilder(s.Length + 4);

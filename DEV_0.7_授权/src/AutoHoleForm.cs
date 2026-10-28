@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
@@ -882,20 +882,21 @@ namespace TianGongCadSuite {
         // 否则（预先选好的对象）一个孔都没有、或已选参考孔投到它的空位上，才当打孔面。
         void PickFaceWithHoles(object selected, bool onlyRefs){
             var t = AutoHoleReader.ReadTarget(selected);
-            string how; int notHole, notSlot;
+            string how; int notHole, notSlot, odd;
             var holes = HoleScanCad.ScanFace(t, out how, out notHole);
-            var faceSlots = HoleScanCad.ScanFaceSlots(t, out notSlot);
+            var faceSlots = HoleScanCad.ScanFaceSlots(t, out notSlot, out odd);
+            string oddNote = odd > 0 ? odd + " 个两头不一样大的异形孔（葫芦孔 / 挂孔之类）认不了，没加进来" : "";
             notHole += notSlot;
-            Log.Write("AutoHoleFaceScan", FaceLabel(t) + "：圆孔 " + holes.Count + "，腰孔 " + faceSlots.Count + "，判为凸台 " + notHole + (how.Length > 0 ? "，" + how : ""));
+            Log.Write("AutoHoleFaceScan", FaceLabel(t) + "：圆孔 " + holes.Count + "，腰孔 " + faceSlots.Count + "，判为凸台 " + notHole + (odd > 0 ? "，异形孔 " + odd : "") + (how.Length > 0 ? "，" + how : ""));
             if (holes.Count + faceSlots.Count == 0 && onlyRefs) {
-                SetStatus("这张面上没有认出孔（" + FaceLabel(t) + (notHole > 0 ? "，" + notHole + " 个圆/腰形判定为凸台" : "") + "）。"
+                SetStatus("这张面上没有认出孔（" + FaceLabel(t) + (notHole > 0 ? "，" + notHole + " 个圆/腰形判定为凸台" : "") + (oddNote.Length > 0 ? "，" + oddNote : "") + "）。"
                           + "要在它上面打孔：点「下一步」到「打孔面」再点它。" + (how.Length > 0 ? "注意：" + how : ""), Ui.Warn);
                 return;
             }
             if (holes.Count + faceSlots.Count == 0) {
                 AddTargetFace(selected, t);
                 string inst = InstanceNote(t);
-                SetStatus("这个面上没有识别到孔，已作为打孔面：" + FaceLabel(t) + (inst.Length > 0 ? "　⚠ " + inst : "") + (how.Length > 0 ? "　注意：" + how : ""), inst.Length > 0 ? Ui.Warn : Ui.Muted);
+                SetStatus("这个面上没有识别到孔，已作为打孔面：" + FaceLabel(t) + (oddNote.Length > 0 ? "（" + oddNote + "）" : "") + (inst.Length > 0 ? "　⚠ " + inst : "") + (how.Length > 0 ? "　注意：" + how : ""), inst.Length > 0 ? Ui.Warn : Ui.Muted);
                 return;
             }
             // 0.8.5：已经点好参考孔、再点要打孔的面，而这张面上本来就有几个别的孔（现场最常见：底板上早打过几个安装孔）——
@@ -918,6 +919,7 @@ namespace TianGongCadSuite {
                          + (faceSlots.Count > 0 ? "；腰孔 " + faceSlots.Count + " 条（" + string.Join("、", faceSlots.GroupBy(x => x.Label).Select(x => x.Key + " ×" + x.Count()).ToArray()) + "，目标件上配同样的腰孔，通切）" : "")
                          + (dup > 0 ? "；其中 " + dup + " 个已经在列表里" : "")
                          + (notHole > 0 ? "；另有 " + notHole + " 个圆/腰形判定为凸台，已跳过" : "")
+                         + (oddNote.Length > 0 ? "；" + oddNote : "")
                          + "。要把这张面当打孔面：到「打孔面」那一步再点它（会撤掉从它认进来的参考孔）。";
             SetStatus("已从 " + FaceLabel(t) + " 上识别到 " + holes.Count + " 个孔" + (faceSlots.Count > 0 ? "、" + faceSlots.Count + " 条腰孔" : "")
                       + "，共 " + groups.Count + " 组（新增 " + added + " 个" + (slotsAdded > 0 ? "、腰孔 " + slotsAdded + " 条" : "") + "）。", Ui.Ok);

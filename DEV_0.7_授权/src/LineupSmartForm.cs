@@ -25,7 +25,7 @@ namespace TianGongCadSuite {
             var numbering=Drop(menu,"编号与阀岛");Item(numbering,"管理阀岛 / 设置新增记录的阀岛",()=>ShowNumberSettings());Item(numbering,"将选中阀片分配到阀岛…",AssignIslandDialog);Item(numbering,"给选中空编号行自动编号",NumberSelected);Item(numbering,"从选中气缸生成 H/W",GenerateSensorPairs);
             Item(numbering,"气缸归属阀片",AssignCylinderDialog);Item(numbering,"查看层级",ShowHierarchy);
             var models=Drop(menu,"型号库");Item(models,"选择型号（F4 / 双击型号）",()=>PickModel(false));Item(models,"套用型号到选中多行",()=>PickModel(true));Item(models,"导入型号库 / 从清单提取",ImportLibrary);Item(models,"将当前清单的完整型号收录入库",()=>{SaveDraft();int n=LearnModels(project.Records);status.Text="型号库新增 "+n+" 条，现有 "+catalog.Entries.Count+" 条。";});Item(models,"导出型号库 CSV",ExportLibrary);
-            var files=Drop(menu,"导入导出");Item(files,"粘贴整张五类清单",()=>ImportText(Clipboard.GetText(),'\t'));Item(files,"导入清单 TSV / CSV",()=>{using(var d=new OpenFileDialog{Filter="表格文本|*.tsv;*.txt;*.csv"})if(d.ShowDialog(this)==DialogResult.OK)ImportText(File.ReadAllText(d.FileName,System.Text.Encoding.UTF8),Path.GetExtension(d.FileName).Equals(".csv",StringComparison.OrdinalIgnoreCase)?',':'\t');});
+            var files=Drop(menu,"导入导出");Item(files,"粘贴整张五类清单",()=>ImportText(Clipboard.GetText(),'\t'));Item(files,"导入清单 TSV / CSV",()=>{using(var d=new OpenFileDialog{Filter="表格文本|*.tsv;*.txt;*.csv"})if(d.ShowDialog(this)==DialogResult.OK)ImportText(SettingsFile.ReadUserText(d.FileName),Path.GetExtension(d.FileName).Equals(".csv",StringComparison.OrdinalIgnoreCase)?',':'\t');});
             Item(files,"复制五类清单到 WPS / Excel",()=>{Clipboard.SetText(LineupTableData.Tsv(ExportRows()));status.Text="已复制全部五类 11 列，在 WPS/Excel 的 A1 粘贴。";});
             Item(files,"导出五类 CSV",()=>{using(var d=new SaveFileDialog{Filter="CSV 清单|*.csv",FileName=Path.GetFileNameWithoutExtension(file)+"-Lineup.csv"})if(d.ShowDialog(this)==DialogResult.OK)Export(d.FileName);});
             Item(files,"复制参考BOM（10列）",()=>{ExportRows();Clipboard.SetText(LineupTableData.Tsv(LineupTableData.ReferenceGrouped(project)));status.Text="已复制参考BOM 10列；机构名称仍保存在插件中。";});
@@ -187,7 +187,7 @@ namespace TianGongCadSuite {
         void LearnAfterSave(){try{LearnModels(project.Records);}catch(Exception ex){status.Text="清单已保存；型号库未更新："+ex.Message;}}
         void ImportLibrary(){
             using(var dialog=new OpenFileDialog{Filter="型号库 / 清单|*.csv;*.tsv;*.txt;*.xml"})if(dialog.ShowDialog(this)==DialogResult.OK){
-                string ext=Path.GetExtension(dialog.FileName).ToLowerInvariant();var imported=ext==".xml"?LineupModelCatalog.Load(dialog.FileName):LineupModelCatalog.Import(File.ReadAllText(dialog.FileName,System.Text.Encoding.UTF8),ext==".csv"?',':'\t',ActiveCategory);
+                string ext=Path.GetExtension(dialog.FileName).ToLowerInvariant();var imported=ext==".xml"?LineupModelCatalog.Load(dialog.FileName):LineupModelCatalog.Import(SettingsFile.ReadUserText(dialog.FileName),ext==".csv"?',':'\t',ActiveCategory);
                 int count=LearnModels(imported.Entries.Select(e=>new LineupRecord{Category=e.Category,Model=e.Model,Brand=e.Brand,Connector=e.Connector}));status.Text="型号库新增 "+count+" 条，现有 "+catalog.Entries.Count+" 条。";
             }
         }

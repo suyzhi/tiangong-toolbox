@@ -8,6 +8,7 @@ static class PureProgram {
         int failed = 0;
         failed += Run("AutoHole", TianGongCadSuite.AutoHoleTests.Pure);
         failed += Run("FormatConvert.ResumeMarker", FormatConvertTests.ResumeMarker);
+        failed += Run("FormatConvert.SameNameTargets", FormatConvertTests.SameNameTargets);
         failed += Run("FormatConvert.CommandLineQuoting", FormatConvertTests.CommandLineQuoting);
         failed += Run("PanelNaming", TianGongCadSuite.PanelNamingPureTests.Run);
         failed += Run("PanelPlates", TianGongCadSuite.PanelPlatesPureTests.Run);

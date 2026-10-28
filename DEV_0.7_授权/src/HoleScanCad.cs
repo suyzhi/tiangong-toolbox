@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using P=SolidEdgePart;
@@ -366,7 +366,12 @@ namespace TianGongCadSuite {
         // 在用户 30 个零件上逐面比对（tools/hole-feature-probe/FaceScanAudit.cs），圆孔没有漏的，漏掉的是腰孔（7 条；另有约 50 个圆角矩形窗口，不是孔）。
         // 判据和点圆弧认腰孔（SlotScanCad.FromArc）一样：内环 = 两段同半径圆弧 + 两条直边；再按圆弧那头的壁判一下是不是腰形凸台。
         public static List<SlotReference> ScanFaceSlots(TargetFace target, out int skippedCount){
-            skippedCount = 0;
+            int odd; return ScanFaceSlots(target, out skippedCount, out odd);
+        }
+        // oddCount（0.10.2）：两段圆弧 + 两条直边、但两头半径不一样的内环（葫芦孔 / 挂孔）。不是腰孔，配不出来；
+        // 原来一声不吭跳过，用户点了面以为面上的孔都认进来了（OK310 围栏侧板实测：每面 7 个葫芦孔，一个都没提）。
+        public static List<SlotReference> ScanFaceSlots(TargetFace target, out int skippedCount, out int oddCount){
+            skippedCount = 0; oddCount = 0;
             var list = new List<SlotReference>();
             if (target == null || target.Face == null) return list;
             var face = target.Face;
@@ -386,7 +391,8 @@ namespace TianGongCadSuite {
                         else others++;
                     }
                     if (arcs.Count != 2 || lines != 2 || others != 0) continue;
-                    if (Math.Abs(arcs[0].RadiusMm - arcs[1].RadiusMm) > 0.001 || !HoleScan.Parallel(arcs[0].Axis, n) || !HoleScan.Parallel(arcs[1].Axis, n)) continue;
+                    if (!HoleScan.Parallel(arcs[0].Axis, n) || !HoleScan.Parallel(arcs[1].Axis, n)) continue;
+                    if (Math.Abs(arcs[0].RadiusMm - arcs[1].RadiusMm) > 0.001) { oddCount++; continue; }
                     double dist = (arcs[1].Center - arcs[0].Center).Length;
                     if (dist < 1e-6) continue;   // 两段圆弧同心 = 拆成两半的圆孔，归 ScanFace 管
                     G.Face wf; WallOf(arcEdges[0], face, out wf); arcs[0].WallFace = wf;

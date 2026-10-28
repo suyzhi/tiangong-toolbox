@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -23,7 +23,7 @@ class FaceScanAudit {
     static T Try<T>(Func<T> f, T dflt){ try { return f(); } catch { return dflt; } }
     static string N(double v){ return v.ToString("0.###"); }
 
-    static int faces, facesWithMouths, facesMissing, mouthsTotal, mouthsMissed, splitFaces, slotLoopsTotal, slotsFound;
+    static int faces, facesWithMouths, facesMissing, mouthsTotal, mouthsMissed, splitFaces, slotLoopsTotal, slotsFound, oddTotal;
     static readonly Dictionary<string, int> reasons = new Dictionary<string, int>();
     static void Reason(string r){ int n; reasons.TryGetValue(r, out n); reasons[r] = n + 1; }
 
@@ -46,7 +46,7 @@ class FaceScanAudit {
             try { AuditPart(f); } catch (Exception e) { L("FATAL " + Path.GetFileName(f) + "：" + e); }
         }
         L("");
-        L("RESULT 腰形内环 " + slotLoopsTotal + "，认出腰孔 " + slotsFound);
+        L("RESULT 腰形内环 " + slotLoopsTotal + "，认出腰孔 " + slotsFound); L("RESULT 两头不一样大的异形孔（葫芦孔，提示用户、不认） " + oddTotal);
         L("RESULT 平面 " + faces + "，有孔口的面 " + facesWithMouths + "，认不全的面 " + facesMissing + "，孔口 " + mouthsTotal + "，漏认 " + mouthsMissed + "，被拆成几张的共面面 " + splitFaces);
         foreach (var kv in reasons.OrderByDescending(k => k.Value)) L("RESULT 漏认原因 " + kv.Key + " ×" + kv.Value);
         return 0;
@@ -93,12 +93,22 @@ class FaceScanAudit {
         var oddInner = new List<string>();
         var coplanarNeighbours = new HashSet<int>();
         var neighbourFaces = new List<G.Face>();
-        int slotLoops = 0; var oddLoops = new List<string>();
+        int slotLoops = 0; var oddLoops = new List<string>(); var slotDesc = new List<string>();
         foreach (G.Loop loop in (G.Loops)face.Loops) {
             bool outer = Try(() => loop.IsOuterLoop, true);
             bool lines = false; int nArc = 0, nLine = 0;
             foreach (G.Edge e in (G.Edges)loop.Edges) { object g = Try<object>(() => e.Geometry, null); if (!(g is G.Circle)) lines = true; if (g is G.Circle) nArc++; else if (g is G.Line) nLine++; }
-            if (!outer && nArc == 2 && nLine == 2 && Try(() => ((G.Edges)loop.Edges).Count, 0) == 4) slotLoops++;
+            if (!outer && nArc == 2 && nLine == 2 && Try(() => ((G.Edges)loop.Edges).Count, 0) == 4) {
+                slotLoops++;
+                // 0.10.2：腰形内环的组成（半径、圆心、轴和面法向的夹角），认不出来时看是哪一条判据挡住的
+                var d = new List<string>();
+                foreach (G.Edge e in (G.Edges)loop.Edges) {
+                    var ci = Try<object>(() => e.Geometry, null) as G.Circle; if (ci == null) continue;
+                    Array cc = new double[3], ax = new double[3]; double r = 0; ci.GetCircleData(ref cc, ref ax, out r);
+                    d.Add("R" + N(r * 1000) + "@" + V3.From(cc) + " 轴·n=" + V3.From(ax).Unit().Dot(n).ToString("0.000000"));
+                }
+                slotDesc.Add(string.Join(" | ", d));
+            }
             else if (!outer && nArc > 0 && nLine + nArc > 1) {
                 // 带圆弧、又不是标准"两弧两直线"的内环：列出组成，看腰孔到底长什么样
                 var parts = new List<string>();
@@ -139,9 +149,9 @@ class FaceScanAudit {
         foreach (var ol in oddLoops.Take(6)) L("  实体" + mi + " 面#" + face.ID + " " + ol);
         if (oddLoops.Count > 0) Reason("带圆弧的非标准内环");
         if (slotLoops > 0) {
-            int skippedSlots; var sl = HoleScanCad.ScanFaceSlots(AutoHoleReader.ReadTarget(face), out skippedSlots);
+            int skippedSlots, oddSlots; var sl = HoleScanCad.ScanFaceSlots(AutoHoleReader.ReadTarget(face), out skippedSlots, out oddSlots); slotLoops -= oddSlots; oddTotal += oddSlots;
             slotLoopsTotal += slotLoops; slotsFound += sl.Count;
-            if (sl.Count != slotLoops) { L("  实体" + mi + " 面#" + face.ID + "：腰形内环 " + slotLoops + "，认出腰孔 " + sl.Count + "（判为凸台 " + skippedSlots + "）"); Reason("腰孔没认全"); }
+            if (sl.Count != slotLoops) { L("  实体" + mi + " 面#" + face.ID + "：腰形内环 " + slotLoops + "，认出腰孔 " + sl.Count + "（判为凸台 " + skippedSlots + "）"); Reason("腰孔没认全"); foreach (var sd in slotDesc.Take(8)) L("    腰形内环 " + sd); }
         }
         if (mouths.Count == 0 && oddInner.Count == 0) return;
         facesWithMouths++;

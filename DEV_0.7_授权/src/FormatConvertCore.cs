@@ -136,6 +136,22 @@ namespace TianGongCadSuite {
         public static string TopTarget(ConvertItem item,ConvertOptions options){
             return TopTargetFor(item,options,NativeExtension(item.Source));
         }
+        // 一个装配里各文档的输出路径（0.10.2）：同一个源文件的重复实例并成一个（返回 null）；
+        // 不同源文件撞了同一个输出路径（平铺输出时两个文件夹里各有一个同名零件）→ 依次改成「名字 (2)」「名字 (3)」，clashWith = 先占了这个名字的源文件。
+        // 原来按输出路径判重复，第二个同名零件直接被丢掉，装配两处都引用了第一个
+        public static string ClaimTarget(Dictionary<string,string> writtenFrom,string target,string sourceKey,out string clashWith){
+            clashWith=null;
+            string dir=Path.GetDirectoryName(target),stem=Path.GetFileNameWithoutExtension(target),tail=Path.GetExtension(target);
+            string candidate=target;
+            for(int n=2;;n++){
+                string first;
+                if(!writtenFrom.TryGetValue(candidate,out first)){ writtenFrom[candidate]=sourceKey; return candidate; }
+                if(string.Equals(first,sourceKey,StringComparison.OrdinalIgnoreCase))return null;
+                if(clashWith==null)clashWith=first;
+                candidate=Path.Combine(dir,stem+" ("+n+")"+tail);
+            }
+        }
+
         public static string TopTargetFor(ConvertItem item,ConvertOptions options,string extension){
             string outRoot=Path.GetFullPath(options.OutputRoot);
             string name=Path.GetFileNameWithoutExtension(item.Source)+extension;

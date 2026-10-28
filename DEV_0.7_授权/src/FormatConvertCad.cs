@@ -125,7 +125,7 @@ namespace TianGongCadSuite {
                 row.Documents=documents.Count;
                 var saveWatch=Stopwatch.StartNew();
                 int failures=0;string firstError=null;
-                var written=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var writtenFrom=new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);   // 输出路径 → 源文件
                 foreach(Node node in documents){
                     F.SolidEdgeDocument doc=node.Doc;
                     string name=null;F.DocumentTypeConstants type=F.DocumentTypeConstants.igUnknownDocument;
@@ -149,10 +149,16 @@ namespace TianGongCadSuite {
                     } else {
                         target=ConvertPlanner.ComponentTarget(assigned,finalName,item,options);
                     }
-                    if(!written.Add(target)){
+                    // 0.10.2：只有"同一个源文件"才并。原来按输出路径判：不镜像目录（平铺输出）时，两个文件夹里各有一个
+                    // 「零件1.par」（不同零件），第二个被当成"重复实例"直接丢掉，输出的装配两处都引用了第一个 —— 零件悄悄错了
+                    string clash;
+                    string claimed=ConvertPlanner.ClaimTarget(writtenFrom,target,assigned??finalName,out clash);
+                    if(claimed==null){
                         log("同一零件的重复实例，已并入 "+finalName+"。");
                         continue;
                     }
+                    if(clash!=null)log("别的文件夹里还有一个不同的 "+finalName+"（"+clash+"），这一个另存为 "+Path.GetFileName(claimed)+"。");
+                    target=claimed;
                     try{
                         Directory.CreateDirectory(Path.GetDirectoryName(target));
                         if(!TryClaim(lockRoot,target)){

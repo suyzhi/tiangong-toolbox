@@ -120,9 +120,19 @@ namespace TianGongCadSuite {
         }
         internal void PasteCells(string text){
             if(grid.CurrentCell==null)throw new InvalidOperationException("先点击要粘贴的起始单元格。");
-            var block=LineupTableData.ReadDelimited(text,'\t');int top=grid.CurrentCell.RowIndex,left=grid.CurrentCell.ColumnIndex;
-            if(block.Count==0)return;if(top+block.Count>grid.Rows.Count||left<1||block.Any(r=>left+r.Length>12))throw new InvalidOperationException("粘贴区域超出已有业务单元格。新增整表请使用“粘贴整张清单”。");
-            var before=Snapshot();for(int y=0;y<block.Count;y++)for(int x=0;x<block[y].Length;x++)grid.Rows[top+y].Cells[left+x].Value=block[y][x];
+            var block=LineupTableData.ReadDelimited(text,'\t');int top=grid.CurrentCell.RowIndex;
+            if(block.Count==0)return;
+            // 0.10.2：按屏幕上看得见的列顺序贴。原来按内部列号往右数：「常用字段」视图藏了几列、还把两列挪到了前面，
+            // 从 WPS/Excel 复制的几列就贴进了看不见的列、跟看到的对不上
+            var cols=grid.Columns.Cast<DataGridViewColumn>().Where(c=>c.Visible).OrderBy(c=>c.DisplayIndex).ToList();int start=cols.IndexOf(grid.CurrentCell.OwningColumn);
+            Func<DataGridViewColumn,bool> business=c=>c.Index>=1&&c.Index<=11;
+            // 复制一个格子、选中一片再粘贴：每个选中的格子都填上（WPS/Excel 的习惯；原来只贴到当前格）
+            var targets=grid.SelectedCells.Cast<DataGridViewCell>().Where(c=>c.RowIndex>=0&&business(c.OwningColumn)).ToList();
+            bool fill=block.Count==1&&block[0].Length==1&&targets.Count>1;
+            if(!fill&&(top+block.Count>grid.Rows.Count||start<0||block.Any(r=>start+r.Length>cols.Count||cols.Skip(start).Take(r.Length).Any(c=>!business(c)))))throw new InvalidOperationException("粘贴区域超出已有业务单元格。新增整表请使用“粘贴整张清单”。");
+            var before=Snapshot();
+            if(fill)foreach(var cell in targets)cell.Value=block[0][0];
+            else for(int y=0;y<block.Count;y++)for(int x=0;x<block[y].Length;x++)grid.Rows[top+y].Cells[cols[start+x].Index].Value=block[y][x];
             dirty=true;try{SaveDraft();undo.Push(before);}catch{project=before;Reload(null);dirty=false;throw;}
         }
         internal void BindAndNext(){

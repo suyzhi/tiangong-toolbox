@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
@@ -161,6 +161,7 @@ namespace TianGongCadSuite {
                     Thread.Sleep(IgnoreIntervalForTest ? 0 : 20000);
                     var s = Load();
                     ResumeStaged(s);
+                    CleanOld(s);
                     if (!IgnoreIntervalForTest && (DateTime.UtcNow - s.LastCheck).TotalHours < CheckHours) return;
                     string error;
                     var m = Fetch(out error);
@@ -173,6 +174,21 @@ namespace TianGongCadSuite {
             });
             t.IsBackground = true; t.Name = "TG-Update-Check";
             t.Start();
+        }
+
+        // 0.10.2：装上以后旧版本的下载（每个 zip + 解压出来的包，十几 MB）一直留在 %LOCALAPPDATA%，每次更新都多一份。
+        // 版本号不比当前新、也不是等着装的那个 → 删掉
+        static void CleanOld(State s){
+            try {
+                if (!Directory.Exists(UpdatesRoot)) return;
+                foreach (var dir in Directory.GetDirectories(UpdatesRoot)) {
+                    Version v;
+                    string name = Path.GetFileName(dir);
+                    if (!System.Version.TryParse(name, out v) || name == s.Staged) continue;
+                    if (new Version(v.Major, v.Minor, Math.Max(0, v.Build)) > Current) continue;
+                    try { Directory.Delete(dir, true); Log.Write("UpdateClean", "删掉已装过的旧下载 " + name); } catch (Exception e) { Log.Write("UpdateClean", name + "：" + e.Message); }
+                }
+            } catch (Exception e) { Log.Write("UpdateClean", e.Message); }
         }
 
         static void ResumeStaged(State s){
@@ -204,9 +220,15 @@ namespace TianGongCadSuite {
         // 功能区「检查更新」
         public static void CheckNowInteractive(IWin32Window owner){
             string error;
-            UpdateManifest m;
-            Cursor.Current = Cursors.WaitCursor;
-            try { m = Fetch(out error); } finally { Cursor.Current = Cursors.Default; }
+            UpdateManifest m = null;
+            // 0.10.2：原来在 UI 线程上直接联网（最长 15 秒），网络慢时天工整个"未响应"。改成后台查，前台一个小窗口转着，可以关掉不等
+            error = null;
+            string err = null;
+            var t = new Thread(() => { try { m = Fetch(out err); } catch (Exception e) { err = "检查更新失败：" + e.Message; } });
+            t.IsBackground = true; t.Name = "TG-Update-CheckNow"; t.Start();
+            if (!t.Join(400) && !WaitDialog(owner, t)) return;
+            t.Join();
+            error = err;
             var s = Load(); s.LastCheck = DateTime.UtcNow; Save(s);
             if (error != null) { MessageBox.Show(owner, error, "检查更新", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
             if (!IsNewer(m)) {
@@ -217,6 +239,22 @@ namespace TianGongCadSuite {
             // 已经下载好了（等着关天工再装）：直接打开到"已下载"那一步，可以点「立即更新」
             bool staged = s.Staged == m.Version && Directory.Exists(s.StagedDir);
             Show(owner, m, staged ? s.StagedDir : null);
+        }
+
+        // "正在检查更新…"小窗口：线程结束自动关，返回 true；用户关掉 = 不等了，返回 false
+        static bool WaitDialog(IWin32Window owner, Thread t){
+            using (var f = new Form { Text = "检查更新", FormBorderStyle = FormBorderStyle.FixedDialog, MinimizeBox = false, MaximizeBox = false,
+                                      ShowInTaskbar = false, StartPosition = FormStartPosition.CenterParent, ClientSize = new System.Drawing.Size(340, 70), BackColor = Ui.Bg })
+            using (var timer = new System.Windows.Forms.Timer { Interval = 100 }) {
+                f.Controls.Add(new Label { Text = "正在连接更新服务器…（网络慢时最多 15 秒，关掉这个窗口就不等了）", Font = Ui.F9, ForeColor = Ui.Text,
+                                           Dock = DockStyle.Fill, Padding = new Padding(14, 0, 14, 0), TextAlign = System.Drawing.ContentAlignment.MiddleLeft });
+                bool finished = false;
+                timer.Tick += (s, e) => { if (!t.IsAlive) { finished = true; f.Close(); } };
+                f.Shown += (s, e) => timer.Start();
+                if (t.IsAlive) f.ShowDialog(owner); else finished = true;
+                timer.Stop();
+                return finished;
+            }
         }
 
         static UpdateForm.Answer Show(IWin32Window owner, UpdateManifest m, string stagedPkg){

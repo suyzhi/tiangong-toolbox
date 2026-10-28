@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
@@ -7,6 +7,18 @@ using TianGongCadSuite;
 static class FormatConvertTests {
     static void Assert(bool ok,string label){ if(!ok)throw new Exception("FAIL: "+label); Console.WriteLine("PASS: "+label); }
     public static void Pure(){
+        SameNameTargets();PureRest();
+    }
+    public static void SameNameTargets(){
+        // 0.10.2：平铺输出时不同文件夹里的同名零件不能并成一个
+        var written=new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);string clash;
+        Assert(ConvertPlanner.ClaimTarget(written,@"D:\out\零件1.par",@"C:\src\A\零件1.par",out clash)==@"D:\out\零件1.par"&&clash==null,"first part claims its name");
+        Assert(ConvertPlanner.ClaimTarget(written,@"D:\out\零件1.par",@"C:\src\A\零件1.par",out clash)==null,"same source again merges (duplicate instance)");
+        Assert(ConvertPlanner.ClaimTarget(written,@"D:\out\零件1.par",@"C:\src\B\零件1.par",out clash)==@"D:\out\零件1 (2).par"&&clash==@"C:\src\A\零件1.par","different source with the same name gets (2)");
+        Assert(ConvertPlanner.ClaimTarget(written,@"D:\out\零件1.par",@"C:\src\B\零件1.par",out clash)==null,"second folder's part again merges into its own (2)");
+        Assert(ConvertPlanner.ClaimTarget(written,@"D:\out\零件1.par",@"C:\src\C\零件1.par",out clash)==@"D:\out\零件1 (3).par","third different source gets (3)");
+    }
+    static void PureRest(){
         Assert(ConvertPlanner.NativeExtension(@"C:\a\b.SLDASM")==".asm","sldasm maps to asm");
         Assert(ConvertPlanner.NativeExtension(@"C:\a\b.sldprt")==".par","sldprt maps to par");
         Assert(ConvertPlanner.NativeExtension(@"C:\a\b.SLDDRW")==".dft","slddrw maps to dft");
