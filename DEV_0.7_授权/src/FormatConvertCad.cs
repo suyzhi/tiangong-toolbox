@@ -129,12 +129,14 @@ namespace TianGongCadSuite {
                         Directory.CreateDirectory(stage);
                         staged=new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
                         foreach(string f in files){ string copy=Path.Combine(stage,Path.GetFileName(f)); File.Copy(f,copy,true); staged[StemKey(copy)]=f; }   // 导入后文档叫「临时文件夹\名字.par」，按文件夹 + 主文件名对
-                        log("「"+Path.GetFileName(item.Source)+"」打开后一个零件都没有：它用到的零件不在装配所在的文件夹，天工找不到。已把同一项目里的 "+files.Count+" 个 SolidWorks 文件拷到临时文件夹再打开。");
+                        log("「"+Path.GetFileName(item.Source)+"」打开后（或它的子装配）是空的：它用到的零件不在装配所在的文件夹，天工找不到。已把同一项目里的 "+files.Count+" 个 SolidWorks 文件拷到临时文件夹再打开。");
                         string again=Path.Combine(stage,Path.GetFileName(item.Source));
                         top=Retry(delegate(){ return (F.SolidEdgeDocument)app.Documents.Open(again); },"打开 "+Path.GetFileName(item.Source),7200);
                     }
-                    if(EmptyAssembly(top))
-                        throw new InvalidOperationException("装配打开后一个零件都没有：天工找不到这个 SolidWorks 装配引用的零件（装配里记的是零件原来的位置）。把装配和它用到的零件放进同一个文件夹，或者输入里加上零件所在的上级文件夹，再转。");
+                    // 拷到一起还有找不到的：整个装配是空的就报失败；只缺几个（比如项目外的标准件）照样转，日志里说一声
+                    if(EmptyAssembly(top)&&!TopEmpty(top))log("「"+Path.GetFileName(item.Source)+"」里还有零件找不到（不在这个项目的文件夹里），转出来的装配会缺这些件。");
+                    else if(EmptyAssembly(top))
+                        throw new InvalidOperationException("装配打开后是空的：天工找不到这个 SolidWorks 装配引用的零件（装配里记的是零件原来的位置）。天工找不到这个 SolidWorks 装配引用的零件（装配里记的是零件原来的位置）。把装配和它用到的零件放进同一个文件夹，或者输入里加上零件所在的上级文件夹，再转。");
                 }
                 row.OpenSeconds=total.Elapsed.TotalSeconds;
                 var root=BuildNode(top,0,new Dictionary<string,Node>(),log);
@@ -207,10 +209,22 @@ namespace TianGongCadSuite {
             return row;
         }
         static string StemKey(string path){ return Path.Combine(Path.GetDirectoryName(path)??"",Path.GetFileNameWithoutExtension(path)); }
-        static bool EmptyAssembly(F.SolidEdgeDocument doc){
+        // 装配树里有没有"空的装配 / 打不开的实例"：顶层的子装配找到了、子装配里的零件没找到（装配体、零件分文件夹）也算
+        static bool TopEmpty(F.SolidEdgeDocument doc){ var a=doc as A.AssemblyDocument; if(a==null)return false; try{ return a.Occurrences.Count==0; }catch{ return false; } }
+        static bool EmptyAssembly(F.SolidEdgeDocument doc){ return EmptyAssembly(doc,0,new HashSet<string>(StringComparer.OrdinalIgnoreCase)); }
+        static bool EmptyAssembly(F.SolidEdgeDocument doc,int depth,HashSet<string> seen){
             var a=doc as A.AssemblyDocument;
-            if(a==null)return false;
-            try{ return a.Occurrences.Count==0; }catch{ return false; }
+            if(a==null||depth>12)return false;
+            try{ if(!seen.Add(a.FullName))return false; }catch{}
+            int n=0;try{ n=a.Occurrences.Count; }catch{ return false; }
+            if(n==0)return true;
+            for(int i=1;i<=n;i++){
+                object child=null;
+                try{ child=((A.Occurrence)a.Occurrences.Item(i)).OccurrenceDocument; }catch{}
+                if(child==null)return true;
+                if(EmptyAssembly(child as F.SolidEdgeDocument,depth+1,seen))return true;
+            }
+            return false;
         }
         static string SafeFullName(F.SolidEdgeDocument doc,ConvertItem item){
             string full=SafeFullNameOrNull(doc);
