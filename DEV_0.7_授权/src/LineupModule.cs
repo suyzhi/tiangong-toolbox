@@ -78,7 +78,7 @@ namespace TianGongCadSuite {
             var errors=next.Validate();if(errors.Count>0)throw new InvalidOperationException(string.Join("；",errors));
             next.Save(store);project=next;editing=r;binding=r;RefreshRecords(r);status.Text="已保存："+store;return r;
         }
-        internal void ExportTo(string file){var rows=new List<string[]>();rows.Add(Names);foreach(var r in project.Records){var cells=Cells(r);cells[11]=LinkNumber(r.IslandId);cells[12]=LinkNumber(r.ValveId);rows.Add(cells);}File.WriteAllText(file,LineupCsv.Write(rows),System.Text.Encoding.UTF8);status.Text="已导出 "+project.Records.Count+" 条记录。";}
+        internal void ExportTo(string file){var rows=new List<string[]>();rows.Add(Names);foreach(var r in project.Records){var cells=Cells(r);cells[11]=LinkNumber(r.IslandId);cells[12]=LinkNumber(r.ValveId);rows.Add(cells);}SettingsFile.WriteUserText(file,LineupCsv.Write(rows));status.Text="已导出 "+project.Records.Count+" 条记录。";}
         internal A.Occurrence Locate(bool zoom){
             EnsureDocument();if(editing==null)throw new InvalidOperationException("请先选择列表记录。");
             ClearHighlight();var target=LineupCad.Resolve(assembly,editing);highlight=assembly.HighlightSets.Add();highlight.Color=0x00FFFF;highlight.AddItem(target);highlight.Draw();

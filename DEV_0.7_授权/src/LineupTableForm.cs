@@ -146,7 +146,7 @@ namespace TianGongCadSuite {
             assembly.SelectSet.RemoveAll();
         }
         List<string[]> ExportRows(){SaveDraft();int empty=project.Records.Count(r=>LineupTableData.Cells(r).All(string.IsNullOrWhiteSpace));if(empty>0)throw new InvalidDataException("有 "+empty+" 行尚未填写任何清单字段，请先填写或删除这些空行再导出。未编号但有描述的记录可以导出。");return LineupTableData.Grouped(project);}
-        internal void Export(string path){File.WriteAllText(path,LineupCsv.Write(ExportRows()),new UTF8Encoding(true));UpdateStatus("已导出全部类目 11 列清单");}
+        internal void Export(string path){SettingsFile.WriteUserText(path,LineupCsv.Write(ExportRows()));UpdateStatus("已导出全部类目 11 列清单");}
         internal void Undo(){StopContinuous();if(undo.Count==0)return;Ensure();var previous=undo.Peek();LineupTableData.RejectDuplicates(previous.Records);previous.Save(store);undo.Pop();project=previous;dirty=false;Reload(null);RefreshEntryParents();UpdateStatus("已撤销");}
         internal void Locate(){
             Ensure();var r=Snapshot().Records.FirstOrDefault(record=>record.Id==CurrentId());if(r==null)throw new InvalidOperationException("请选择一行。");

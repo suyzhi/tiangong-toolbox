@@ -77,6 +77,16 @@ namespace TianGongCadSuite {
             using (var ms = new MemoryStream()) { fs.CopyTo(ms); data = ms.ToArray(); }
             return DecodeUserText(data);
         }
+        // 导出给用户的表格（UTF-8 带 BOM，Excel 才认中文）。上次导出的文件还在 Excel / WPS 里开着时，原来报一句
+        // "文件正由另一进程使用"，用户不知道是哪个程序；这里说清楚（0.10.2）
+        public static void WriteUserText(string path, string text){
+            try { File.WriteAllText(path, text, new UTF8Encoding(true)); }
+            catch (IOException e) {
+                int hr = e.HResult & 0xFFFF;
+                if (hr == 32 || hr == 33) throw new IOException("「" + Path.GetFileName(path) + "」正被别的程序（多半是 Excel / WPS）打开着，写不进去。先在那边关掉它再导出，或者换个文件名。", e);
+                throw;
+            }
+        }
         public static string DecodeUserText(byte[] data){
             if (data == null || data.Length == 0) return "";
             if (data.Length >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF) return Encoding.UTF8.GetString(data, 3, data.Length - 3);

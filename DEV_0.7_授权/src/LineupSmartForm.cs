@@ -191,6 +191,6 @@ namespace TianGongCadSuite {
                 int count=LearnModels(imported.Entries.Select(e=>new LineupRecord{Category=e.Category,Model=e.Model,Brand=e.Brand,Connector=e.Connector}));status.Text="型号库新增 "+count+" 条，现有 "+catalog.Entries.Count+" 条。";
             }
         }
-        void ExportLibrary(){using(var d=new SaveFileDialog{Filter="型号库 CSV|*.csv",FileName="Lineup-型号库.csv"})if(d.ShowDialog(this)==DialogResult.OK){var rows=new List<string[]>{new[]{"类别","型号","品牌","传感器接口类型"}};rows.AddRange(catalog.Entries.Select(e=>new[]{e.Category,e.Model,e.Brand,e.Connector}));File.WriteAllText(d.FileName,LineupCsv.Write(rows),new System.Text.UTF8Encoding(true));status.Text="型号库已导出。";}}
+        void ExportLibrary(){using(var d=new SaveFileDialog{Filter="型号库 CSV|*.csv",FileName="Lineup-型号库.csv"})if(d.ShowDialog(this)==DialogResult.OK){var rows=new List<string[]>{new[]{"类别","型号","品牌","传感器接口类型"}};rows.AddRange(catalog.Entries.Select(e=>new[]{e.Category,e.Model,e.Brand,e.Connector}));SettingsFile.WriteUserText(d.FileName,LineupCsv.Write(rows));status.Text="型号库已导出。";}}
     }
 }
