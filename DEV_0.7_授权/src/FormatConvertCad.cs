@@ -116,8 +116,26 @@ namespace TianGongCadSuite {
             row.Index=item.Index;row.Source=item.Source;row.Target=item.Target;row.Worker=item.Worker;
             var total=Stopwatch.StartNew();
             F.SolidEdgeDocument top=null;
+            string stage=null;Dictionary<string,string> staged=null;   // 临时文件夹里的拷贝 → 原文件
             try{
                 top=Retry(delegate(){ return (F.SolidEdgeDocument)app.Documents.Open(item.Source); },"打开 "+Path.GetFileName(item.Source),7200);
+                // 0.10.2：SolidWorks 装配打开后一个零件都没有 = 天工没找到它引用的零件（零件不在装配的文件夹里）。
+                // 原来照样存出空装配、报成功。把同一项目里的 SolidWorks 文件拷到一个临时文件夹再开；还是空的就报失败、说清楚
+                if(EmptyAssembly(top)&&ConvertPlanner.IsSolidWorks(item.Source)){
+                    var files=ConvertPlanner.StageSources(item.Source,item.Root);
+                    if(files.Count>1){
+                        CloseAll();top=null;
+                        stage=Path.Combine(Path.GetTempPath(),"TianGongConverter","stage-"+Guid.NewGuid().ToString("N").Substring(0,8));
+                        Directory.CreateDirectory(stage);
+                        staged=new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
+                        foreach(string f in files){ string copy=Path.Combine(stage,Path.GetFileName(f)); File.Copy(f,copy,true); staged[StemKey(copy)]=f; }   // 导入后文档叫「临时文件夹\名字.par」，按文件夹 + 主文件名对
+                        log("「"+Path.GetFileName(item.Source)+"」打开后一个零件都没有：它用到的零件不在装配所在的文件夹，天工找不到。已把同一项目里的 "+files.Count+" 个 SolidWorks 文件拷到临时文件夹再打开。");
+                        string again=Path.Combine(stage,Path.GetFileName(item.Source));
+                        top=Retry(delegate(){ return (F.SolidEdgeDocument)app.Documents.Open(again); },"打开 "+Path.GetFileName(item.Source),7200);
+                    }
+                    if(EmptyAssembly(top))
+                        throw new InvalidOperationException("装配打开后一个零件都没有：天工找不到这个 SolidWorks 装配引用的零件（装配里记的是零件原来的位置）。把装配和它用到的零件放进同一个文件夹，或者输入里加上零件所在的上级文件夹，再转。");
+                }
                 row.OpenSeconds=total.Elapsed.TotalSeconds;
                 var root=BuildNode(top,0,new Dictionary<string,Node>(),log);
                 var documents=new List<Node>();
@@ -133,6 +151,8 @@ namespace TianGongCadSuite {
                     try{ type=doc.Type; }catch{}
                     string ext=ExtensionFor(type);
                     string assigned=SafeFullNameOrNull(doc);
+                    string original;
+                    if(staged!=null&&assigned!=null&&staged.TryGetValue(StemKey(assigned),out original))assigned=Path.Combine(Path.GetDirectoryName(original),Path.GetFileName(assigned));   // 临时拷贝 → 按原文件的位置放输出（镜像目录照常）
                     // The CAD renames repeat components of one session to "Part_1", "Part_2"... Using the
                     // assigned source name instead keeps the output deterministic and collapses those
                     // duplicates onto a single file, exactly like the source project is organised.
@@ -180,10 +200,17 @@ namespace TianGongCadSuite {
                 log("转换失败 "+Path.GetFileName(item.Source)+"："+e.Message+Hr(e));
             }finally{
                 CloseAll();
+                if(stage!=null){ try{ Directory.Delete(stage,true); }catch(Exception e){ log("临时文件夹没删掉（"+e.Message+"）："+stage); } }
                 row.TotalSeconds=total.Elapsed.TotalSeconds;
             }
             if(row.Status=="ok"&&options.VerifyReopen)Verify(item,row);
             return row;
+        }
+        static string StemKey(string path){ return Path.Combine(Path.GetDirectoryName(path)??"",Path.GetFileNameWithoutExtension(path)); }
+        static bool EmptyAssembly(F.SolidEdgeDocument doc){
+            var a=doc as A.AssemblyDocument;
+            if(a==null)return false;
+            try{ return a.Occurrences.Count==0; }catch{ return false; }
         }
         static string SafeFullName(F.SolidEdgeDocument doc,ConvertItem item){
             string full=SafeFullNameOrNull(doc);

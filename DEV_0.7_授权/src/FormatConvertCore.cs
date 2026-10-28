@@ -136,6 +136,38 @@ namespace TianGongCadSuite {
         public static string TopTarget(ConvertItem item,ConvertOptions options){
             return TopTargetFor(item,options,NativeExtension(item.Source));
         }
+        // SolidWorks 装配打开后一个零件都没有时，拿来"拷到一起再开"的那批文件（0.10.2）。
+        // 真机（宝马托盘 140-2线：零件、装配体分两个文件夹）：天工只在装配自己的文件夹里找它引用的零件，找不到就静默打开成空装配，
+        // 原来照样存出一个空的 .asm、报"成功"。从用户加的输入文件夹（就是装配所在文件夹时退一级到上级）里收 .sldprt/.sldasm，
+        // 同名的只要第一个（拷到一个文件夹里放不下两个同名的），源装配自己排第一。不扫整个盘符，最多 3000 个。
+        public static List<string> StageSources(string source,string root){
+            var list=new List<string>();
+            if(string.IsNullOrEmpty(source))return list;
+            string own=Path.GetDirectoryName(Path.GetFullPath(source));
+            string dir=null;
+            try{
+                if(!string.IsNullOrEmpty(root)&&Directory.Exists(root)&&!SameDir(root,own))dir=root;
+                else dir=Path.GetDirectoryName(own);
+                if(dir!=null&&SameDir(dir,Path.GetPathRoot(dir)))dir=null;
+            }catch{ dir=null; }
+            var names=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            list.Add(Path.GetFullPath(source));names.Add(Path.GetFileName(source));
+            if(dir==null)return list;
+            try{
+                foreach(string f in Directory.EnumerateFiles(dir,"*.*",SearchOption.AllDirectories)){
+                    if(list.Count>=3000)break;
+                    string ext=Path.GetExtension(f).ToLowerInvariant();
+                    if(ext!=".sldprt"&&ext!=".sldasm")continue;
+                    if(IsLockFile(Path.GetFileName(f)))continue;
+                    if(names.Add(Path.GetFileName(f)))list.Add(f);
+                }
+            }catch{}
+            return list;
+        }
+        static bool SameDir(string a,string b){
+            try{ return string.Equals(Path.GetFullPath(a).TrimEnd('\\','/'),Path.GetFullPath(b).TrimEnd('\\','/'),StringComparison.OrdinalIgnoreCase); }catch{ return false; }
+        }
+
         // 一个装配里各文档的输出路径（0.10.2）：同一个源文件的重复实例并成一个（返回 null）；
         // 不同源文件撞了同一个输出路径（平铺输出时两个文件夹里各有一个同名零件）→ 依次改成「名字 (2)」「名字 (3)」，clashWith = 先占了这个名字的源文件。
         // 原来按输出路径判重复，第二个同名零件直接被丢掉，装配两处都引用了第一个

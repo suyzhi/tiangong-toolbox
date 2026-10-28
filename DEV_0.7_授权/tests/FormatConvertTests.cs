@@ -17,6 +17,18 @@ static class FormatConvertTests {
         Assert(ConvertPlanner.ClaimTarget(written,@"D:\out\零件1.par",@"C:\src\B\零件1.par",out clash)==@"D:\out\零件1 (2).par"&&clash==@"C:\src\A\零件1.par","different source with the same name gets (2)");
         Assert(ConvertPlanner.ClaimTarget(written,@"D:\out\零件1.par",@"C:\src\B\零件1.par",out clash)==null,"second folder's part again merges into its own (2)");
         Assert(ConvertPlanner.ClaimTarget(written,@"D:\out\零件1.par",@"C:\src\C\零件1.par",out clash)==@"D:\out\零件1 (3).par","third different source gets (3)");
+        // 0.10.2：装配打开成空的时拷到一起再开 —— 零件、装配体分文件夹的项目
+        string root=Path.Combine(Path.GetTempPath(),"tgstage-"+Guid.NewGuid().ToString("N").Substring(0,6));
+        try{
+            Directory.CreateDirectory(Path.Combine(root,"装配体"));Directory.CreateDirectory(Path.Combine(root,"零件","子"));
+            string asm=Path.Combine(root,"装配体","总装.SLDASM");File.WriteAllText(asm,"x");
+            File.WriteAllText(Path.Combine(root,"零件","板.sldprt"),"x");File.WriteAllText(Path.Combine(root,"零件","子","板.sldprt"),"x");
+            File.WriteAllText(Path.Combine(root,"零件","~$板.sldprt"),"x");File.WriteAllText(Path.Combine(root,"零件","说明.pdf"),"x");
+            var a=ConvertPlanner.StageSources(asm,root);
+            Assert(a.Count==2&&a[0]==Path.GetFullPath(asm)&&Path.GetFileName(a[1])=="板.sldprt","stage: source first, same-name part once, no lock file / pdf ("+a.Count+")");
+            var b=ConvertPlanner.StageSources(asm,Path.Combine(root,"装配体"));
+            Assert(b.Count==2,"stage: input folder = assembly folder → looks one level up ("+b.Count+")");
+        } finally { try{ Directory.Delete(root,true); }catch{} }
     }
     static void PureRest(){
         Assert(ConvertPlanner.NativeExtension(@"C:\a\b.SLDASM")==".asm","sldasm maps to asm");
