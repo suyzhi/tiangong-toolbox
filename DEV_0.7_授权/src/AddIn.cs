@@ -170,6 +170,43 @@ diagnostics=new Diagnostics(context.Application,()=>Run(registry.Find(1)),()=>Ru
         // 0.10.3 窗口管理真机：插件现在开着哪些窗口（类型|标题|可见|配孔检查的状态栏），功能区命令用 StartCommand 点
         public string OpenFormsReport(){var sb=new System.Text.StringBuilder();foreach(System.Windows.Forms.Form f in System.Windows.Forms.Application.OpenForms){var c=f as AutoHoleCheckForm;sb.Append(f.GetType().Name+"|"+f.Text+"|"+f.Visible+(c!=null?"|"+c.StatusForTest.Replace("\n"," "):"")+"\n");}return sb.ToString();}
         public void StartCheckRun(){Result="";dispatcher.BeginInvoke((Action)(()=>{try{foreach(System.Windows.Forms.Form f in System.Windows.Forms.Application.OpenForms){var c=f as AutoHoleCheckForm;if(c!=null){c.RunCheckForTest();Result="ran: "+c.SummaryText;return;}}Result="no check form";}catch(Exception e){Result="EXC "+e;}}));}
+        // 第 4 轮：配孔检查进程内计时（和窗口同一条路径），按阶段、按零件拆开，看大装配的时间花在哪
+        public void StartCheckTiming(string path){Result="";dispatcher.BeginInvoke((Action)(()=>{try{Result=CheckTiming(path);}catch(Exception e){Result="EXC "+e;}}));}
+        string CheckTiming(string path){
+            var sb=new System.Text.StringBuilder();var sw=System.Diagnostics.Stopwatch.StartNew();
+            var asm=(SolidEdgeAssembly.AssemblyDocument)Host.Documents.Open(path);
+            sb.Append("open "+sw.Elapsed.TotalSeconds.ToString("0.0")+"s\n");sw.Restart();
+            var marks=new System.Collections.Generic.List<long>();
+            System.Collections.Generic.List<string> warnings;System.Collections.Generic.List<HoleRecord> shafts;System.Collections.Generic.List<AssemblyPart> parts;
+            var holes=AutoHoleWriter.CollectAssemblyHoles(asm,out warnings,out shafts,out parts,(i,n)=>marks.Add(sw.ElapsedMilliseconds));
+            long collect=sw.ElapsedMilliseconds;marks.Add(collect);
+            sb.Append("list "+((marks.Count>1?marks[0]:0)/1000.0).ToString("0.0")+"s collect "+(collect/1000.0).ToString("0.0")+"s parts="+parts.Count+" holes="+holes.Count+" shafts="+shafts.Count+" warn="+warnings.Count+"\n");
+            var slow=new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<long,int>>();
+            for(int i=0;i+1<marks.Count&&i<parts.Count;i++)slow.Add(new System.Collections.Generic.KeyValuePair<long,int>(marks[i+1]-marks[i],i));
+            slow.Sort((a,b)=>b.Key.CompareTo(a.Key));
+            var files=new System.Collections.Generic.Dictionary<string,int>(StringComparer.OrdinalIgnoreCase);
+            foreach(var ap in parts){string f="";try{f=ap.Nested?ap.Sub.SubOccurrenceFileName:ap.Top.OccurrenceFileName;}catch{}int c;files.TryGetValue(f,out c);files[f]=c+1;}
+            sb.Append("distinct files="+files.Count+"\n");
+            foreach(var w in warnings.GetRange(0,Math.Min(8,warnings.Count)))sb.Append("  WARN "+w+"\n");
+            foreach(var kv in slow.GetRange(0,Math.Min(15,slow.Count))){var ap=parts[kv.Value];int edges=0;foreach(var b in ap.Bodies){try{edges+=((SolidEdgeGeometry.Edges)b.get_Edges(SolidEdgeGeometry.FeatureTopologyQueryTypeConstants.igQueryAll)).Count;}catch{}}
+                sb.Append("  "+kv.Key+"ms edges="+edges+" bodies="+ap.Bodies.Count+" "+ap.Name+"\n");}
+            sw.Restart();var bodies=AutoHoleWriter.OccurrenceBodies.Build(parts);sb.Append("bodies "+sw.Elapsed.TotalSeconds.ToString("0.0")+"s\n");
+            var names=new System.Collections.Generic.List<string>();foreach(var ap in parts)if(!ap.Ignored&&!names.Contains(ap.Name))names.Add(ap.Name);
+            string prog=System.IO.Path.Combine(System.IO.Path.GetTempPath(),"tg-check-timing.txt");long lastW=0;
+            sw.Restart();int groups=0;var issues=HoleCheck.Run(holes,null,true,names,bodies,shafts,(i,n)=>{groups=n;if(sw.ElapsedMilliseconds-lastW>20000){lastW=sw.ElapsedMilliseconds;
+                long casts=0,ticks=0;foreach(var t in bodies.All){casts+=t.Casts;ticks+=t.CastTicks;}
+                var top=new System.Collections.Generic.List<PartRayTarget>(bodies.All);top.Sort((x,y)=>y.CastTicks.CompareTo(x.CastTicks));var tops=new System.Text.StringBuilder();
+                foreach(var t in top.GetRange(0,Math.Min(6,top.Count)))tops.Append("    "+(t.CastTicks*1000/System.Diagnostics.Stopwatch.Frequency)+"ms casts="+t.Casts+" world="+(t.World.HasValue?((t.World.Value.Hi-t.World.Value.Lo)*1000).ToString():"null")+" "+t.Name+"\r\n");
+                try{System.IO.File.AppendAllText(prog,DateTime.Now.ToString("HH:mm:ss")+" group "+i+"/"+n+" casts="+casts+" castS="+(ticks/(double)System.Diagnostics.Stopwatch.Frequency).ToString("0")+"\r\n"+tops);}catch{}}});
+            sb.Append("run "+sw.Elapsed.TotalSeconds.ToString("0.0")+"s groups="+groups+" issues="+issues.Count+"\n");
+            var tl=new System.Collections.Generic.List<PartRayTarget>(bodies.All);int noWorld=0;long allCasts=0;foreach(var t in tl){if(!t.World.HasValue)noWorld++;allCasts+=t.Casts;}
+            tl.Sort((x,y)=>y.CastTicks.CompareTo(x.CastTicks));
+            sb.Append("targets="+tl.Count+" noWorld="+noWorld+" casts="+allCasts+"\n");
+            foreach(var t in tl.GetRange(0,Math.Min(20,tl.Count)))sb.Append("  "+(t.CastTicks*1000/System.Diagnostics.Stopwatch.Frequency)+"ms casts="+t.Casts+" world="+(t.World.HasValue?((t.World.Value.Hi-t.World.Value.Lo)*1000).ToString():"null")+" "+t.Name+"\n");
+            foreach(var g in System.Linq.Enumerable.GroupBy(issues,x=>x.KindName))sb.Append("  "+g.Key+" "+System.Linq.Enumerable.Count(g)+"\n");
+            try{asm.Close(false);}catch{}
+            return sb.ToString();
+        }
         public void StartCloseForms(){Result="";dispatcher.BeginInvoke((Action)(()=>{int n=0;foreach(var f in System.Linq.Enumerable.ToList(System.Linq.Enumerable.Cast<System.Windows.Forms.Form>(System.Windows.Forms.Application.OpenForms))){try{f.Close();n++;}catch{}}Result="closed "+n;}));}
         public string PropCardFormTest(string field,string value,int rowCount){
             string text="";var form=new PropCardForm(Host);

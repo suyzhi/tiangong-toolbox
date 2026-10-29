@@ -60,6 +60,7 @@ class RenameE2E {
             else if (mode == "stale") StaleRun(dir);
             else if (mode == "propcard") PropCardRun(dir, args.Length > 3 ? args[3] : Asm);
             else if (mode == "sibling") SiblingRun(dir, args.Length > 3 ? args[3] : "");
+            else if (mode == "generic") GenericRun(dir, args[3], args[4], args[5]);
         } catch (Exception e) { L("FAIL 异常 " + e); fails++; }
         stop = true;
         L("对话框 " + dialogs.Count + " 个" + (dialogs.Count > 0 ? "：" + string.Join(" | ", dialogs.ToArray()) : ""));
@@ -265,6 +266,36 @@ class RenameE2E {
         bool missing = Try(() => doc.Occurrences.Item(1).FileMissing(), true);
         L("   旁边文件夹的装配现在引用：" + occ + (missing ? "（缺）" : ""));
         Check(string.Equals(occ, renamed, StringComparison.OrdinalIgnoreCase) && !missing, "旁边文件夹（装配\\）里用到它的装配跟着改好、0 缺件");
+        CloseAll();
+    }
+
+    // 第 4 轮：任意装配（格式转换出来的天工装配，几百个导入零件、名字又长）上「查找替换」改名，
+    // 核对改名计划、重新打开装配逐层 0 缺件、副本里不再有链着旧名字的实例。dir = 副本根（窗口只留它下面的文件）
+    // 用法: RenameE2E.exe <输出> generic <副本根> <装配相对路径> <查找> <替换>
+    static void GenericRun(string dir, string asmRel, string find, string replace){
+        string asm = Path.Combine(dir, asmRel);
+        var t0 = DateTime.Now;
+        Open(asm);
+        L("   打开 " + (DateTime.Now - t0).TotalSeconds.ToString("0.0") + "s");
+        var t1 = DateTime.Now;
+        diag.StartRenameFormTest(find, replace, "", dir, true);
+        string r = Wait(30);
+        L("   改名 " + (DateTime.Now - t1).TotalSeconds.ToString("0.0") + "s");
+        L(r.Length > 3000 ? r.Substring(0, 3000) + "…（共 " + r.Length + " 字）" : r);
+        var plan = Plan(r);
+        Check(plan.Count > 0, "有改名计划（" + plan.Count + " 个文件）");
+        Check(r.Contains("error= "), "改名没有报错");
+        CloseAll();
+        string newAsm = asm;
+        foreach (var p in plan) if (string.Equals(p.Key, Path.GetFileName(asm), StringComparison.OrdinalIgnoreCase)) newAsm = Path.Combine(Path.GetDirectoryName(asm), p.Value);
+        var news = Names(plan.Select(p => p.Value), false); var olds = Names(plan.Select(p => p.Key), false);
+        var t2 = DateTime.Now;
+        var c = WalkFile(newAsm, dir, news, olds);
+        L("   重新打开 " + Path.GetFileName(newAsm) + " " + (DateTime.Now - t2).TotalSeconds.ToString("0.0") + "s：实例 " + c[0] + "，缺 " + c[1] + "，链新名字 " + c[2] + "，链旧名字 " + c[3]);
+        Check(c[1] == 0, "重新打开 0 缺件");
+        Check(c[3] == 0, "副本里没有链着旧名字的实例");
+        int missingFiles = plan.Count(p => !Directory.GetFiles(dir, p.Value, SearchOption.AllDirectories).Any());
+        Check(missingFiles == 0, "计划里的新文件名都在（缺 " + missingFiles + "）");
         CloseAll();
     }
 

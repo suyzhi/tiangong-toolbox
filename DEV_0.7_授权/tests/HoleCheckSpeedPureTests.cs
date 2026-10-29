@@ -28,6 +28,7 @@ namespace TianGongCadSuite {
             Check((string)h.Selection == "ref" && (string)h.Selection == "ref" && made == 1, "第一次用时建、只建一次");
             var bad = new HoleRecord { MakeSelection = () => { throw new InvalidOperationException(); } };
             Check(bad.Selection == null, "建引用失败返回 null 不抛");
+            BigAssemblyRun();
             JunctionLoop();
             LockedSettings();
             UserTextEncoding();
@@ -50,6 +51,23 @@ namespace TianGongCadSuite {
             Check(new HoleSpec { Kind = HoleKind.Countersink, HoleDiameter = 13, CountersinkDiameter = 12, CountersinkAngle = 90 }.SpecProblem.Contains("锥孔直径"), "锥孔直径不大于孔径：挡住");
             Check(new HoleSpec { Kind = HoleKind.Counterbore, HoleDiameter = 6.6, CounterboreDiameter = 11, CounterboreDepth = 6.8 }.SpecProblem.Length == 0, "正常的 M6 沉孔：放行");
             Check(new HoleSpec { Kind = HoleKind.Tapped, HoleDiameter = 5, ThreadFull = false, ThreadDepth = 20, Depth = 10 }.SpecProblem.Contains("螺纹深度"), "螺纹深度超过孔深：照旧挡住");
+        }
+        // 第 4 轮：SolidWorks 转来的大装配（ST064：8113 组孔、几千个导入件、上万根螺栓杆外圆）配对要将近两个小时 ——
+        // 每串孔 × 每个零件都把全装配的螺栓杆扫一遍。这里 3000 串孔 × 1500 个零件 × 15000 根螺栓杆，原来要几分钟，现在几秒内
+        static void BigAssemblyRun(){
+            var holes = new List<HoleRecord>(); var shafts = new List<HoleRecord>(); var names = new List<string>();
+            var idx = new PartRayIndex();
+            for (int p = 0; p < 1500; p++) {
+                string n = "件" + p + ".par:1"; names.Add(n);
+                var t = PartRayTarget.WithBoxes(n, Transform.Identity, (o, d) => new List<Box3>());
+                t.World = new Box3(new V3(p, 0, 0), new V3(p + 0.5, 0.5, 0.5));   // 各在各的地方，孔够不着
+                idx.Add(t);
+                for (int k = 0; k < 10; k++) shafts.Add(new HoleRecord { PartName = n, DiameterMm = 6, Center = new V3(p, 0.1, 0.01 * k), Axis = new V3(1, 0, 0) });
+            }
+            for (int i = 0; i < 3000; i++) holes.Add(new HoleRecord { PartName = "件" + (i % 1500) + ".par:1", DiameterMm = 6.6, Center = new V3(5000 + i, 3, 3), Axis = new V3(0, 0, 1), AxialMax = 0.01 });
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var r = HoleCheck.Run(holes, null, true, names, idx, shafts);
+            Check(sw.Elapsed.TotalSeconds < 20 && r.Count == 3000, "3000 串孔 × 1500 个零件 × 15000 根螺栓杆配对 " + sw.Elapsed.TotalSeconds.ToString("0.0") + "s（原来几分钟）");
         }
         // 设置文件被别的程序独占打开：读不出来 → 当没有；这时不许整份重写（会冲掉原有内容）；放开后读得出来就能写
         static void LockedSettings(){

@@ -1796,6 +1796,7 @@ namespace TianGongCadSuite {
             var result = new List<HoleRecord>();
             parts = AssemblyPart.List(assembly, warnings);
             var byBucket = new Dictionary<string, List<HoleRecord>>(StringComparer.Ordinal);
+            var edgeCache = new Dictionary<string, LocalCircles>(StringComparer.OrdinalIgnoreCase);
             // 只有判定口径里的孔径（默认 3–25mm）会参与检查；螺栓杆/销只拿来和这些孔比同轴，比孔大的不可能穿过孔。
             // 口径以外的圆边（圆管、大圆角、细小倒圆）原来也逐条判凸台、建引用 —— 每条五六次 COM 调用，白花。
             double minHole = HoleCheck.MinDiameterMm - 0.001, maxHole = HoleCheck.MaxDiameterMm + 0.001;
@@ -1806,39 +1807,35 @@ namespace TianGongCadSuite {
             // 同一个实例里所有边共用一个"零件 → 装配"变换：读一次（原来每条圆边各建一个装配引用再取矩阵，2～4 次 COM 调用/边）
             Transform placement;
             try { placement = ap.Placement; }
-            catch (Exception e) { warnings.Add(ap.Name + " 读不到装配位置：" + e.Message); continue; }
-            foreach (var body in ap.Bodies) {           // 多实体零件每个实体都要看（0.7.15）
+            catch (Exception e) { if (!ap.NoEdges) warnings.Add(ap.Name + " 读不到装配位置：" + e.Message); continue; }
+            for (int bi = 0; bi < ap.Bodies.Count; bi++) {   // 多实体零件每个实体都要看（0.7.15）
+                var body = ap.Bodies[bi];
                 string partName = ap.Name;
                 object rawEdges;
                 try { rawEdges = body.get_Edges(G.FeatureTopologyQueryTypeConstants.igQueryAll); }
                 catch (Exception e) { warnings.Add(partName + " 读取边失败：" + e.Message); continue; }
-                // 单段圆弧（腰孔两头、圆角）不是孔（0.8.5）：原来圆弧也当孔收，腰孔压在螺纹孔上这种调节结构，腰孔两头各报一条假的漏打孔。
-                // 但导入件常把一个整圆孔口拆成两段：同一个圆的第二段起照常当孔（去重会把它们并成一条）
-                var arcSeen = new HashSet<string>(StringComparer.Ordinal);
-                foreach (G.Edge edge in (G.Edges)rawEdges) {
-                    G.Circle circle = null;
-                    try { circle = edge.Geometry as G.Circle; } catch { }
-                    if (circle == null) continue;
-                    Array c = new double[3], ax = new double[3]; double r = 0;
-                    try { circle.GetCircleData(ref c, ref ax, out r); } catch { continue; }
-                    if (r <= 0) continue;
-                    bool closedEdge = true; try { closedEdge = edge.IsClosed; } catch { }
-                    if (!closedEdge) {
-                        string key = Math.Round(Convert.ToDouble(c.GetValue(0)), 6) + "," + Math.Round(Convert.ToDouble(c.GetValue(1)), 6) + "," + Math.Round(Convert.ToDouble(c.GetValue(2)), 6) + "," + Math.Round(r, 6);
-                        if (arcSeen.Add(key)) continue;
-                    }
-                    double dia = r * 2000.0;
-                    bool holeSize = dia >= minHole && dia <= maxHole, shaftSize = dia >= minShaft && dia <= maxShaft;
-                    if (!holeSize && !shaftSize) continue;
+                // 同一个零件文件在装配里用了很多次（SolidWorks 转来的 ST064：3533 个实例只有 469 个文件，一个阀岛 3.7 万条边）：
+                // 圆边在零件坐标里读一次记下来，别的实例只换算位置。原来每个实例都把每条边重读一遍（每条四五次 COM 调用）。
+                // 边数对不上（可调零件之类每个实例几何不同）就重读
+                int edgeCount = -1;
+                try { edgeCount = ((G.Edges)rawEdges).Count; } catch { }
+                string key = ap.File.Length > 0 && edgeCount >= 0 ? ap.File + "|" + bi : null;
+                LocalCircles circles;
+                if (key == null || !edgeCache.TryGetValue(key, out circles) || circles.EdgeCount != edgeCount) {
+                    circles = ReadCircles((G.Edges)rawEdges, edgeCount, minHole, maxHole, minShaft, maxShaft);
+                    if (key != null) edgeCache[key] = circles;
+                }
+                foreach (var lc in circles.Items) {
                     V3 centre, axis;
-                    try { centre = placement.Point(V3.From(c)); axis = placement.Vector(V3.From(ax)).Unit(); } catch { continue; }
+                    try { centre = placement.Point(lc.Centre); axis = placement.Vector(lc.Axis).Unit(); } catch { continue; }
                     if (!centre.Finite) continue;
-                    if (HoleScanCad.IsBossEdge(edge)) {           // 螺栓杆、销、圆凸台的外圆不是孔，单独记下
-                        if (shaftSize) shafts.Add(new HoleRecord { Center = centre, Axis = axis, DiameterMm = dia, PartName = partName });
+                    double dia = lc.Diameter;
+                    if (lc.Boss) {           // 螺栓杆、销、圆凸台的外圆不是孔，单独记下
+                        if (dia >= minShaft && dia <= maxShaft) shafts.Add(new HoleRecord { Center = centre, Axis = axis, DiameterMm = dia, PartName = partName });
                         continue;
                     }
-                    if (!holeSize) continue;
-                    var owner = ap; var picked = edge;
+                    if (dia < minHole || dia > maxHole) continue;
+                    var owner = ap; var picked = lc.Edge;
                     var rec = new HoleRecord { Center = centre, Axis = axis, DiameterMm = dia, PartName = partName,
                                                MakeSelection = () => owner.Reference(picked) };
                     // 通孔有上下两条圆边，同一个孔只保留一条记录。
@@ -1857,6 +1854,36 @@ namespace TianGongCadSuite {
             }
             }
             return result;
+        }
+
+        // 一个实体上口径以内的圆边（零件坐标）：孔口 / 螺栓杆外圆。同一个零件文件的各个实例共用（见 CollectAssemblyHoles）
+        sealed class LocalCircle { public V3 Centre, Axis; public double Diameter; public bool Boss; public G.Edge Edge; }
+        sealed class LocalCircles { public int EdgeCount; public readonly List<LocalCircle> Items = new List<LocalCircle>(); }
+        static LocalCircles ReadCircles(G.Edges edges, int edgeCount, double minHole, double maxHole, double minShaft, double maxShaft){
+            var res = new LocalCircles { EdgeCount = edgeCount };
+            // 单段圆弧（腰孔两头、圆角）不是孔（0.8.5）：原来圆弧也当孔收，腰孔压在螺纹孔上这种调节结构，腰孔两头各报一条假的漏打孔。
+            // 但导入件常把一个整圆孔口拆成两段：同一个圆的第二段起照常当孔（去重会把它们并成一条）
+            var arcSeen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (G.Edge edge in edges) {
+                G.Circle circle = null;
+                try { circle = edge.Geometry as G.Circle; } catch { }
+                if (circle == null) continue;
+                Array c = new double[3], ax = new double[3]; double r = 0;
+                try { circle.GetCircleData(ref c, ref ax, out r); } catch { continue; }
+                if (r <= 0) continue;
+                bool closedEdge = true; try { closedEdge = edge.IsClosed; } catch { }
+                if (!closedEdge) {
+                    string key = Math.Round(Convert.ToDouble(c.GetValue(0)), 6) + "," + Math.Round(Convert.ToDouble(c.GetValue(1)), 6) + "," + Math.Round(Convert.ToDouble(c.GetValue(2)), 6) + "," + Math.Round(r, 6);
+                    if (arcSeen.Add(key)) continue;
+                }
+                double dia = r * 2000.0;
+                bool holeSize = dia >= minHole && dia <= maxHole, shaftSize = dia >= minShaft && dia <= maxShaft;
+                if (!holeSize && !shaftSize) continue;
+                V3 centre = V3.From(c), axis = V3.From(ax);
+                if (!centre.Finite || !axis.Finite) continue;
+                res.Items.Add(new LocalCircle { Centre = centre, Axis = axis, Diameter = dia, Boss = HoleScanCad.IsBossEdge(edge), Edge = edge });
+            }
+            return res;
         }
 
         // 轴线是否穿过某个零件的材料（用于判"漏打孔"）。
@@ -1882,42 +1909,54 @@ namespace TianGongCadSuite {
                 foreach (var ap in parts) {
                     Transform placement;
                     try { placement = ap.Placement; }
-                    catch (Exception e) { Log.Write("AutoHoleCheckMatrix " + ap.Name, e); continue; }   // 读不到变换宁可不判，也不按原点瞎判
+                    catch (Exception e) { if (!ap.NoEdges) Log.Write("AutoHoleCheckMatrix " + ap.Name, e); continue; }   // 读不到变换宁可不判，也不按原点瞎判
                     var bodies = ap.Bodies;
+                    // 每个实体自己的包围盒（零件坐标，读不到为 null）：直线连某个实体的包围盒都碰不到，它的面就不可能被射中，不用问 CAD。
+                    // SolidWorks 转来的导入件常是几百个实体的一个零件（ST064 的 BOSCH 柔性线 434 个实体）：原来每打一条射线
+                    // 把 434 个实体挨个问一遍，这一个零件就占了配孔检查一分多钟
+                    var bodyBoxes = new Box3?[bodies.Count];
+                    for (int i = 0; i < bodies.Count; i++) bodyBoxes[i] = BodyBox(bodies[i]);
                     var target = PartRayTarget.WithBoxes(ap.Name, placement, (o, d) => {
                         var all = new List<Box3>();
-                        foreach (var b in bodies) all.AddRange(CastBoxes(b, o, d));   // 多实体零件：哪个实体的材料都算
+                        for (int i = 0; i < bodies.Count; i++) {   // 多实体零件：哪个实体的材料都算
+                            if (bodyBoxes[i].HasValue && !PartRayTarget.NearBox(bodyBoxes[i].Value, o, d, -1e9, 1e9, 1e-5)) continue;
+                            all.AddRange(CastBoxes(bodies[i], o, d));
+                        }
                         return all;
                     });
-                    target.World = WorldBox(bodies, placement);
-                    target.Local = LocalBox(bodies);
+                    target.World = WorldBox(bodyBoxes, placement);
+                    target.Local = LocalBox(bodyBoxes);
                     index.Add(target);
                 }
                 return index;
             }
         }
 
-        static Box3? LocalBox(IList<G.Body> bodies){
-            if (bodies == null || bodies.Count == 0) return null;
+        static Box3? BodyBox(G.Body b){
+            Array mn = new double[3], mx = new double[3];
+            try { b.GetRange(ref mn, ref mx); } catch { return null; }
+            V3 a = V3.From(mn), z = V3.From(mx);
+            if (!a.Finite || !z.Finite) return null;
+            return new Box3(a, z);
+        }
+        // 各实体局部包围盒的并集；任何一个实体读不到就返回 null（不预筛）
+        static Box3? LocalBox(IList<Box3?> boxes){
+            if (boxes == null || boxes.Count == 0) return null;
             V3 lo = new V3(double.MaxValue, double.MaxValue, double.MaxValue), hi = new V3(double.MinValue, double.MinValue, double.MinValue);
-            foreach (var b in bodies) {
-                Array mn = new double[3], mx = new double[3];
-                try { b.GetRange(ref mn, ref mx); } catch { return null; }
-                V3 a = V3.From(mn), z = V3.From(mx);
-                if (!a.Finite || !z.Finite) return null;
+            foreach (var bb in boxes) {
+                if (!bb.HasValue) return null;
+                V3 a = bb.Value.Lo, z = bb.Value.Hi;
                 lo = new V3(Math.Min(lo.X, a.X), Math.Min(lo.Y, a.Y), Math.Min(lo.Z, a.Z)); hi = new V3(Math.Max(hi.X, z.X), Math.Max(hi.Y, z.Y), Math.Max(hi.Z, z.Z));
             }
             return new Box3(lo, hi);
         }
         // 实例的全部实体在装配坐标里的包围盒（局部包围盒 8 个角变换过去再取范围）。任何一个实体读不到就返回 null（不预筛）
-        static Box3? WorldBox(IList<G.Body> bodies, Transform placement){
-            if (bodies == null || bodies.Count == 0 || placement == null) return null;
+        static Box3? WorldBox(IList<Box3?> boxes, Transform placement){
+            if (boxes == null || boxes.Count == 0 || placement == null) return null;
             double[] lo = { double.MaxValue, double.MaxValue, double.MaxValue }, hi = { double.MinValue, double.MinValue, double.MinValue };
-            foreach (var b in bodies) {
-                Array mn = new double[3], mx = new double[3];
-                try { b.GetRange(ref mn, ref mx); } catch { return null; }
-                V3 a = V3.From(mn), z = V3.From(mx);
-                if (!a.Finite || !z.Finite) return null;
+            foreach (var bb in boxes) {
+                if (!bb.HasValue) return null;
+                V3 a = bb.Value.Lo, z = bb.Value.Hi;
                 for (int k = 0; k < 8; k++) {
                     var p = placement.Point(new V3((k & 1) == 0 ? a.X : z.X, (k & 2) == 0 ? a.Y : z.Y, (k & 4) == 0 ? a.Z : z.Z));
                     lo[0] = Math.Min(lo[0], p.X); lo[1] = Math.Min(lo[1], p.Y); lo[2] = Math.Min(lo[2], p.Z);

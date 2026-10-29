@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using A=SolidEdgeAssembly;
 using G=SolidEdgeGeometry;
@@ -24,6 +24,10 @@ namespace TianGongCadSuite {
         public G.Body Body;
         public List<G.Body> Bodies = new List<G.Body>();
         public bool Nested;
+        // 子装配里一条边都没有的零件（轴承里的滚珠 —— 球面没有边）：取不到放置矩阵，但它本来也不可能有孔。
+        // 配孔检查跳过它、不算"读取失败"（ST064 原来报"108 个零件读取失败"，日志里每次检查 108 段异常堆栈）
+        public bool NoEdges;
+        public string File = "";                 // 零件文件全路径（配孔检查按文件缓存圆边；读不出来为空 = 不缓存）
         // 隐藏的、只作参考的（「范围」「包络」这类不计入物理属性的零件）：配孔检查不拿它当"漏打孔的那个零件"（0.8.5，见 RefOnly）
         public bool Ignored;
         public A.Occurrence Top;                 // 顶层实例（Nested=false）
@@ -52,6 +56,7 @@ namespace TianGongCadSuite {
                         placement = PickGeometry.Unwrap(Reference(e)).Transform;
                         return placement;
                     }
+                NoEdges = true;
                 throw new InvalidOperationException(Name + " 没有边，取不到放置矩阵。");
             }
         }
@@ -74,12 +79,13 @@ namespace TianGongCadSuite {
                 }
                 object doc = null; try { doc = occ.OccurrenceDocument; } catch { }
                 // 文件不在了（被移走 / 删了）、加载不了：原来一声不响地跳过，配孔检查漏查了它用户也不知道
-                if (doc == null) { Warn(warnings, name + " 的文件打不开（不在了或加载失败），这个零件没查"); continue; }
+                if (doc == null) { string miss = ""; try { miss = occ.OccurrenceFileName ?? ""; } catch { } Warn(warnings, name + " 的文件打不开（不在了或加载失败），这个零件没查" + (miss.Length > 0 ? "（找的是 " + miss + "）" : "")); continue; }
                 var part = Doc(doc);
                 if (part == null && !IsSheet(doc)) continue;
                 var bodies = part != null ? BodiesOf(part, name, warnings) : SheetBodies(doc, name, warnings);
                 if (bodies.Count == 0) continue;
-                result.Add(new AssemblyPart { Name = name, Part = part, Body = bodies[0], Bodies = bodies, Top = occ, assembly = assembly, Ignored = RefOnly(occ) });
+                string file = ""; try { file = occ.OccurrenceFileName ?? ""; } catch { }
+                result.Add(new AssemblyPart { Name = name, Part = part, Body = bodies[0], Bodies = bodies, Top = occ, assembly = assembly, Ignored = RefOnly(occ), File = file });
             }
             return result;
         }
@@ -91,8 +97,15 @@ namespace TianGongCadSuite {
                 A.SubOccurrence s = null;
                 try { s = subs.Item(i); } catch { }
                 if (s == null) continue;
-                string name;
-                try { name = parent + "/" + s.Name; } catch { continue; }
+                string name, own = null;
+                try { own = s.Name; } catch { }
+                // 文件不在了的实例：天工给的名字是空的或者是整条路径（焊接台车副本实测「MC模组侧向支撑.asm:1/」「…asm:5/H:\桌面\…\-019.par」），
+                // 「读取失败的零件」里看不出是哪个零件 —— 换成文件名
+                string subFile = ""; try { subFile = s.SubOccurrenceFileName ?? ""; } catch { }
+                if (string.IsNullOrEmpty(own)) own = subFile.Length > 0 ? System.IO.Path.GetFileName(subFile) : null;
+                else if (own.IndexOf('\\') >= 0) { try { own = System.IO.Path.GetFileName(own); } catch { } }
+                if (string.IsNullOrEmpty(own)) continue;
+                name = parent + "/" + own;
                 bool sub = false;
                 try { sub = s.Subassembly; } catch { }
                 if (sub) {
@@ -101,12 +114,13 @@ namespace TianGongCadSuite {
                     continue;
                 }
                 object doc = null; try { doc = s.SubOccurrenceDocument; } catch { }
-                if (doc == null) { Warn(warnings, name + " 的文件打不开（不在了或加载失败），这个零件没查"); continue; }
+                if (doc == null) { Warn(warnings, name + " 的文件打不开（不在了或加载失败），这个零件没查" + (subFile.Length > 0 ? "（找的是 " + subFile + "）" : "")); continue; }
                 var part = Doc(doc);
                 if (part == null && !IsSheet(doc)) continue;
                 var bodies = part != null ? BodiesOf(part, name, warnings) : SheetBodies(doc, name, warnings);
                 if (bodies.Count == 0) continue;
-                result.Add(new AssemblyPart { Name = name, Part = part, Body = bodies[0], Bodies = bodies, Nested = true, Sub = s, assembly = assembly, Ignored = parentIgnored || RefOnly(s) });
+                string file = subFile;
+                result.Add(new AssemblyPart { Name = name, Part = part, Body = bodies[0], Bodies = bodies, Nested = true, Sub = s, assembly = assembly, Ignored = parentIgnored || RefOnly(s), File = file });
             }
         }
 

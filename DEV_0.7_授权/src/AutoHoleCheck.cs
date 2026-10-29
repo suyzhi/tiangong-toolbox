@@ -78,6 +78,8 @@ namespace TianGongCadSuite {
         public string MissingPart = "";   // 漏打孔：没打孔的那个零件（「去配孔」时提示用户点它的面）
         public string Done = "";          // 「去配孔」以后打上了：写一句（"已配 2 个孔"），列表里标出来（0.8.5）
         public int Places = 1;            // 合并了几处一模一样的问题（HoleCheck.Merge）
+        // 配错孔 / 孔偏了：提示语说的是哪几个零件（「不查的零件」按它们判，不按整串孔 —— 串里常带着别的零件）
+        public List<string> Parts = new List<string>();
         public List<HoleRecord> Holes = new List<HoleRecord>();
         public string KindName {
             get {
@@ -110,6 +112,8 @@ namespace TianGongCadSuite {
         // 每问一次就是一次 get_FacesByRay（COM）—— 孤孔 × 零件数，围栏上几十万次。先用包围盒在内存里挡掉
         // 根本够不着的零件（直线段离包围盒都远的，不可能碰到它的面），只对够得着的才去问 CAD。
         public Box3? World;
+        // 问了 CAD 几次、一共花了多久（Stopwatch 刻度）：大装配上配孔检查慢在哪个零件，计时探针读它
+        public int Casts; public long CastTicks;
         public PartRayTarget(string name, Transform placement, Func<V3, V3, bool> castLocal){
             if (placement == null) throw new ArgumentNullException("placement");
             Name = name ?? ""; Placement = placement; this.castLocal = castLocal;
@@ -152,7 +156,9 @@ namespace TianGongCadSuite {
             if (!origin.Finite || !dir.Finite || dir.Length < 1e-12) return false;
             dir = dir.Unit();
             IList<Box3> boxes;
+            long t0w = System.Diagnostics.Stopwatch.GetTimestamp();
             try { boxes = boxesLocal(origin, dir); } catch { return false; }
+            finally { Casts++; CastTicks += System.Diagnostics.Stopwatch.GetTimestamp() - t0w; }
             if (boxes == null) return false;
             const double eps = 1e-4;
             double beyondHi = double.PositiveInfinity, beforeLo = double.NegativeInfinity;
@@ -197,6 +203,7 @@ namespace TianGongCadSuite {
             byName[target.Name] = target; return true;
         }
         public int Count { get { return byName.Count; } }
+        public IEnumerable<PartRayTarget> All { get { return byName.Values; } }
         // 按这个孔自己的轴向范围 ± CoaxialSpanTolMm 查
         public bool Hits(HoleRecord hole, string partName){
             if (hole == null) return false;
@@ -219,6 +226,10 @@ namespace TianGongCadSuite {
         public double AxisAngleTolDeg = 2.0;   // 轴线方向容差
         public double AxisOffsetTolMm = 0.2;   // 同轴偏移容差（超过即"孔偏了"）
         public double CoaxialSpanTolMm = 3.0;  // 沿轴线的间隙不超过这个才认为挨着（成对 / 漏打孔判定的范围）
+        // 第 4 轮：不列「名字里含这些字」的零件内部的问题（外购件：FESTO 气缸、BOSCH 导轨、LEUZE 传感器……）。逗号 / 空格 / 顿号隔开，默认空。
+        // SolidWorks 转过来的 NOK_Drawer3 实测 340 条里大半在外购件子装配里（气缸活塞杆、接头内部的孔），用户改不了外购件，只会被淹没。
+        // 不默认一刀切：支架上真漏了装气缸的孔（孔在气缸上、缺的是支架）照样报，见 HoleCheck.Skipped
+        public string SkipNames = "";
 
         public HoleCheckOptions Clone(){ return (HoleCheckOptions)MemberwiseClone(); }
 
@@ -228,6 +239,18 @@ namespace TianGongCadSuite {
             if (!(AxisOffsetTolMm > 0)) return "同轴偏差容差要大于 0。";
             if (!(CoaxialSpanTolMm >= 0)) return "轴向间隙不能为负。";
             return "";
+        }
+
+        const string SkipKey = "不查名字含";
+        // 拆成一个个关键字（去重，忽略大小写）
+        public string[] SkipWords(){
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var list = new List<string>();
+            foreach (var w in (SkipNames ?? "").Split(new[]{ ',', '，', ' ', '　', '、', ';', '；', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)) {
+                string t = w.Trim();
+                if (t.Length > 0 && seen.Add(t)) list.Add(t);
+            }
+            return list.ToArray();
         }
 
         static readonly string[] Keys = { "最小孔径mm", "最大孔径mm", "方向容差度", "同轴偏差mm", "轴向间隙mm" };
@@ -240,6 +263,7 @@ namespace TianGongCadSuite {
             var o = new HoleCheckOptions();
             foreach (var r in SettingsFile.Read(path)) {
                 if (r.Length < 2) continue;
+                if (r[0] == SkipKey) { o.SkipNames = r[1]; continue; }
                 int i = Array.IndexOf(Keys, r[0]);
                 double v;
                 if (i >= 0 && double.TryParse(r[1], NumberStyles.Float, CultureInfo.InvariantCulture, out v)) o.Set(i, v);
@@ -250,6 +274,7 @@ namespace TianGongCadSuite {
             var rows = new List<string[]>();
             var v = Values();
             for (int i = 0; i < Keys.Length; i++) rows.Add(new[]{ Keys[i], v[i].ToString("R", CultureInfo.InvariantCulture) });
+            rows.Add(new[]{ SkipKey, string.Join(" ", SkipWords()) });
             SettingsFile.Write(path, rows, "天工工具箱 · 配孔检查的判定口径（每行：名字<TAB>值）");
         }
 
@@ -262,6 +287,7 @@ namespace TianGongCadSuite {
                 "· 配错孔：同一组的孔配不上同一个螺纹规格（底孔/内小径配过孔/沉孔才算对）；沉孔按较小的过孔直径比。\r\n" +
                 "· 孤孔：只有一个零件有孔、附近也没穿过别的零件（大多数本来就该是孤孔，默认不显示）。\r\n" +
                 "· 子装配里的零件也一起检查（零件名写成「子装配/零件」）。\r\n" +
+                (SkipWords().Length > 0 ? "· 名字（含所在子装配名）里有「" + string.Join("、", SkipWords()) + "」的零件：它们内部的问题不列出；孔在它们上、缺孔的是别的零件照样报。\r\n" : "") +
                 "（点「判定口径」可以改这些数）";
         }
         static string N(double v){ return v.ToString("0.###", CultureInfo.InvariantCulture); }
@@ -539,13 +565,26 @@ namespace TianGongCadSuite {
             foreach (var h in chain) { double l, u; Span(h, o, a, out l, out u); lo = Math.Min(lo, l); hi = Math.Max(hi, u); }
         }
 
-        // 零件 part 在这个孔的轴线上有没有一根同轴的轴/销/螺栓杆（方向差 < 2°，横向偏差不超过孔半径）
-        static bool HasCoaxialShaft(IList<HoleRecord> shafts, string part, HoleRecord hole){
-            if (shafts == null || hole == null) return false;
+        // 零件 part 在这个孔的轴线上有没有一根同轴的轴/销/螺栓杆（方向差 < 2°，横向偏差不超过孔半径）。
+        // 螺栓杆先按零件名分好（ShaftsByPart）：原来每串孔 × 每个零件都把全装配的螺栓杆扫一遍（零件数 × 螺栓杆数），
+        // SolidWorks 转来的 ST064（8113 组孔、几千个导入件）光这一步配对就要将近两个小时，CAD 调用只占几秒
+        static Dictionary<string, List<HoleRecord>> ShaftsByPart(IList<HoleRecord> shafts){
+            var map = new Dictionary<string, List<HoleRecord>>(StringComparer.Ordinal);
+            if (shafts == null) return map;
+            foreach (var s in shafts) {
+                if (s == null) continue;
+                List<HoleRecord> l;
+                if (!map.TryGetValue(s.PartName ?? "", out l)) { l = new List<HoleRecord>(); map[s.PartName ?? ""] = l; }
+                l.Add(s);
+            }
+            return map;
+        }
+        static bool HasCoaxialShaft(Dictionary<string, List<HoleRecord>> shaftsByPart, string part, HoleRecord hole){
+            List<HoleRecord> shafts;
+            if (shaftsByPart == null || hole == null || part == null || !shaftsByPart.TryGetValue(part, out shafts)) return false;
             double cosTol = Math.Cos(AxisAngleTolDeg * Math.PI / 180.0);
             double tol = Math.Max(AxisOffsetTolMm, hole.DiameterMm / 2.0);
             foreach (var s in shafts) {
-                if (s == null || s.PartName != part) continue;
                 if (Math.Abs(s.Axis.Dot(hole.Axis)) < cosTol) continue;
                 if (LateralMm(hole, s) <= tol) return true;
             }
@@ -585,6 +624,11 @@ namespace TianGongCadSuite {
                 ? allParts
                 : (IList<string>)holes.Select(x => x.PartName).Distinct().ToList();
             double tol = CoaxialSpanTolMm / 1000.0;
+            var skip = Options.SkipWords();
+            var shaftsByPart = ShaftsByPart(shafts);
+            // 「型材自动填充」生成的内嵌板（填充板_….par）：型材侧面的扳手孔正对着槽里的板，没人会在玻璃 / 填充板上配孔（围栏副本实测 4 条）。
+            // 一次挑掉（原来每串孔 × 每个零件都截一次名字）
+            var candidates = partUniverse.Where(p => !ShortPart(p).StartsWith(PanelNaming.Prefix, StringComparison.Ordinal)).ToList();
 
             int gi = 0;
             foreach (var g in groups) {
@@ -604,15 +648,18 @@ namespace TianGongCadSuite {
                         // 已经是完整的螺纹连接（螺纹孔 + 过孔）：只查夹在这串孔中间的零件，两头外面贴着的不算漏孔（见 CompleteJoint）
                         double span = tol;
                         if (hi - lo > 0.0015 && CompleteJoint(chain)) { lo += 0.0005; hi -= 0.0005; span = 0; }
-                        foreach (var other in partUniverse) {
+                        // 先碰到的是「不查的零件」（外购件）就接着找：同一条轴线上真漏了孔的支架不能被它挡住（只报一个零件）
+                        string skippedHit = null;
+                        foreach (var other in candidates) {
                             if (parts.Contains(other)) continue;
-                            // 「型材自动填充」生成的内嵌板（填充板_….par）：型材侧面的扳手孔正对着槽里的板，没人会在玻璃 / 填充板上配孔（围栏副本实测 4 条）
-                            if (ShortPart(other).StartsWith(PanelNaming.Prefix, StringComparison.Ordinal)) continue;
-                            if (HasCoaxialShaft(shafts, other, h)) continue;   // 同轴的螺栓杆 / 销：本来就该穿过它
+                            if (HasCoaxialShaft(shaftsByPart, other, h)) continue;   // 同轴的螺栓杆 / 销：本来就该穿过它
                             bool hit = bodies != null ? bodies.Hits(other, o, a, lo, hi, span)
                                      : (parts.Count == 1 && rayHitsPart != null && rayHitsPart(h, other));
-                            if (hit) { hitPart = other; break; }
+                            if (!hit) continue;
+                            if (skip.Length > 0 && NameHas(other, skip)) { if (skippedHit == null) skippedHit = other; continue; }
+                            hitPart = other; break;
                         }
+                        if (hitPart == null) hitPart = skippedHit;
                         if (hitPart != null) {
                             HoleIssue mi;
                             if (!missingByPart.TryGetValue(hitPart, out mi)) {
@@ -638,7 +685,7 @@ namespace TianGongCadSuite {
                         for (int j = i + 1; j < chain.Count; j++)
                             if (chain[i].PartName != chain[j].PartName) maxLateral = Math.Max(maxLateral, LateralMm(chain[i], chain[j]));
                     if (maxLateral > AxisOffsetTolMm) {
-                        issues.Add(new HoleIssue { Kind = HoleIssueKind.Misaligned, Holes = chain,
+                        issues.Add(new HoleIssue { Kind = HoleIssueKind.Misaligned, Holes = chain, Parts = parts,
                             Message = "同组孔最大偏心 " + N(maxLateral) + "mm（容差 " + N(AxisOffsetTolMm) + "mm），涉及 " + string.Join("、", parts.Select(ShortPart).ToArray()) + Pos(chain[0]) });
                         continue;
                     }
@@ -651,6 +698,8 @@ namespace TianGongCadSuite {
                     // 正确的"沉孔 + 螺纹孔"组合误报成配错孔。
                     var byPart = chain.GroupBy(x => x.PartName).Select(x => new { Part = x.Key, Dia = x.Min(y => y.DiameterMm), Holes = x.ToList() }).ToList();
                     V3 co, ca; double clo, chi; ChainSpan(chain, out co, out ca, out clo, out chi);
+                    // 只报一对：两个都是「不查的零件」的那对先记着，接着找有自制件的一对（外购件内部配不上不能挡住支架真配错）
+                    HoleIssue wrongSkipped = null;
                     for (int i = 0; i < byPart.Count; i++)
                         for (int j = i + 1; j < byPart.Count; j++) {
                             string why;
@@ -659,11 +708,14 @@ namespace TianGongCadSuite {
                             // 节流阀 Φ3 气道报"配错孔 M10 与 M2.5"。螺钉连接的两个孔沿轴线是首尾挨着的，不会重叠
                             if (Overlap(byPart[i].Holes, byPart[j].Holes, co, ca) > 0.001) continue;
                             if (!IsValidPair(byPart[i].Dia, byPart[j].Dia, out why)) {
-                                issues.Add(new HoleIssue { Kind = HoleIssueKind.WrongSpec, Holes = chain,
-                                    Message = ShortPart(byPart[i].Part) + " Φ" + N(byPart[i].Dia) + " 与 " + ShortPart(byPart[j].Part) + " Φ" + N(byPart[j].Dia) + " " + why + Pos(chain[0]) });
+                                var w = new HoleIssue { Kind = HoleIssueKind.WrongSpec, Holes = chain, Parts = new List<string>{ byPart[i].Part, byPart[j].Part },
+                                    Message = ShortPart(byPart[i].Part) + " Φ" + N(byPart[i].Dia) + " 与 " + ShortPart(byPart[j].Part) + " Φ" + N(byPart[j].Dia) + " " + why + Pos(chain[0]) };
+                                if (skip.Length > 0 && NameHas(byPart[i].Part, skip) && NameHas(byPart[j].Part, skip)) { if (wrongSkipped == null) wrongSkipped = w; continue; }
+                                issues.Add(w); wrongSkipped = null;
                                 i = byPart.Count; break;
                             }
                         }
+                    if (wrongSkipped != null) issues.Add(wrongSkipped);
                 }
                 foreach (var part in missingOrder) {
                     var mi = missingByPart[part];
@@ -691,7 +743,7 @@ namespace TianGongCadSuite {
                 string key = ((int)it.Kind) + "|" + StripInstance(ShortPart(it.MissingPart)) + "|" + StripInstance(StripPos(it.Message));
                 HoleIssue m;
                 if (!byKey.TryGetValue(key, out m)) {
-                    m = new HoleIssue { Kind = it.Kind, Message = it.Message, MissingPart = it.MissingPart, Done = it.Done, Holes = new List<HoleRecord>(it.Holes) };
+                    m = new HoleIssue { Kind = it.Kind, Message = it.Message, MissingPart = it.MissingPart, Done = it.Done, Holes = new List<HoleRecord>(it.Holes), Parts = new List<string>(it.Parts) };
                     byKey[key] = m; list.Add(m);
                     continue;
                 }
@@ -706,6 +758,25 @@ namespace TianGongCadSuite {
         }
         static string StripPos(string message){
             return System.Text.RegularExpressions.Regex.Replace(message ?? "", "（@X[^）]*）", "");
+        }
+
+        // 这一条是不是全在「不查」的零件里（判定口径里的 SkipNames）：
+        //   · 漏打孔：缺孔的零件是外购件就不列（外购件改不了）；孔在外购件上、缺孔的是支架 —— 支架真漏了装它的孔，照样列；
+        //   · 孔偏了 / 配错孔 / 孤孔：提示语里说的零件（Parts；没有就看涉及的孔）全是外购件才不列（气缸和自己的接头之间）；外购件和自制件之间的照样列。
+        //   Run 本身也按 Options 里的关键字挑：一串孔只报一个缺孔零件 / 一对配错孔，先挑有自制件的（见 Run），所以筛掉外购件不会连带藏掉真问题
+        // 名字按整条实例路径比（「FESTO_DSBC.asm:1/活塞杆.par:1」里 FESTO 在子装配名上），不分大小写
+        public static bool Skipped(HoleIssue it, string[] words){
+            if (it == null || words == null || words.Length == 0) return false;
+            if (it.Kind == HoleIssueKind.MissingHole) return NameHas(it.MissingPart, words);
+            if (it.Parts != null && it.Parts.Count > 0) { foreach (var p in it.Parts) if (!NameHas(p, words)) return false; return true; }
+            if (it.Holes == null || it.Holes.Count == 0) return false;
+            foreach (var h in it.Holes) if (!NameHas(h.PartName, words)) return false;
+            return true;
+        }
+        static bool NameHas(string name, string[] words){
+            if (string.IsNullOrEmpty(name)) return false;
+            foreach (var w in words) if (name.IndexOf(w, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            return false;
         }
 
         // 子装配里的零件实例名是一整条路径（「总装.asm:1/子装配.asm:1/托盘.asm:1/底板.par:1」）：问题列表一行只放得下这条路径，

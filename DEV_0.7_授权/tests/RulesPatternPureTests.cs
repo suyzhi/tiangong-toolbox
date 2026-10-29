@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 
 namespace TianGongCadSuite {
     // 2026-10-14 新增的纯逻辑：批量排孔两端边距/横向偏移、配做规则表、设置文件、排孔预设、日志滚动；
@@ -172,6 +173,44 @@ namespace TianGongCadSuite {
                     Assert(iss.Count == 1 && iss[0].Kind == HoleIssueKind.MissingHole, "口径放宽到 30mm：Φ28 穿过 B 报漏打孔");
                     Assert(iss[0].MissingPart == "B", "漏打孔记下是哪个零件没孔（「去配孔」提示用户点它）");
                 } finally { HoleCheck.Options = savedOpt; }
+
+                // 第 4 轮「不查的零件」：存盘往返、拆关键字；外购件内部的不列，孔在外购件上、缺孔的是自制支架照样列
+                var so = new HoleCheckOptions { SkipNames = "FESTO，bosch 、 LEUZE  festo" };
+                Assert(string.Join("|", so.SkipWords()) == "FESTO|bosch|LEUZE", "关键字：中英文逗号 / 顿号 / 空格都能隔开，重复的（不分大小写）去掉");
+                so.Save(of);
+                Assert(string.Join("|", HoleCheckOptions.Load(of).SkipWords()) == "FESTO|bosch|LEUZE", "不查的零件存盘读回");
+                Assert(new HoleCheckOptions().SkipWords().Length == 0, "默认不排除任何零件（不一刀切）");
+                var words = so.SkipWords();
+                Func<string, HoleRecord> hr = n => new HoleRecord { PartName = n, DiameterMm = 6.6 };
+                var inside = new HoleIssue { Kind = HoleIssueKind.WrongSpec, Holes = new List<HoleRecord>{ hr("FESTO_DSBC.asm:1/活塞杆.par:1"), hr("FESTO_DSBC.asm:1/端盖.par:1") } };
+                var mixed = new HoleIssue { Kind = HoleIssueKind.WrongSpec, Holes = new List<HoleRecord>{ hr("FESTO_DSBC.asm:1/端盖.par:1"), hr("支架.par:1") } };
+                var bracketMissing = new HoleIssue { Kind = HoleIssueKind.MissingHole, MissingPart = "支架.par:1", Holes = new List<HoleRecord>{ hr("Bosch_导轨.par:2") } };
+                var vendorMissing = new HoleIssue { Kind = HoleIssueKind.MissingHole, MissingPart = "LEUZE传感器.asm:1/壳体.par:1", Holes = new List<HoleRecord>{ hr("支架.par:1") } };
+                Assert(HoleCheck.Skipped(inside, words), "外购件子装配内部的配错孔：不列");
+                Assert(!HoleCheck.Skipped(mixed, words), "外购件和自制支架之间的配错孔：照样列");
+                Assert(!HoleCheck.Skipped(bracketMissing, words), "孔在导轨上、支架没孔：支架真漏了，照样列");
+                Assert(HoleCheck.Skipped(vendorMissing, words), "缺孔的是外购件（改不了）：不列");
+                Assert(!HoleCheck.Skipped(inside, new string[0]), "没填关键字：什么都不排除");
+                // Run 挑缺孔零件 / 配错的一对时先挑自制件：外购件挡在前面也不会把支架的真问题藏掉
+                var saved2 = HoleCheck.Options;
+                try {
+                    var a1 = new HoleRecord { PartName = "FESTO_缸.asm:1/缸体.par:1", DiameterMm = 6.6, Center = new V3(0, 0, 0), Axis = new V3(0, 0, 1), AxialMax = 0.01 };
+                    var ix = new PartRayIndex();
+                    ix.Add(PartRayTarget.WithBoxes("FESTO_缸.asm:1/端盖.par:1", Transform.Identity, (o2, d2) => new List<Box3>{ new Box3(new V3(-0.05, -0.05, 0.01), new V3(0.05, 0.05, 0.012)) }));
+                    ix.Add(PartRayTarget.WithBoxes("支架.par:1", Transform.Identity, (o2, d2) => new List<Box3>{ new Box3(new V3(-0.05, -0.05, 0.012), new V3(0.05, 0.05, 0.013)) }));
+                    var univ = new List<string>{ "FESTO_缸.asm:1/缸体.par:1", "FESTO_缸.asm:1/端盖.par:1", "支架.par:1" };
+                    HoleCheck.Options = new HoleCheckOptions();
+                    var r0 = HoleCheck.Run(new List<HoleRecord>{ a1 }, null, false, univ, ix, null);
+                    Assert(r0.Count == 1 && r0[0].MissingPart == "FESTO_缸.asm:1/端盖.par:1", "没填关键字：照旧报先碰到的零件");
+                    HoleCheck.Options = new HoleCheckOptions { SkipNames = "festo" };
+                    var r1 = HoleCheck.Run(new List<HoleRecord>{ a1 }, null, false, univ, ix, null);
+                    Assert(r1.Count == 1 && r1[0].MissingPart == "支架.par:1" && !HoleCheck.Skipped(r1[0], HoleCheck.Options.SkipWords()), "填了 FESTO：先碰到的外购件端盖跳过，报支架漏孔");
+                    // 配错孔：外购件内部一对（Φ6.6 与 Φ10.5）和 外购件—支架一对（Φ6.6 与 Φ12）都配不上：报有支架的那对
+                    Func<string, double, double, HoleRecord> at = (n, d, z) => new HoleRecord { PartName = n, DiameterMm = d, Center = new V3(0, 0, z), Axis = new V3(0, 0, 1), AxialMax = 0.002 };
+                    var chain = new List<HoleRecord>{ at("FESTO_缸.asm:1/缸体.par:1", 6.6, 0), at("FESTO_缸.asm:1/端盖.par:1", 10.5, 0.002), at("支架.par:1", 16, 0.004) };
+                    var r2 = HoleCheck.Run(chain, null, false, new List<string>(), new PartRayIndex(), null).Where(x => x.Kind == HoleIssueKind.WrongSpec).ToList();
+                    Assert(r2.Count == 1 && r2[0].Parts.Contains("支架.par:1") && !HoleCheck.Skipped(r2[0], HoleCheck.Options.SkipWords()), "配错孔先报有支架的那对：" + (r2.Count > 0 ? r2[0].Message : "无"));
+                } finally { HoleCheck.Options = saved2; }
 
                 // 日志滚动
                 string lf = Path.Combine(dir, "panel.log");

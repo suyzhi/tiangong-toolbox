@@ -39,6 +39,9 @@ namespace TianGongCadSuite {
         }
         F.HighlightSet highlights;
         List<HoleIssue> issues = new List<HoleIssue>();
+        // 检查出来的全部（合并后）；issues 是去掉判定口径里「不查的零件」以后的。改「不查的零件」只重新筛，不用重查
+        List<HoleIssue> allIssues = new List<HoleIssue>();
+        int skippedPlaces;
         List<HoleIssue> shown = new List<HoleIssue>();
         int holeCount, groupCount, failedParts;
         bool busy, checkedOnce;          // 扫描中：RunCheck 里有 DoEvents，必须挡住重入
@@ -183,7 +186,7 @@ namespace TianGongCadSuite {
             if (shown.Count == 0) {
                 // 空状态：一句居中的话，不是一条"假的结果"
                 string text = !checkedOnce ? "点左边「开始检查」扫一遍装配里的孔。"
-                            : (issues.Count == 0 ? "没有发现问题。" : "当前筛选下没有问题（在左边勾选要看哪几类）。");
+                            : (issues.Count == 0 ? (skippedPlaces > 0 ? "没有要看的问题（" + skippedPlaces + " 处在「不查的零件」里，见判定口径）。" : "没有发现问题。") : "当前筛选下没有问题（在左边勾选要看哪几类）。");
                 TextRenderer.DrawText(g, text, Ui.F9, e.Bounds, Ui.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
                 return;
             }
@@ -296,9 +299,16 @@ namespace TianGongCadSuite {
         }
 
         void ShowIssues(List<HoleIssue> found, int holes, int groups){
-            issues = found ?? new List<HoleIssue>(); holeCount = holes; groupCount = groups; checkedOnce = true;
+            allIssues = found ?? new List<HoleIssue>(); holeCount = holes; groupCount = groups; checkedOnce = true;
+            Refilter();
             ApplyFilter();
             copy.Enabled = issues.Count > 0;
+        }
+
+        void Refilter(){
+            var words = HoleCheck.Options.SkipWords();
+            issues = allIssues.Where(i => !HoleCheck.Skipped(i, words)).ToList();
+            skippedPlaces = allIssues.Where(i => HoleCheck.Skipped(i, words)).Sum(i => i.Places);
         }
 
         // 胶囊上的数是"一共找到几条"（不受筛选影响）；列表只显示勾着的几类
@@ -323,7 +333,8 @@ namespace TianGongCadSuite {
             if (checkedOnce) {
                 // 结论只数"该关心的"三类；孤孔显示出来时才算进去
                 var counted = issues.Where(i => i.Kind != HoleIssueKind.Unpaired || cUnpaired.Checked).ToList();
-                summary.Text = HoleCheck.Summary(counted, holeCount, groupCount);
+                summary.Text = HoleCheck.Summary(counted, holeCount, groupCount)
+                             + (skippedPlaces > 0 ? "（另有 " + skippedPlaces + " 处在「不查的零件」里，没列出）" : "");
                 summary.ForeColor = counted.Count == 0 ? Ui.Ok : Ui.Warn;
                 shell.SetTitle(counted.Count == 0 ? "没有发现问题" : "发现 " + counted.Sum(i => i.Places) + " 处问题", "点一条在模型里高亮");
                 countLine.Text = holeCount + " 个孔 · " + groupCount + " 组同轴孔";
@@ -362,6 +373,7 @@ namespace TianGongCadSuite {
                 sb.AppendLine("装配：" + (assembly != null ? assembly.FullName : ""));
                 sb.AppendLine(summary.Text);
                 if (lastWarnings.Count > 0) { sb.AppendLine("读取失败的零件（没查）："); foreach (var w in lastWarnings) sb.AppendLine("    " + w); }
+                if (skippedPlaces > 0) sb.AppendLine("不查的零件（名字含）：" + string.Join(" ", HoleCheck.Options.SkipWords()));
                 sb.AppendLine();
                 foreach (var i in shown) {
                     sb.AppendLine("【" + i.KindName + "】" + i.Message);
@@ -441,12 +453,20 @@ namespace TianGongCadSuite {
         void EditOptions(){
             // 检查中（会泵消息）改口径：HoleCheck.Run 一半用旧口径一半用新口径，结果对不上
             if (busy) { SetStatus("正在检查，做完再改判定口径。", Ui.Warn); return; }
+            var before = HoleCheck.Options;
             using (var f = new HoleCheckOptionsForm(HoleCheck.Options)) {
                 if (f.ShowDialog(this) != DialogResult.OK || f.Result == null) return;
                 HoleCheck.Options = f.Result;
             }
             tips.SetToolTip(rules, HoleCheck.Options.Describe());
-            SetStatus(checkedOnce ? "判定口径已改，点「重新检查」按新口径再查一遍。" : "判定口径已改。", Ui.Ok);
+            var o = HoleCheck.Options;
+            bool numbers = before == null || before.MinDiameterMm != o.MinDiameterMm || before.MaxDiameterMm != o.MaxDiameterMm || before.AxisAngleTolDeg != o.AxisAngleTolDeg
+                        || before.AxisOffsetTolMm != o.AxisOffsetTolMm || before.CoaxialSpanTolMm != o.CoaxialSpanTolMm;
+            // 「不查的零件」只是筛选：已经查过就马上按新的筛一遍（不用为它再等十分钟重查）
+            if (checkedOnce) { Refilter(); ApplyFilter(); }
+            if (!checkedOnce) SetStatus("判定口径已改。", Ui.Ok);
+            else if (numbers) SetStatus("判定口径已改，点「重新检查」按新口径再查一遍（「不查的零件」已经按新的筛过了）。", Ui.Ok);
+            else SetStatus("已按新的「不查的零件」重新筛选：" + summary.Text + "　再点「重新检查」，被外购件挡住的支架漏孔 / 配错孔也会找出来。", Ui.Ok);
         }
 
         void Cleanup(){
