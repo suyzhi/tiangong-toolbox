@@ -38,6 +38,8 @@
     <Compile Include="../../src/Log.cs" />
     <Compile Include="../../src/PropCardData.cs" />
     <Compile Include="../../src/BatchRenameData.cs" />
+    <Compile Include="../../src/DrawingPlan.cs" />
+    <Compile Include="../../src/DrawingLayout.cs" />
     <Compile Include="../../src/BatchRenameScan.cs" />
     <Compile Include="../AutoHolePureTests.cs" />
     <Compile Include="../HoleCheckSpeedPureTests.cs" />
@@ -49,6 +51,7 @@
     <Compile Include="../RulesPatternPureTests.cs" />
     <Compile Include="../PropCardPureTests.cs" />
     <Compile Include="../BatchRenamePureTests.cs" />
+    <Compile Include="../DrawingPlanPureTests.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Stubs.cs" />
   </ItemGroup>
