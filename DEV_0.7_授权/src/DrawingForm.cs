@@ -31,7 +31,7 @@ namespace TianGongCadSuite {
             head.AutoSize = false; head.Height = 30; head.Font = Ui.F10B; head.ForeColor = Ui.Text; head.BackColor = Ui.Bg;
             body.Add(head);
             var hint = new Label { AutoSize = false, Height = 36, Font = Ui.F8, ForeColor = Ui.Muted, BackColor = Ui.Bg,
-                Text = "按公司模板（SK先惠 A4 / A3）出图：主视图 + 投影 + 轴测图，坐标尺寸、孔标注、圆角、刻字引线都标好，标题栏从零件属性自动带出。\r\n出完请看一眼「需要人工确认」那一列；双击一行打开那张图。" };
+                Text = "按公司模板（SK先惠 A4 / A3）出图：主视图 + 投影 + 轴测图，坐标尺寸、孔标注、圆角、刻字引线都标好，定位销孔加 H7 + 位置度（按公司图纸统计），标题栏从零件属性自动带出。\r\n出完请看一眼「需要人工确认」那一列；双击一行打开那张图。" };
             body.Add(hint);
             list.View = View.Details; list.CheckBoxes = true; list.FullRowSelect = true; list.GridLines = false; list.HideSelection = false;
             list.BorderStyle = BorderStyle.FixedSingle; list.Font = Ui.F9;

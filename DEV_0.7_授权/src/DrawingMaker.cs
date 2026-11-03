@@ -338,6 +338,7 @@ namespace TianGongCadSuite {
                 Count(o, rv); o.Covered += Covered(w.Ordinate(vr, rv, lay.Scale));
             }
             // 孔、圆角
+            int pinGroups = 0, pinCount = 0; var pins = new List<ModelHole>();
             foreach (var kv in views) {
                 if (kv.Key == DwgViewRole.Iso) continue;
                 var v = kv.Value; var e = edges[kv.Key];
@@ -365,10 +366,25 @@ namespace TianGongCadSuite {
                         string m = DrawingPlan.ThreadFromEdges(g.Leader, threads);
                         if (m.Length > 0) { val = m; DrawingText.ThreadOnly(m, mh, out suf, out sub); }
                     }
+                    // 定位销孔（没螺纹、没沉孔的 Ø4/5/6/8 光孔，DrawingTolerance）：加 H7 + 位置度框，文字下面多留一格放框
+                    // 视图里的圆没对上三维孔（HoleMap 偶尔整个视图对不上，02-010）时按直径在三维孔里找：同直径的孔全是光孔才算
+                    var pinHole = mh;
+                    if (pinHole == null && isHole) {
+                        var same = holes.Where(h => Math.Abs(h.Radius * 2000 - g.DiameterMm) < 0.02).ToList();
+                        if (same.Count > 0 && same.All(h => h.CbRadius <= 0 && (h.Spec == null || (h.Spec.Kind != HoleKind.Tapped && h.Spec.Kind != HoleKind.Counterbore && h.Spec.ThreadSize.Length == 0)))) pinHole = same[0];
+                    }
+                    bool cbore = pinHole != null && (pinHole.CbRadius > 0 || (pinHole.Spec != null && pinHole.Spec.Kind == HoleKind.Counterbore));
+                    bool pin = DrawingTolerance.IsPinHole(g.DiameterMm, isHole && pinHole != null, val.Length > 0, cbore || sub.Length > 0);
                     var ls = DwgWriter.ToSheet(v, g.Leader.Cx, g.Leader.Cy);
-                    string shown = pre + (val.Length > 0 ? val : "Ø" + g.DiameterMm.ToString("0.##")) + suf;
-                    var text = Spot(w, sbox, ls[1], shown, sub.Length > 0 ? 2 : 1, k);
-                    if (w.HoleCallout(v, g, pre, val, suf, sub, text)) { o.Covered++; o.HoleCallouts++; }
+                    string shown = pre + (val.Length > 0 ? val : "Ø" + g.DiameterMm.ToString("0.##")) + suf + (pin ? " H7(+0.012)" : "");
+                    var text = Spot(w, sbox, ls[1], shown, sub.Length > 0 ? 2 : 1, k, pin ? 0.006 : 0);
+                    if (w.HoleCallout(v, g, pre, val, suf, sub, text)) {
+                        o.Covered++; o.HoleCallouts++;
+                        if (pin && w.Fit(w.LastCallout, g.DiameterMm)) {
+                            pinGroups++; pinCount += g.Count; pins.Add(pinHole);
+                            w.Position(w.LastCallout);
+                        }
+                    }
                     k++;
                 }
                 bool sectionView = false; try { sectionView = v.DrawingViewType == D.DrawingViewTypeConstants.igXSectionView; } catch { }
@@ -406,12 +422,58 @@ namespace TianGongCadSuite {
                     if (w.Note(v, l, mx, my, DrawingPlan.ChamferText(g.Count, g.RadiusMm), text) != null) o.Covered++;
                 }
             }
+            // 销孔所在的面（装配时贴着别的零件、靠销定位的安装面）标 Ra3.2：在孔是侧面的那个视图里找过孔口的那条面线
+            bool rough = pins.Count > 0 && MatingFaces(w, views, edges, pins, range) > 0;
+            string tn = DrawingTolerance.Note(pinGroups, pinCount, rough);
+            if (tn.Length > 0) o.Notes.Insert(0, tn);
+        }
+
+        static int MatingFaces(DwgWriter w, Dictionary<DwgViewRole, D.DrawingView> views, Dictionary<DwgViewRole, List<DwgEdge>> edges, List<ModelHole> pins, double[] range){
+            var done = new HashSet<string>(); int n = 0;
+            foreach (var h in pins) {
+                if (h == null || h.Segments.Count == 0) continue;
+                // 开口那头（盲孔只有一头；通孔取 +轴 那头）
+                double t = !h.BlindHi ? h.Segments.Max(sg => sg.Hi) : h.Segments.Min(sg => sg.Lo);
+                var mouth = h.Point + h.Axis * t;
+                int ax = Math.Abs(h.Axis.X) > 0.9998 ? 0 : Math.Abs(h.Axis.Y) > 0.9998 ? 1 : Math.Abs(h.Axis.Z) > 0.9998 ? 2 : -1;
+                if (ax < 0) continue;
+                string key = ax + ":" + Math.Round(ax == 0 ? mouth.X : ax == 1 ? mouth.Y : mouth.Z, 5);
+                if (done.Contains(key)) continue;
+                foreach (var kv in views) {
+                    if (kv.Key == DwgViewRole.Iso || !edges.ContainsKey(kv.Key)) continue;
+                    try {
+                        V3 x, y, d; double ou, ov;
+                        if (!Frame(kv.Value, edges[kv.Key], range, out x, out y, out d, out ou, out ov)) continue;
+                        if (Math.Abs(h.Axis.Dot(d)) > 1e-3) continue;
+                        bool alongX = Math.Abs(h.Axis.Dot(x)) > 0.999, alongY = Math.Abs(h.Axis.Dot(y)) > 0.999;
+                        if (!alongX && !alongY) continue;
+                        double[] at;
+                        var face = DrawingTolerance.MouthFace(edges[kv.Key], alongX, mouth.Dot(x) + ou, mouth.Dot(y) + ov, h.Radius, out at);
+                        if (face == null) continue;
+                        if (w.Roughness(kv.Value, face, at, DrawingTolerance.MatingRoughness)) { done.Add(key); n++; }
+                        break;
+                    } catch (Exception e) { Log.Write("DrawingMatingFace", e); }
+                }
+            }
+            return n;
+        }
+
+        // 视图的屏幕轴（x 右、y 上、d 视线）和"模型坐标投影 → 视图坐标"的平移（零件投影外框对齐视图图元外框，同 HoleMap）
+        static bool Frame(D.DrawingView v, List<DwgEdge> edges, double[] range, out V3 x, out V3 y, out V3 d, out double ou, out double ov){
+            double dx, dy, dz, ux, uy, uz; D.ViewOrientationConstants k; v.ViewOrientation(out dx, out dy, out dz, out ux, out uy, out uz, out k);
+            d = new V3(dx, dy, dz).Unit(); x = new V3(ux, uy, uz).Unit(); y = d.Cross(x);
+            double pu = double.MaxValue, pv = double.MaxValue;
+            for (int i = 0; i < 8; i++) { var c = new V3(range[(i & 1) == 0 ? 0 : 3], range[(i & 2) == 0 ? 1 : 4], range[(i & 4) == 0 ? 2 : 5]); pu = Math.Min(pu, c.Dot(x)); pv = Math.Min(pv, c.Dot(y)); }
+            var box = DrawingPlan.Box(edges);
+            ou = box[0] - pu; ov = box[1] - pv;
+            return edges.Count > 0;
         }
         // 引线文字放哪：在视图旁边找一块空地（DwgSpace）；实在没有就按老办法往视图右上角叠
-        static double[] Spot(DwgWriter w, double[] sbox, double y, string text, int lines, int k){
-            double tw = DwgSpace.TextWidth(text) + 0.002, th = 0.0045 * lines;
+        // below：文字下面再留多高（放位置度框）
+        static double[] Spot(DwgWriter w, double[] sbox, double y, string text, int lines, int k, double below = 0){
+            double tw = DwgSpace.TextWidth(text) + 0.002, th = 0.0045 * lines + below;
             var r = w.Space == null ? null : w.Space.Place(sbox, y, tw, th);
-            if (r != null) return new[] { r[0], r[1] + 0.001 };
+            if (r != null) return new[] { r[0], r[1] + 0.001 + below };
             return new[] { sbox[2] + 0.006, sbox[3] - 0.004 - k * 0.008 };
         }
 

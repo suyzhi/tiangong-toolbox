@@ -85,7 +85,62 @@ namespace TianGongCadSuite {
             try { if (suffix.Length > 0) d.SuffixString = suffix; } catch { }
             try { if (subfix.Length > 0) d.SubfixString = subfix; } catch { }
             MoveText(d, textPos); Occupy(d);
+            LastCallout = d;
             return true;
+        }
+        public S.Dimension LastCallout;   // 刚建的孔标注（加公差、位置度框用）
+
+        // ---- 公差（0.11.1，规矩见 DrawingTolerance）----
+        // 孔标注加 H7，显示成「Ø6 H7(+0.012/0)」。和人图里的 H7 尺寸属性一模一样的设法（探针 7c）：
+        // 标准配合 = true + 孔公差带 H7 + 公差符号 H7 + 显示类型 ClassPlusMinus，上下偏差天工自己按标准算。
+        // 少了 PrimaryToleranceSymbol 图上只有 Ø6.6、偏差读不出（探针 7）。万一标准表算不出，就自己写 H7 的数值
+        public bool Fit(S.Dimension d, double diameterMm){
+            if (d == null) return false;
+            try {
+                d.UseStandardLimitAndFitTolerance = true;
+                d.HoleClassString = DrawingTolerance.PinFit;
+                d.PrimaryToleranceSymbol = DrawingTolerance.PinFit;
+                d.DisplayType = S.DimDispTypeConstants.igDimDisplayTypeClassPlusMinus;
+                string up = ""; try { up = d.PrimaryUpperTolerance ?? ""; } catch { }
+                if (up.Length == 0) {
+                    d.UseStandardLimitAndFitTolerance = false;
+                    d.PrimaryUpperTolerance = "+" + DrawingTolerance.H7Upper(diameterMm).ToString("0.000", System.Globalization.CultureInfo.InvariantCulture);
+                    d.PrimaryLowerTolerance = "0";
+                }
+                Occupy(d);
+                return true;
+            } catch (Exception e) { Notes.Add("Ø" + diameterMm + " 的 H7 没设上：" + e.Message); return false; }
+        }
+
+        // 位置度框：不带引线，紧贴在孔标注文字正下方（人图就这么放，普查 76% 的 H7 孔都有）。
+        // 天工 FeatureControlFrames.Add(x, y) 的 (x, y) 是框的中心（探针 7）；标注文字从文字点往右（或往左）排，所以按尺寸框在文字点哪边决定往哪边对齐
+        public bool Position(S.Dimension d){
+            if (d == null) return false;
+            try {
+                double kx, ky, kz; F.KeyPointType kt; int hh; d.GetKeyPoint(d.KeyPointCount - 1, out kx, out ky, out kz, out kt, out hh);
+                double a, b, c, e; d.Range(out a, out b, out c, out e);
+                const double fw = 0.0105, fh = 0.003;
+                bool right = c - kx >= kx - a;
+                double cx = right ? kx + 0.0005 + fw / 2 : kx - 0.0005 - fw / 2, cy = ky - 0.0045;
+                var f = ((S.FeatureControlFrames)sheet.FeatureControlFrames).Add(cx, cy, 0);
+                f.PrimaryFrame = DrawingTolerance.PositionFrame;
+                Created++;
+                if (Space != null) Space.Add(cx - fw / 2, cy - fh / 2, cx + fw / 2, cy + fh / 2);
+                Occupy(f);
+                return true;
+            } catch (Exception ex) { Failed++; Notes.Add("位置度框没加上：" + ex.Message); return false; }
+        }
+
+        // 粗糙度：挂在视图里那条面的线上（at = 视图坐标），写 Ra 值（天工把最小值也跟着设成一样，和人图读回的一致，探针 7）
+        public bool Roughness(D.DrawingView v, DwgEdge face, double[] at, string ra){
+            try {
+                var p = ToSheet(v, at[0], at[1]);
+                var s = ((S.SurfaceFinishSymbols)sheet.SurfaceFinishSymbols).AddByTerminator(Ref(v, face.Tag), p[0], p[1], 0, false);
+                try { s.SurfaceFinishSymbol = S.DimSurfTextureSymTypeConstants.igDimSurfaceFinishMachined; } catch { }
+                s.RoughnessValue = ra;
+                Created++; Occupy(s);
+                return true;
+            } catch (Exception ex) { Failed++; Notes.Add("粗糙度 Ra" + ra + " 没挂上：" + ex.Message); return false; }
         }
 
         public bool Radius(D.DrawingView v, RadiusGroup g, double[] textPos){
