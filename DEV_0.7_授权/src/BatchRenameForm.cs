@@ -12,6 +12,7 @@ namespace TianGongCadSuite {
     // 批量生成新名字三招：查找替换、前后加字、按模板（{原名} {序号} {任意属性}，比如 {图号}-{零件名称}）。
     // 选中两行以上 = 只改选中的；否则改筛出来的全部。同名工程图 / 显示配置自动跟着改（灰字行）。
     // 改名后装配、工程图里的引用一起改好（见 BatchRenameCad），不会断开。
+    // 表格右边是零件预览（PartPreview）：点一行看它长什么样，再决定叫什么。
     public sealed class BatchRenameForm : Form, IBusyTool {
         const string Title = "批量改名";
         const int ColNew = 2;
@@ -25,6 +26,7 @@ namespace TianGongCadSuite {
         readonly Label status = new Label();
         readonly Button run;
         readonly WizardShell shell = new WizardShell { StepCaption = false };
+        readonly PartPreview preview = new PartPreview();
         int stateFilter;   // 0 全部 / 1 要改名的 / 2 有问题的
         bool loading, busy;
         public bool Busy { get { return busy; } }
@@ -37,13 +39,14 @@ namespace TianGongCadSuite {
             status.Text = text; status.ForeColor = Ui.Muted; status.Refresh();
             try { Application.DoEvents(); } catch { }
         }
-        void BeginBusy(){ busy = true; Enabled = false; Cursor = Cursors.WaitCursor; pulse.Reset(); }
-        void EndBusy(){ busy = false; Enabled = true; Cursor = Cursors.Default; }
+        // 忙的时候预览放开文件：预览控件占着当前显示的文件，改名的进程改不动它
+        void BeginBusy(){ busy = true; Enabled = false; Cursor = Cursors.WaitCursor; pulse.Reset(); preview.Hold(true); }
+        void EndBusy(){ busy = false; Enabled = true; Cursor = Cursors.Default; preview.Hold(false); }
 
         public BatchRenameForm(F.Application application){
             app = application;
             cad = new BatchRenameCad(application);
-            Ui.Shell(this, Product.Title(Title), 1120, 680, 860, 480);
+            Ui.Shell(this, Product.Title(Title), 1440, 700, 860, 480);
             FormBorderStyle = FormBorderStyle.Sizable;
             Controls.Add(shell);
             var page = shell.AddPage(Title, Title, "");
@@ -100,6 +103,7 @@ namespace TianGongCadSuite {
             gridFrame.Padding = new Padding(2, 2, 2, 8);
             BuildGrid();
             gridFrame.Controls.Add(grid);
+            shell.AddHeader(page, PartPreview.Attach(gridFrame, preview, "rename.preview"));
             var legend = new Label { Text = "选中两行以上 = 只改选中的，否则改表里筛出来的全部　·　Ctrl+V 粘贴一列新名字（可从 Excel 复制）　·　Delete 恢复原名　·　黄底 = 要改名　灰字 = 跟着主文件改的同名工程图", AutoSize = false, Height = 18, Font = Ui.F8, ForeColor = Ui.Muted, BackColor = Ui.Bg };
             stack.Add(gridFrame, true); stack.Add(legend);
 
@@ -165,11 +169,21 @@ namespace TianGongCadSuite {
                 Refresh2();
             };
             grid.CellFormatting += OnFormat;
+            // 重建表格时（loading）当前格子会自己跳到第一行：不跟着预览（第一行常是总装配，要加载好几秒）；点了哪行才显示哪行
+            grid.CurrentCellChanged += (s, e) => { if (!loading) ShowPreview(); };
+            grid.CellClick += (s, e) => { if (e.RowIndex >= 0) ShowPreview(); };
             grid.KeyDown += (s, e) => {
                 if (e.Control && e.KeyCode == Keys.V) { Paste(); e.Handled = true; }
                 else if (e.KeyCode == Keys.Delete) { foreach (var r in SelectedRows()) r.Revert(); Refresh2(); e.Handled = true; }
             };
             grid.DataError += (s, e) => { e.ThrowException = false; };
+        }
+
+        // 当前行的文件显示在右边的预览里（跟着改名的工程图显示同名的零件 / 装配）
+        void ShowPreview(){
+            var c = grid.CurrentCell;
+            var r = c != null && c.RowIndex >= 0 && c.RowIndex < grid.Rows.Count ? grid.Rows[c.RowIndex].Tag as RenameRow : null;
+            preview.ShowFile(r == null ? "" : r.Path);
         }
 
         DataGridViewTextBoxColumn Column(string header, int width, bool readOnly){
@@ -468,6 +482,8 @@ namespace TianGongCadSuite {
             lastResult = result;
             if (result.Error.Length == 0) {
                 // 表里换成新名字（行还在，方便接着改）
+                // 预览跟着换到新名字（旧名字的文件已经不在了）
+                preview.Renamed(changed.ToDictionary(r => r.Path, r => r.NewPath, StringComparer.OrdinalIgnoreCase));
                 foreach (var r in changed) { r.Path = r.NewPath; r.Revert(); }
                 folderFiles.Clear();
                 Rebuild();
@@ -493,16 +509,23 @@ namespace TianGongCadSuite {
             // 只留 onlyUnder 文件夹里的文件（测试副本的装配还引用着副本外面的原件，绝不能碰）
             if (!string.IsNullOrEmpty(onlyUnder)) { string under = Path.GetFullPath(onlyUnder).TrimEnd('\\') + "\\"; rows.RemoveAll(r => !Path.GetFullPath(r.Path).StartsWith(under, StringComparison.OrdinalIgnoreCase)); SyncFollowers(); Rebuild(); }
             grid.ClearSelection();
+            // 预览先显示一个要改名的文件（用户点过一行就是这样）：预览控件占着它，改名时必须放开
+            var shown = rows.FirstOrDefault(x => x.Master == null && x.Locked.Length == 0 && !string.IsNullOrEmpty(find) && x.FileName.Contains(find));
+            if (shown != null) { foreach (DataGridViewRow g in grid.Rows) if (g.Tag == shown) { grid.CurrentCell = g.Cells[1]; break; } preview.TestShowNow(); }
+            string held = "PREVIEW " + preview.TestState() + "\n";
             if (!string.IsNullOrEmpty(find)) { findBox.Text = find; replaceBox.Text = replace ?? ""; ApplyReplace(); }
             if (!string.IsNullOrEmpty(template)) { templateBox.Text = template; ApplyTemplate(); }
             string before = status.Text + " | button=" + run.Text + " | followers=" + rows.Count(r => r.Master != null);
             var plan = string.Join(" ; ", rows.Where(r => r.Changed).Select(r => r.FileName + "→" + r.NewFileName).ToArray());
             RunRename();
             var res = lastResult;
-            return "CONFIRM " + lastConfirm.Replace("\r\n", " / ") + "\nloaded=" + loaded + " rows=" + rows.Count + " | " + before + "\nPLAN " + plan + "\nAFTER " + status.Text
+            return held + "CONFIRM " + lastConfirm.Replace("\r\n", " / ") + "\nloaded=" + loaded + " rows=" + rows.Count + " | " + before + "\nPLAN " + plan + "\nAFTER " + status.Text
                 + (res == null ? "" : "\nTIMING filter=" + res.FilterMs + " start=" + res.StartMs + " close=" + res.CloseMs + " scan=" + res.ScanMs + " apply=" + res.ApplyMs + " reopen=" + res.ReopenMs + " total=" + res.TotalMs + " scanned=" + res.Scanned + " skipped=" + res.Skipped + " error=" + res.Error.Replace("\r\n", " / ") + " warnings=" + string.Join(" / ", res.Warnings.ToArray()) + " reopened=" + string.Join(",", res.Reopened.ToArray()));
         }
         internal void TestClose(){ Close(); }
+        internal PartPreview TestPreview { get { return preview; } }
+        internal DataGridView TestGrid { get { return grid; } }
+        internal void TestLoad(){ quiet = true; LoadActive(); }
         internal void TestShot(string png){
             Application.DoEvents();
             using (var bmp = new Bitmap(Width, Height)) { DrawToBitmap(bmp, new Rectangle(0, 0, Width, Height)); bmp.Save(png); }

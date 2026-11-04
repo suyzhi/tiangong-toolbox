@@ -10,6 +10,7 @@ namespace TianGongCadSuite {
     //
     // 好用的三招：选一片格子 → 上面输入框填值 → 「填入」；从 Excel 复制一块 → Ctrl+V；选中 → Delete 清空。
     // 改过的格子标黄，文件里还没有的属性标灰；只写改过的文件（标准件、外购件不会被碰）。
+    // 表格右边是零件预览（PartPreview）：点一行看它长什么样，再决定填什么。
     public sealed class PropCardForm : Form, IBusyTool {
         static readonly Color EditedBg = Ui.WarnSoft;
         static readonly Color MissingBg = Ui.Subtle;
@@ -36,14 +37,15 @@ namespace TianGongCadSuite {
             status.Text = text; status.Refresh();
             try { Application.DoEvents(); } catch { }
         }
-        void BeginBusy(){ busy = true; Enabled = false; Cursor = Cursors.WaitCursor; pulse.Reset(); }
-        void EndBusy(){ busy = false; Enabled = true; Cursor = Cursors.Default; }
+        // 忙的时候预览放开文件：预览控件占着当前显示的文件，写属性会被它挡住
+        void BeginBusy(){ busy = true; Enabled = false; Cursor = Cursors.WaitCursor; pulse.Reset(); preview.Hold(true); }
+        void EndBusy(){ busy = false; Enabled = true; Cursor = Cursors.Default; preview.Hold(false); }
 
         public PropCardForm(F.Application application){
             app = application;
             cad = new PropCardCad(application);
             fields = PropCardFields.Load(SettingsFile.PathOf(PropCardFields.FileName));
-            Ui.Shell(this, Product.Title("属性卡填写"), 1120, 680, 860, 480);
+            Ui.Shell(this, Product.Title("属性卡填写"), 1440, 700, 860, 480);
             FormBorderStyle = FormBorderStyle.Sizable;
 
             // ---- 0.9.0「D」：侧栏放文件来源、筛选；正文上面一行"把选中的格子填成"，下面表格；底部写入 ----
@@ -107,6 +109,7 @@ namespace TianGongCadSuite {
             gridFrame.Padding = new Padding(2, 2, 2, 8);
             BuildGrid();
             gridFrame.Controls.Add(grid);
+            shell.AddHeader(page, PartPreview.Attach(gridFrame, preview, "propcard.preview"));
             var legend = new Label { Text = "黄底 = 改过还没写入　灰底 = 文件里还没有这个属性", AutoSize = false, Height = 18, Font = Ui.F8, ForeColor = Ui.Muted, BackColor = Ui.Bg };
             stack.Add(bar); stack.Add(gridFrame, true); stack.Add(legend);
 
@@ -123,6 +126,7 @@ namespace TianGongCadSuite {
             UpdateStatus();
         }
         readonly WizardShell shell = new WizardShell { StepCaption = false };
+        readonly PartPreview preview = new PartPreview();
         int stateFilter;   // 0 全部 / 1 改过未写入 / 2 缺属性 / 3 读取出错
         bool Missing(PropCardRow r){ foreach (var f in fields) if (!r.Has(f)) return true; return false; }
 
@@ -163,11 +167,21 @@ namespace TianGongCadSuite {
                 UpdateStatus();
             };
             grid.CellFormatting += OnFormat;
+            // 重建表格时（loading）当前格子会自己跳到第一行：不跟着预览（第一行常是总装配，要加载好几秒）；点了哪行才显示哪行
+            grid.CurrentCellChanged += (s, e) => { if (!loading) ShowPreview(); };
+            grid.CellClick += (s, e) => { if (e.RowIndex >= 0) ShowPreview(); };
             grid.KeyDown += (s, e) => {
                 if (e.Control && e.KeyCode == Keys.V) { Paste(); e.Handled = true; }
                 else if (e.KeyCode == Keys.Delete) { SetSelected(""); e.Handled = true; }
             };
             grid.DataError += (s, e) => { e.ThrowException = false; };
+        }
+
+        // 当前行的文件显示在右边的预览里
+        void ShowPreview(){
+            var c = grid.CurrentCell;
+            var r = c != null && c.RowIndex >= 0 && c.RowIndex < grid.Rows.Count ? grid.Rows[c.RowIndex].Tag as PropCardRow : null;
+            preview.ShowFile(r == null ? "" : r.Path);
         }
 
         // ---------- 载入 ----------
@@ -444,15 +458,21 @@ namespace TianGongCadSuite {
             for (int i = 0; i < grid.Columns.Count; i++) if ((string)grid.Columns[i].Tag == field) col = i;
             if (col < 0) return "no column " + field;
             grid.ClearSelection();
+            // 预览先显示第一行（用户点过一行就是这样）：预览控件占着这个文件，写属性时必须放开
+            if (grid.Rows.Count > 0) { grid.CurrentCell = grid.Rows[0].Cells[0]; preview.TestShowNow(); }
+            string held = "PREVIEW " + preview.TestState() + " | ";
+            grid.ClearSelection();
             for (int i = 0; i < rowCount && i < grid.Rows.Count; i++) grid.Rows[i].Cells[col].Selected = true;
             quiet = true;
             fillBox.Text = value;
             SetSelected(value);
             string before = status.Text + " | button=" + write.Text;
             WriteAll();
-            return "rows=" + rows.Count + " | " + before + " | after: " + status.Text + " | problems: " + string.Join(" ; ", lastProblems.ToArray());
+            return held + "rows=" + rows.Count + " | " + before + " | after: " + status.Text + " | problems: " + string.Join(" ; ", lastProblems.ToArray());
         }
         internal void TestForceClose(){ forceClose = true; Close(); }
+        internal PartPreview TestPreview { get { return preview; } }
+        internal DataGridView TestGrid { get { return grid; } }
         // 截图用：改几格，让黄色 / 灰色都出现
         internal void TestEditSome(){
             for (int i = 0; i < 3 && i < grid.Rows.Count; i++) SetCell(grid.Rows[i], FixedColumns, "示例零件" + (i + 1));

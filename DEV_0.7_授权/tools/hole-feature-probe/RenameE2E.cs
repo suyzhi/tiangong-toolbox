@@ -59,6 +59,8 @@ class RenameE2E {
             else if (mode == "dirty") DirtyRun(dir);
             else if (mode == "stale") StaleRun(dir);
             else if (mode == "propcard") PropCardRun(dir, args.Length > 3 ? args[3] : Asm);
+            else if (mode == "preview") PreviewRun(args[0], dir, args.Length > 3 ? args[3] : Asm);
+            else if (mode == "previewshot") PreviewShotRun(args[0], dir, args.Length > 3 ? args[3] : Asm);
             else if (mode == "sibling") SiblingRun(dir, args.Length > 3 ? args[3] : "");
             else if (mode == "generic") GenericRun(dir, args[3], args[4], args[5]);
         } catch (Exception e) { L("FAIL 异常 " + e); fails++; }
@@ -358,6 +360,53 @@ class RenameE2E {
             Check(m.Success && m.Groups[1].Value == m.Groups[2].Value && int.Parse(m.Groups[1].Value) > 50, "第 " + round + " 轮全部写好（" + (m.Success ? m.Value : "没找到") + "）");
             Check(!r.Contains("problems: ") || r.TrimEnd().EndsWith("problems:"), "第 " + round + " 轮没有失败的文件");
             Check(dialogs.Count == before, "第 " + round + " 轮没有弹对话框");
+        }
+    }
+
+    // 0.11.3 零件预览：开着装配（加密副本），批量改名 / 属性卡窗口各点 8 行 —— 每行都显示得出来、不弹框、切走窗口后放开文件；截图在输出目录
+    static void PreviewRun(string outDir, string dir, string asmName){
+        Open(Path.Combine(dir, asmName));
+        foreach (var kind in new[] { "rename", "propcard" }) {
+            int before = dialogs.Count;
+            diag.StartPreviewFormTest(kind, outDir, 8);
+            string r = Wait(10);
+            L(r);
+            var lines = r.Split('\n').Where(x => x.StartsWith(kind + "-")).ToList();
+            Check(lines.Count == 8, kind + "：点了 8 行（" + lines.Count + "）");
+            // 装配开着时零件文件天工自己也占着，所以 heldAfterDeactivate 只记下来看，放没放开由 main 模式（真改名）验
+            Check(lines.All(x => x.Contains(" loaded=") && !x.Contains(" loaded= ")), kind + "：每行都显示出来了");
+            Check(dialogs.Count == before, kind + "：没有弹对话框");
+        }
+    }
+
+    // 预览停在某一行，从本进程（别的进程）截窗口：进程内 PrintWindow 截不到三维窗口，看不出天工里到底画没画出来
+    [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint f);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+    struct RECT { public int L, T, R, B; }
+    static void PreviewShotRun(string outDir, string dir, string asmName){
+        Open(Path.Combine(dir, asmName));
+        foreach (var job in new[] { "rename|18", "rename|0", "propcard|36" }) {
+            var kv = job.Split('|');
+            diag.StartPreviewHold(kv[0], int.Parse(kv[1]));
+            string r = Wait(5);
+            L(kv[0] + " " + kv[1] + ": " + r);
+            Idle(20);
+            var m = System.Text.RegularExpressions.Regex.Match(r, @"hwnd=(\d+)");
+            if (m.Success) {
+                var h = new IntPtr(long.Parse(m.Groups[1].Value)); RECT rc; GetWindowRect(h, out rc);
+                using (var bmp = new System.Drawing.Bitmap(rc.R - rc.L, rc.B - rc.T)) {
+                    using (var g = System.Drawing.Graphics.FromImage(bmp)) { IntPtr dc = g.GetHdc(); PrintWindow(h, dc, 2); g.ReleaseHdc(dc); }
+                    bmp.Save(Path.Combine(outDir, "outside-" + kv[0] + "-" + kv[1] + ".png"));
+                }
+                // 在用户的真桌面上跑时再从屏幕拷一张（硬件画的三维窗口 PrintWindow 截不到）
+                SetForegroundWindow(h); Idle(10);
+                using (var bmp = new System.Drawing.Bitmap(rc.R - rc.L, rc.B - rc.T)) {
+                    try { using (var g = System.Drawing.Graphics.FromImage(bmp)) g.CopyFromScreen(rc.L, rc.T, 0, 0, bmp.Size); bmp.Save(Path.Combine(outDir, "screen-" + kv[0] + "-" + kv[1] + ".png")); }
+                    catch (Exception e) { L("screen shot: " + e.Message); }
+                }
+            }
+            diag.StartCloseForms(); L("close: " + Wait(2)); Idle(10);
         }
     }
 

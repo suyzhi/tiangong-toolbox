@@ -150,6 +150,34 @@ diagnostics=new Diagnostics(context.Application,()=>Run(registry.Find(1)),()=>Ru
         // 0.10.0 批量改名：窗口真实路径（载入当前文档 → 查找替换 / 模板 → 改名），在 CAD 自己的消息循环里跑，跑完读 Result
         public void StartRenameFormTest(string find,string replace,string template,string onlyUnder,bool answer){Result="";dispatcher.BeginInvoke((Action)(()=>{
             try{var form=new BatchRenameForm(Host);try{form.Show();Result=form.TestRun(find,replace,template,onlyUnder,answer);}finally{form.TestClose();}}catch(Exception e){Result="EXC "+e;}}));}
+        // 0.11.3 零件预览：打开批量改名 / 属性卡窗口（载入当前文档），隔着取 count 行逐个点，截图 + 记加载耗时、预览占没占着文件、切走窗口后放没放开
+        public void StartPreviewFormTest(string kind,string outDir,int count){Result="";dispatcher.BeginInvoke((Action)(()=>{try{Result=PreviewFormTest(kind,outDir,count);}catch(Exception e){Result="EXC "+e;}}));}
+        string PreviewFormTest(string kind,string outDir,int count){
+            var sb=new System.Text.StringBuilder();System.Windows.Forms.Form form;PartPreview pv;System.Windows.Forms.DataGridView grid;
+            if(kind=="rename"){var f=new BatchRenameForm(Host);form=f;f.Show();f.TestLoad();pv=f.TestPreview;grid=f.TestGrid;}
+            else{var f=new PropCardForm(Host);form=f;f.Show();f.LoadActive();pv=f.TestPreview;grid=f.TestGrid;}
+            try{
+                sb.Append("rows="+grid.Rows.Count+"\n");
+                int step=Math.Max(1,grid.Rows.Count/Math.Max(1,count));
+                for(int i=0,n=0;i<grid.Rows.Count&&n<count;i+=step,n++){
+                    grid.CurrentCell=grid.Rows[i].Cells[1];
+                    var sw=System.Diagnostics.Stopwatch.StartNew();pv.TestShowNow();long ms=sw.ElapsedMilliseconds-400;
+                    string file=pv.LoadedFile;pv.TestShot(System.IO.Path.Combine(outDir,kind+"-"+n+".png"));
+                    bool held=file.Length>0&&Locked(file);string state=pv.TestState();pv.TestDeactivate();bool after=file.Length>0&&Locked(file);
+                    if(n<2){System.Windows.Forms.Application.DoEvents();pv.TestShot(System.IO.Path.Combine(outDir,kind+"-"+n+"-released.png"));}
+                    sb.Append(kind+"-"+n+" row="+i+" ms="+ms+" heldWhileShown="+held+" heldAfterDeactivate="+after+" "+state+"\n");
+                }
+            }finally{if(form is PropCardForm)((PropCardForm)form).TestForceClose();else((BatchRenameForm)form).TestClose();}
+            return sb.ToString();
+        }
+        // 窗口开着、预览停在第 row 行，不关（截图要从别的进程截：进程内 PrintWindow 截不到三维窗口）；收尾用 StartCloseForms
+        public void StartPreviewHold(string kind,int row){Result="";dispatcher.BeginInvoke((Action)(()=>{try{
+            System.Windows.Forms.Form form;PartPreview pv;System.Windows.Forms.DataGridView grid;
+            if(kind=="rename"){var f=new BatchRenameForm(Host);form=f;f.Show();f.TestLoad();pv=f.TestPreview;grid=f.TestGrid;}
+            else{var f=new PropCardForm(Host);form=f;f.Show();f.LoadActive();pv=f.TestPreview;grid=f.TestGrid;}
+            grid.CurrentCell=grid.Rows[Math.Min(row,grid.Rows.Count-1)].Cells[1];pv.TestShowNow();
+            Result="hwnd="+form.Handle.ToInt64()+" "+pv.TestState();}catch(Exception e){Result="EXC "+e;}}));}
+        static bool Locked(string f){try{using(new System.IO.FileStream(f,System.IO.FileMode.Open,System.IO.FileAccess.Read,System.IO.FileShare.None)){}return false;}catch(System.IO.IOException){return true;}}
         // 初筛核对：文件夹里每个文件，按字节找出来的名字 vs 设计管理器列出来的链接 —— 漏一个就是 bug
         public void StartRenameFilterAudit(string folder){Result="";dispatcher.BeginInvoke((Action)(()=>{try{Result=RenameFilterAudit(folder);}catch(Exception e){Result="EXC "+e;}}));}
         string RenameFilterAudit(string folder){
