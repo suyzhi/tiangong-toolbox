@@ -17,7 +17,9 @@ namespace TianGongCadSuite {
     //   * 控件原生是中键拖动旋转、Shift+中键平移、Ctrl+中键缩放，左键 / 右键不响应：左键拖动换成中键交给它；
     //   * 工程图（.dft）显示不出来（控件保持上一个文件），改成显示同名的零件 / 装配，没有就提示；显示配置（.cfg）显示同名装配；
     //   * 文件不在了控件也不报错、只显示空白，所以先查文件在不在；
-    //   * 换文件后视角沿用上一个，所以新文件一律回到等轴测再「适合」；同一个文件重新显示（切窗口回来）不动视角。
+    //   * 换文件后视角沿用上一个，所以新文件一律回到等轴测再「适合」；同一个文件重新显示（切窗口回来）不动视角；
+    //   * 有的装配控件一片空白（焊接台车里的「聚氧模组侧向支撑子装配」，零部件单独都画得出）：装配显示后从屏幕读一次预览区，
+    //     只剩背景渐变就改用天工里开着的这个装配自己画（PreviewMesh + MeshView），文件里没有存缩略图可用。
     public sealed class PartPreview : Panel {
         const string Clsid = "7f0aa8a5-3928-4b4b-ae60-4e3c1e331103";   // SEPREVIEW.SEPreviewCtrl.1
 
@@ -54,6 +56,12 @@ namespace TianGongCadSuite {
         readonly PictureBox still = new PictureBox();
         readonly Timer debounce = new Timer { Interval = 160 };
         readonly Timer settle = new Timer { Interval = 120 };
+        readonly Timer check = new Timer { Interval = 700 };   // 装配显示后多久读屏判断画没画出来
+        public SolidEdgeFramework.Application App;            // 兜底自己画时从这里找开着的装配
+        MeshView meshView;
+        string meshPath = "";                                  // 正在自己画的装配
+        readonly System.Collections.Generic.HashSet<string> blankAsm = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        readonly System.Collections.Generic.Dictionary<string, PreviewMesh> meshes = new System.Collections.Generic.Dictionary<string, PreviewMesh>(StringComparer.OrdinalIgnoreCase);
         Host host;
         bool broken;          // 控件建不出来（没装 / 天工版本不同）：只显示提示
         string row = "";      // 表里选中的那一行的文件
@@ -64,6 +72,7 @@ namespace TianGongCadSuite {
         int fits;
         bool busy, inactive;
         bool pinned;          // 测试用：私有桌面上窗口总被判成"没激活"，钉住才看得到真实显示
+        bool forceEmpty;      // 测试用：私有桌面上读不了屏（CopyFromScreen 报句柄无效），强制当成"没画出来"测兜底
         Form owner;
 
         public PartPreview(){
@@ -92,7 +101,11 @@ namespace TianGongCadSuite {
             view.Controls.Add(hint); view.Controls.Add(still);
             Controls.Add(view); Controls.Add(tip); Controls.Add(bar); Controls.Add(title);
             debounce.Tick += (s, e) => { debounce.Stop(); Apply(); };
-            settle.Tick += (s, e) => { settle.Stop(); if (loaded.Length == 0) return; SetView("Iso"); lastShown = loaded; };
+            settle.Tick += (s, e) => {
+                settle.Stop(); if (loaded.Length == 0) return; SetView("Iso"); lastShown = loaded;
+                if (string.Equals(Path.GetExtension(loaded), ".asm", StringComparison.OrdinalIgnoreCase)) { check.Stop(); check.Start(); }
+            };
+            check.Tick += (s, e) => { check.Stop(); CheckDrawn(); };
             Say("点表里的一行，这里显示它的三维模型");
         }
 
@@ -149,7 +162,7 @@ namespace TianGongCadSuite {
             if (!Visible) { debounce.Stop(); Release(); } else Kick();
         }
         protected override void Dispose(bool disposing){
-            if (disposing) { debounce.Dispose(); settle.Dispose(); Release(); if (host != null) { try { host.Dispose(); } catch { } host = null; } }
+            if (disposing) { debounce.Dispose(); settle.Dispose(); check.Dispose(); Release(); if (host != null) { try { host.Dispose(); } catch { } host = null; } }
             base.Dispose(disposing);
         }
 
@@ -175,6 +188,7 @@ namespace TianGongCadSuite {
             if (busy || inactive || !Visible || IsDisposed) return;
             if (wanted.Length == 0) { Release(); Say(wantedNote.Length > 0 ? wantedNote : "点表里的一行，这里显示它的三维模型"); return; }
             if (!File.Exists(wanted)) { Release(); Say("文件不在了：\r\n" + wanted); return; }
+            if (blankAsm.Contains(wanted)) { ShowMesh(wanted); return; }   // 已经知道控件画不出来的装配：直接自己画
             if (!EnsureHost()) return;
             if (string.Equals(loaded, wanted, StringComparison.OrdinalIgnoreCase)) { Reveal(); return; }
             var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -257,23 +271,87 @@ namespace TianGongCadSuite {
             return distinct < 3;
         }
 
+        // 装配显示后读一次屏：预览区只剩背景渐变（每一行颜色都一样）= 控件没画出来 → 自己画
+        void CheckDrawn(){
+            if (host == null || !host.Visible || loaded.Length == 0 || busy || inactive) return;
+            string file = loaded;
+            bool empty = forceEmpty;
+            if (!empty) try {
+                using (var bmp = new Bitmap(host.Width, host.Height)) {
+                    using (var g = Graphics.FromImage(bmp)) g.CopyFromScreen(host.PointToScreen(Point.Empty), Point.Empty, host.Size);
+                    empty = NothingDrawn(bmp);
+                }
+            } catch (Exception e) { Log.Write("PartPreview", "check " + e.Message); return; }
+            if (!empty) return;
+            Log.Write("PartPreview", "control drew nothing, drawing it ourselves: " + file);
+            blankAsm.Add(file);
+            ShowMesh(file);
+        }
+        internal static bool NothingDrawn(Bitmap b){
+            if (b.Width < 8 || b.Height < 8) return false;
+            int busyRows = 0;
+            for (int y = 2; y < 40; y++) {
+                int py = b.Height * y / 42;
+                var first = b.GetPixel(2, py);
+                for (int x = 1; x < 40; x++) {
+                    var c = b.GetPixel(2 + (b.Width - 5) * x / 40, py);
+                    if (Math.Abs(c.R - first.R) + Math.Abs(c.G - first.G) + Math.Abs(c.B - first.B) > 12) { busyRows++; break; }
+                }
+            }
+            return busyRows <= 1;
+        }
+
+        // 用天工里开着的装配自己画（不占文件）
+        void ShowMesh(string file){
+            check.Stop(); settle.Stop();
+            if (host != null && loaded.Length > 0) { try { Set(host.Ocx, "Filename", ""); } catch { } loaded = ""; }
+            PreviewMesh mesh;
+            if (!meshes.TryGetValue(file, out mesh)) {
+                var asm = PreviewMesh.Find(App, file);
+                if (asm == null) { Say("天工的预览控件画不出这个装配。\r\n在天工里打开它（或载入用到它的总装配）后再点这一行，插件会用天工里的模型画出来。"); return; }
+                Say("天工的预览控件画不出这个装配，\r\n正在用天工里的模型画…"); hint.Refresh();
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                Cursor = Cursors.WaitCursor;
+                try { mesh = PreviewMesh.Build(asm, null); }
+                catch (Exception e) { Log.Write("PartPreview", "mesh " + e); Say("这个装配画不出来：" + e.Message); return; }
+                finally { Cursor = Cursors.Default; }
+                Log.Write("PartPreview", "mesh " + mesh.Parts + " parts " + mesh.Triangles + " triangles " + sw.ElapsedMilliseconds + "ms " + file);
+                if (meshes.Count > 4) meshes.Clear();
+                meshes[file] = mesh;
+            }
+            if (mesh.Triangles == 0) { Say("这个装配里没有读到能画的零件"); return; }
+            if (meshView == null) { meshView = new MeshView { Dock = DockStyle.Fill }; view.Controls.Add(meshView); }
+            if (!string.Equals(meshPath, file, StringComparison.OrdinalIgnoreCase)) meshView.Mesh = mesh;
+            meshPath = file;
+            meshView.Visible = true; meshView.BringToFront();
+            hint.Visible = false; still.Visible = false;
+            if (host != null) host.Visible = false;
+            string name = row.Length > 0 ? Path.GetFileName(row) : Path.GetFileName(file);
+            title.Text = name + "　（预览控件画不出，按天工里的模型画）";
+        }
+        bool MeshShown { get { return meshView != null && meshView.Visible; } }
+
         void Reveal(){
+            if (meshView != null) meshView.Visible = false;
             host.Visible = true; host.BringToFront();
             still.Visible = false;
             hint.Visible = false;
         }
         void Say(string text){
+            if (meshView != null) meshView.Visible = false;
             hint.Text = text; hint.Visible = true; hint.BringToFront();
             still.Visible = false;
             if (host != null) host.Visible = false;
         }
 
         void SetView(string type){
+            if (MeshShown) { meshView.SetView(type); return; }
             if (host == null || loaded.Length == 0) return;
             try { Set(host.Ocx, "ViewType", type); } catch (Exception e) { Log.Write("PartPreview", "view " + e.Message); }
             FitView();
         }
         void FitView(){
+            if (MeshShown) { meshView.Fit(); return; }
             if (host == null || loaded.Length == 0) return;
             try { Call(host.Ocx, "Fit"); fits++; } catch (Exception e) { Log.Write("PartPreview", "fit " + e.Message); return; }
             // 控件的「适合」是贴边的（零件两头顶着窗口边、一点不留），再缩小一点留出边：
@@ -302,7 +380,10 @@ namespace TianGongCadSuite {
             var sw = System.Diagnostics.Stopwatch.StartNew();
             while (sw.ElapsedMilliseconds < 400) { Application.DoEvents(); System.Threading.Thread.Sleep(10); }
         }
+        internal string TestMeshState(){ return MeshShown ? "mesh " + meshView.Mesh.Parts + " parts " + meshView.Mesh.Triangles + " tris" : "no mesh"; }
+        internal void TestMeshSave(string png, double daz){ if (!MeshShown) return; if (daz != 0) meshView.TestRotate(daz, 0); meshView.TestSave(png); }
         internal void TestCommand(string cmd){
+            if (cmd == "forceempty") { forceEmpty = true; return; }
             if (host == null) return;
             if (cmd == "zoomout" || cmd == "zoomin") {
                 var c = host.PointToScreen(new Point(host.Width / 2, host.Height / 2));   // WM_MOUSEWHEEL 的坐标是屏幕坐标

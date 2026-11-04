@@ -46,6 +46,7 @@ namespace TianGongCadSuite {
         public BatchRenameForm(F.Application application){
             app = application;
             cad = new BatchRenameCad(application);
+            preview.App = application;
             Ui.Shell(this, Product.Title(Title), 1440, 700, 860, 480);
             FormBorderStyle = FormBorderStyle.Sizable;
             Controls.Add(shell);

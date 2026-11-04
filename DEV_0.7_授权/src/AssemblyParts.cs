@@ -172,7 +172,7 @@ namespace TianGongCadSuite {
         // 钣金件（.psm）：原来 as PartDocument 是 null，整个跳过 —— 钣金上的孔不查，钣金也永远不会被报成"漏打孔的那个零件"
         // （用户的 OK310 围栏里就有十几个钣金件）。配孔检查只用它的实体、位置和引用，Part 留空
         static bool IsSheet(object doc){ return doc is P.SheetMetalDocument; }
-        static List<G.Body> SheetBodies(object doc, string name, List<string> warnings){
+        internal static List<G.Body> SheetBodies(object doc, string name, List<string> warnings){
             var list = new List<G.Body>();
             try {
                 var models = ((P.SheetMetalDocument)doc).Models;
@@ -180,7 +180,7 @@ namespace TianGongCadSuite {
             } catch (Exception e) { Warn(warnings, name + " 读取钣金实体失败：" + e.Message); }
             return list;
         }
-        static List<G.Body> BodiesOf(P.PartDocument part, string name, List<string> warnings){
+        internal static List<G.Body> BodiesOf(P.PartDocument part, string name, List<string> warnings){
             var list = new List<G.Body>();
             try {
                 foreach (var m in PartBodies.All(part)) { var b = PartBodies.Body(m); if (b != null) list.Add(b); }

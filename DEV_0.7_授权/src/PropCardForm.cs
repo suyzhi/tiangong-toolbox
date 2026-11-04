@@ -44,6 +44,7 @@ namespace TianGongCadSuite {
         public PropCardForm(F.Application application){
             app = application;
             cad = new PropCardCad(application);
+            preview.App = application;
             fields = PropCardFields.Load(SettingsFile.PathOf(PropCardFields.FileName));
             Ui.Shell(this, Product.Title("属性卡填写"), 1440, 700, 860, 480);
             FormBorderStyle = FormBorderStyle.Sizable;
