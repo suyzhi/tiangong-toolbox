@@ -60,6 +60,7 @@ class RenameE2E {
             else if (mode == "stale") StaleRun(dir);
             else if (mode == "propcard") PropCardRun(dir, args.Length > 3 ? args[3] : Asm);
             else if (mode == "preview") PreviewRun(args[0], dir, args.Length > 3 ? args[3] : Asm);
+            else if (mode == "previewfiles") PreviewFilesRun(args[0], args.Skip(2).ToArray());
             else if (mode == "previewshot") PreviewShotRun(args[0], dir, args.Length > 3 ? args[3] : Asm);
             else if (mode == "sibling") SiblingRun(dir, args.Length > 3 ? args[3] : "");
             else if (mode == "generic") GenericRun(dir, args[3], args[4], args[5]);
@@ -408,6 +409,32 @@ class RenameE2E {
             }
             diag.StartCloseForms(); L("close: " + Wait(2)); Idle(10);
         }
+    }
+
+    // 一组文件逐个放进预览探针窗口，1 秒、5 秒各从屏幕截一张（要在用户真桌面上跑）；"OPEN:路径" = 先在天工里打开它
+    static void PreviewFilesRun(string outDir, string[] files){
+        int k = 0;
+        foreach (var f0 in files) {
+            if (f0.StartsWith("OPEN:")) { Open(f0.Substring(5)); L("opened " + f0.Substring(5)); continue; }
+            k++;
+            diag.StartPreviewFile(f0);
+            string r = Wait(2);
+            L(k + " " + Path.GetFileName(f0) + ": " + r);
+            var m = System.Text.RegularExpressions.Regex.Match(r, @"hwnd=(\d+)");
+            if (!m.Success) continue;
+            var h = new IntPtr(long.Parse(m.Groups[1].Value));
+            foreach (var wait in new[] { 1, 5 }) {
+                var until = DateTime.Now.AddSeconds(wait == 1 ? 1 : 4);
+                while (DateTime.Now < until) Idle(2);
+                SetForegroundWindow(h); Idle(4);
+                RECT rc; GetWindowRect(h, out rc);
+                using (var bmp = new System.Drawing.Bitmap(rc.R - rc.L, rc.B - rc.T)) {
+                    try { using (var g = System.Drawing.Graphics.FromImage(bmp)) g.CopyFromScreen(rc.L, rc.T, 0, 0, bmp.Size); bmp.Save(Path.Combine(outDir, "file" + k + "-" + wait + "s.png")); }
+                    catch (Exception e) { L("screen shot: " + e.Message); }
+                }
+            }
+        }
+        diag.StartPreviewFile(""); Wait(2);
     }
 
     // ---------- 对话框监视：这个桌面上冒出来的 #32770 都记下来，点默认按钮 ----------

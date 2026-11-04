@@ -302,6 +302,13 @@ namespace TianGongCadSuite {
             var sw = System.Diagnostics.Stopwatch.StartNew();
             while (sw.ElapsedMilliseconds < 400) { Application.DoEvents(); System.Threading.Thread.Sleep(10); }
         }
+        internal void TestCommand(string cmd){
+            if (host == null) return;
+            if (cmd == "zoomout" || cmd == "zoomin") {
+                var c = host.PointToScreen(new Point(host.Width / 2, host.Height / 2));   // WM_MOUSEWHEEL 的坐标是屏幕坐标
+                for (int i = 0; i < 3; i++) SendMessage(host.Handle, 0x020A, (IntPtr)((cmd == "zoomin" ? 120 : -120) << 16), (IntPtr)((c.Y << 16) | (c.X & 0xFFFF)));
+            } else SetView(cmd);
+        }
         internal void TestDeactivate(){ inactive = true; debounce.Stop(); Release(); }
         internal string LoadedFile { get { return loaded; } }
         internal void TestShot(string png){

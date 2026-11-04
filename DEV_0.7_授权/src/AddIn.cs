@@ -177,6 +177,14 @@ diagnostics=new Diagnostics(context.Application,()=>Run(registry.Find(1)),()=>Ru
             else{var f=new PropCardForm(Host);form=f;f.Show();f.LoadActive();pv=f.TestPreview;grid=f.TestGrid;}
             grid.CurrentCell=grid.Rows[Math.Min(row,grid.Rows.Count-1)].Cells[1];pv.TestShowNow();
             Result="hwnd="+form.Handle.ToInt64()+" "+pv.TestState();}catch(Exception e){Result="EXC "+e;}}));}
+        // 任意文件放进一个只有预览的窗口里显示（总装配预览是空的：比加密 / 明文、开没开着、等多久）；path 为空 = 关掉
+        static System.Windows.Forms.Form previewProbeForm;static PartPreview previewProbe;
+        public void StartPreviewFile(string path){Result="";dispatcher.BeginInvoke((Action)(()=>{try{
+            if(string.IsNullOrEmpty(path)){if(previewProbeForm!=null)previewProbeForm.Close();previewProbeForm=null;Result="closed";return;}
+            if(previewProbeForm==null||previewProbeForm.IsDisposed){previewProbeForm=new System.Windows.Forms.Form{Width=560,Height=560,Text="预览探针",TopMost=true,StartPosition=System.Windows.Forms.FormStartPosition.CenterScreen};previewProbe=new PartPreview{Dock=System.Windows.Forms.DockStyle.Fill};previewProbeForm.Controls.Add(previewProbe);previewProbeForm.Show();}
+            if(path.StartsWith("!")){previewProbe.TestCommand(path.Substring(1));Result="hwnd="+previewProbeForm.Handle.ToInt64()+" cmd "+path;return;}
+            var sw=System.Diagnostics.Stopwatch.StartNew();previewProbe.ShowFile(path);previewProbe.TestShowNow();
+            Result="hwnd="+previewProbeForm.Handle.ToInt64()+" ms="+(sw.ElapsedMilliseconds-400)+" "+previewProbe.TestState();}catch(Exception e){Result="EXC "+e;}}));}
         static bool Locked(string f){try{using(new System.IO.FileStream(f,System.IO.FileMode.Open,System.IO.FileAccess.Read,System.IO.FileShare.None)){}return false;}catch(System.IO.IOException){return true;}}
         // 初筛核对：文件夹里每个文件，按字节找出来的名字 vs 设计管理器列出来的链接 —— 漏一个就是 bug
         public void StartRenameFilterAudit(string folder){Result="";dispatcher.BeginInvoke((Action)(()=>{try{Result=RenameFilterAudit(folder);}catch(Exception e){Result="EXC "+e;}}));}
