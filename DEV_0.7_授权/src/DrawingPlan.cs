@@ -99,12 +99,28 @@ namespace TianGongCadSuite {
         // 圆弧上会撑大外框的点：两个端点 + 落在扫过范围里的四个象限点
         static IEnumerable<double[]> ArcExtremes(DwgEdge a){
             yield return new[] { a.X1, a.Y1 }; yield return new[] { a.X2, a.Y2 };
-            double s = Math.Atan2(a.Y1 - a.Cy, a.X1 - a.Cx), sweep = a.Sweep;
             for (int q = 0; q < 4; q++) {
-                double ang = q * Math.PI / 2, d = ang - s;
-                if (sweep >= 0) { while (d < 0) d += 2 * Math.PI; if (d <= sweep + 1e-9) yield return new[] { a.Cx + a.R * Math.Cos(ang), a.Cy + a.R * Math.Sin(ang) }; }
-                else { while (d > 0) d -= 2 * Math.PI; if (d >= sweep - 1e-9) yield return new[] { a.Cx + a.R * Math.Cos(ang), a.Cy + a.R * Math.Sin(ang) }; }
+                double ang = q * Math.PI / 2;
+                if (OnArcAngle(a, ang)) yield return new[] { a.Cx + a.R * Math.Cos(ang), a.Cy + a.R * Math.Sin(ang) };
             }
+        }
+        // 圆弧实际扫过的范围（逆时针：从 start 转 extent）。按两个端点定，天工报的扫角只用它的大小来挑是哪一段：
+        // 视图转过 90° 时（OK310-02-010 主视图 x 沿模型 Y）DVArc2d 的扫角正负和起点对不上，按扫角正负算会把 R20 圆角
+        // 当成往下扫的那段，外框多出 20mm、竖直坐标串的基准落到零件外面（第 21 轮 010 / 011 都是 75%）。
+        static void ArcSpan(DwgEdge a, out double start, out double extent){
+            double s0 = Math.Atan2(a.Y1 - a.Cy, a.X1 - a.Cx), e0 = Math.Atan2(a.Y2 - a.Cy, a.X2 - a.Cx);
+            double ccw = e0 - s0; while (ccw < 0) ccw += 2 * Math.PI; while (ccw >= 2 * Math.PI) ccw -= 2 * Math.PI;
+            double sw = Math.Abs(a.Sweep);
+            if (sw >= 2 * Math.PI - 1e-6 || ccw < 1e-9) { start = s0; extent = sw > 1e-9 ? sw : 2 * Math.PI; return; }
+            double cw = 2 * Math.PI - ccw;
+            // 正好半圆：两个端点分不出是哪一半，只能按扫角正负（销子球头）
+            bool fromStart = Math.Abs(ccw - cw) < 1e-3 ? a.Sweep >= 0 : Math.Abs(ccw - sw) <= Math.Abs(cw - sw);
+            if (fromStart) { start = s0; extent = ccw; } else { start = e0; extent = cw; }
+        }
+        static bool OnArcAngle(DwgEdge a, double t){
+            double start, extent; ArcSpan(a, out start, out extent);
+            double d = t - start; while (d < -1e-12) d += 2 * Math.PI; while (d >= 2 * Math.PI) d -= 2 * Math.PI;
+            return d <= extent + 1e-6;
         }
 
         // ---- 坐标尺寸要标的落点 ----
@@ -152,11 +168,7 @@ namespace TianGongCadSuite {
         }
 
         // 点 (x,y)（已在圆上）是不是落在这段弧扫过的范围里
-        static bool OnArc(DwgEdge a, double x, double y){
-            double s0 = Math.Atan2(a.Y1 - a.Cy, a.X1 - a.Cx), t = Math.Atan2(y - a.Cy, x - a.Cx), d = t - s0;
-            if (a.Sweep >= 0) { while (d < -1e-9) d += 2 * Math.PI; return d <= a.Sweep + 1e-6; }
-            while (d > 1e-9) d -= 2 * Math.PI; return d >= a.Sweep - 1e-6;
-        }
+        static bool OnArc(DwgEdge a, double x, double y){ return OnArcAngle(a, Math.Atan2(y - a.Cy, x - a.Cx)); }
 
         // 一串超过 MaxRun 个落点（刻度尺的刻线、刻字、花纹）：标出来没人看得清，天工建几百个尺寸也要好几分钟。
         // 只留孔心和够长的边（≥ 视图另一方向 15%），还多就只留外形两头和孔心

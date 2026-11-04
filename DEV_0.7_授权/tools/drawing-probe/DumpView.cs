@@ -22,7 +22,7 @@ class DumpView {
                 double dx, dy, dz, ux, uy, uz; D.ViewOrientationConstants o; v.ViewOrientation(out dx, out dy, out dz, out ux, out uy, out uz, out o);
                 Console.WriteLine("== " + v.Name + " " + o + " 线 " + v.DVLines2d.Count);
                 foreach (D.DVLine2d l in v.DVLines2d) { double a, b, c, e; l.GetStartPoint(out a, out b); l.GetEndPoint(out c, out e); Console.WriteLine("  L (" + Mm(a) + "," + Mm(b) + ")-(" + Mm(c) + "," + Mm(e) + ") " + l.EdgeType); }
-                foreach (D.DVArc2d l in v.DVArcs2d) { double a, b; l.GetCenterPoint(out a, out b); Console.WriteLine("  A (" + Mm(a) + "," + Mm(b) + ") R" + Mm(l.Radius) + " sweep " + Math.Round(l.SweepAngle, 3) + " " + l.EdgeType); }
+                foreach (D.DVArc2d l in v.DVArcs2d) { double a, b, sx, sy, ex, ey; l.GetCenterPoint(out a, out b); l.GetStartPoint(out sx, out sy); l.GetEndPoint(out ex, out ey); Console.WriteLine("  A (" + Mm(a) + "," + Mm(b) + ") R" + Mm(l.Radius) + " sweep " + Math.Round(l.SweepAngle, 3) + " 起 (" + Mm(sx) + "," + Mm(sy) + ") 止 (" + Mm(ex) + "," + Mm(ey) + ") " + l.EdgeType); }
                 foreach (D.DVCircle2d l in v.DVCircles2d) { double a, b; l.GetCenterPoint(out a, out b); Console.WriteLine("  C (" + Mm(a) + "," + Mm(b) + ") R" + Mm(l.Radius) + " " + l.EdgeType); }
             }
         }

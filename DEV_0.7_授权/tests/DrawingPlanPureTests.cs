@@ -159,6 +159,61 @@ namespace TianGongCadSuite {
             var pin = new ModelFacts(); pin.Size = new[] { 0.012, 0.012, 0.025 }; pin.Holes = new[] { 0, 0, 1 }; pin.Steps = new[] { 2, 2, 2 }; pin.FaceArea = new[] { 0, 0, 1e-4 };
             DrawingLayout.Mouths(pin, new[] { new ModelHole { Axis = new V3(0, 0, 1), BlindHi = true, BlindLo = false } });
             Check(DrawingLayout.Choose(pin)[0].Sign == -1, "销子一头的盲孔朝 -Z 开口：主视图从 -Z 看");
+            Check(!DrawingLayout.Choose(pin).Any(v => v.Role == DwgViewRole.Back), "盲孔都朝主视图：不加后视图");
+
+            // 视图转过 90° 时圆弧的扫角正负和起点对不上（OK310-02-010 主视图，DrawProbe8 / 第 21 轮调试输出）：
+            // R20 圆角心 (5,-9.5)，起点 (-15,-9.5)、终点 (5,10.5)，天工报扫角 +90°（按起点逆时针转就成了往下那段）
+            var lEdges = new List<DwgEdge> {
+                DwgEdge.Line(25 * mm, 22.5 * mm, -25 * mm, 22.5 * mm), DwgEdge.Line(-25 * mm, 22.5 * mm, -25 * mm, -22.5 * mm), DwgEdge.Line(-25 * mm, -22.5 * mm, -17 * mm, -22.5 * mm),
+                DwgEdge.Line(5 * mm, 10.5 * mm, 25 * mm, 10.5 * mm), DwgEdge.Line(25 * mm, 10.5 * mm, 25 * mm, 22.5 * mm), DwgEdge.Line(-15 * mm, -20.5 * mm, -15 * mm, -9.5 * mm),
+                DwgEdge.Line(-17 * mm, -22.5 * mm, -15 * mm, -20.5 * mm), DwgEdge.Arc(5 * mm, -9.5 * mm, 20 * mm, Math.PI / 2, -15 * mm, -9.5 * mm, 5 * mm, 10.5 * mm),
+                DwgEdge.Circle(-10 * mm, 16.5 * mm, 2.25 * mm), DwgEdge.Circle(15 * mm, 16.5 * mm, 2.25 * mm) };
+            var lBox = DrawingPlan.Box(lEdges);
+            Check(Math.Abs(lBox[1] + 22.5 * mm) < 1e-9, "扫角正负不对的圆角不撑大外框：下边 -22.5（实际 " + lBox[1] * 1000 + "）");
+            var lRun = DrawingPlan.Ordinate(lEdges, false, 2, lBox, true, 0.008);
+            Check(lRun != null && Math.Abs(lRun.Origin.Coord + 22.5 * mm) < 1e-9 && lRun.Targets.Select(t => Math.Round(t.Coord * 1000, 3)).SequenceEqual(new[] { 10.5, 16.5, 22.5 }), "竖直串基准落在零件底边 -22.5，落点 10.5 / 16.5 / 22.5（人图的 12、6、45）");
+
+            // 盲孔开口那面要有正对的视图（普查 80% vs 反面 24%）
+            // 板 100×60×12，主视图看 Z：正面 4 个盲孔朝 +Z，背面 2 个盲孔朝 -Z → 补后视图，放在最右边
+            var fPlate = new ModelFacts(); fPlate.Size = new[] { 0.100, 0.060, 0.012 }; fPlate.Holes = new[] { 0, 0, 6 }; fPlate.Steps = new[] { 2, 2, 2 }; fPlate.FaceArea = new[] { 7e-4, 1.2e-3, 6e-3 };
+            var fhz = new List<ModelHole>();
+            for (int i = 0; i < 4; i++) fhz.Add(new ModelHole { Axis = new V3(0, 0, 1), BlindLo = true, BlindHi = false });
+            for (int i = 0; i < 2; i++) fhz.Add(new ModelHole { Axis = new V3(0, 0, 1), BlindLo = false, BlindHi = true });
+            DrawingLayout.Mouths(fPlate, fhz);
+            Check(fPlate.BlindPlus[2] == 4 && fPlate.BlindMinus[2] == 2, "盲孔口朝向计数：+Z 4、-Z 2");
+            var fpv = DrawingLayout.Choose(fPlate);
+            var fback = fpv.FirstOrDefault(v => v.Role == DwgViewRole.Back);
+            Check(fpv[0].Sign == 1 && fback != null && fback.Sign == -1 && fback.Extra && fback.Axis == 2, "背面有盲孔：主视图从 +Z 看，补一个从 -Z 看的后视图");
+            DrawingLayout.IsoBox(fPlate.Size, out iw, out ih);
+            var fpl = DrawingLayout.Arrange(fpv, iw, ih);
+            var fpm = fpl.Get(DwgViewRole.Main); var fpb = fpl.Get(DwgViewRole.Back);
+            Check(fpb != null && fpb.X - fpb.W * fpl.Scale / 2 > fpm.X + fpm.W * fpl.Scale / 2 && Math.Abs(fpb.Y - fpm.Y) < 1e-12, "后视图在主视图右边、同一高度");
+            foreach (var v in fpl.Views) if (v.Role != DwgViewRole.Iso) Check(v.X + v.W * v.Scale / 2 <= fpl.Zones.Main[2] + 1e-9 && v.X - v.W * v.Scale / 2 >= fpl.Zones.Main[0] - 1e-9, "带后视图：视图 " + v.Role + " 不出主区");
+            // 侧面（沿竖直轴 Y）的盲孔开在底面（-Y）：俯视图看 +Y 看不到 → 不补仰视图（第 19 / 20 轮补了掉分），只记个数提示人工
+            var fBlk = new ModelFacts(); fBlk.Size = new[] { 0.100, 0.040, 0.020 }; fBlk.Holes = new[] { 0, 2, 4 }; fBlk.Steps = new[] { 2, 2, 2 }; fBlk.FaceArea = new[] { 8e-4, 2e-3, 4e-3 };
+            var fhb = new List<ModelHole>();
+            for (int i = 0; i < 4; i++) fhb.Add(new ModelHole { Axis = new V3(0, 0, 1) });
+            for (int i = 0; i < 2; i++) fhb.Add(new ModelHole { Axis = new V3(0, 1, 0), BlindLo = false, BlindHi = true });
+            DrawingLayout.Mouths(fBlk, fhb);
+            var fbv = DrawingLayout.Choose(fBlk);
+            Check(fbv[0].Axis == 2 && fbv[0].Horizontal == 0 && fbv.Any(v => v.Role == DwgViewRole.Below) && !fbv.Any(v => v.Extra) && fBlk.BottomBlind == 2, "Y 向盲孔开在 -Y：俯视图照旧，记下底面 2 个盲孔");
+            // 补了比例要缩小就不补，记下来提示人工（第 17 轮大焊接框架 1:10 → 1:20）
+            var fBig = new ModelFacts(); fBig.Size = new[] { 1.2, 0.8, 0.3 }; fBig.Holes = new[] { 0, 0, 6 }; fBig.Steps = new[] { 2, 2, 2 }; fBig.FaceArea = new[] { 0.2, 0.3, 0.9 };
+            var fhg = new List<ModelHole>();
+            for (int i = 0; i < 4; i++) fhg.Add(new ModelHole { Axis = new V3(0, 0, 1), BlindLo = true, BlindHi = false });
+            for (int i = 0; i < 2; i++) fhg.Add(new ModelHole { Axis = new V3(0, 0, 1), BlindLo = false, BlindHi = true });
+            DrawingLayout.Mouths(fBig, fhg);
+            var fgv = DrawingLayout.Choose(fBig);
+            double giw, gih; DrawingLayout.IsoBox(fBig.Size, out giw, out gih);
+            var fgl = DrawingLayout.Arrange(fgv, giw, gih);
+            var fgCore = DrawingLayout.Arrange(fgv.Where(v => !v.Extra).ToList(), giw, gih);
+            Check(fgv.Any(v => v.Role == DwgViewRole.Back) && fgl.Scale >= fgCore.Scale - 1e-12, "补后视图不让比例变小（" + DrawingPlan.ScaleText(fgl.Scale) + " vs " + DrawingPlan.ScaleText(fgCore.Scale) + "）");
+            Check(fgl.Get(DwgViewRole.Back) != null || fgl.Dropped.Contains(DwgViewRole.Back), "放不下的后视图记进 Dropped");
+            // 通孔不算：从哪面看都是圆
+            var fThr = new ModelFacts(); fThr.Size = new[] { 0.100, 0.040, 0.020 }; fThr.Holes = new[] { 0, 2, 4 }; fThr.Steps = new[] { 2, 2, 2 }; fThr.FaceArea = new[] { 8e-4, 2e-3, 4e-3 };
+            DrawingLayout.Mouths(fThr, new[] { new ModelHole { Axis = new V3(0, 1, 0) }, new ModelHole { Axis = new V3(0, 0, 1) } });
+            var ftv = DrawingLayout.Choose(fThr);
+            Check(!ftv.Any(v => v.Extra), "只有通孔：视图照旧");
 
             // 螺纹线认规格：Ø3.24 底孔 + 大径 4 的螺纹线 → M4
             var h4 = DwgEdge.Circle(0, 0, 1.62 * mm);

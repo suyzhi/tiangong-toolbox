@@ -17,6 +17,8 @@ namespace TianGongCadSuite {
         public double[] FaceArea = new double[3];      // 法向沿该轴的平面面积和
         public bool SheetMetal;
         public int[] MouthPlus = new int[3], MouthMinus = new int[3];
+        public int[] BlindPlus = new int[3], BlindMinus = new int[3];   // 只朝 +轴 / -轴 一头开口的盲孔：从另一头看不到圆
+        public int BottomBlind;                                         // 开在底面（俯视图看不到那面）的盲孔个数：只提示人工补
         public bool[] Stepped = new bool[3];   // 沿该轴有台阶孔 / 槽（不只是孔口一段沉孔）：主视图下面换成剖视
         public static bool IsStepped(ModelHole h){ return h.Segments.Count >= 3 || (h.Segments.Count == 2 && h.CbRadius <= 0); }   // 孔口朝 +轴 / -轴 的个数（盲孔只有一头开口）
         public readonly List<double> Chamfers = new List<double>();   // 倒角边长（毫米），每个倒角面一个
@@ -27,7 +29,8 @@ namespace TianGongCadSuite {
         public double ChamferMax { get { return Math.Max(Chamfers.Count == 0 ? 0 : Chamfers.Max(), Rounds.Count == 0 ? 0 : Rounds.Max()); } }
     }
 
-    public enum DwgViewRole { Main, Below, Right, Iso }
+    // Left / Back：盲孔开在左视图 / 主视图看不到的那面时补的反方向视图（右视图放主视图左边、后视图放最右边，GB 第一角）
+    public enum DwgViewRole { Main, Below, Right, Iso, Left, Back }
 
     // 要建的一个视图：Axis = 视线方向沿哪个模型轴（Sign 正负表示从哪边看），Horizontal = 视图里水平方向对应的模型轴。
     public sealed class DwgViewSpec {
@@ -38,6 +41,7 @@ namespace TianGongCadSuite {
         public double X, Y;                 // 视图中心放在图纸哪（纸面米）
         public double Scale;
         public bool Section;                // Below 换成过台阶孔中心的全剖
+        public bool Extra;                  // 补的反方向视图：只标从别的视图看不到的东西
         public DwgViewSpec Clone(){ return (DwgViewSpec)MemberwiseClone(); }
     }
 
@@ -60,6 +64,7 @@ namespace TianGongCadSuite {
         public SheetZones Zones;
         public double Scale, IsoScale;
         public readonly List<DwgViewSpec> Views = new List<DwgViewSpec>();
+        public readonly List<DwgViewRole> Dropped = new List<DwgViewRole>();   // 想补、但补了比例要缩小所以没补的反方向视图
         public DwgViewSpec Get(DwgViewRole r){ return Views.FirstOrDefault(v => v.Role == r); }
     }
 
@@ -85,6 +90,7 @@ namespace TianGongCadSuite {
                 // Hi 那头朝 +Axis 开口，Lo 那头朝 -Axis
                 if (!h.BlindHi) { if (sg > 0) f.MouthPlus[k]++; else f.MouthMinus[k]++; }
                 if (!h.BlindLo) { if (sg > 0) f.MouthMinus[k]++; else f.MouthPlus[k]++; }
+                if (h.BlindHi != h.BlindLo) { bool plus = (!h.BlindHi) == (sg > 0); if (plus) f.BlindPlus[k]++; else f.BlindMinus[k]++; }
             }
         }
 
@@ -115,14 +121,51 @@ namespace TianGongCadSuite {
             if (section) below = true;
             if (below) r.Add(new DwgViewSpec { Role = DwgViewRole.Below, Axis = vert, Horizontal = horiz, Vertical = axis, W = f.Size[horiz], H = f.Size[axis], Section = section });
             if (right) r.Add(new DwgViewSpec { Role = DwgViewRole.Right, Axis = horiz, Horizontal = axis, Vertical = vert, W = f.Size[axis], H = f.Size[vert] });
+            Facing(f, r, axis, sign, horiz, vert);
             r.Add(new DwgViewSpec { Role = DwgViewRole.Iso, Axis = axis, Horizontal = horiz, Vertical = vert });
             return r;
+        }
+
+        // 盲孔开口那面要有一个正对它的视图（孔在那里才是圆、才标得出来）。
+        // 普查（734 张公司图 × 461 个零件三维孔，2026-11-03）：盲孔开口朝的方向，人图有正对它的视图 128/160 = 80%；
+        // 同一根轴另一头（没有孔口）只有 15/63 = 24%；两个方向只画一个时，画孔口那面 43 次、画另一面 9 次。
+        // 主视图背面的盲孔（OK310-02-007 人图补了后视图、孔标注写「背面」）14/15 都画了正对的视图。
+        // 所以：左视图看不到的那面有盲孔口 → 补右视图；主视图背面有盲孔口 → 补后视图。
+        // 不把俯视图直接换成仰视图：另一面的台阶、槽人照样要标（第 17 轮试过换，OK310-02-022 少了 55 / 58 两个尺寸）。
+        // 底面的盲孔不补仰视图、只提示（BottomBlind）：仰视图放主视图上面，第 19 / 20 轮补了的两张（M30-02-023、OK310-02-022 副本）
+        // 主视图上方的坐标尺寸都被挤乱（M30-02-023 竖直串顶上的 95 打折线跑进了视图），两张都掉分。
+        public static void Facing(ModelFacts f, List<DwgViewSpec> r, int axis, int sign, int horiz, int vert){
+            Func<int, int, int> blind = (a, s) => s > 0 ? f.BlindPlus[a] : f.BlindMinus[a];
+            var main = r[0];
+            // 俯视图（折到下面）的视线 = 主视图屏幕上方 = 视线 × 屏幕 x；左视图（折到右边）的视线 = -屏幕 x
+            var d = new V3(axis == 0 ? sign : 0, axis == 1 ? sign : 0, axis == 2 ? sign : 0);
+            var x = new V3(horiz == 0 ? 1 : 0, horiz == 1 ? 1 : 0, horiz == 2 ? 1 : 0);
+            var up = d.Cross(x); int upSign = (vert == 0 ? up.X : vert == 1 ? up.Y : up.Z) > 0 ? 1 : -1;
+            f.BottomBlind = blind(vert, -upSign);
+            var right = r.FirstOrDefault(v => v.Role == DwgViewRole.Right);
+            if (right != null && blind(horiz, 1) > 0)
+                r.Add(new DwgViewSpec { Role = DwgViewRole.Left, Axis = horiz, Horizontal = axis, Vertical = vert, W = right.W, H = right.H, Extra = true });
+            if (blind(axis, -sign) > 0) r.Add(new DwgViewSpec { Role = DwgViewRole.Back, Axis = axis, Sign = -sign, Horizontal = horiz, Vertical = vert, W = main.W, H = main.H, Extra = true });
         }
 
         // ---- 排版 ----
         // 主视图左上，俯视图在它下面、左视图在它右边；整组按比例放进主区，轴测图单独放进 Iso 区（比例可以比主视图小一档）。
         // 先试 A4，A4 放得下且比例不比 1:1 小（或者和 A3 一样大）就用 A4，否则 A3 —— 普查里小件 A4、大件 A3。
+        // 补的反方向视图（Extra）不能让比例变小：先按不补排出图纸和比例；补上以后同一张（或者 A4 换 A3）比例不变才补，否则不补、记进 Dropped。
+        // 第 17 轮补了就缩：大焊接框架 002 从 1:10 缩到 1:20、OK310-02-003 从 1:1.5 缩到 1:2.5，两张分数都掉了一截。
         public static DwgLayout Arrange(List<DwgViewSpec> views, double isoW, double isoH){
+            var core = views.Where(v => !v.Extra).ToList();
+            var lay = Pick(core, isoW, isoH);
+            var extra = views.Where(v => v.Extra).ToList();
+            if (extra.Count == 0) return lay;
+            foreach (var z in lay.Zones.Name == "A4" ? new[] { SheetZones.A4(), SheetZones.A3() } : new[] { SheetZones.A3() }) {
+                var full = Fit(views, z, isoW, isoH);
+                if (full.Scale >= lay.Scale - 1e-12) return full;
+            }
+            lay.Dropped.AddRange(extra.Select(v => v.Role));
+            return lay;
+        }
+        static DwgLayout Pick(List<DwgViewSpec> views, double isoW, double isoH){
             var a4 = Fit(views, SheetZones.A4(), isoW, isoH);
             var a3 = Fit(views, SheetZones.A3(), isoW, isoH);
             return (a4.Scale >= a3.Scale - 1e-12 || a4.Scale >= 1 - 1e-12) ? a4 : a3;
@@ -132,21 +175,32 @@ namespace TianGongCadSuite {
             // A4 / A3 各排一遍，视图对象各用各的（共用会被后排的那张覆盖坐标）
             var views = specs.Select(v => v.Clone()).ToList();
             var main = views.First(v => v.Role == DwgViewRole.Main);
-            var below = views.FirstOrDefault(v => v.Role == DwgViewRole.Below);
-            var right = views.FirstOrDefault(v => v.Role == DwgViewRole.Right);
-            // 需要的宽高 = 模型尺寸 × 比例 + 固定留白（尺寸带）
-            double modelW = main.W + (right != null ? right.W : 0), modelH = main.H + (below != null ? below.H : 0);
-            int bandsW = 2 + (right != null ? 1 : 0), bandsH = 2 + (below != null ? 1 : 0);
-            double fixedW = bandsW * DimBand + (right != null ? Gap : 0), fixedH = bandsH * DimBand + (below != null ? Gap : 0);
+            Func<DwgViewRole, DwgViewSpec> get = role => views.FirstOrDefault(v => v.Role == role);
+            var below = get(DwgViewRole.Below); var right = get(DwgViewRole.Right);
+            // 一行（左 → 右）：右视图、主视图、左视图、后视图；一列（上 → 下）：主视图、俯视图（GB 第一角）
+            var row = new List<DwgViewSpec>(); var col = new List<DwgViewSpec>();
+            if (get(DwgViewRole.Left) != null) row.Add(get(DwgViewRole.Left));
+            row.Add(main);
+            if (right != null) row.Add(right);
+            if (get(DwgViewRole.Back) != null) row.Add(get(DwgViewRole.Back));
+            col.Add(main);
+            if (below != null) col.Add(below);
+            // 需要的宽高 = 模型尺寸 × 比例 + 固定留白（每个视图前一条尺寸带、最后再一条，视图之间再空一格）
+            double modelW = row.Sum(v => v.W), modelH = col.Sum(v => v.H);
+            double fixedW = (row.Count + 1) * DimBand + (row.Count - 1) * Gap, fixedH = (col.Count + 1) * DimBand + (col.Count - 1) * Gap;
             double scale = DrawingPlan.PickScale(modelW, modelH, Math.Max(1e-6, z.MainW - fixedW), Math.Max(1e-6, z.MainH - fixedH));
             var lay = new DwgLayout { Zones = z, Scale = scale };
             // 整组在主区里居中偏左上
             double groupW = modelW * scale + fixedW, groupH = modelH * scale + fixedH;
             double left = z.Main[0] + Math.Max(0, (z.MainW - groupW) / 2), top = z.Main[3] - Math.Max(0, (z.MainH - groupH) / 2);
-            double mx = left + DimBand + main.W * scale / 2, my = top - DimBand - main.H * scale / 2;
+            var xs = new Dictionary<DwgViewSpec, double>(); double cx = left;
+            for (int i = 0; i < row.Count; i++) { cx += DimBand + (i > 0 ? Gap : 0); xs[row[i]] = cx + row[i].W * scale / 2; cx += row[i].W * scale; }
+            var ys = new Dictionary<DwgViewSpec, double>(); double cy = top;
+            for (int i = 0; i < col.Count; i++) { cy -= DimBand + (i > 0 ? Gap : 0); ys[col[i]] = cy - col[i].H * scale / 2; cy -= col[i].H * scale; }
+            double mx = xs[main], my = ys[main];
             Put(lay, main, mx, my, scale);
-            if (below != null) Put(lay, below, mx, my - main.H * scale / 2 - DimBand - Gap - below.H * scale / 2, scale);
-            if (right != null) Put(lay, right, mx + main.W * scale / 2 + DimBand + Gap + right.W * scale / 2, my, scale);
+            foreach (var v in col) if (v != main) Put(lay, v, mx, ys[v], scale);
+            foreach (var v in row) if (v != main) Put(lay, v, xs[v], my, scale);
             var iso = views.FirstOrDefault(v => v.Role == DwgViewRole.Iso);
             if (iso != null) {
                 double isoAvailW = z.Iso[2] - z.Iso[0] - 0.006, isoAvailH = z.Iso[3] - z.Iso[1] - 0.006;

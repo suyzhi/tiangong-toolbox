@@ -31,7 +31,10 @@ class ModelHoleSurvey {
                 row["holes"] = holes.Select(h => new Dictionary<string,object> {
                     { "d", Math.Round(h.Radius * 2000, 3) }, { "thr", h.Through }, { "dep", Math.Round(h.Depth * 1000, 2) }, { "cb", Math.Round(h.CbRadius * 2000, 2) },
                     { "kind", h.Spec == null ? "" : h.Spec.Kind.ToString() }, { "m", h.Spec == null ? "" : h.Spec.ThreadSize },
-                    { "ax", new[] { Math.Round(h.Axis.X, 3), Math.Round(h.Axis.Y, 3), Math.Round(h.Axis.Z, 3) } }, { "seg", h.Segments.Count } }).ToList();
+                    { "ax", new[] { Math.Round(h.Axis.X, 3), Math.Round(h.Axis.Y, 3), Math.Round(h.Axis.Z, 3) } }, { "seg", h.Segments.Count },
+                    // 孔口朝向（+ = 沿 ax 那头开口，- = 反方向那头开口；通孔两个都有）和孔轴上一点（毫米）：对照人图里有没有正对孔口的视图
+                    { "mo", (h.BlindHi ? "" : "+") + (h.BlindLo ? "" : "-") },
+                    { "pt", new[] { Math.Round(h.Point.X * 1000, 2), Math.Round(h.Point.Y * 1000, 2), Math.Round(h.Point.Z * 1000, 2) } } }).ToList();
             } catch (Exception e) { row["error"] = e.Message; }
             finally { try { if (doc != null) ((dynamic)doc).Close(false); } catch { } }
             row["sec"] = Math.Round((DateTime.Now - t0).TotalSeconds, 1);

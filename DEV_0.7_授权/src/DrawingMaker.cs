@@ -105,6 +105,24 @@ namespace TianGongCadSuite {
                     try { var v = sheet.DrawingViews.AddByFold(main, D.FoldTypeConstants.igFoldRight, right.X, right.Y); Idle(app); Center(v, right.X, right.Y, true, false); views[DwgViewRole.Right] = v; }
                     catch (Exception e) { o.Notes.Add("左视图建不出来：" + e.Message); }
                 }
+                // 左视图 / 主视图看不到的那面有盲孔口：补右视图 / 后视图（DrawingLayout.Facing；补了比例会缩小就不补，提示人工）；底面的只提示
+                foreach (var dr in lay.Dropped) o.Notes.Add("视图 " + (dr == DwgViewRole.Left ? "右端面" : "背面") + "有盲孔，补视图图纸放不下（比例要缩小），没补，这些孔请人工补标");
+                if (facts.BottomBlind > 0 && (below == null || !below.Section)) o.Notes.Add("视图 底面有 " + facts.BottomBlind + " 个盲孔，俯视图里看不到，请人工补仰视图或局部视图标注");
+                var leftV = lay.Get(DwgViewRole.Left);
+                if (leftV != null) {
+                    try { var v = sheet.DrawingViews.AddByFold(main, D.FoldTypeConstants.igFoldLeft, leftV.X, leftV.Y); Idle(app); Center(v, leftV.X, leftV.Y, true, false); views[DwgViewRole.Left] = v; o.Notes.Add("视图 右端面有盲孔：加了右视图"); }
+                    catch (Exception e) { o.Notes.Add("右视图建不出来：" + e.Message); }
+                }
+                var back = lay.Get(DwgViewRole.Back);
+                if (back != null) {
+                    try {
+                        // 后视图：视线反过来、屏幕 x 也反过来（上方不变）
+                        var v = sheet.DrawingViews.AddPartView(link, D.ViewOrientationConstants.igTopView, lay.Scale, back.X, back.Y, D.PartDrawingViewTypeConstants.sePartDesignedView);
+                        v.SetViewOrientation(-dMain.X, -dMain.Y, -dMain.Z, -xMain.X, -xMain.Y, -xMain.Z);
+                        try { v.Update(); } catch { }
+                        Idle(app); Center(v, back.X, back.Y, true, true); views[DwgViewRole.Back] = v; o.Notes.Add("视图 背面有盲孔：加了后视图");
+                    } catch (Exception e) { o.Notes.Add("后视图建不出来：" + e.Message); }
+                }
                 var isoSpec = lay.Get(DwgViewRole.Iso);
                 D.DrawingView iso = null;
                 if (isoSpec != null) {
@@ -120,6 +138,9 @@ namespace TianGongCadSuite {
                 var w = new DwgWriter(sheet);
                 w.Space = new DwgSpace(lay.Zones);
                 foreach (var kv in views) { var b = DwgWriter.SheetBox(kv.Value); w.Space.Add(b[0] - 0.001, b[1] - 0.001, b[2] + 0.001, b[3] + 0.001); }
+                // 刻字引线的文字最后才挂，位置照模板那条：先把那块占上，孔标注别压在它上面（视图多了整组右移时 02-007 压上过）
+                var eb = EngraveBox(sheet, Path.GetFileNameWithoutExtension(modelPath));
+                if (eb != null) w.Space.Add(eb);
                 Annotate(w, views, lay, holes, range, facts, o);
                 foreach (var kv in views) o.Notes.Add("视图 " + kv.Key + " " + Describe(kv.Value));
                 try { ((dynamic)main).RetrieveCenterLinesCenterMarks(true); } catch (Exception e) { Log.Write("DrawingCenterMarks", e); }
@@ -309,8 +330,9 @@ namespace TianGongCadSuite {
             var edges = new Dictionary<DwgViewRole, List<DwgEdge>>();
             foreach (var kv in views) if (kv.Key != DwgViewRole.Iso) {
                 bool isSection = false; try { isSection = kv.Value.DrawingViewType == D.DrawingViewTypeConstants.igXSectionView; } catch { }
-                // 剖视里孔壁就是要标的台阶，不当"孔带"去掉
-                edges[kv.Key] = isSection ? DrawingViewRead.Edges(kv.Value) : HoleInternal(kv.Value, DrawingViewRead.Edges(kv.Value), holes, range);
+                // 剖视里台阶孔的孔壁就是要标的台阶，不当"孔带"去掉；顺带剖开的普通孔（法兰上的螺栓孔，OK310-02-002）照样去掉，
+                // 不然一圈螺栓孔的孔壁会把坐标尺寸挤成一团 —— 它们的位置在孔是圆的那个视图里标
+                edges[kv.Key] = HoleInternal(kv.Value, DrawingViewRead.Edges(kv.Value), isSection ? holes.Where(h => !ModelFacts.IsStepped(h)).ToList() : holes, range);
             }
             var main = views[DwgViewRole.Main];
             var em = edges[DwgViewRole.Main];
@@ -337,6 +359,13 @@ namespace TianGongCadSuite {
                 var rv = Only(DrawingPlan.Ordinate(er, false, lay.Scale, boxR, false, off, ctOf(vr, false)), vr, sheetYs, false, main, boxM, boxR);
                 Count(o, rv); o.Covered += Covered(w.Ordinate(vr, rv, lay.Scale));
             }
+            // 补的反方向视图（右视图 / 后视图）：只标主视图里没标过的坐标（背面盲孔的位置）
+            foreach (var role in new[] { DwgViewRole.Left, DwgViewRole.Back }) {
+                D.DrawingView ve; if (!views.TryGetValue(role, out ve)) continue;
+                var ee = edges[role]; var boxE = DrawingPlan.Box(ee);
+                if (role != DwgViewRole.Left) { var rh = Only(DrawingPlan.Ordinate(ee, true, lay.Scale, boxE, true, off, ctOf(ve, true)), ve, sheetXs, true, main, boxM, boxE); Count(o, rh); o.Covered += Covered(w.Ordinate(ve, rh, lay.Scale)); }
+                { var rv = Only(DrawingPlan.Ordinate(ee, false, lay.Scale, boxE, role == DwgViewRole.Left, off, ctOf(ve, false)), ve, sheetYs, false, main, boxM, boxE); Count(o, rv); o.Covered += Covered(w.Ordinate(ve, rv, lay.Scale)); }
+            }
             // 孔、圆角
             int pinGroups = 0, pinCount = 0; var pins = new List<ModelHole>();
             foreach (var kv in views) {
@@ -351,8 +380,11 @@ namespace TianGongCadSuite {
                 int k = 0;
                 var hgs = DrawingPlan.Holes(e, maxD).OrderByDescending(g => g.Count).ToList();
                 if (hgs.Count > 12) { o.Notes.Add("孔的规格太多（" + hgs.Count + " 种），只标了 12 种，请人工补"); hgs = hgs.Take(12).ToList(); }
+                bool extra = kv.Key == DwgViewRole.Left || kv.Key == DwgViewRole.Back;
                 foreach (var g in hgs) {
                     ModelHole mh; map.TryGetValue(g.Leader, out mh);
+                    // 补的反方向视图只标盲孔（通孔在对面那个视图里已经是圆、已经标过）
+                    if (extra && (mh == null || mh.Through)) continue;
                     // 不是孔（凸台外圆、轴）就不当孔标
                     if (mh == null && holes.Count > 0 && !map.Keys.Any(c => Math.Abs(c.R - g.Leader.R) < 1e-6)) { }
                     o.Required++;
@@ -388,6 +420,7 @@ namespace TianGongCadSuite {
                     k++;
                 }
                 bool sectionView = false; try { sectionView = v.DrawingViewType == D.DrawingViewTypeConstants.igXSectionView; } catch { }
+                if (extra) continue;   // 外圆、圆角、倒角在主视图那一侧已经标了
                 // 同心圆的外圈：不是沉孔那圈（已写在孔标注的第二行）的，单独标直径（台阶孔大径、法兰外圆）
                 foreach (var g in DrawingPlan.OuterRings(e, maxD)) {
                     bool cb = map.Any(mp => Math.Abs(mp.Value.CbRadius * 2000 - g.DiameterMm) < 0.02 && Math.Abs(mp.Key.Cx - g.Leader.Cx) < 1e-5 && Math.Abs(mp.Key.Cy - g.Leader.Cy) < 1e-5)
@@ -583,6 +616,21 @@ namespace TianGongCadSuite {
 
         // 模板里自带一条「刻字：%{文件名（无扩展名）|R1}」引线，没挂在任何东西上（文字在标题栏左上方）。
         // 天工不让把它直接改挂（SetTerminator 0x80040223，探针 3），所以照它的文字和位置新建一条挂到轴测图最长的边上，再删掉模板那条。
+        // 模板刻字引线文字占的地方（图纸坐标）：按模板那条的位置，宽度按展开后的「刻字：文件名」估
+        static double[] EngraveBox(D.Sheet sheet, string name){
+            try {
+                var bs = (S.Balloons)sheet.Balloons;
+                for (int i = 1; i <= bs.Count; i++) {
+                    var b = bs.Item(i); string t = ""; try { t = b.BalloonText ?? ""; } catch { }
+                    if (!t.Contains("刻字")) continue;
+                    double a, c, d, e; b.Range(out a, out c, out d, out e);
+                    double wd = Math.Max(d - a, DwgSpace.TextWidth("刻字：" + name) + 0.004);
+                    return new[] { a - 0.002, Math.Min(c, e) - 0.002, a + wd, Math.Max(c, e) + 0.002 };
+                }
+            } catch (Exception ex) { Log.Write("DrawingEngraveBox", ex); }
+            return null;
+        }
+
         static void Engrave(D.Sheet sheet, D.DrawingView iso, DrawingOutcome o){
             try {
                 var bs = (S.Balloons)sheet.Balloons;
