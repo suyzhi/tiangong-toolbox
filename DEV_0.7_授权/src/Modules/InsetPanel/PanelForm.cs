@@ -137,5 +137,4 @@ namespace TianGongCadSuite {
         public void Idle(int n,out bool more){more=false;}
         public new void KeyDown(ref short key,short shift){if(key==27)Close();}public new void KeyPress(ref short key){}public new void KeyUp(ref short key,short shift){}
     }
-    public sealed class CadOwner : IWin32Window {public IntPtr Handle{get;private set;}public CadOwner(int handle){Handle=new IntPtr(handle);}}
 }

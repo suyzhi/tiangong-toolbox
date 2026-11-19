@@ -1,4 +1,4 @@
-# tools/run-autohole-native.ps1 —— 在私有桌面上跑完自动打孔的全部原生回归，不打扰用户桌面。
+﻿# tools/run-autohole-native.ps1 —— 在私有桌面上跑完自动打孔的全部原生回归，不打扰用户桌面。
 # 用法：tools\run-autohole-native.ps1 [-Modes --autohole-scan]   （只跑某几个模式时用 -Modes）
 param([string[]]$Modes)
 $ErrorActionPreference='Continue'

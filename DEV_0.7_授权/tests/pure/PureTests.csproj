@@ -16,32 +16,43 @@
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="../../src/PanelNaming.cs" />
-    <Compile Include="../../src/PanelPlates.cs" />
-    <Compile Include="../../src/Geometry.cs" />
-    <Compile Include="../../src/AutoHoleData.cs" />
-    <Compile Include="../../src/AutoHolePattern.cs" />
-    <Compile Include="../../src/AutoHoleCheck.cs" />
-    <Compile Include="../../src/HoleProfile.cs" />
-    <Compile Include="../../src/HoleScan.cs" />
-    <Compile Include="../../src/HoleNaming.cs" />
-    <Compile Include="../../src/HoleSpecRead.cs" />
-    <Compile Include="../../src/HoleLink.cs" />
-    <Compile Include="../../src/HoleNativeLinkMath.cs" />
-    <Compile Include="../../src/HoleSpots.cs" />
-    <Compile Include="../../src/FaceShape.cs" />
-    <Compile Include="../../src/HoleStandard.cs" />
-    <Compile Include="../../src/FormatConvertCore.cs" />
-    <Compile Include="../../src/HoleRules.cs" />
-    <Compile Include="../../src/SettingsFile.cs" />
-    <Compile Include="../../src/PatternPresets.cs" />
-    <Compile Include="../../src/Log.cs" />
-    <Compile Include="../../src/PropCardData.cs" />
-    <Compile Include="../../src/BatchRenameData.cs" />
-    <Compile Include="../../src/DrawingPlan.cs" />
-    <Compile Include="../../src/DrawingLayout.cs" />
-    <Compile Include="../../src/DrawingTolerance.cs" />
-    <Compile Include="../../src/BatchRenameScan.cs" />
+    <!-- Infrastructure -->
+    <Compile Include="../../src/Infrastructure/Geometry.cs" />
+    <Compile Include="../../src/Infrastructure/Log.cs" />
+    <Compile Include="../../src/Infrastructure/SettingsFile.cs" />
+
+    <!-- InsetPanel -->
+    <Compile Include="../../src/Modules/InsetPanel/PanelNaming.cs" />
+    <Compile Include="../../src/Modules/InsetPanel/PanelPlates.cs" />
+
+    <!-- AutoHole Core -->
+    <Compile Include="../../src/Modules/AutoHole/Core/AutoHoleData.cs" />
+    <Compile Include="../../src/Modules/AutoHole/Core/AutoHolePattern.cs" />
+    <Compile Include="../../src/Modules/AutoHole/Core/HoleProfile.cs" />
+    <Compile Include="../../src/Modules/AutoHole/Core/HoleScan.cs" />
+    <Compile Include="../../src/Modules/AutoHole/Core/HoleNaming.cs" />
+    <Compile Include="../../src/Modules/AutoHole/Core/HoleSpecRead.cs" />
+    <Compile Include="../../src/Modules/AutoHole/Core/HoleLink.cs" />
+    <Compile Include="../../src/Modules/AutoHole/Core/HoleNativeLinkMath.cs" />
+    <Compile Include="../../src/Modules/AutoHole/Core/HoleSpots.cs" />
+    <Compile Include="../../src/Modules/AutoHole/Core/FaceShape.cs" />
+    <Compile Include="../../src/Modules/AutoHole/Core/HoleStandard.cs" />
+    <Compile Include="../../src/Modules/AutoHole/Core/HoleRules.cs" />
+    <Compile Include="../../src/Modules/AutoHole/Core/PatternPresets.cs" />
+    <Compile Include="../../src/Modules/AutoHole/Core/Check/HoleCheckModels.cs" />
+    <Compile Include="../../src/Modules/AutoHole/Core/Check/PartRayIndex.cs" />
+    <Compile Include="../../src/Modules/AutoHole/Core/Check/HoleCheck.cs" />
+
+    <!-- FormatConvert / PropCard / BatchRename / Drawing -->
+    <Compile Include="../../src/Modules/FormatConvert/FormatConvertCore.cs" />
+    <Compile Include="../../src/Modules/PropCard/PropCardData.cs" />
+    <Compile Include="../../src/Modules/BatchRename/BatchRenameData.cs" />
+    <Compile Include="../../src/Modules/BatchRename/BatchRenameScan.cs" />
+    <Compile Include="../../src/Modules/Drawing/DrawingPlan.cs" />
+    <Compile Include="../../src/Modules/Drawing/DrawingLayout.cs" />
+    <Compile Include="../../src/Modules/Drawing/DrawingTolerance.cs" />
+
+    <!-- Pure Test Suites -->
     <Compile Include="../AutoHolePureTests.cs" />
     <Compile Include="../HoleCheckSpeedPureTests.cs" />
     <Compile Include="../AutoHoleScanPureTests.cs" />

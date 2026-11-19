@@ -49,8 +49,24 @@ sudo -u tglicense bash -c '
   cd /opt/tg-license
   python3 -m venv venv && venv/bin/pip install cryptography
 '
-# 把本目录的 tg_license_server.py 传到 /opt/tg-license/
+# 把本目录的 tg_license/、admin/ 以及 tg_license_server.py、tg_license_admin.py、tg_license_update.py 传到 /opt/tg-license/
 ```
+
+### 模块结构
+
+核心代码位于 `tg_license/` 包，根目录的 `tg_license_server.py` / `tg_license_admin.py` / `tg_license_update.py` 作为兼容入口与导出壳保留（现有 systemd 服务与命令行用法不变）：
+
+| 模块 | 职责 |
+| --- | --- |
+| `tg_license/codec.py` | 协议常量、日期偏移、激活码/载荷编解码、公钥去掩码（与插件 C# 逐字节一致） |
+| `tg_license/crypto.py` | P-256 ECDSA P1363 签验、`.tgkey`/PEM/公钥文件读写、C# 公钥槽生成 |
+| `tg_license/ledger.py` | SQLite 台账表结构、自动加列迁移、一码一机核心裁决状态机 |
+| `tg_license/service.py` | `/api/v1/license` 限流、验码与签名回执生成 |
+| `tg_license/updates.py` | 安装包 zip 校验、落盘、签名清单与发布历史 |
+| `tg_license/admin_auth.py` | 看板 PBKDF2 口令哈希、会话 Cookie、CSRF 与登录失败锁定 |
+| `tg_license/admin_web.py` | `/admin` 静态资源与管理看板 API（查询、签发、作废/解绑/改配额/延期、版本发布） |
+| `tg_license/http_server.py` | `ThreadingHTTPServer` 路由分发与反代客户端 IP 识别 |
+| `tg_license/cli.py` | 全部命令行子命令入口 |
 
 ## 二、生成密钥（只做一次）
 

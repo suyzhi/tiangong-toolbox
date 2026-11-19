@@ -17,7 +17,7 @@
 ## 开发约定
 
 - 所有新插件功能统一放入 `DEV_0.7_授权` 的宿主中（0.6 与 0.7 已合并，不要再往 0.6 加东西）。
-- 每项功能实现 `IToolModule`，在 `src/PluginFramework.cs` 的 `ModuleCatalog.Create` 中登记。
+- 每项功能实现 `IToolModule`，在 `src/Host/PluginFramework.cs` 的 `ModuleCatalog.Create` 中登记。
 - 命令 ID 全局唯一，已发布的 ID 不重复使用。
 - 原有 DEV 0.1～0.3 目录和交付 ZIP 只作为历史版本和回溯材料，不直接继续开发。
 - 发布前使用独立 `build`、`artifacts` 目录，不覆盖生产 CAD 文件。
@@ -62,8 +62,16 @@ DEV 0.6.0 给这个模块加了**孔形状参考面板**：2D 剖面（带尺寸
 ```text
 DEV_0.7_授权/            唯一在用的宿主
   VERSION               版本号（build.ps1 / make-installer.ps1 读它）
-  src/                  宿主、各功能模块、CAD 互操作和界面（一个文件一个类）
-  src/License/          授权（插件里的）；src/Admin/ 管理员工具（不进插件 DLL）
+  src/
+    Host/               插件宿主、COM 入口、命令注册框架与产品信息
+    Infrastructure/     无 CAD 依赖的基础设施（日志、设置、几何）
+    Cad/                跨模块复用的天工 CAD 互操作与网格读取
+    UI/                 跨模块复用的 WinForms 主题、布局、向导骨架与预览控件
+    License/            授权（插件里的，路径由构建/发码脚本固定引用）
+    Admin/              管理员工具（不进插件 DLL）
+    Modules/            9 个独立业务模块（AutoHole / InsetPanel / Lineup / FormatConvert /
+                        PropCard / BatchRename / Drawing / TrainingExport / Update）
+  server/               联网授权与在线更新服务端（核心包 tg_license/ + 兼容入口脚本 + admin/）
   tests/                PanelTests.exe（开发构建才编）；tests/pure 不需要 CAD 的纯逻辑测试（dotnet run）
   tools/                构建、安装、真机测试、探针，分类见 tools/README.md
   build/ artifacts/     本机编译输出 / 测试输出（不进 git）
