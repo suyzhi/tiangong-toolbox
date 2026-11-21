@@ -22,7 +22,7 @@ namespace TianGongCadSuite {
             Guard.Install();
             try{addin=instance;context=new ToolContext((F.Application)application);registry=ModuleCatalog.Create(context);
                 // GuiVersion 变了 CAD 才会按新的组名重建功能区按钮（firstTime=true）；改组名/增删按钮时要跟着加一。
-                addin.Description=Product.Name+" "+Product.Version;addin.GuiVersion=48;   /* 48：0.11.0 加「一键出图」按钮 */addin.Visible=true;
+                addin.Description=Product.Name+" "+Product.Version;addin.GuiVersion=49;   /* 49：0.12.0 加「快速出清单」按钮 */addin.Visible=true;
                 events=new Connection(addin.AddInEvents,typeof(F.ISEAddInEvents),this);
                 // 按命令 ID 取（不要用下标：命令 1/4 已从功能区下线，下标会错位）
 diagnostics=new Diagnostics(context.Application,()=>Run(registry.Find(1)),()=>Run(registry.Find(2)),()=>Run(registry.Find(3)));addin.Object=diagnostics;
@@ -245,6 +245,9 @@ diagnostics=new Diagnostics(context.Application,()=>Run(registry.Find(1)),()=>Ru
             try{asm.Close(false);}catch{}
             return sb.ToString();
         }
+        // 0.12.0 快速出清单：窗口真实路径（扫描模型文件夹 → 导出 6 种格式 + 加工件清单 + 编码申请表 + 可选缩略图）
+        public void StartQuickBomTest(string modelFolder,string outputFolder,bool includeCodeReq,bool includeThumbs){Result="";dispatcher.BeginInvoke((Action)(()=>{
+            try{var form=new QuickBomForm(Host);try{form.Show();Result=form.TestRunFolderExport(modelFolder,outputFolder,includeCodeReq,includeThumbs);}finally{try{form.Close();}catch{}}}catch(Exception e){Result="EXC "+e;}}));}
         public void StartCloseForms(){Result="";dispatcher.BeginInvoke((Action)(()=>{int n=0;foreach(var f in System.Linq.Enumerable.ToList(System.Linq.Enumerable.Cast<System.Windows.Forms.Form>(System.Windows.Forms.Application.OpenForms))){try{f.Close();n++;}catch{}}Result="closed "+n;}));}
         public string PropCardFormTest(string field,string value,int rowCount){
             string text="";var form=new PropCardForm(Host);

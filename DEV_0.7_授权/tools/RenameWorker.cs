@@ -11,35 +11,48 @@ using System.Threading;
 // 设计管理器 Document.Rename 也一样；不在白名单里的进程改名仍是 %TSD-Header）。所以改名交给这个不在白名单里的进程做。
 // 它看到的是磁盘上的原始字节：改名前后各读一次文件头，原来加密、改完不加密就停下报错（插件会整体退回）。
 //
-// 用法: 本程序 <清单文件> <结果文件>
-// 结果文件：第一行 "OK <改了几个>" 或 "FAIL <改了几个>"，第二行是原因
+// 用法:
+//   本程序 <清单文件> <结果文件>            —— 移动（改名，批量改名用）
+//   本程序 --copy <清单文件> <结果文件>     —— 复制（快速出清单复制原三维 / 工程图用，保持加密头不变）
+// 结果文件：第一行 "OK <处理了几个>" 或 "FAIL <处理了几个>"，第二行是原因
 static class RenameWorker {
     const string Head = "%TSD-Header";
     static int Main(string[] args){
+        bool copy = args.Length >= 3 && args[0] == "--copy";
+        string listFile = copy ? args[1] : args[0];
+        string outFile = copy ? args[2] : args[1];
         int done = 0;
         string why = "";
         try {
-            var lines = File.ReadAllLines(args[0], Encoding.UTF8);
+            var lines = File.ReadAllLines(listFile, Encoding.UTF8);
             foreach (var line in lines) {
                 if (line.Length == 0) continue;
                 var ab = line.Split('\t');
                 if (ab.Length != 2) throw new InvalidOperationException("清单格式不对：" + line);
                 bool before = Encrypted(ab[0]);
-                Move(ab[0], ab[1]);
-                if (before && !Encrypted(ab[1])) {
-                    // 改回去（同一个进程改名不会再变），然后报错
-                    try { Move(ab[1], ab[0]); } catch { }
-                    throw new InvalidOperationException("改名后文件不再是加密的，已停止（" + Path.GetFileName(ab[0]) + "）");
+                if (copy) {
+                    Copy(ab[0], ab[1]);
+                    if (before && !Encrypted(ab[1])) {
+                        try { File.Delete(ab[1]); } catch { }
+                        throw new InvalidOperationException("复制后文件不再是加密的，已停止（" + Path.GetFileName(ab[0]) + "）");
+                    }
+                } else {
+                    Move(ab[0], ab[1]);
+                    if (before && !Encrypted(ab[1])) {
+                        // 改回去（同一个进程改名不会再变），然后报错
+                        try { Move(ab[1], ab[0]); } catch { }
+                        throw new InvalidOperationException("改名后文件不再是加密的，已停止（" + Path.GetFileName(ab[0]) + "）");
+                    }
                 }
                 done++;
-                // 每改好一个记一笔：万一中途被结束，插件也知道前几个已经改了、要改回来
-                File.WriteAllText(args[1], "RUNNING " + done + "\r\n", Encoding.UTF8);
+                // 每做完一个记一笔：万一中途被结束，插件也知道前几个已经处理了
+                File.WriteAllText(outFile, "RUNNING " + done + "\r\n", Encoding.UTF8);
             }
-            File.WriteAllText(args[1], "OK " + done + "\r\n", Encoding.UTF8);
+            File.WriteAllText(outFile, "OK " + done + "\r\n", Encoding.UTF8);
             return 0;
         } catch (Exception e) {
             why = e.Message;
-            try { File.WriteAllText(args[1], "FAIL " + done + "\r\n" + why.Replace("\r", " ").Replace("\n", " ") + "\r\n", Encoding.UTF8); } catch { }
+            try { File.WriteAllText(outFile, "FAIL " + done + "\r\n" + why.Replace("\r", " ").Replace("\n", " ") + "\r\n", Encoding.UTF8); } catch { }
             return 1;
         }
     }
@@ -49,6 +62,25 @@ static class RenameWorker {
         for (int i = 0; ; i++) {
             try { File.Move(from, to); return; }
             catch (IOException) { if (i >= 10) throw; Thread.Sleep(150); }
+        }
+    }
+
+    // 用共享读打开源文件、逐块写目标文件：天工正开着这个文件时照样能复制，且不经白名单进程解密
+    static void Copy(string from, string to){
+        string dir = Path.GetDirectoryName(to);
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+        for (int i = 0; ; i++) {
+            try {
+                using (var src = new FileStream(from, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                using (var dst = new FileStream(to, FileMode.Create, FileAccess.Write, FileShare.None)) {
+                    src.CopyTo(dst, 1 << 16);
+                }
+                try { File.SetLastWriteTimeUtc(to, File.GetLastWriteTimeUtc(from)); } catch { }
+                return;
+            } catch (IOException) {
+                if (i >= 10) throw;
+                Thread.Sleep(150);
+            }
         }
     }
 

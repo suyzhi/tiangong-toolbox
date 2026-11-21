@@ -4,7 +4,7 @@
 
 ## 当前版本
 
-**0.10.0**（版本号只有一个来源：`DEV_0.7_授权/VERSION`），工作目录 `DEV_0.7_授权` —— **唯一**在用的宿主。
+**0.12.0**（版本号只有一个来源：`DEV_0.7_授权/VERSION`），工作目录 `DEV_0.7_授权` —— **唯一**在用的宿主。
 
 - 接手先读 [HANDOVER.md](HANDOVER.md)：构建/测试/安装命令、当前状态、要真机确认的清单、踩过的坑、下一步。
 - 各功能的设计与实测：[自动打孔系列](DEV_0.7_授权/AUTO-HOLE.md)、[授权](DEV_0.7_授权/LICENSE.md)、
@@ -57,6 +57,10 @@ DEV 0.6.0 给这个模块加了**孔形状参考面板**：2D 剖面（带尺寸
 `batch-rename` 是 0.10.0 新增模块，命令 ID 12「批量改名」：当前装配涉及的文件列成一张表批量改文件名，
 同名工程图跟着改；引用它们的装配、工程图（含同文件夹里的）用天工设计管理器接口改链接，不断开、不加载几何。设计与实测见 [DEV_0.7_授权/HANDOVER-0.10.0.md](DEV_0.7_授权/HANDOVER-0.10.0.md)。
 
+`drawing` 是 0.11.0 新增模块，命令 ID 13「一键出图」：按公司模板（SK先惠 A4 / A3）自动出零件图 / 装配图（主视图、投影、轴测、坐标尺寸、孔标注、定位销孔 H7/位置度与粗糙度、刻字）。见 [DEV_0.7_授权/DRAWING.md](DEV_0.7_授权/DRAWING.md) 与 [DEV_0.7_授权/HANDOVER-0.11.0.md](DEV_0.7_授权/HANDOVER-0.11.0.md)。
+
+`quick-bom` 是 0.12.0 新增模块，命令 ID 14「快速出清单」：设计完成下图下单时，从当前装配/文档或模型文件夹一键收集加工件与焊接件，自动读取属性卡并按公司八大类规则预判分类，支持表格直接编辑/Excel 粘贴与右侧 3D 预览，一键输出标准《加工件清单.xlsx》（保留公司 LOGO、八大类规则图、样式与公式，可选嵌入三维缩略图）、可选《编码申请-加工件.xlsx》（ERP 导入表），以及每个零件的 6 种标准格式（原三维 `.par/.psm/.asm`、`.dft`、`.dwg`、`.jpg`、`.pdf`、`.step`；原三维与 `.dft` 经独立非白名单进程复制以保持透明加密）。设计与真机实测见 [DEV_0.7_授权/HANDOVER-0.12.0.md](DEV_0.7_授权/HANDOVER-0.12.0.md)。
+
 ## 目录约定
 
 ```text
@@ -69,8 +73,8 @@ DEV_0.7_授权/            唯一在用的宿主
     UI/                 跨模块复用的 WinForms 主题、布局、向导骨架与预览控件
     License/            授权（插件里的，路径由构建/发码脚本固定引用）
     Admin/              管理员工具（不进插件 DLL）
-    Modules/            9 个独立业务模块（AutoHole / InsetPanel / Lineup / FormatConvert /
-                        PropCard / BatchRename / Drawing / TrainingExport / Update）
+    Modules/            10 个独立业务模块（AutoHole / InsetPanel / Lineup / FormatConvert /
+                        PropCard / BatchRename / Drawing / QuickBom / TrainingExport / Update）
   server/               联网授权与在线更新服务端（核心包 tg_license/ + 兼容入口脚本 + admin/）
   tests/                PanelTests.exe（开发构建才编）；tests/pure 不需要 CAD 的纯逻辑测试（dotnet run）
   tools/                构建、安装、真机测试、探针，分类见 tools/README.md

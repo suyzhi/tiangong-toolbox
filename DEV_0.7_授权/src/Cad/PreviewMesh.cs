@@ -148,6 +148,25 @@ namespace TianGongCadSuite {
             return mesh;
         }
 
+        // 单个零件 / 钣金件直接取网格（快速出清单生成缩略图用）
+        public static PreviewMesh BuildSingle(object doc){
+            var local = Local(doc, 0.0005);
+            if (local.Length / 9 > Budget) local = Local(doc, 0.003);
+            int tri = local.Length / 9;
+            var mesh = new PreviewMesh { Tri = local, Tint = new int[tri], Parts = tri > 0 ? 1 : 0 };
+            if (tri == 0) return mesh;
+            float[] lo = { float.MaxValue, float.MaxValue, float.MaxValue }, hi = { float.MinValue, float.MinValue, float.MinValue };
+            int tint = Palette[0];
+            for (int i = 0; i < tri; i++) mesh.Tint[i] = tint;
+            for (int k = 0; k < local.Length; k += 3) {
+                float x = local[k], y = local[k + 1], z = local[k + 2];
+                if (x < lo[0]) lo[0] = x; if (y < lo[1]) lo[1] = y; if (z < lo[2]) lo[2] = z;
+                if (x > hi[0]) hi[0] = x; if (y > hi[1]) hi[1] = y; if (z > hi[2]) hi[2] = z;
+            }
+            mesh.Lo = lo; mesh.Hi = hi;
+            return mesh;
+        }
+
         // 一个零件（或钣金件）全部实体的三角形，零件坐标
         static float[] Local(object doc, double chord){
             var bodies = new List<G.Body>();

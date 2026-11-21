@@ -182,6 +182,28 @@ namespace TianGongCadSuite {
 
         protected override void Dispose(bool disposing){ if (disposing && frame != null) { frame.Dispose(); frame = null; } base.Dispose(disposing); }
 
+        // 离屏渲染等轴测 PNG（快速出清单嵌入缩略图用，白底，无需显示控件）
+        public static byte[] RenderPng(PreviewMesh m, int w, int h){
+            if (m == null || m.Triangles <= 0 || w <= 0 || h <= 0) return null;
+            using (var v = new MeshView { mesh = m }) {
+                v.az = -Math.PI / 4; v.el = Math.Atan(1 / Math.Sqrt(2)); v.zoom = 1.05; v.panX = 0; v.panY = 0;
+                int n = w * h;
+                v.zbuf = new float[n]; v.pix = new int[n];
+                int white = unchecked((int)0xFFFFFFFF);
+                for (int i = 0; i < n; i++) { v.pix[i] = white; v.zbuf[i] = float.MaxValue; }
+                v.Raster(w, h, 1);
+                using (var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb)) {
+                    var data = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+                    try { for (int y = 0; y < h; y++) Marshal.Copy(v.pix, y * w, data.Scan0 + y * data.Stride, w); }
+                    finally { bmp.UnlockBits(data); }
+                    using (var ms = new System.IO.MemoryStream()) {
+                        bmp.Save(ms, ImageFormat.Png);
+                        return ms.ToArray();
+                    }
+                }
+            }
+        }
+
 #if TG_DEV_BUILD
         internal void TestSave(string png){ using (var b = Render(Math.Max(1, Width), Math.Max(1, Height), 1)) b.Save(png); }
         internal void TestRotate(double daz, double del){ az += daz; el += del; Redraw(); }

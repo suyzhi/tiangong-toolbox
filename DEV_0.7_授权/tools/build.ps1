@@ -43,10 +43,12 @@ $shared=@(
     '/nologo','/target:library','/platform:x64','/optimize+','/debug:full',
     ('/out:' + (Join-Path $bin 'TianGongCadSuite.dll')),
     ('/reference:' + $interop),
-    '/reference:System.Web.Extensions.dll','/reference:System.Data.dll',
+    '/reference:System.Web.Extensions.dll','/reference:System.Data.dll','/reference:System.Xml.dll',
     '/reference:System.Windows.Forms.dll','/reference:System.Drawing.dll',
     '/reference:Microsoft.CSharp.dll','/reference:System.Management.dll',
-    '/reference:System.IO.Compression.dll','/reference:System.IO.Compression.FileSystem.dll'
+    '/reference:System.IO.Compression.dll','/reference:System.IO.Compression.FileSystem.dll',
+    ('/resource:' + (Join-Path $root 'src\Modules\QuickBom\Templates\ProcessingListTemplate.xlsx') + ',TianGongCadSuite.QuickBom.ProcessingListTemplate.xlsx'),
+    ('/resource:' + (Join-Path $root 'src\Modules\QuickBom\Templates\CodeRequestTemplate.xlsx') + ',TianGongCadSuite.QuickBom.CodeRequestTemplate.xlsx')
 )
 if($DevBuild){$shared+='/define:TG_DEV_BUILD'}
 & $csc ($shared + $sources)
@@ -69,7 +71,7 @@ $tests=@(Get-ChildItem (Join-Path $root 'tests') -Filter '*.cs' -ErrorAction Sil
 if(-not $DevBuild){
     foreach($stale in 'PanelTests.exe','PanelTests.pdb','license-test.tgkey'){Remove-Item -LiteralPath (Join-Path $bin $stale) -Force -ErrorAction SilentlyContinue}
 }
-if($DevBuild -and $tests.Count){& $csc /nologo /target:exe /platform:x64 /out:"$bin\PanelTests.exe" /reference:"$interop" /reference:"$bin\TianGongCadSuite.dll" /reference:Microsoft.CSharp.dll /reference:System.Data.dll /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Management.dll $tests;if($LASTEXITCODE -ne 0){throw '测试程序编译失败'}}
+if($DevBuild -and $tests.Count){& $csc /nologo /target:exe /platform:x64 /out:"$bin\PanelTests.exe" /reference:"$interop" /reference:"$bin\TianGongCadSuite.dll" /reference:Microsoft.CSharp.dll /reference:System.Data.dll /reference:System.Xml.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Management.dll $tests;if($LASTEXITCODE -ne 0){throw '测试程序编译失败'}}
 
 $fixture=Join-Path $root "tests\fixtures\lineup-sample.tsv"
 if(Test-Path $fixture){Copy-Item -LiteralPath $fixture -Destination $bin -Force}
