@@ -16,9 +16,9 @@ namespace TianGongCadSuite {
         }
         Control BuildToolbar(){
             // 0.9.0：类目、查找挪到左侧导航（BuildNav），这里只剩一排菜单
-            var container=new Panel{Dock=DockStyle.Top,Height=46,BackColor=Ui.Bg};
+            var container=new Panel{Dock=DockStyle.Top,Height=Ui.S(46),BackColor=Ui.Bg};
             category.Items.Add("全部");category.Items.AddRange(LineupTableData.Categories);category.Items.Add("旧分类/辅助");category.SelectedIndex=1;
-            var menu=new ToolStrip{Font=Ui.F9,Dock=DockStyle.Fill,GripStyle=ToolStripGripStyle.Hidden,BackColor=Ui.Bg,Padding=new Padding(12,6,12,6),Renderer=new FlatMenuRenderer()};
+            var menu=new ToolStrip{Font=Ui.F9,Dock=DockStyle.Fill,GripStyle=ToolStripGripStyle.Hidden,BackColor=Ui.Bg,Padding=Ui.SPad(12,6,12,6),Renderer=new FlatMenuRenderer()};
             var add=Drop(menu,"新增");Item(add,"新增记录（自动编号）",()=>AddEmpty());Item(add,"多选模型加入",()=>AddSelectedModels());Item(add,"复制选中行",DuplicateRows);Item(add,"从气缸生成 H/W 传感器",GenerateSensorPairs);
             var edit=Drop(menu,"编辑");Item(edit,"粘贴到当前单元格",()=>PasteCells(Clipboard.GetText()));Item(edit,"向下填充（不含编号/地址）",FillDown);Item(edit,"删除选中行",DeleteRows);Item(edit,"撤销",Undo);Item(edit,"保存",SaveDraft);
             Item(edit,"上方插入",()=>InsertAt(false));Item(edit,"下方插入",()=>InsertAt(true));Item(edit,"上移",()=>MoveRows(-1));Item(edit,"下移",()=>MoveRows(1));
@@ -94,18 +94,18 @@ namespace TianGongCadSuite {
         // 左侧类目导航（0.9.0）：点一个类目 = 原来的类目下拉框选它（下拉框还在，代码照旧读 category.SelectedIndex）
         Panel nav;readonly StepRail navRail=new StepRail{Kind=StepRail.Mode.Nav};readonly Label navStats=new Label();
         Control BuildNav(){
-            nav=new Panel{Dock=DockStyle.Left,Width=220,BackColor=Ui.Rail,Padding=new Padding(12,16,12,16)};
+            nav=new Panel{Dock=DockStyle.Left,Width=Ui.S(230),BackColor=Ui.Rail,Padding=Ui.SPad(12,16,12,16)};
             var label=new Label{Text="查找",Font=Ui.F8,ForeColor=Ui.Text2,BackColor=Ui.Rail,AutoSize=false};
             search.BorderStyle=BorderStyle.FixedSingle;search.Font=Ui.F9;
             foreach(var c in category.Items)navRail.Add(Convert.ToString(c),"");
             navRail.Selected=Math.Max(0,category.SelectedIndex);
             navRail.SelectedChanged+=(s,e)=>{if(category.SelectedIndex!=navRail.Selected)category.SelectedIndex=navRail.Selected;};
             category.SelectedIndexChanged+=(s,e)=>{if(category.SelectedIndex>=0)navRail.Selected=category.SelectedIndex;};
-            var card=new RailCard("清单状态",96);
+            var card=new RailCard("清单状态",104);
             navStats.AutoSize=false;navStats.Font=Ui.F8;navStats.ForeColor=Ui.Text2;navStats.BackColor=Color.White;
-            card.Controls.Add(navStats);card.Resize+=(s,e)=>navStats.SetBounds(12,32,card.Width-24,card.Height-40);
+            card.Controls.Add(navStats);card.Resize+=(s,e)=>navStats.SetBounds(Ui.S(12),Ui.S(34),Math.Max(20,card.Width-Ui.S(24)),Math.Max(20,card.Height-Ui.S(42)));
             nav.Controls.AddRange(new Control[]{label,search,navRail,card});
-            nav.Layout+=(s,e)=>{int w=nav.ClientSize.Width-24,h=nav.ClientSize.Height;label.SetBounds(12,16,w,20);search.SetBounds(12,38,w,26);card.SetBounds(12,h-16-card.Height,w,card.Height);navRail.SetBounds(12,78,w,Math.Max(0,card.Top-12-78));};
+            nav.Layout+=(s,e)=>{int p=Ui.S(12),t=Ui.S(16),w=Math.Max(20,nav.ClientSize.Width-p*2),h=nav.ClientSize.Height;label.SetBounds(p,t,w,Ui.S(20));search.SetBounds(p,t+Ui.S(22),w,Ui.S(28));card.SetBounds(p,h-t-card.Height,w,card.Height);int ry=t+Ui.S(60);navRail.SetBounds(p,ry,w,Math.Max(0,card.Top-p-ry));};
             nav.Paint+=(s,e)=>{using(var p=new Pen(Ui.Line))e.Graphics.DrawLine(p,nav.Width-1,0,nav.Width-1,nav.Height);};
             return nav;
         }
@@ -130,10 +130,10 @@ namespace TianGongCadSuite {
             protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e){using(var p=new Pen(Ui.Line)){if(e.Vertical)e.Graphics.DrawLine(p,e.Item.Width/2,4,e.Item.Width/2,e.Item.Height-4);else e.Graphics.DrawLine(p,4,e.Item.Height/2,e.Item.Width-4,e.Item.Height/2);}}
         }
         void InitializePickingPanel(Control toolbar){
-            fullToolbar=toolbar;pickingPanel=new Panel{Dock=DockStyle.Fill,Visible=false};pickingLabel=new Label{Dock=DockStyle.Top,Height=59,Padding=new Padding(10,8,10,4),AutoEllipsis=true,BackColor=Ui.Bg};
-            var actions=new FlowLayoutPanel{Dock=DockStyle.Bottom,Height=65,Padding=new Padding(6,4,6,4),BackColor=Ui.Bg};
+            fullToolbar=toolbar;pickingPanel=new Panel{Dock=DockStyle.Fill,Visible=false};pickingLabel=new Label{Dock=DockStyle.Top,Height=Ui.S(64),Padding=Ui.SPad(10,8,10,4),AutoEllipsis=true,BackColor=Ui.Bg};
+            var actions=new FlowLayoutPanel{Dock=DockStyle.Bottom,Height=Ui.S(68),Padding=Ui.SPad(6,4,6,4),BackColor=Ui.Bg};
             Button(actions,"绑定并下一条",BindAndNext);Button(actions,"另建记录",()=>AddSelectedModels());Button(actions,"返回表格",()=>SetPickingMode(false));
-            watchStop=Ui.Secondary("停止连续",88,32);watchStop.Visible=false;watchStop.Margin=new Padding(4,1,2,1);((FlatButton)watchStop).SetFore(Ui.Bad);watchStop.Click+=(s,e)=>StopContinuous();actions.Controls.Add(watchStop);Button(actions,"撤销",Undo);
+            watchStop=Ui.Secondary("停止连续",88,32);watchStop.Visible=false;watchStop.Margin=Ui.SPad(4,1,2,1);((FlatButton)watchStop).SetFore(Ui.Bad);watchStop.Click+=(s,e)=>StopContinuous();actions.Controls.Add(watchStop);Button(actions,"撤销",Undo);
             pickingPanel.Controls.Add(pickingLabel);pickingPanel.Controls.Add(actions);Controls.Add(pickingPanel);
             grid.CurrentCellChanged+=(s,e)=>RefreshPickingLabel();
         }
@@ -142,7 +142,7 @@ namespace TianGongCadSuite {
         internal string BindingRecordId {get{return CurrentId();}}
         internal void SetPickingMode(bool value){
             if(value==pickingMode)return;grid.EndEdit();if(value)pickingId=CurrentId();pickingMode=value;
-            if(value){normalBounds=Bounds;fullToolbar.Visible=false;helpBar.Visible=false;if(nav!=null)nav.Visible=false;if(entryPanel!=null)entryPanel.Visible=false;grid.Visible=false;status.Visible=false;MinimumSize=new Size(400,140);Size=new Size(440,180);var area=Screen.FromControl(this).WorkingArea;Location=new Point(Math.Max(area.Left,area.Right-Width-20),Math.Max(area.Top,area.Bottom-Height-60));pickingPanel.Visible=true;pickingPanel.BringToFront();}
+            if(value){normalBounds=Bounds;fullToolbar.Visible=false;helpBar.Visible=false;if(nav!=null)nav.Visible=false;if(entryPanel!=null)entryPanel.Visible=false;grid.Visible=false;status.Visible=false;MinimumSize=new Size(Ui.S(400),Ui.S(145));Size=new Size(Ui.S(440),Ui.S(186));var area=Screen.FromControl(this).WorkingArea;Location=new Point(Math.Max(area.Left,area.Right-Width-Ui.S(20)),Math.Max(area.Top,area.Bottom-Height-Ui.S(60)));pickingPanel.Visible=true;pickingPanel.BringToFront();}
             else{StopContinuous();pickingPanel.Visible=false;MinimumSize=new Size(1040,520);Bounds=normalBounds;fullToolbar.Visible=true;helpBar.Visible=true;if(nav!=null)nav.Visible=true;if(entryPanel!=null)entryPanel.Visible=true;grid.Visible=true;status.Visible=true;}
             if(!value&&pickingId!=null)SelectId(pickingId);RefreshPickingLabel();
         }

@@ -27,26 +27,27 @@ namespace TianGongCadSuite {
         public DrawingForm(F.Application application){
             app = application;
             Ui.Shell(this, "一键出图", 860, 560, 640, 420);
-            var body = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(20, 16, 20, 8), Gap = 6 };
-            head.AutoSize = false; head.Height = 30; head.Font = Ui.F10B; head.ForeColor = Ui.Text; head.BackColor = Ui.Bg;
+            var body = new VerticalStack { Dock = DockStyle.Fill, Padding = Ui.SPad(20, 16, 20, 8), Gap = Ui.S(8) };
+            head.AutoSize = false; head.Height = Ui.S(30); head.Font = Ui.F10B; head.ForeColor = Ui.Text; head.BackColor = Ui.Bg;
             body.Add(head);
-            var hint = new Label { AutoSize = false, Height = 36, Font = Ui.F8, ForeColor = Ui.Muted, BackColor = Ui.Bg,
+            var hint = new Label { AutoSize = false, Height = Ui.S(58), Font = Ui.F8, ForeColor = Ui.Muted, BackColor = Ui.Bg,
                 Text = "按公司模板（SK先惠 A4 / A3）出图：主视图 + 投影 + 轴测图，坐标尺寸、孔标注、圆角、刻字引线都标好，定位销孔加 H7 + 位置度（按公司图纸统计），标题栏从零件属性自动带出。\r\n出完请看一眼「需要人工确认」那一列；双击一行打开那张图。" };
             body.Add(hint);
             list.View = View.Details; list.CheckBoxes = true; list.FullRowSelect = true; list.GridLines = false; list.HideSelection = false;
             list.BorderStyle = BorderStyle.FixedSingle; list.Font = Ui.F9;
-            list.Columns.Add("文件", 300); list.Columns.Add("类型", 56); list.Columns.Add("已有图纸", 70); list.Columns.Add("结果", 240); list.Columns.Add("需要人工确认", 400);
+            list.Columns.Add("文件", 300); list.Columns.Add("类型", 56); list.Columns.Add("已有图纸", 76); list.Columns.Add("结果", 240); list.Columns.Add("需要人工确认", 400);
+            Ui.FitListView(list);
             list.DoubleClick += (s, e) => OpenSelected();
             body.Add(list, true);
-            var opts = new FlowLayoutPanel { Height = 30, FlowDirection = FlowDirection.LeftToRight, BackColor = Ui.Bg, WrapContents = false };
-            overwrite.Text = "已有同名工程图时覆盖（不勾：另存为「名字(自动).dft」）"; overwrite.AutoSize = true; overwrite.Font = Ui.F9;
-            openAfter.Text = "出完打开工程图"; openAfter.AutoSize = true; openAfter.Checked = true; openAfter.Font = Ui.F9;
+            var opts = new FlowLayoutPanel { Height = Ui.S(34), FlowDirection = FlowDirection.LeftToRight, BackColor = Ui.Bg, WrapContents = false };
+            overwrite.Text = "已有同名工程图时覆盖（不勾：另存为「名字(自动).dft」）"; overwrite.AutoSize = true; overwrite.Font = Ui.F9; overwrite.Margin = Ui.SPad(0, 4, 16, 0);
+            openAfter.Text = "出完打开工程图"; openAfter.AutoSize = true; openAfter.Checked = true; openAfter.Font = Ui.F9; openAfter.Margin = Ui.SPad(0, 4, 0, 0);
             opts.Controls.Add(overwrite); opts.Controls.Add(openAfter);
             body.Add(opts);
-            bar.Height = 8; body.Add(bar);
-            status.AutoSize = false; status.Height = 22; status.Font = Ui.F8; status.ForeColor = Ui.Muted; status.BackColor = Ui.Bg;
+            bar.Height = Ui.S(8); body.Add(bar);
+            status.AutoSize = false; status.Height = Ui.S(24); status.Font = Ui.F8; status.ForeColor = Ui.Muted; status.BackColor = Ui.Bg;
             body.Add(status);
-            var actions = new ActionBar { Dock = DockStyle.Bottom, Height = 64, Padding = new Padding(18, 0, 18, 0) };
+            var actions = new ActionBar { Dock = DockStyle.Bottom, Height = Ui.S(68), Padding = Ui.SPad(18, 0, 18, 0) };
             run.Click += (s, e) => { if (busy) stop = true; else Run(); };
             close.Click += (s, e) => Close();
             actions.AddRight(close); actions.AddRight(run);

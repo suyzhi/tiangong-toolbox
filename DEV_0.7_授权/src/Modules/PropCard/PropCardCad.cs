@@ -119,6 +119,25 @@ namespace TianGongCadSuite {
             catch { return false; }
         }
 
+        public void ResetContext(){
+            root = null;
+            rootPath = "";
+            opened = null;
+            occurrences.Clear();
+            skippedSubs.Clear();
+        }
+
+        public void RefreshActiveContext(){
+            ResetContext();
+            if (app == null) return;
+            try {
+                if (app.ActiveDocument != null) {
+                    string ignored;
+                    Collect(out ignored);
+                }
+            } catch { }
+        }
+
         static bool Add(List<string> list, HashSet<string> seen, string file){
             if (string.IsNullOrEmpty(file) || !seen.Add(file)) return false;
             list.Add(file);
@@ -138,6 +157,9 @@ namespace TianGongCadSuite {
                 object custom = Late.Get(sets, "Item", "Custom");
                 foreach (var pair in FileNames(custom)) row.Original[pair.Key] = Convert.ToString(Late.Get(Late.Get(custom, "Item", pair.Value), "Value"));
                 try { row.Material = Convert.ToString(Late.Get(Late.Get(Late.Get(sets, "Item", "MechanicalModeling"), "Item", "Material"), "Value")); } catch { }
+                if (string.IsNullOrEmpty(row.Material)) {
+                    try { row.Material = Convert.ToString(Late.Get(Late.Get(Late.Get(sets, "Item", "MechanicalModeling"), "Item", "材料"), "Value")); } catch { }
+                }
             } catch (Exception e) {
                 // 读不了文件（打开着的加密文件就读不了）：退回已打开的文档
                 var doc = LoadedDocument(path);
@@ -241,6 +263,7 @@ namespace TianGongCadSuite {
         // 文件在不在 CAD 内存里：打开着的文档、当前工程图引用的模型、当前装配里引用它的实例
         // （加密文件在内存里时属性组件写不进去，只能写内存里那份 —— 工程图引用的零件就是这样，0.8.0 现场）
         object LoadedDocument(string path){
+            if (app == null) return null;
             if (opened == null) {
                 opened = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
                 try {

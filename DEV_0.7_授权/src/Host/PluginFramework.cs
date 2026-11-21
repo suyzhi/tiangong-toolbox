@@ -184,8 +184,10 @@ namespace TianGongCadSuite {
         // 已在功能区下线的命令（客户版不再出现）：
         //   1 = 四面生成内嵌板（手工选四面，已被"型材自动填充"取代）
         //   4 = 导出出图训练数据（内部研究用）
+        //  10 = 属性卡填写（0.13.0 已整合进命令 14「出图清单工作台」）
+        //  12 = 批量改名（0.13.0 已整合进命令 14「出图清单工作台」）
         // 只影响"注册哪些按钮"；对应实现仍编译在 DLL 里，命令 ID 也永久保留。
-        static readonly int[] Hidden=new int[]{1,4};
+        static readonly int[] Hidden=new int[]{1,4,10,12};
         public static ToolRegistry Create(ToolContext context){var registry=new ToolRegistry();foreach(int id in Hidden)registry.Retire(id);registry.Add(new InsetPanelModule(context));registry.Add(new LineupModule(context));registry.Add(new TrainingExportModule(context));registry.Add(new FormatConvertModule(context));registry.Add(new AutoHoleModule(context));registry.Add(new PropCardModule(context));registry.Add(new BatchRenameModule(context));registry.Add(new DrawingModule(context));registry.Add(new QuickBomModule(context));registry.Add(new UpdateModule(context));return registry;}
     }
 }

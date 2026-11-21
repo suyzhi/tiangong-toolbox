@@ -49,12 +49,14 @@ namespace TianGongCadSuite {
 
         [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
         [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
+        [DllImport("user32.dll")] static extern IntPtr GetFocus();
+        [DllImport("user32.dll")] static extern IntPtr SetFocus(IntPtr hwnd);
 
         readonly Label title = new Label();
         readonly Panel view = new Panel();
         readonly Label hint = new Label();
         readonly PictureBox still = new PictureBox();
-        readonly Timer debounce = new Timer { Interval = 160 };
+        readonly Timer debounce = new Timer { Interval = 260 };
         readonly Timer settle = new Timer { Interval = 120 };
         readonly Timer check = new Timer { Interval = 700 };   // 装配显示后多久读屏判断画没画出来
         public SolidEdgeFramework.Application App;            // 兜底自己画时从这里找开着的装配
@@ -77,26 +79,26 @@ namespace TianGongCadSuite {
 
         public PartPreview(){
             BackColor = Ui.Bg;
-            Padding = new Padding(10, 0, 0, 0);
-            title.AutoSize = false; title.Dock = DockStyle.Top; title.Height = 26;
+            Padding = Ui.SPad(10, 0, 0, 0);
+            title.AutoSize = false; title.Dock = DockStyle.Top; title.Height = Ui.S(28);
             title.Font = Ui.F9B; title.ForeColor = Ui.Text; title.BackColor = Ui.Bg;
             title.TextAlign = ContentAlignment.MiddleLeft; title.AutoEllipsis = true;
             title.Text = "零件预览";
-            var bar = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 30, BackColor = Ui.Bg, WrapContents = false, Padding = new Padding(0), Margin = new Padding(0) };
+            var bar = new FlowLayoutPanel { Dock = DockStyle.Top, Height = Ui.S(34), BackColor = Ui.Bg, WrapContents = false, Padding = new Padding(0), Margin = new Padding(0) };
             foreach (var v in new[]{ new[]{ "等轴测", "Iso" }, new[]{ "前", "Front" }, new[]{ "上", "Top" }, new[]{ "右", "Right" } }) {
                 string type = v[1];
-                var b = Ui.Small(v[0]); b.Margin = new Padding(0, 0, 2, 0); ((FlatButton)b).SetFore(Ui.Text2);
+                var b = Ui.Small(v[0]); b.Margin = new Padding(0, 0, Ui.S(2), 0); ((FlatButton)b).SetFore(Ui.Text2);
                 b.Click += (s, e) => SetView(type);
                 bar.Controls.Add(b);
             }
-            var fit = Ui.Small("适合"); fit.Margin = new Padding(0, 0, 2, 0); ((FlatButton)fit).SetFore(Ui.Text2);
+            var fit = Ui.Small("适合"); fit.Margin = new Padding(0, 0, Ui.S(2), 0); ((FlatButton)fit).SetFore(Ui.Text2);
             fit.Click += (s, e) => FitView();
             bar.Controls.Add(fit);
-            var tip = new Label { Dock = DockStyle.Bottom, Height = 22, AutoSize = false, Font = Ui.F8, ForeColor = Ui.Muted, BackColor = Ui.Bg,
-                Text = "拖动旋转 · 滚轮缩放 · Shift+拖动平移 · 双击适合", TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true };
+            var tip = new Label { Dock = DockStyle.Bottom, Height = Ui.S(24), AutoSize = false, Font = Ui.F8, ForeColor = Ui.Muted, BackColor = Ui.Bg,
+                Text = "拖动旋转 · 滚轮缩放 · Shift平移 · 双击适合", TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true };
             view.Dock = DockStyle.Fill; view.BackColor = Color.FromArgb(0xE9, 0xED, 0xF3);
             hint.Dock = DockStyle.Fill; hint.AutoSize = false; hint.TextAlign = ContentAlignment.MiddleCenter;
-            hint.Font = Ui.F9; hint.ForeColor = Ui.Muted; hint.BackColor = view.BackColor; hint.Padding = new Padding(16);
+            hint.Font = Ui.F9; hint.ForeColor = Ui.Muted; hint.BackColor = view.BackColor; hint.Padding = Ui.SPad(16, 16, 16, 16);
             still.Dock = DockStyle.Fill; still.SizeMode = PictureBoxSizeMode.Normal; still.Visible = false; still.BackColor = view.BackColor;
             view.Controls.Add(hint); view.Controls.Add(still);
             Controls.Add(view); Controls.Add(tip); Controls.Add(bar); Controls.Add(title);
@@ -112,8 +114,8 @@ namespace TianGongCadSuite {
         // 放到表格所在的卡片右边（中间一条可拖的分隔条），返回标题栏上的「隐藏预览 / 显示预览」按钮；开关记在 choices.tsv 的 key 下。
         // 卡片里要先放好 Dock=Fill 的表格：停靠按 Controls 倒序排，后加的预览先占右边，表格填剩下的
         public static Button Attach(Control frame, PartPreview preview, string key){
-            var split = new Splitter { Dock = DockStyle.Right, Width = 6, MinExtra = 360, MinSize = 220, BackColor = Ui.Bg };
-            preview.Dock = DockStyle.Right; preview.Width = 340;
+            var split = new Splitter { Dock = DockStyle.Right, Width = Ui.S(6), MinExtra = Ui.S(360), MinSize = Ui.S(240), BackColor = Ui.Bg };
+            preview.Dock = DockStyle.Right; preview.Width = Ui.S(360);
             frame.Controls.Add(split); frame.Controls.Add(preview);
             var toggle = Ui.Small("隐藏预览"); ((FlatButton)toggle).SetFore(Ui.Text2);
             Action sync = () => { bool on = Choices.Get(key, "1") != "0"; preview.Visible = on; split.Visible = on; toggle.Text = on ? "隐藏预览" : "显示预览"; };
@@ -122,13 +124,18 @@ namespace TianGongCadSuite {
             return toggle;
         }
 
-        // 表里选中了一行（path 为空 = 没选中）。连按方向键时只显示最后停下的那个
+        // 表里选中了一行（path 为空 = 没选中）。连按方向键时只显示最后停下的那个；同行切换列不重复触发
         public void ShowFile(string path){
+            string next = path ?? "";
+            if (string.Equals(row, next, StringComparison.OrdinalIgnoreCase)) {
+                if (next.Length == 0 || debounce.Enabled || (loaded.Length > 0 && string.Equals(loaded, wanted, StringComparison.OrdinalIgnoreCase))) return;
+            }
             string note;
-            row = path ?? "";
+            row = next;
             wanted = ModelFor(row, out note);
             wantedNote = note;
-            title.Text = string.IsNullOrEmpty(path) ? "零件预览" : Path.GetFileName(path) + (note.Length > 0 && wanted.Length > 0 ? "　（" + note + "）" : "");
+            title.Text = string.IsNullOrEmpty(next) ? "零件预览" : Path.GetFileName(next) + (note.Length > 0 && wanted.Length > 0 ? "　（" + note + "）" : "");
+            if (!Visible) return;
             debounce.Stop(); debounce.Start();
         }
 
@@ -185,12 +192,16 @@ namespace TianGongCadSuite {
         }
 
         void Apply(){
-            if (busy || inactive || !Visible || IsDisposed) return;
+            var form = FindForm();
+            if (busy || inactive || !Visible || IsDisposed || (form != null && (!form.Visible || form.WindowState == FormWindowState.Minimized))) return;
             if (wanted.Length == 0) { Release(); Say(wantedNote.Length > 0 ? wantedNote : "点表里的一行，这里显示它的三维模型"); return; }
             if (!File.Exists(wanted)) { Release(); Say("文件不在了：\r\n" + wanted); return; }
             if (blankAsm.Contains(wanted)) { ShowMesh(wanted); return; }   // 已经知道控件画不出来的装配：直接自己画
             if (!EnsureHost()) return;
-            if (string.Equals(loaded, wanted, StringComparison.OrdinalIgnoreCase)) { Reveal(); return; }
+            if (string.Equals(loaded, wanted, StringComparison.OrdinalIgnoreCase)) {
+                if (!host.Visible) Reveal();
+                return;
+            }
             var sw = System.Diagnostics.Stopwatch.StartNew();
             try {
                 Cursor = Cursors.WaitCursor;
@@ -333,7 +344,22 @@ namespace TianGongCadSuite {
 
         void Reveal(){
             if (meshView != null) meshView.Visible = false;
-            host.Visible = true; host.BringToFront();
+            var form = FindForm();
+            if (!Visible || (form != null && (!form.Visible || form.WindowState == FormWindowState.Minimized))) return;
+            Control prevActive = (form != null && !form.IsDisposed) ? form.ActiveControl : null;
+            IntPtr prevFocus = GetFocus();
+            if (!host.Visible) {
+                try { host.Visible = true; } catch (Exception e) { Log.Write("PartPreview", "reveal " + e.Message); }
+                // AxHost.MakeVisibleWithShow() 显示 ActiveX 时会把焦点抢走，导致表格里 Ctrl+C / Ctrl+V / Ctrl+Z 失灵；
+                // 立刻把焦点还给表格等原控件（用户真正点到预览画面时 Host.WndProc 里才会 Focus）。
+                if (prevActive != null && prevActive != host && !prevActive.IsDisposed && prevActive.Visible && prevActive.CanFocus) {
+                    try { form.ActiveControl = prevActive; } catch { }
+                }
+                if (prevFocus != IntPtr.Zero && prevFocus != host.Handle && GetFocus() != prevFocus) {
+                    try { SetFocus(prevFocus); } catch { }
+                }
+            }
+            host.BringToFront();
             still.Visible = false;
             hint.Visible = false;
         }

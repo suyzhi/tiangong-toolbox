@@ -20,8 +20,11 @@ namespace TianGongCadSuite {
             TestCategoryClassification();
             TestCategoryParsing();
             TestCustomPartFilter();
+            TestRecursiveFolderScan();
             TestHeaderInferenceAndNaming();
             TestValidation();
+            TestWorkbenchSyncAndRename();
+            TestWorkbenchSortFilterAndUndo();
             TestProcessingListXlsx();
             TestCodeRequestXlsxAndDictionaries();
             Console.WriteLine("QuickBomPureTests PASSED " + passed);
@@ -184,6 +187,199 @@ namespace TianGongCadSuite {
             } finally {
                 try { Directory.Delete(tmpDir, true); } catch { }
             }
+        }
+
+        static void TestRecursiveFolderScan() {
+            string tmpDir = Path.Combine(Path.GetTempPath(), "tg-bom-scan-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tmpDir);
+            try {
+                // 根目录模型
+                File.WriteAllText(Path.Combine(tmpDir, "SK26.01-SD-15-001.par"), "");
+                File.WriteAllText(Path.Combine(tmpDir, "SK26.01-SD-15-001.dft"), "");
+                File.WriteAllText(Path.Combine(tmpDir, "~$SK26.01-SD-15-001.par"), ""); // 临时锁文件应跳过
+
+                // 二级子文件夹模型
+                string subA = Path.Combine(tmpDir, "按钮盒支架");
+                string subDeep = Path.Combine(subA, "子组件");
+                Directory.CreateDirectory(subDeep);
+                File.WriteAllText(Path.Combine(subA, "SK26.01-SD-15-009.asm"), "");
+                File.WriteAllText(Path.Combine(subA, "SK26.01-SD-15-009.dft"), "");
+                File.WriteAllText(Path.Combine(subDeep, "OK050-01-07A.asm"), "");
+                File.WriteAllText(Path.Combine(subDeep, "SK26.01-SD-15-010.psm"), "");
+
+                // 已导出的清单成品目录（应自动跳过，避免重复扫出）
+                string exportedDir = Path.Combine(tmpDir, "SK26.01-C10-01-加工件清单（按钮盒支架）-张三-20261121");
+                Directory.CreateDirectory(exportedDir);
+                File.WriteAllText(Path.Combine(exportedDir, "SK26.01-C10-01-按钮盒支架加工件清单-张三-20261121.xlsx"), "");
+                File.WriteAllText(Path.Combine(exportedDir, "SK26.01-SD-15-009.asm"), "");
+
+                // 隐藏目录（应跳过）
+                string hiddenDir = Path.Combine(tmpDir, ".hidden");
+                Directory.CreateDirectory(hiddenDir);
+                File.WriteAllText(Path.Combine(hiddenDir, "SK26.01-SD-15-999.par"), "");
+
+                var topOnly = BomRules.ScanFolderModels(tmpDir, false);
+                Check(topOnly.Count == 1 && topOnly[0].EndsWith("SK26.01-SD-15-001.par"), "non-recursive scans only root and skips ~* lock files");
+
+                var all = BomRules.ScanFolderModels(tmpDir, true);
+                Check(all.Count == 4, "recursive finds root + nested models, skips exported BOM dir & hidden dir (got " + all.Count + ")");
+                Check(BomRules.RelativeSubFolder(tmpDir, Path.Combine(tmpDir, "SK26.01-SD-15-001.par")) == "", "root file relative subfolder is empty");
+                Check(BomRules.RelativeSubFolder(tmpDir, Path.Combine(subDeep, "SK26.01-SD-15-010.psm")) == Path.Combine("按钮盒支架", "子组件"), "nested relative subfolder matches");
+                Check(BomRules.PickTopProject(all) == "SK26.01", "PickTopProject prefers SK26.01 with .dft over OK050");
+            } finally {
+                try { Directory.Delete(tmpDir, true); } catch { }
+            }
+        }
+
+        static void TestWorkbenchSyncAndRename() {
+            // 1. 扩展属性去重（不重复显示核心 6 列）
+            var extras = WorkbenchRules.ExtraPropFields(PropCardFields.Default);
+            Check(!extras.Contains("零件名称") && !extras.Contains("图号") && !extras.Contains("数量") && !extras.Contains("表面处理"), "core shared prop fields deduplicated from extra columns");
+            Check(extras.Contains("设计") && extras.Contains("项目名称") && extras.Contains("总装配图号"), "non-core prop card fields kept");
+
+            // 2. .asm 使用「零件名」键映射 + 修改属性实时联动到 BOM 和改名模板
+            var asmBom = new BomItem { ModelPath = @"D:\proj\旧支架.asm", PartName = "旧支架", DrawingNo = "旧支架", Material = "Q235-B", Quantity = 1 };
+            asmBom.RawCustomProps["零件名"] = "旧支架";
+            asmBom.RawCustomProps["图号"] = "SK26.01-SD-15-009";
+            var parBom = new BomItem { ModelPath = @"D:\proj\小板.par", PartName = "小板", DrawingNo = "小板", Material = "45#", Quantity = 2 };
+            parBom.RawCustomProps["零件名称"] = "定位小板";
+
+            var existingFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
+                @"D:\proj\旧支架.asm", @"D:\proj\旧支架.dft", @"D:\proj\旧支架.cfg",
+                @"D:\proj\小板.par", @"D:\proj\小板.dft", @"D:\proj\已存在.dft"
+            };
+            Func<string, bool> exists = p => existingFiles.Contains(p);
+
+            var rAsm = WorkbenchRules.CreateRow(asmBom, exists);
+            var rPar = WorkbenchRules.CreateRow(parBom, exists);
+            Check(rAsm.HasCfgFollower && rAsm.Bom.HasDraft == false, "fake path exists check sets HasCfgFollower");
+            Check(rAsm.DraftDisplay == "缺 .dft (+.cfg)" || rAsm.DraftDisplay == "有+.cfg", "draft display includes cfg note");
+            Check(rAsm.PropKeyFor("零件名称") == "零件名", ".asm maps 零件名称 to existing 零件名");
+            Check(rPar.PropKeyFor("零件名称") == "零件名称", ".par maps 零件名称 to 零件名称");
+
+            // 修改属性：实时同步到 Bom + 标脏 + 模板立即可用（未写入前就能用！）
+            rAsm.SetPropValue("零件名称", "缓存按钮盒支架");
+            rAsm.SetPropValue("表面处理", "哑光喷塑RAL9003");
+            Check(rAsm.PropDirty && rAsm.IsPropEdited("零件名称") && rAsm.Bom.PartName == "缓存按钮盒支架", "editing 零件名称 marks Prop dirty and syncs Bom.PartName");
+            var asmWrites = WorkbenchRules.CollectPropWrites(rAsm, PropCardFields.Default, true);
+            Check(asmWrites.Any(kv => kv.Key == "零件名" && kv.Value == "缓存按钮盒支架"), "CollectPropWrites writes 零件名 without creating duplicate 零件名称");
+            Check(!asmWrites.Any(kv => kv.Key == "零件名称"), "CollectPropWrites avoids duplicate 零件名称 on .asm");
+
+            // 模板生成直接读取表里刚改的新值
+            var miss = new List<string>();
+            string tplOut = RenameRules.Template("{图号}-{零件名称}", rAsm.Rename.OldBase, 1, rAsm.EffectiveTemplateProps(), miss);
+            Check(miss.Count == 0 && tplOut == "SK26.01-SD-15-009-缓存按钮盒支架", "live template uses unsaved edited properties (got " + tplOut + ")");
+
+            // 一键「用图号 → 填新文件名」与跟随 .dft / .cfg 冲突检测
+            var list = new List<WorkbenchRow> { rAsm, rPar };
+            int synced = WorkbenchRules.SyncDrawingNoToNewName(list);
+            Check(synced == 2 && rAsm.Rename.NewBase == "旧支架" == false || rAsm.Bom.DrawingNo.Length > 0, "SyncDrawingNoToNewName ran");
+            rAsm.SetPropValue("图号", "SK26.01-SD-15-009");
+            WorkbenchRules.SyncDrawingNoToNewName(new[] { rAsm });
+            Check(rAsm.Rename.NewBase == "SK26.01-SD-15-009" && rAsm.RenameChanged, "SyncDrawingNoToNewName sets NewBase to DrawingNo");
+
+            // 测试跟随 .dft 撞上磁盘上已有的 已存在.dft
+            rPar.Rename.SetNewBase("已存在");
+            int probs;
+            var batch = WorkbenchRules.BuildAndValidateRenameBatch(list, true, exists, out probs);
+            Check(batch.Count == 5, "batch includes 2 masters + 2 .dft + 1 .cfg = 5 rows (got " + batch.Count + ")");
+            Check(probs > 0 && rPar.RenameProblem.Contains(".dft"), "companion .dft collision bubbles to master row: " + rPar.RenameProblem);
+
+            // 修正冲突后校验通过，并验证改名后路径同步保留未写入的属性卡修改
+            rPar.Rename.SetNewBase("SK26.01-SD-15-010");
+            batch = WorkbenchRules.BuildAndValidateRenameBatch(list, true, exists, out probs);
+            Check(probs == 0, "no rename problems after fixing collision (got " + probs + ")");
+
+            var moved = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) {
+                { @"D:\proj\旧支架.asm", @"D:\proj\SK26.01-SD-15-009.asm" },
+                { @"D:\proj\旧支架.dft", @"D:\proj\SK26.01-SD-15-009.dft" },
+                { @"D:\proj\旧支架.cfg", @"D:\proj\SK26.01-SD-15-009.cfg" },
+                { @"D:\proj\小板.par", @"D:\proj\SK26.01-SD-15-010.par" },
+                { @"D:\proj\小板.dft", @"D:\proj\SK26.01-SD-15-010.dft" }
+            };
+            existingFiles.Add(@"D:\proj\SK26.01-SD-15-009.asm");
+            existingFiles.Add(@"D:\proj\SK26.01-SD-15-009.dft");
+            existingFiles.Add(@"D:\proj\SK26.01-SD-15-009.cfg");
+            existingFiles.Add(@"D:\proj\SK26.01-SD-15-010.par");
+            existingFiles.Add(@"D:\proj\SK26.01-SD-15-010.dft");
+            WorkbenchRules.ApplyRenamedPaths(list, moved, exists);
+            Check(rAsm.Rename.Path == @"D:\proj\SK26.01-SD-15-009.asm" && !rAsm.RenameChanged, "ApplyRenamedPaths updates Rename.Path and clears Changed");
+            Check(rAsm.Prop.Path == @"D:\proj\SK26.01-SD-15-009.asm" && rAsm.PropDirty, "ApplyRenamedPaths updates Prop.Path and preserves unsaved edits");
+            Check(rAsm.Bom.ModelPath == @"D:\proj\SK26.01-SD-15-009.asm" && rAsm.Bom.DraftPath == @"D:\proj\SK26.01-SD-15-009.dft", "ApplyRenamedPaths updates Bom model & draft paths");
+
+            // 一键「用文件名 → 填图号」
+            WorkbenchRules.SyncFileNameToDrawingNo(new[] { rPar });
+            Check(rPar.Bom.DrawingNo == "SK26.01-SD-15-010" && rPar.IsPropEdited("图号"), "SyncFileNameToDrawingNo updates both Bom.DrawingNo and Prop 图号");
+        }
+
+        static void TestWorkbenchSortFilterAndUndo() {
+            // 1. 自然排序：2 排在 10 前面，忽略大小写
+            Check(WorkbenchRules.NaturalCompare("SK26.01-SD-15-2", "SK26.01-SD-15-10") < 0, "natural compare: 2 < 10");
+            Check(WorkbenchRules.NaturalCompare("SK26.01-SD-15-10", "SK26.01-SD-15-2") > 0, "natural compare: 10 > 2");
+            Check(WorkbenchRules.NaturalCompare("part02", "PART10") < 0, "natural compare case-insensitive");
+            Check(WorkbenchRules.NaturalCompare("A-2", "A-02") < 0, "natural compare shorter numeric tie-breaker");
+
+            Func<string, bool> noExist = p => false;
+            var r1 = WorkbenchRules.CreateRow(new BomItem { ModelPath = @"D:\p\SK-10.par", PartName = "底座", DrawingNo = "SK-10", Material = "Q235-B", Quantity = 10, Category = 4, Selected = true }, noExist);
+            var r2 = WorkbenchRules.CreateRow(new BomItem { ModelPath = @"D:\p\SK-2.par", PartName = "支架", DrawingNo = "SK-2", Material = "", Quantity = 2, Category = 2, Selected = true }, noExist);
+            var r3 = WorkbenchRules.CreateRow(new BomItem { ModelPath = @"D:\p\SK-1.asm", PartName = "总成", DrawingNo = "SK-1", Material = "SUS304", Quantity = 1, Category = 1, Selected = false }, noExist);
+            var r4 = WorkbenchRules.CreateRow(new BomItem { ModelPath = @"D:\p\SK-3.par", PartName = "压板", DrawingNo = "SK-3", Material = "Q235-B", Quantity = 4, Category = 4, Selected = true }, noExist);
+
+            // 2. 排序：文件名自然升序/降序、数量数值升序/降序、文本空白无论升降序均置底、勾选列升序已勾选在前
+            var rows = new List<WorkbenchRow> { r1, r2, r3, r4 };
+            WorkbenchRules.SortRows(rows, "col:old", 1, r => "");
+            Check(rows[0] == r3 && rows[1] == r2 && rows[2] == r4 && rows[3] == r1, "natural sort asc on col:old: SK-1, SK-2, SK-3, SK-10");
+            WorkbenchRules.SortRows(rows, "col:old", -1, r => "");
+            Check(rows[0] == r1 && rows[1] == r4 && rows[2] == r2 && rows[3] == r3, "natural sort desc on col:old: SK-10, SK-3, SK-2, SK-1");
+
+            WorkbenchRules.SortRows(rows, "prop:数量", 1, r => "");
+            Check(rows[0].Bom.Quantity == 1 && rows[1].Bom.Quantity == 2 && rows[2].Bom.Quantity == 4 && rows[3].Bom.Quantity == 10, "numeric sort asc on prop:数量");
+            WorkbenchRules.SortRows(rows, "prop:数量", -1, r => "");
+            Check(rows[0].Bom.Quantity == 10 && rows[3].Bom.Quantity == 1, "numeric sort desc on prop:数量");
+
+            WorkbenchRules.SortRows(rows, "col:mat", 1, r => "");
+            Check(rows[3] == r2, "blank material stays last on asc sort");
+            WorkbenchRules.SortRows(rows, "col:mat", -1, r => "");
+            Check(rows[3] == r2 && rows[0] == r3, "blank material ALSO stays last on desc sort (Excel behavior)");
+
+            WorkbenchRules.SortRows(rows, "col:sel", 1, r => "");
+            Check(rows[0].Bom.Selected && rows[1].Bom.Selected && rows[2].Bom.Selected && !rows[3].Bom.Selected, "col:sel asc puts selected rows first");
+
+            // 3. 唯一值统计（(空白) 置顶 + 计数准确）与多列级联筛选
+            var distinctMat = WorkbenchRules.DistinctColumnValues(rows, "col:mat", r => "");
+            Check(distinctMat.Count == 3 && distinctMat[0].Key == WorkbenchRules.BlankToken && distinctMat[0].Value == 1, "DistinctColumnValues puts (空白) first with count 1");
+            Check(distinctMat.Any(kv => kv.Key == "Q235-B" && kv.Value == 2), "DistinctColumnValues counts Q235-B == 2");
+
+            var filters = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal) {
+                { "col:mat", new HashSet<string>(new[] { "Q235-B" }, StringComparer.Ordinal) },
+                { "col:kind", new HashSet<string>(new[] { "零件" }, StringComparer.Ordinal) }
+            };
+            Check(WorkbenchRules.PassesColumnFilters(r1, "", filters, null), "r1 passes mat=Q235-B & kind=零件");
+            Check(!WorkbenchRules.PassesColumnFilters(r2, "", filters, null), "r2 fails mat=Q235-B");
+            Check(!WorkbenchRules.PassesColumnFilters(r3, "", filters, null), "r3 fails both filters");
+            // 级联：在打开材料筛选时跳过 col:mat，仍只看到 kind=零件 下的材料（不包含 r3 的 SUS304）
+            var matCands = rows.Where(r => WorkbenchRules.PassesColumnFilters(r, "", filters, "col:mat")).ToList();
+            Check(matCands.Count == 3 && !matCands.Contains(r3), "cascading excludeColKey keeps other column filters active");
+
+            // 4. Undo 快照捕获与精确回滚
+            var snap = r1.CaptureSnapshot();
+            r1.SetPropValue("零件名称", "改错的名字");
+            r1.SetMaterial("AL6061");
+            r1.Rename.SetNewBase("WRONG-NAME");
+            r1.Bom.Selected = false;
+            Check(r1.Bom.PartName == "改错的名字" && r1.RenameChanged && r1.PropDirty && !r1.Bom.Selected, "row mutated before undo");
+            r1.RestoreSnapshot(snap);
+            Check(r1.Bom.PartName == "底座" && r1.Bom.Material == "Q235-B" && !r1.RenameChanged && !r1.PropDirty && r1.Bom.Selected, "RestoreSnapshot restores all editable fields cleanly");
+
+            // 5. 剪贴板 TSV 格式化与解析往返（含特殊换行/制表符清洗）
+            var block = new List<IList<string>> {
+                new[] { "零件A", "SK-01\t带Tab" },
+                new[] { "零件B\r\n换行", "SK-02" }
+            };
+            string tsv = WorkbenchRules.FormatClipboardBlock(block);
+            var parsed = PropCardFields.ParseClipboard(tsv);
+            Check(parsed.Count == 2 && parsed[0].Length == 2 && parsed[0][0] == "零件A" && parsed[0][1] == "SK-01 带Tab" && parsed[1][0] == "零件B 换行" && parsed[1][1] == "SK-02",
+                "FormatClipboardBlock + ParseClipboard roundtrips cleanly: " + tsv);
         }
 
         static void TestCodeRequestXlsxAndDictionaries() {

@@ -77,61 +77,69 @@ namespace TianGongCadSuite {
             var remove=Ui.Small("移除选中");((FlatButton)remove).SetFore(Ui.Text2);remove.Click+=delegate{ RemoveSelected();RefreshRail(); };
             var clear=Ui.Small("清空");((FlatButton)clear).SetFore(Ui.Text2);clear.Click+=delegate{ if(timer.Enabled)return;sources.Clear();items.Clear();scanned=false;AutoOutput();RefreshList();RefreshRail(); };
             shell.AddHeader(pIn,addFiles);shell.AddHeader(pIn,addFolder);shell.AddHeader(pIn,remove);shell.AddHeader(pIn,clear);
-            var inStack=new VerticalStack{ Dock=DockStyle.Fill,Padding=new Padding(0),Gap=10,AutoScroll=false };
+            var inStack=new VerticalStack{ Dock=DockStyle.Fill,Padding=new Padding(0),Gap=Ui.S(10),AutoScroll=false };
             pIn.Body.Controls.Add(inStack);
-            var frame=Ui.Card("",0,"");frame.Padding=new Padding(6,8,6,8);
-            inputs.Dock=DockStyle.Fill;inputs.SelectionMode=SelectionMode.MultiExtended;inputs.BorderStyle=BorderStyle.None;inputs.IntegralHeight=false;inputs.Font=Ui.F9;inputs.ItemHeight=24;
+            var frame=Ui.Card("",0,"");frame.Padding=Ui.SPad(6,8,6,8);
+            inputs.Dock=DockStyle.Fill;inputs.SelectionMode=SelectionMode.MultiExtended;inputs.BorderStyle=BorderStyle.None;inputs.IntegralHeight=false;inputs.Font=Ui.F9;inputs.ItemHeight=Ui.S(26);
             inputEmpty.Dock=DockStyle.Top;
             frame.Controls.Add(inputs);frame.Controls.Add(inputEmpty);inputEmpty.BringToFront();
-            var kinds=new FlowLayoutPanel{ Height=76,BackColor=Ui.Bg,FlowDirection=FlowDirection.LeftToRight,WrapContents=true,Padding=new Padding(0) };
-            var kindsLabel=new Label{ Text="转哪几类",AutoSize=false,Width=76,Height=26,TextAlign=ContentAlignment.MiddleLeft,Font=Ui.F9B,ForeColor=Ui.Text2,BackColor=Ui.Bg };
+            var kinds=new FlowLayoutPanel{ Height=Ui.S(92),BackColor=Ui.Bg,FlowDirection=FlowDirection.LeftToRight,WrapContents=true,Padding=new Padding(0) };
+            int klw=Math.Max(Ui.S(76),TextRenderer.MeasureText("转哪几类",Ui.F9B).Width+Ui.S(10));
+            var kindsLabel=new Label{ Text="转哪几类",AutoSize=false,Width=klw,Height=Ui.S(28),TextAlign=ContentAlignment.MiddleLeft,Font=Ui.F9B,ForeColor=Ui.Text2,BackColor=Ui.Bg };
             kinds.Controls.Add(kindsLabel);
             parts.Text="零件 .SLDPRT";parts.Checked=true;
             assemblies.Text="装配 .SLDASM";assemblies.Checked=true;
             drawings.Text="工程图 .SLDDRW（天工 2025 打不开，一般不勾）";   // 0.10.2 真机：宝马托盘里试了 2 张（一张零件图、一张装配图），一打开都是 E_FAIL
             step.Text="STEP .stp/.step";step.Checked=true;
             recursive.Text="包含子文件夹";recursive.Checked=true;
-            foreach(var c in new[]{ parts,assemblies,drawings,step,recursive }){ c.AutoSize=true;c.BackColor=Ui.Bg;c.Margin=new Padding(0,4,18,4);kinds.Controls.Add(c); c.CheckedChanged+=delegate{ Unscan(); }; }
-            var scan=Ui.Secondary("扫描文件",100,34);scan.Click+=delegate{ ScanInputs();RefreshRail(); };scan.Margin=new Padding(0,0,0,0);
+            foreach(var c in new[]{ parts,assemblies,drawings,step,recursive }){ c.AutoSize=true;c.BackColor=Ui.Bg;c.Margin=Ui.SPad(0,4,16,4);kinds.Controls.Add(c); c.CheckedChanged+=delegate{ Unscan(); }; }
+            var scan=Ui.Secondary("扫描文件",100,34);scan.Click+=delegate{ ScanInputs();RefreshRail(); };scan.Margin=Ui.SPad(0,2,0,2);
             kinds.Controls.Add(scan);
+            kinds.MinimumSize=new Size(0,Ui.S(78));
+            kinds.Tag="autoheight";
             inStack.Add(frame,true);inStack.Add(kinds);
 
             // ---- ② 输出设置 ----
-            var outStack=new VerticalStack{ Dock=DockStyle.Fill,Padding=new Padding(0),Gap=14,AutoScroll=false };
+            var outStack=new VerticalStack{ Dock=DockStyle.Fill,Padding=new Padding(0),Gap=Ui.S(14),AutoScroll=false };
             pOut.Body.Controls.Add(outStack);
-            var outRow=new Panel{ Height=62,BackColor=Ui.Bg };
-            var outLabel=new Label{ Text="输出目录",AutoSize=false,Font=Ui.F9B,ForeColor=Ui.Text2,BackColor=Ui.Bg,Bounds=new Rectangle(0,0,200,22) };
+            var outRow=new Panel{ Height=Ui.S(68),BackColor=Ui.Bg };
+            var outLabel=new Label{ Text="输出目录",AutoSize=false,Font=Ui.F9B,ForeColor=Ui.Text2,BackColor=Ui.Bg,Bounds=new Rectangle(0,0,Ui.S(200),Ui.S(24)) };
             output.BorderStyle=BorderStyle.FixedSingle;output.Font=Ui.F9;
             var browse=Ui.Secondary("浏览…",80,30);browse.Click+=delegate{ BrowseOutput();RefreshRail(); };
             var openDir=Ui.Ghost("打开");openDir.Click+=delegate{ OpenOutputFolder(); };
             outRow.Controls.AddRange(new Control[]{ outLabel,output,browse,openDir });
-            outRow.Resize+=delegate{ int w=outRow.Width;output.SetBounds(0,28,Math.Max(80,w-180),28);browse.Location=new Point(output.Right+8,27);openDir.Location=new Point(browse.Right+6,27); };
+            outRow.Resize+=delegate{
+                int w=outRow.Width, btns=browse.Width+openDir.Width+Ui.S(16);
+                output.SetBounds(0,Ui.S(30),Math.Max(Ui.S(80),w-btns),Ui.S(30));
+                browse.Location=new Point(output.Right+Ui.S(8),Ui.S(29));
+                openDir.Location=new Point(browse.Right+Ui.S(6),Ui.S(29));
+            };
             output.TextChanged+=delegate{ if(!settingOutput)outputAuto=output.Text.Trim().Length==0; RefreshRail(); };
             openOutput.Visible=false;
-            var opts=new FieldGrid{ BackColor=Ui.Bg,LabelWidth=84 };
+            var opts=new FieldGrid{ BackColor=Ui.Bg,LabelWidth=Ui.S(84) };
             mirror.Text="镜像源目录结构（推荐，避免同名覆盖）";mirror.Checked=true;mirror.AutoSize=true;mirror.CheckedChanged+=delegate{ Unscan(); };
             force.Text="覆盖已存在的转换结果";force.AutoSize=true;
             verify.Text="转换后重新打开校验引用";verify.AutoSize=true;
             opts.Add("目录结构",mirror);
             opts.Add("已存在",force);
             opts.Add("校验",verify);
-            workers.Minimum=1;workers.Maximum=8;workers.Value=2;workers.Width=64;workers.BorderStyle=BorderStyle.FixedSingle;workers.TextAlign=HorizontalAlignment.Right;
+            workers.Minimum=1;workers.Maximum=8;workers.Value=2;workers.Width=Ui.S(72);workers.BorderStyle=BorderStyle.FixedSingle;workers.TextAlign=HorizontalAlignment.Right;
             autoWorkers.Text="自动（推荐：单进程）";autoWorkers.Checked=true;autoWorkers.AutoSize=true;
             autoWorkers.CheckedChanged+=delegate{ workers.Enabled=!autoWorkers.Checked; };workers.Enabled=false;
             opts.Add("并行进程",autoWorkers,workers);
             opts.Height=opts.PreferredHeight;
-            estimate.AutoSize=false;estimate.ForeColor=Ui.Muted;estimate.Font=Ui.F8;estimate.BackColor=Ui.Bg;estimate.Height=64;   // 40 高时窗口一窄，第三行「转换器完成」被截掉
+            estimate.AutoSize=false;estimate.ForeColor=Ui.Muted;estimate.Font=Ui.F8;estimate.BackColor=Ui.Bg;estimate.Height=Ui.S(72);
             estimate.Text="并行>1 为实验特性：实测仅快约 1.2 倍，且个别零件可能保存失败。\r\n输出格式：装配 .asm、零件 .par、钣金 .psm、工程图 .dft；转换由天工CAD自带的 SolidWorks / STEP 转换器完成。";
             outStack.Add(outRow);outStack.Add(opts);outStack.Add(estimate);
 
             // ---- ③ 转换 ----
-            var runStack=new VerticalStack{ Dock=DockStyle.Fill,Padding=new Padding(0),Gap=12,AutoScroll=false };
+            var runStack=new VerticalStack{ Dock=DockStyle.Fill,Padding=new Padding(0),Gap=Ui.S(12),AutoScroll=false };
             pRun.Body.Controls.Add(runStack);
-            progress.Height=10;
+            progress.Height=Ui.S(10);
             var tiles=new Panel{ Height=statDone.Height,BackColor=Ui.Bg };
             tiles.Controls.AddRange(new Control[]{ statDone,statOk,statFail,statSkip });
-            tiles.Resize+=delegate{ int w=(tiles.Width-36)/4;int x=0;foreach(var t in new[]{ statDone,statOk,statFail,statSkip }){ t.SetBounds(x,0,w,tiles.Height);x+=w+12; } };
-            var logFrame=Ui.Card("日志",0,"");logFrame.Padding=new Padding(12,36,6,8);
+            tiles.Resize+=delegate{ int g=Ui.S(12);int w=(tiles.Width-g*3)/4;int x=0;foreach(var t in new[]{ statDone,statOk,statFail,statSkip }){ t.SetBounds(x,0,w,tiles.Height);x+=w+g; } };
+            var logFrame=Ui.Card("日志",0,"");logFrame.Padding=Ui.SPad(12,38,6,8);
             logBox.Dock=DockStyle.Fill;logBox.Multiline=true;logBox.ScrollBars=ScrollBars.Vertical;logBox.ReadOnly=true;
             logBox.BorderStyle=BorderStyle.None;logBox.BackColor=Color.White;logBox.Font=Ui.F8;
             logFrame.Controls.Add(logBox);
@@ -165,7 +173,7 @@ namespace TianGongCadSuite {
             back.Enabled=cur>0&&!running;
             bool showStart=running||cur==2;
             start.Visible=showStart;next.Visible=!showStart;
-            if(!showStart)next.Text="下一步："+shell.Pages[cur+1].Title;
+            if(!showStart){ next.Text="下一步："+shell.Pages[cur+1].Title; Ui.FitButton(next); }
             shell.Footer.PerformLayout();
         }
         void RefreshRail(){

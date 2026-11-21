@@ -15,28 +15,27 @@ namespace TianGongCadSuite.Licensing {
         readonly Label planLabel;
 
         internal ActivationForm(){
-            Text = "天工工具箱 授权激活";
+            Ui.Shell(this, "天工工具箱 授权激活", 660, 486, 620, 460);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             MinimizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(660, 470);
-            Font = Ui.F9;
-            BackColor = Ui.Bg;
+            ShowInTaskbar = true;
 
+            int pad = Ui.S(22), cw = ClientSize.Width - pad * 2;
             Label title = new Label();
             title.Text = "本插件需要激活码才能使用";
             title.Font = Ui.Title;
             title.ForeColor = Ui.Text;
             title.AutoSize = true;
-            title.Location = new Point(20, 16);
+            title.Location = new Point(pad, Ui.S(16));
             Controls.Add(title);
 
             Label hint = new Label();
             hint.Text = "把管理员发来的激活码整段粘贴到下面的框里，点「激活」。激活需要联网，激活后这个码就绑定本机。";
             hint.AutoSize = false;
-            hint.Size = new Size(620, 22);
-            hint.Location = new Point(22, 56);
+            hint.Size = new Size(cw, Ui.S(36));
+            hint.Location = new Point(pad, Ui.S(58));
             hint.ForeColor = Ui.Text2;
             Controls.Add(hint);
 
@@ -44,8 +43,8 @@ namespace TianGongCadSuite.Licensing {
             codeBox.Multiline = true;
             codeBox.ScrollBars = ScrollBars.Vertical;
             codeBox.Font = new Font("Consolas", 10f);
-            codeBox.Location = new Point(22, 82);
-            codeBox.Size = new Size(616, 124);
+            codeBox.Location = new Point(pad, Ui.S(98));
+            codeBox.Size = new Size(cw, Ui.S(120));
             codeBox.BorderStyle = BorderStyle.FixedSingle;
             codeBox.WordWrap = true;
             codeBox.TextChanged += delegate { RefreshPlan(); };
@@ -53,8 +52,8 @@ namespace TianGongCadSuite.Licensing {
 
             planLabel = new Label();
             planLabel.AutoSize = false;
-            planLabel.Location = new Point(22, 212);
-            planLabel.Size = new Size(616, 20);
+            planLabel.Location = new Point(pad, Ui.S(224));
+            planLabel.Size = new Size(cw, Ui.S(22));
             planLabel.ForeColor = Ui.Muted;
             Controls.Add(planLabel);
 
@@ -62,56 +61,57 @@ namespace TianGongCadSuite.Licensing {
             machineTitle.Text = "本机机器码（只有售后核对时才需要，管理员发码时不用它）";
             machineTitle.AutoSize = true;
             machineTitle.Font = Ui.F8; machineTitle.ForeColor = Ui.Text2;
-            machineTitle.Location = new Point(22, 242);
+            machineTitle.Location = new Point(pad, Ui.S(254));
             Controls.Add(machineTitle);
 
+            Button copyButton = Ui.Secondary("复制机器码", 152, 34);
             machineBox = new TextBox();
             machineBox.ReadOnly = true;
             machineBox.Font = new Font("Consolas", 12f, FontStyle.Bold);
             machineBox.BackColor = Ui.Rail;
             machineBox.BorderStyle = BorderStyle.FixedSingle;
-            machineBox.Location = new Point(22, 264);
-            machineBox.Size = new Size(456, 28);
+            machineBox.Location = new Point(pad, Ui.S(278));
+            machineBox.Size = new Size(Math.Max(Ui.S(200), cw - copyButton.Width - Ui.S(10)), Ui.S(32));
             machineBox.Text = LicenseLibrary.MachineCode();
             Controls.Add(machineBox);
 
-            Button copyButton = Ui.Secondary("复制机器码", 152, 34);
-            copyButton.Location = new Point(486, 262);
+            copyButton.Location = new Point(machineBox.Right + Ui.S(10), Ui.S(277));
             copyButton.Click += delegate {
                 try{ Clipboard.SetText(machineBox.Text); statusLabel.Text = "机器码已复制（发给管理员时可作为售后凭证）。"; }
                 catch(Exception){ statusLabel.Text = "复制失败，请手工抄写。"; }
             };
             Controls.Add(copyButton);
 
+            int barY = ClientSize.Height - Ui.S(76);
             Button importButton = Ui.Ghost("从文件导入…");
-            importButton.Location = new Point(16, 405);
+            importButton.Location = new Point(Ui.S(16), barY + (Ui.S(76) - importButton.Height) / 2);
             importButton.Click += delegate { ImportFromFile(); };
             Controls.Add(importButton);
 
-            // 已激活、但超过宽限期没联网（或服务器暂时连不上）时，不用重新输码，点这里再试一次。
-            Button retryButton = Ui.Secondary("重新联网验证", 126, 38);
-            retryButton.Location = new Point(290, 403);
-            retryButton.Click += delegate { DoRetry(); };
-            Controls.Add(retryButton);
-
             Button activateButton = Ui.Primary("激活", 120, 44);
-            activateButton.Location = new Point(518, 400);
+            activateButton.Location = new Point(ClientSize.Width - pad - activateButton.Width, barY + (Ui.S(76) - activateButton.Height) / 2);
             activateButton.Click += delegate { DoActivate(); };
             Controls.Add(activateButton);
 
             Button closeButton = Ui.Secondary("关闭", 84, 38);
-            closeButton.Location = new Point(424, 403);
+            closeButton.Location = new Point(activateButton.Left - Ui.S(10) - closeButton.Width, barY + (Ui.S(76) - closeButton.Height) / 2);
             closeButton.Click += delegate { DialogResult = DialogResult.Cancel; Close(); };
             Controls.Add(closeButton);
 
+            // 已激活、但超过宽限期没联网（或服务器暂时连不上）时，不用重新输码，点这里再试一次。
+            Button retryButton = Ui.Secondary("重新联网验证", 126, 38);
+            retryButton.Location = new Point(closeButton.Left - Ui.S(10) - retryButton.Width, barY + (Ui.S(76) - retryButton.Height) / 2);
+            retryButton.Click += delegate { DoRetry(); };
+            Controls.Add(retryButton);
+
             statusLabel = new Label();
             statusLabel.AutoSize = false;
-            statusLabel.Location = new Point(22, 306);
-            statusLabel.Size = new Size(616, 70);
+            statusLabel.Location = new Point(pad, Ui.S(320));
+            statusLabel.Size = new Size(cw, Math.Max(Ui.S(48), barY - Ui.S(328)));
             statusLabel.ForeColor = Ui.Text2;
             Controls.Add(statusLabel);
             // 底部操作栏的分隔线
-            Paint += delegate(object sender, PaintEventArgs e) { using (var p = new Pen(Ui.Line)) e.Graphics.DrawLine(p, 0, 388, ClientSize.Width, 388); };
+            Paint += delegate(object sender, PaintEventArgs e) { using (var p = new Pen(Ui.Line)) e.Graphics.DrawLine(p, 0, barY, ClientSize.Width, barY); };
 
             RefreshPlan();
             statusLabel.Text = "当前状态：" + LicenseLibrary.Current().Describe();

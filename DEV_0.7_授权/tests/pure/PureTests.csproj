@@ -54,6 +54,7 @@
     <Compile Include="../../src/Modules/QuickBom/BomModels.cs" />
     <Compile Include="../../src/Modules/QuickBom/BomRules.cs" />
     <Compile Include="../../src/Modules/QuickBom/BomXlsxWriter.cs" />
+    <Compile Include="../../src/Modules/QuickBom/WorkbenchData.cs" />
 
     <!-- Embedded Excel Templates -->
     <EmbeddedResource Include="../../src/Modules/QuickBom/Templates/ProcessingListTemplate.xlsx" LogicalName="TianGongCadSuite.QuickBom.ProcessingListTemplate.xlsx" />

@@ -13,9 +13,9 @@ namespace TianGongCadSuite {
         readonly F.Application app;readonly A.AssemblyDocument assembly;readonly string file,store;
         LineupProject project;readonly DataTable data=new DataTable();
         readonly DataGridView grid=new DataGridView();
-        readonly ComboBox category=new ComboBox{DropDownStyle=ComboBoxStyle.DropDownList,Width=135};
-        readonly TextBox search=new TextBox{Width=180};
-        readonly Label status=new Label{Dock=DockStyle.Bottom,Height=42};
+        readonly ComboBox category=new ComboBox{DropDownStyle=ComboBoxStyle.DropDownList,Width=Ui.S(135)};
+        readonly TextBox search=new TextBox{Width=Ui.S(180)};
+        readonly Label status=new Label{Dock=DockStyle.Bottom,Height=Ui.S(42)};
         readonly Stack<LineupProject> undo=new Stack<LineupProject>();
         readonly Timer saver=new Timer{Interval=600};
         bool loading,dirty;dynamic highlight;
@@ -23,10 +23,15 @@ namespace TianGongCadSuite {
             app=host;assembly=doc;file=LineupCad.AssemblyFile(doc);store=Path.ChangeExtension(file,".lineup.xml");
             project=File.Exists(store)?LineupProject.Load(store,file):new LineupProject{AssemblyFile=file};
             InitializeCatalog(modelLibraryPath);
-            Text="Lineup 快速录入";Font=Ui.F9;BackColor=Ui.Bg;ForeColor=Ui.Text;Width=1320;Height=660;MinimumSize=new Size(1040,520);StartPosition=FormStartPosition.Manual;var area=Screen.PrimaryScreen.WorkingArea;Location=new Point(Math.Max(area.Left,area.Right-Width-20),Math.Max(area.Top,area.Bottom-Height-40));
+            AutoScaleMode=AutoScaleMode.None;
+            Text="Lineup 快速录入";Font=Ui.F9;BackColor=Ui.Bg;ForeColor=Ui.Text;
+            var area=Screen.PrimaryScreen.WorkingArea;
+            Width=Math.Min(Ui.S(1320),area.Width-Ui.S(24));Height=Math.Min(Ui.S(660),area.Height-Ui.S(24));
+            MinimumSize=new Size(Math.Min(Ui.S(1040),area.Width-Ui.S(24)),Math.Min(Ui.S(520),area.Height-Ui.S(24)));
+            StartPosition=FormStartPosition.Manual;Location=new Point(Math.Max(area.Left,area.Right-Width-Ui.S(20)),Math.Max(area.Top,area.Bottom-Height-Ui.S(40)));
             var tools=BuildToolbar();
-            helpBar=new Label{Text="上方填写本批共用字段，下方直接修改已有记录。F4 型号库 · Ctrl+V 粘贴 · Ctrl+Z 撤销",Dock=DockStyle.Top,Height=30,Padding=new Padding(16,8,0,0),ForeColor=Ui.Muted,Font=Ui.F8,BackColor=Ui.Bg};
-            grid.Dock=DockStyle.Fill;grid.AutoGenerateColumns=false;grid.AllowUserToAddRows=false;grid.AllowUserToDeleteRows=false;grid.RowHeadersWidth=50;grid.SelectionMode=DataGridViewSelectionMode.CellSelect;grid.MultiSelect=true;grid.BackgroundColor=Color.White;grid.BorderStyle=BorderStyle.None;
+            helpBar=new Label{Text="上方填写本批共用字段，下方直接修改已有记录。F4 型号库 · Ctrl+V 粘贴 · Ctrl+Z 撤销",Dock=DockStyle.Top,Height=Ui.S(32),Padding=Ui.SPad(16,8,0,0),ForeColor=Ui.Muted,Font=Ui.F8,BackColor=Ui.Bg};
+            grid.Dock=DockStyle.Fill;grid.AutoGenerateColumns=false;grid.AllowUserToAddRows=false;grid.AllowUserToDeleteRows=false;grid.RowHeadersWidth=Ui.S(50);grid.SelectionMode=DataGridViewSelectionMode.CellSelect;grid.MultiSelect=true;grid.BackgroundColor=Color.White;grid.BorderStyle=BorderStyle.None;
             grid.ClipboardCopyMode=DataGridViewClipboardCopyMode.EnableWithoutHeaderText;
             grid.EnableHeadersVisualStyles=false;grid.ColumnHeadersDefaultCellStyle.BackColor=Ui.Rail;grid.ColumnHeadersDefaultCellStyle.ForeColor=Ui.Muted;grid.ColumnHeadersDefaultCellStyle.Font=Ui.F8;grid.ColumnHeadersDefaultCellStyle.SelectionBackColor=Ui.Rail;grid.ColumnHeadersHeightSizeMode=DataGridViewColumnHeadersHeightSizeMode.DisableResizing;grid.ColumnHeadersHeight=34;grid.RowTemplate.Height=32;grid.AlternatingRowsDefaultCellStyle.BackColor=Color.FromArgb(0xFA,0xFA,0xFB);
             grid.GridColor=Color.FromArgb(0xEE,0xEE,0xF0);grid.DefaultCellStyle.SelectionBackColor=Color.FromArgb(0xE0,0xE7,0xFF);grid.DefaultCellStyle.SelectionForeColor=Ui.Text;grid.RowHeadersDefaultCellStyle.BackColor=Ui.Rail;grid.RowHeadersDefaultCellStyle.SelectionBackColor=Ui.AccentSoft;
@@ -37,9 +42,10 @@ namespace TianGongCadSuite {
             for(int i=0;i<11;i++)grid.Columns.Add(new DataGridViewTextBoxColumn{Name=LineupTableData.Headers[i],HeaderText=LineupTableData.Headers[i],DataPropertyName=LineupTableData.Headers[i],Width=widths[i],SortMode=DataGridViewColumnSortMode.Automatic});
             grid.Columns.Add(new DataGridViewTextBoxColumn{Name="关联模型",HeaderText="关联模型",DataPropertyName="关联模型",Width=200,ReadOnly=true});
             grid.Columns.Add(new DataGridViewTextBoxColumn{Name="阀岛型号",HeaderText="所属阀岛的型号",DataPropertyName="阀岛型号",Width=220,ReadOnly=true});
+            Ui.FitGrid(grid);
             grid.Columns[0].Frozen=true;grid.Columns[1].Frozen=true;
             grid.DataSource=data;
-            status.BackColor=Ui.Bg;status.ForeColor=Ui.Muted;status.Font=Ui.F8;status.Padding=new Padding(16,0,0,0);status.TextAlign=ContentAlignment.MiddleLeft;
+            status.BackColor=Ui.Bg;status.ForeColor=Ui.Muted;status.Font=Ui.F8;status.Padding=Ui.SPad(16,0,0,0);status.TextAlign=ContentAlignment.MiddleLeft;
             Controls.Add(grid);Controls.Add(helpBar);Controls.Add(BuildNav());Controls.Add(tools);Controls.Add(status);InitializePickingPanel(tools);
             category.SelectedIndexChanged+=(s,e)=>Filter();search.TextChanged+=(s,e)=>Filter();
             grid.CellBeginEdit+=(s,e)=>{if(!loading)undo.Push(Snapshot(false));};
@@ -51,7 +57,7 @@ namespace TianGongCadSuite {
             FormClosed+=(s,e)=>{saver.Dispose();ClearHighlight();};
             SetupModelEditing();InitializeHierarchy();Reload(null);InitializeEntry();UpdateStatus("已加载");
         }
-        void Button(FlowLayoutPanel p,string title,Action action){var b=title.StartsWith("加入",StringComparison.Ordinal)?Ui.Primary(title,TextRenderer.MeasureText(title,Ui.F9B).Width+28,32):Ui.Secondary(title,TextRenderer.MeasureText(title,Ui.F9).Width+24,32);b.Margin=new Padding(4,1,2,1);b.Click+=(s,e)=>Try(action);p.Controls.Add(b);}
+        void Button(FlowLayoutPanel p,string title,Action action){var b=title.StartsWith("加入",StringComparison.Ordinal)?Ui.Primary(title,60,32):Ui.Secondary(title,60,32);b.Margin=Ui.SPad(4,1,2,1);b.Click+=(s,e)=>Try(action);p.Controls.Add(b);}
         void Try(Action action){try{action();}catch(Exception ex){string m=Plain(ex);status.Text=m;if(pickingMode&&pickingLabel!=null)pickingLabel.Text=m;}}
         // 天工 COM 错误翻成人话（0.10.3）：定位 / 绑定时原来直接显示「…（异常来自 HRESULT:0x80010108 (RPC_E_DISCONNECTED)）」
         static string Plain(Exception ex){

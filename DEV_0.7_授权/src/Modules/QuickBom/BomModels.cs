@@ -24,6 +24,7 @@ namespace TianGongCadSuite {
         public bool Selected = true;
         public string ModelPath = "";           // 三维模型完整路径（.par / .psm / .asm）
         public string DraftPath = "";           // 同名工程图完整路径（.dft），没有则为空
+        public string SubFolder = "";           // 递归扫描文件夹时的相对子目录（根目录为空）
         public string PartName = "";            // 名称（B 列）
         public string DrawingNo = "";           // 图号（C 列，也是导出的 6 种格式文件名）
         public string Material = "";            // 材料（D 列）
@@ -58,6 +59,8 @@ namespace TianGongCadSuite {
         public string ReadProblem = "";         // 读取属性出错说明
         public string ExportStatus = "";        // 导出结果说明
         public byte[] ThumbnailPng;             // 可选三维缩略图 PNG
+        // 文件内原始 Custom 自定义属性快照（供三合一工作台属性卡编辑与批量改名模板直接复用，零重复 COM 读取）
+        public readonly Dictionary<string, string> RawCustomProps = new Dictionary<string, string>();
 
         public string ModelExt {
             get { return (Path.GetExtension(ModelPath ?? "") ?? "").ToLowerInvariant(); }

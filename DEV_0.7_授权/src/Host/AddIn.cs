@@ -22,7 +22,7 @@ namespace TianGongCadSuite {
             Guard.Install();
             try{addin=instance;context=new ToolContext((F.Application)application);registry=ModuleCatalog.Create(context);
                 // GuiVersion 变了 CAD 才会按新的组名重建功能区按钮（firstTime=true）；改组名/增删按钮时要跟着加一。
-                addin.Description=Product.Name+" "+Product.Version;addin.GuiVersion=49;   /* 49：0.12.0 加「快速出清单」按钮 */addin.Visible=true;
+                addin.Description=Product.Name+" "+Product.Version;addin.GuiVersion=50;   /* 50：0.13.0 属性卡+批量改名+快速出清单合并为「出图清单工作台」 */addin.Visible=true;
                 events=new Connection(addin.AddInEvents,typeof(F.ISEAddInEvents),this);
                 // 按命令 ID 取（不要用下标：命令 1/4 已从功能区下线，下标会错位）
 diagnostics=new Diagnostics(context.Application,()=>Run(registry.Find(1)),()=>Run(registry.Find(2)),()=>Run(registry.Find(3)));addin.Object=diagnostics;

@@ -27,8 +27,8 @@ namespace TianGongCadSuite {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
             BackColor = Ui.Rail; Cursor = Cursors.Hand;
         }
-        public int ItemHeight { get { return Kind == Mode.Steps ? 62 : 36; } }
-        int Pitch { get { return ItemHeight + (Kind == Mode.Steps ? 4 : 2); } }
+        public int ItemHeight { get { return Kind == Mode.Steps ? Ui.S(64) : Ui.S(34); } }
+        int Pitch { get { return ItemHeight + Ui.S(Kind == Mode.Steps ? 4 : 2); } }
         public int PreferredHeight { get { return Items.Count * Pitch; } }
 
         public Item Add(string title, string sub){
@@ -97,7 +97,7 @@ namespace TianGongCadSuite {
         }
         void PaintStep(Graphics g, Item it, int i, Rectangle r){
             bool cur = i == selected;
-            int d = 24, cx = r.X + 12, cy = r.Y + r.Height / 2;
+            int d = Ui.S(24), cx = r.X + Ui.S(12), cy = r.Y + r.Height / 2;
             var circle = new Rectangle(cx, cy - d / 2, d, d);
             g.SmoothingMode = SmoothingMode.AntiAlias;
             if (it.Error) {
@@ -116,29 +116,30 @@ namespace TianGongCadSuite {
                 TextRenderer.DrawText(g, (i + 1).ToString(), Ui.F8, circle, Ui.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
             }
             g.SmoothingMode = SmoothingMode.Default;
-            int tx = cx + d + 12, tw = Math.Max(10, r.Right - tx - 8);
+            int tx = cx + d + Ui.S(12), tw = Math.Max(10, r.Right - tx - Ui.S(8));
             bool hasSub = it.Sub.Length > 0;
-            var tr = new Rectangle(tx, hasSub ? r.Y + 10 : r.Y, tw, hasSub ? 22 : r.Height);
+            var tr = new Rectangle(tx, hasSub ? r.Y + Ui.S(8) : r.Y, tw, hasSub ? Ui.S(24) : r.Height);
             TextRenderer.DrawText(g, it.Title, Ui.F10B, tr, cur ? Ui.Accent : (it.Done ? Ui.Text : Ui.Text2),
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
             if (hasSub)
-                TextRenderer.DrawText(g, it.Sub, Ui.F8, new Rectangle(tx, r.Y + 32, tw, 20), it.Error ? Ui.Bad : Ui.Muted,
+                TextRenderer.DrawText(g, it.Sub, Ui.F8, new Rectangle(tx, r.Y + Ui.S(34), tw, Ui.S(22)), it.Error ? Ui.Bad : Ui.Muted,
                     TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
         }
         void PaintNav(Graphics g, Item it, int i, Rectangle r){
             bool cur = i == selected;
-            int x = r.X + 12;
+            int x = r.X + Ui.S(12);
             if (!it.Dot.IsEmpty) {
                 g.SmoothingMode = SmoothingMode.AntiAlias;
-                using (var b = new SolidBrush(it.Dot)) g.FillEllipse(b, x, r.Y + r.Height / 2 - 4, 8, 8);
+                int ds = Ui.S(8);
+                using (var b = new SolidBrush(it.Dot)) g.FillEllipse(b, x, r.Y + (r.Height - ds) / 2, ds, ds);
                 g.SmoothingMode = SmoothingMode.Default;
-                x += 18;
+                x += Ui.S(18);
             }
-            var cw = TextRenderer.MeasureText(it.Count, Ui.F9).Width;
+            var cw = TextRenderer.MeasureText(it.Count, Ui.F9B).Width;
             Color fore = it.Dim && !cur ? Ui.DisabledText : (cur ? Ui.Accent : Ui.Text);
-            TextRenderer.DrawText(g, it.Title, cur ? Ui.F9B : Ui.F9, new Rectangle(x, r.Y, Math.Max(10, r.Right - x - cw - 14), r.Height), fore,
+            TextRenderer.DrawText(g, it.Title, cur ? Ui.F9B : Ui.F9, new Rectangle(x, r.Y, Math.Max(10, r.Right - x - cw - Ui.S(14)), r.Height), fore,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
-            TextRenderer.DrawText(g, it.Count, cur ? Ui.F9B : Ui.F9, new Rectangle(r.Right - cw - 12, r.Y, cw + 4, r.Height), it.Dim ? Ui.DisabledText : (cur ? Ui.Text : Ui.Muted),
+            TextRenderer.DrawText(g, it.Count, cur ? Ui.F9B : Ui.F9, new Rectangle(r.Right - cw - Ui.S(12), r.Y, cw + Ui.S(4), r.Height), it.Dim ? Ui.DisabledText : (cur ? Ui.Text : Ui.Muted),
                 TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
         }
     }
@@ -157,11 +158,11 @@ namespace TianGongCadSuite {
                 Style(status); Controls.Add(status); PerformLayout();
             }
         }
-        public int Gap = 10;
+        public int Gap = Ui.S(10);
         public ActionBar(){
             SetStyle(ControlStyles.ResizeRedraw | ControlStyles.OptimizedDoubleBuffer, true);
-            BackColor = Ui.Bg; Height = 72;
-            Padding = new Padding(28, 0, 20, 0);
+            BackColor = Ui.Bg; Height = Ui.S(72);
+            Padding = Ui.SPad(28, 0, 20, 0);
             Style(status); status.ForeColor = Ui.Muted;
             Controls.Add(status);
         }
@@ -183,7 +184,7 @@ namespace TianGongCadSuite {
                 c.Location = new Point(rx, (Height - c.Height) / 2);
                 rx -= Gap;
             }
-            status.SetBounds(x + 4, 6, Math.Max(0, rx - x - 8), Height - 12);
+            status.SetBounds(x + Ui.S(4), Ui.S(6), Math.Max(0, rx - x - Ui.S(8)), Height - Ui.S(12));
         }
         protected override void OnPaint(PaintEventArgs e){
             base.OnPaint(e);
@@ -202,7 +203,7 @@ namespace TianGongCadSuite {
         public int Rest;      // 停靠位置（父控件里底边的 Y）
         public Toast(){
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-            Height = 42; Visible = false; Font = Ui.F9;
+            Height = Ui.S(42); Visible = false; Font = Ui.F9;
             life.Tick += (s, e) => { life.Stop(); Hide(true); };
         }
         public void Show(string text, Color kind, string action, int ms){
@@ -219,7 +220,7 @@ namespace TianGongCadSuite {
             float from = shown;
             Anim.Run(this, animate ? Anim.ToastMs : 0, t => { shown = from * (1 - (float)t); Place(); Invalidate(); }, () => { Visible = false; }, null, "toast");
         }
-        void Place(){ Top = Rest - Height - (int)Math.Round(12 * shown) + 12; }
+        void Place(){ int lift = Ui.S(12); Top = Rest - Height - (int)Math.Round(lift * shown) + lift; }
         protected override void OnMouseClick(MouseEventArgs e){
             if (Action.Length > 0 && actionRect.Contains(e.Location)) { var h = ActionClick; if (h != null) h(this, EventArgs.Empty); Hide(true); }
             else Hide(true);
@@ -233,17 +234,18 @@ namespace TianGongCadSuite {
             g.Clear(back);
             var dark = Color.FromArgb(0x18, 0x18, 0x1B);
             var r = new Rectangle(0, 0, Width - 1, Height - 1);
-            Ui.FillRound(g, r, 10, Anim.Mix(back, dark, shown));
+            Ui.FillRound(g, r, Ui.S(10), Anim.Mix(back, dark, shown));
             var white = Anim.Mix(back, Color.White, shown);
-            int x = 16;
+            int x = Ui.S(16);
             Color mark = tone == Ui.Ok ? Color.FromArgb(0x86, 0xEF, 0xAC) : (tone == Ui.Bad ? Color.FromArgb(0xFC, 0xA5, 0xA5) : (tone == Ui.Warn ? Color.FromArgb(0xFD, 0xE6, 0x8A) : Color.FromArgb(0xC7, 0xD2, 0xFE)));
             mark = Anim.Mix(back, mark, shown);
-            if (tone == Ui.Ok) Ui.DrawCheck(g, new Rectangle(x, Height / 2 - 7, 14, 14), mark, 1.8f);
-            else using (var b = new SolidBrush(mark)) { g.SmoothingMode = SmoothingMode.AntiAlias; g.FillEllipse(b, x + 3, Height / 2 - 4, 8, 8); g.SmoothingMode = SmoothingMode.Default; }
-            x += 26;
-            int aw = Action.Length > 0 ? TextRenderer.MeasureText(Action, Ui.F9B).Width + 16 : 0;
-            actionRect = new Rectangle(Width - aw - 8, 0, aw, Height);
-            TextRenderer.DrawText(g, Text, Font, new Rectangle(x, 0, Math.Max(10, Width - x - aw - 16), Height), white,
+            int cs = Ui.S(14), ds = Ui.S(8);
+            if (tone == Ui.Ok) Ui.DrawCheck(g, new Rectangle(x, Height / 2 - cs / 2, cs, cs), mark, 1.8f);
+            else using (var b = new SolidBrush(mark)) { g.SmoothingMode = SmoothingMode.AntiAlias; g.FillEllipse(b, x + Ui.S(3), Height / 2 - ds / 2, ds, ds); g.SmoothingMode = SmoothingMode.Default; }
+            x += Ui.S(26);
+            int aw = Action.Length > 0 ? TextRenderer.MeasureText(Action, Ui.F9B).Width + Ui.S(16) : 0;
+            actionRect = new Rectangle(Width - aw - Ui.S(8), 0, aw, Height);
+            TextRenderer.DrawText(g, Text, Font, new Rectangle(x, 0, Math.Max(10, Width - x - aw - Ui.S(16)), Height), white,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
             if (aw > 0)
                 TextRenderer.DrawText(g, Action, Ui.F9B, actionRect, Anim.Mix(back, Color.FromArgb(0xC7, 0xD2, 0xFE), shown),
@@ -271,7 +273,7 @@ namespace TianGongCadSuite {
         public readonly ActionBar Footer = new ActionBar();
         public readonly Toast Toast = new Toast();
         public readonly List<Page> Pages = new List<Page>();
-        public int RailWidth = 232;
+        public int RailWidth = Ui.S(246);
         public bool StepCaption = true;   // 标题上方的「第 n 步，共 m 步」；false = 单页窗口（配孔检查、属性卡……），侧栏里也不列步骤
         public event EventHandler PageChanged;
 
@@ -384,40 +386,44 @@ namespace TianGongCadSuite {
             LayoutRail();
         }
         void LayoutRail(){
-            int w = RailWidth - 24, y = 20;
-            if (railTop != null) { railTop.SetBounds(12, y, w, railTop.Height); y += railTop.Height + 14; }
-            int bottom = Height - 16;
-            if (railBottom != null) { bottom -= railBottom.Height; railBottom.SetBounds(12, bottom, w, railBottom.Height); bottom -= 12; }
-            Rail.SetBounds(12, y, w, Math.Max(Rail.PreferredHeight, Math.Max(0, bottom - y)));
+            int pad = Ui.S(12);
+            int w = RailWidth - pad * 2, y = Ui.S(18);
+            if (railTop != null) { railTop.SetBounds(pad, y, w, railTop.Height); y += railTop.Height + Ui.S(12); }
+            int bottom = Height - Ui.S(14);
+            if (railBottom != null) { bottom -= railBottom.Height; railBottom.SetBounds(pad, bottom, w, railBottom.Height); bottom -= Ui.S(10); }
+            Rail.SetBounds(pad, y, w, Math.Max(0, bottom - y));
         }
         void LayoutContent(){
             int w = content.Width, h = content.Height;
             bool cap = stepLabel.Text.Length > 0;
-            int hh = cap ? 74 : 62;
+            int hh = cap ? Ui.S(84) : Ui.S(64);
             header.SetBounds(0, 0, w, hh);
             Footer.SetBounds(0, Math.Max(hh, h - Footer.Height), w, Footer.Height);
-            host.SetBounds(28, hh + 14, Math.Max(0, w - 28 - 24), Math.Max(0, Footer.Top - hh - 14 - 12));
+            int lpad = Ui.S(28), rpad = Ui.S(24), topGap = Ui.S(12), botGap = Ui.S(10);
+            host.SetBounds(lpad, hh + topGap, Math.Max(0, w - lpad - rpad), Math.Max(0, Footer.Top - hh - topGap - botGap));
             foreach (var p in Pages) p.Body.SetBounds(0, 0, host.Width, host.Height);
             if (overlay != null) overlay.Bounds = host.Bounds;
-            Toast.Rest = Footer.Top - 12;
-            Toast.SetBounds(28, Toast.Top, Math.Max(0, w - 28 - 24), Toast.Height);
+            Toast.Rest = Footer.Top - Ui.S(12);
+            Toast.SetBounds(lpad, Toast.Top, Math.Max(0, w - lpad - rpad), Toast.Height);
             if (!Toast.Visible) Toast.Top = Toast.Rest - Toast.Height;
         }
         void LayoutHeader(){
             int w = header.Width, h = header.Height;
             bool cap = stepLabel.Text.Length > 0;
-            int rx = w - 20;
+            int rx = w - Ui.S(20);
+            int lpad = Ui.S(28);
             if (current >= 0)
                 for (int i = Pages[current].HeaderControls.Count - 1; i >= 0; i--) {
                     var c = Pages[current].HeaderControls[i];
-                    rx -= c.Width; c.Location = new Point(rx, h - c.Height - 2); rx -= 4;
+                    rx -= c.Width; c.Location = new Point(rx, Math.Max(Ui.S(8), h - c.Height - Ui.S(4))); rx -= Ui.S(4);
                 }
-            stepLabel.SetBounds(28, 22, Math.Max(0, w - 56), cap ? 18 : 0);
-            var tw = TextRenderer.MeasureText(titleLabel.Text ?? "", Ui.Title).Width + 8;
-            int top = cap ? 40 : 22;
-            titleLabel.SetBounds(28, top, Math.Max(0, Math.Min(tw, rx - 28 - 8)), h - top);
-            int sx = titleLabel.Right + 8;
-            subLabel.SetBounds(sx, top, Math.Max(0, rx - sx - 8), h - top - 4);
+            stepLabel.SetBounds(lpad, Ui.S(16), Math.Max(0, w - lpad * 2), cap ? Ui.S(22) : 0);
+            var tw = TextRenderer.MeasureText(titleLabel.Text ?? "", Ui.Title).Width + Ui.S(10);
+            int top = cap ? Ui.S(38) : Ui.S(16);
+            titleLabel.SetBounds(lpad, top, Math.Max(0, Math.Min(tw, rx - lpad - Ui.S(8))), Math.Max(Ui.S(28), h - top));
+            int sx = titleLabel.Right + Ui.S(8);
+            int subH = Ui.S(22);
+            subLabel.SetBounds(sx, Math.Max(top, h - subH - Ui.S(6)), Math.Max(0, rx - sx - Ui.S(8)), subH);
         }
 
         // 侧栏底色 + 右边一条分隔线
@@ -457,10 +463,10 @@ namespace TianGongCadSuite {
     public sealed class RailCard : Panel {
         public string Title = "";
         public RailCard(string title, int height){
-            Title = title; Height = height;
+            Title = title; Height = Ui.S(height);
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
             BackColor = Color.White;
-            Padding = new Padding(12, 34, 12, 10);
+            Padding = Ui.SPad(12, 36, 12, 10);
         }
         protected override void OnPaint(PaintEventArgs e){
             var g = e.Graphics;
@@ -468,7 +474,7 @@ namespace TianGongCadSuite {
             var r = new Rectangle(0, 0, Width - 1, Height - 1);
             Ui.FillRound(g, r, 10, Color.White);
             Ui.DrawRound(g, r, 10, Ui.Line, 1);
-            using (var f = new Font(Ui.Family, 9F, FontStyle.Bold)) TextRenderer.DrawText(g, Title, f, new Point(12, 11), Ui.Text);
+            TextRenderer.DrawText(g, Title, Ui.F9B, new Point(Ui.S(12), Ui.S(10)), Ui.Text);
         }
     }
 }

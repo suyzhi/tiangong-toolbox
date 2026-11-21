@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Runtime.CompilerServices;
 using System.Windows.Forms;
 
 namespace TianGongCadSuite {
@@ -46,6 +47,67 @@ namespace TianGongCadSuite {
         public static readonly Font NumF  = new Font(Mono, 9.75F);
         public static readonly Font NumB  = new Font(Mono, 9.75F, FontStyle.Bold);
 
+        // 当前进程的 DPI 缩放比例（96 DPI = 1.0，125% = 1.25，150% = 1.5）。
+        // 字体按 pt 创建会随系统缩放变大，所有像素尺寸与坐标都经 S() 同比放大，避免高 DPI 下文字截断或诡异换行。
+        public static readonly float DpiScale = DetectDpiScale();
+        static float DetectDpiScale(){
+            try {
+                using (var g = Graphics.FromHwnd(IntPtr.Zero)) {
+                    float s = g.DpiX / 96f;
+                    if (float.IsNaN(s) || float.IsInfinity(s) || s < 1f) return 1f;
+                    return s > 2.5f ? 2.5f : s;
+                }
+            } catch { return 1f; }
+        }
+        public static int S(int px){ return (int)Math.Round(px * DpiScale); }
+        public static Padding SPad(int left, int top, int right, int bottom){ return new Padding(S(left), S(top), S(right), S(bottom)); }
+
+        static readonly ConditionalWeakTable<object, object> scaledCols = new ConditionalWeakTable<object, object>();
+
+        // 让 DataGridView 表头不换行截断、行高与列宽随 DPI 放大（可重复调用，不会二次放大同一列）
+        public static void FitGrid(DataGridView grid){
+            if (grid == null) return;
+            grid.ColumnHeadersDefaultCellStyle.WrapMode = DataGridViewTriState.False;
+            grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
+            grid.ColumnHeadersHeight = Math.Max(S(34), TextRenderer.MeasureText("测", grid.ColumnHeadersDefaultCellStyle.Font ?? F8).Height + S(16));
+            grid.RowTemplate.Height = Math.Max(S(30), TextRenderer.MeasureText("测", grid.DefaultCellStyle.Font ?? F9).Height + S(12));
+            var hf = grid.ColumnHeadersDefaultCellStyle.Font ?? grid.Font ?? F8;
+            foreach (DataGridViewColumn col in grid.Columns) {
+                if (!col.Visible) continue;
+                int need = TextRenderer.MeasureText(col.HeaderText ?? "", hf).Width + S(26);
+                object marker;
+                bool first = !scaledCols.TryGetValue(col, out marker);
+                if (first) scaledCols.Add(col, new object());
+                if (col.AutoSizeMode == DataGridViewAutoSizeColumnMode.Fill) {
+                    col.MinimumWidth = Math.Max(col.MinimumWidth, Math.Min(need, S(220)));
+                } else {
+                    int baseW = first ? S(col.Width) : col.Width;
+                    col.Width = Math.Max(baseW, need);
+                }
+            }
+        }
+
+        // 让 ListView 表头文字随 DPI 不被截成「已有...」（可重复调用）
+        public static void FitListView(ListView lv){
+            if (lv == null) return;
+            var f = lv.Font ?? F9;
+            foreach (ColumnHeader col in lv.Columns) {
+                int need = TextRenderer.MeasureText(col.Text ?? "", f).Width + S(24);
+                object marker;
+                bool first = !scaledCols.TryGetValue(col, out marker);
+                if (first) scaledCols.Add(col, new object());
+                int baseW = first ? S(col.Width) : col.Width;
+                col.Width = Math.Max(baseW, need);
+            }
+        }
+
+        // 按钮文字动态改长后确保不截断
+        public static void FitButton(Button b){
+            if (b == null) return;
+            int need = TextRenderer.MeasureText(b.Text ?? "", b.Font ?? F9).Width + S(26);
+            if (b.Width < need) b.Width = need;
+        }
+
         public static GraphicsPath Rounded(Rectangle r, int radius){
             var p = new GraphicsPath();
             int d = radius * 2;
@@ -76,18 +138,20 @@ namespace TianGongCadSuite {
             g.SmoothingMode = sm;
         }
 
-        // 窗口外壳：白底、统一字体、居中到 CAD 主窗口、Esc 关闭。
+        // 窗口外壳：白底、统一字体、按当前 DPI 放大后再收进屏幕工作区、居中到 CAD 主窗口、Esc 关闭。
         public static void Shell(Form f, string title, int w, int h, int minW, int minH){
+            f.AutoScaleMode = AutoScaleMode.None;
             f.Text = title;
             f.Font = F9;
             f.BackColor = Bg;
             f.ForeColor = Text;
+            w = S(w); h = S(h); minW = S(minW); minH = S(minH);
             // 小屏幕（1366×768 的笔记本，任务栏一占只剩 728 高）：原来窗口固定 790 高、最小 680，底部「开始打孔」那一栏落在屏幕外，
             // 最小尺寸又不让缩。按 CAD 所在屏幕的工作区收一收（留出标题栏和边框），最小尺寸也不超过它
             Rectangle area;
             try { area = Screen.FromPoint(Cursor.Position).WorkingArea; } catch { area = new Rectangle(0, 0, 1920, 1040); }
-            int chromeW = 16, chromeH = 40;
-            int maxW = Math.Max(400, area.Width - chromeW - 20), maxH = Math.Max(300, area.Height - chromeH - 20);
+            int chromeW = S(16), chromeH = S(40);
+            int maxW = Math.Max(S(400), area.Width - chromeW - S(20)), maxH = Math.Max(S(300), area.Height - chromeH - S(20));
             f.ClientSize = new Size(Math.Min(w, maxW), Math.Min(h, maxH));
             f.MinimumSize = new Size(Math.Min(minW, maxW + chromeW), Math.Min(minH, maxH + chromeH));
             f.FormBorderStyle = FormBorderStyle.SizableToolWindow;
@@ -99,7 +163,7 @@ namespace TianGongCadSuite {
         public static Card Card(string title, int height, string hint){
             var c = new Card();
             c.Title = title; c.Hint = hint;
-            c.Height = height;
+            c.Height = height > 0 ? S(height) : 0;
             return c;
         }
 
@@ -114,7 +178,7 @@ namespace TianGongCadSuite {
             var n = new NumericUpDown();
             n.Minimum = min; n.Maximum = max; n.Value = Clamp(value, min, max);
             n.DecimalPlaces = decimals; n.Increment = step;
-            n.Width = width + 8; n.TextAlign = HorizontalAlignment.Right;
+            n.Width = S(width + 8); n.TextAlign = HorizontalAlignment.Right;
             n.BorderStyle = BorderStyle.FixedSingle;
             n.Font = NumF;
             return n;
@@ -125,27 +189,33 @@ namespace TianGongCadSuite {
             var c = new ComboBox();
             c.DropDownStyle = ComboBoxStyle.DropDownList;
             c.FlatStyle = FlatStyle.Flat;
-            c.Width = width + 8;
+            c.Width = S(width + 8);
             c.Items.AddRange(items);
             if (c.Items.Count > 0) c.SelectedIndex = 0;
             return c;
         }
 
         public static Button Primary(string text, int width, int height){
-            return new FlatButton(text, FlatButton.Kind.Primary, width, height);
+            int sh = S(height);
+            var f = sh >= S(40) ? BtnB : F9B;
+            int sw = Math.Max(S(width), TextRenderer.MeasureText(text ?? "", f).Width + S(28));
+            return new FlatButton(text, FlatButton.Kind.Primary, sw, sh);
         }
         public static Button Secondary(string text, int width, int height){
-            return new FlatButton(text, FlatButton.Kind.Secondary, width, height);
+            int sh = S(height);
+            var f = sh >= S(36) ? Btn : F9;
+            int sw = Math.Max(S(width), TextRenderer.MeasureText(text ?? "", f).Width + S(26));
+            return new FlatButton(text, FlatButton.Kind.Secondary, sw, sh);
         }
         // 文字按钮（「配做规则…」「清空」这类，不抢主按钮的眼）
         public static Button Ghost(string text){
-            int w = TextRenderer.MeasureText(text, F9).Width + 20;
-            return new FlatButton(text, FlatButton.Kind.Ghost, w, 30);
+            int w = TextRenderer.MeasureText(text ?? "", F9).Width + S(22);
+            return new FlatButton(text, FlatButton.Kind.Ghost, w, S(30));
         }
         // 卡片标题行上的小按钮：宽度按文字算，不用手填
         public static Button Small(string text){
-            int w = TextRenderer.MeasureText(text, F8).Width + 20;
-            var b = new FlatButton(text, FlatButton.Kind.Ghost, w, 26);
+            int w = TextRenderer.MeasureText(text ?? "", F8).Width + S(20);
+            var b = new FlatButton(text, FlatButton.Kind.Ghost, w, S(26));
             b.Font = F8;
             return b;
         }
@@ -155,10 +225,10 @@ namespace TianGongCadSuite {
             using (var f = new Form()) {
                 Shell(f, title, 400, 150, 320, 150);
                 f.FormBorderStyle = FormBorderStyle.FixedToolWindow;
-                var l = new Label { Text = label, AutoSize = false, Bounds = new Rectangle(18, 14, 364, 22), ForeColor = Text2, BackColor = Color.Transparent };
-                var t = new TextBox { Text = initial ?? "", Bounds = new Rectangle(18, 40, 364, 28), BorderStyle = BorderStyle.FixedSingle };
-                var ok = Primary("确定", 88, 36); ok.Bounds = new Rectangle(294, 98, 88, 36); ok.DialogResult = DialogResult.OK;
-                var cancel = Secondary("取消", 80, 34); cancel.Bounds = new Rectangle(202, 99, 80, 34); cancel.DialogResult = DialogResult.Cancel;
+                var l = new Label { Text = label, AutoSize = false, Bounds = new Rectangle(S(18), S(14), S(364), S(24)), ForeColor = Text2, BackColor = Color.Transparent };
+                var t = new TextBox { Text = initial ?? "", Bounds = new Rectangle(S(18), S(42), S(364), S(28)), BorderStyle = BorderStyle.FixedSingle };
+                var ok = Primary("确定", 88, 36); ok.Location = new Point(f.ClientSize.Width - S(18) - ok.Width, S(96)); ok.DialogResult = DialogResult.OK;
+                var cancel = Secondary("取消", 80, 34); cancel.Location = new Point(ok.Left - S(10) - cancel.Width, S(97)); cancel.DialogResult = DialogResult.Cancel;
                 f.Controls.Add(l); f.Controls.Add(t); f.Controls.Add(ok); f.Controls.Add(cancel);
                 f.AcceptButton = ok; f.CancelButton = cancel;
                 f.Shown += (s, e) => { t.SelectAll(); t.Focus(); };
@@ -168,7 +238,7 @@ namespace TianGongCadSuite {
 
         // 步骤标题：编号圆点 + 加粗标题 + 灰色说明。
         public static StepHeader Step(int number, string title, string hint){
-            return new StepHeader { Number = number, Title = title, Hint = hint, Height = 26 };
+            return new StepHeader { Number = number, Title = title, Hint = hint, Height = S(28) };
         }
     }
 }

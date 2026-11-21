@@ -37,29 +37,29 @@ namespace TianGongCadSuite {
             ((FlatButton)reselect).SetFore(Ui.Text2);
             reselect.Click += (s, e) => { if (busy) return; faceSelection = null; dirSelection = null; target = null; frame = null; circleReady = false; faceText = ""; ConfigureFilter(); RefreshPreview(); SetStatus("重新点一个面。", Ui.Accent); };
             shell.AddHeader(pFace, reselect);
-            var fstack = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = 10, AutoScroll = false };
+            var fstack = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = Ui.S(10), AutoScroll = false };
             pFace.Body.Controls.Add(fstack);
-            fstack.Add(new Label { Text = "点要排孔的那个零件平面。圆周均布时再点一条圆形边线定圆心和半径；沿线排布时可以再点一条直线边指定方向。", AutoSize = false, Height = 40, ForeColor = Ui.Text2, BackColor = Ui.Bg });
+            fstack.Add(new Label { Text = "点要排孔的那个零件平面。圆周均布时再点一条圆形边线定圆心和半径；沿线排布时可以再点一条直线边指定方向。", AutoSize = false, Height = Ui.S(50), ForeColor = Ui.Text2, BackColor = Ui.Bg });
             fstack.Add(faceEmpty);
             var faceCard = faceCardD = Ui.Card("", 86, "");
-            faceCard.Padding = new Padding(16, 12, 16, 12);
+            faceCard.Padding = Ui.SPad(16, 12, 16, 12);
             faceInfo.Dock = DockStyle.Fill; faceInfo.AutoSize = false; faceInfo.ForeColor = Ui.Text; faceInfo.BackColor = Color.White;
             faceInfo.AutoEllipsis = true;
             faceCard.Controls.Add(faceInfo);
             fstack.Add(faceCard);
 
             // ---- ② 排布：左参数，右示意 ----
-            var lcols = new SplitColumns(0.6f) { Gap = 20 };   // 0.56 时窗口一缩小，「末端 … mm」的单位被截掉
+            var lcols = new SplitColumns(0.6f) { Gap = Ui.S(20) };   // 0.56 时窗口一缩小，「末端 … mm」的单位被截掉
             var lb = new Panel { BackColor = Ui.Bg };
             layoutGrid.BackColor = Ui.Bg;
             lb.Controls.Add(layoutGrid);
-            modeSeg.Width = Math.Max(300, modeSeg.PreferredWidth);
+            modeSeg.Width = Math.Max(Ui.S(300), modeSeg.PreferredWidth);
             layoutGrid.Add("方式", modeSeg);
             countRow = layoutGrid.Add("孔数", count, FieldGrid.Unit("个"));
             pitchRow = layoutGrid.Add("间距", pitch, FieldGrid.Unit("mm"));
             edgeRow = layoutGrid.Add("边距", Ui.Caption("起端"), edge, FieldGrid.Unit("mm"), FieldGrid.Space(8), Ui.Caption("末端"), endEdge, FieldGrid.Unit("mm"));
             var sameRow = layoutGrid.Add("", sameEdge);
-            latMode.Width = Math.Max(170, latMode.PreferredWidth);
+            latMode.Width = Math.Max(Ui.S(170), latMode.PreferredWidth);
             lateralRow = layoutGrid.Add("横向", latMode, lateral, FieldGrid.Unit("mm"));
             angleRow = layoutGrid.Add("起始角", startAngle, FieldGrid.Unit("°"));
             sameEdgeRow = sameRow;
@@ -68,10 +68,10 @@ namespace TianGongCadSuite {
             tips.SetToolTip(lateral, "孔心离方向边的距离（往面里面量）。方向边：自动时是面上最长的那条边，也可以在模型上点一条直线边指定（会高亮）。");
             var dirHint = new Label { Text = "方向默认取面上最长的边；在模型里点另一条直线边可以换方向。", AutoSize = false, ForeColor = Ui.Muted, Font = Ui.F8, BackColor = Ui.Bg };
             lb.Controls.Add(dirHint);
-            lb.Resize += (s, e) => { layoutGrid.SetBounds(0, 0, Math.Max(80, lb.ClientSize.Width), layoutGrid.PreferredHeight); dirHint.SetBounds(0, layoutGrid.PreferredHeight + 6, lb.ClientSize.Width, 36); };
-            layoutGrid.Resize += (s, e) => dirHint.Top = layoutGrid.Bottom + 6;
+            lb.Resize += (s, e) => { layoutGrid.SetBounds(0, 0, Math.Max(Ui.S(80), lb.ClientSize.Width), layoutGrid.PreferredHeight); dirHint.SetBounds(0, layoutGrid.PreferredHeight + Ui.S(6), lb.ClientSize.Width, Ui.S(42)); };
+            layoutGrid.Resize += (s, e) => dirHint.Top = layoutGrid.Bottom + Ui.S(6);
             var sketch = Ui.Card("排孔示意", 0, "改了数字马上重画");
-            sketch.Fill = true; sketch.Padding = new Padding(10, 36, 10, 10);
+            sketch.Fill = true; sketch.Padding = Ui.SPad(10, 38, 10, 10);
             var canvas = new Panel { Dock = DockStyle.Fill, BackColor = Ui.Rail };
             canvas.Paint += DrawPreview;
             canvas.Resize += (s, e) => canvas.Invalidate();
@@ -88,7 +88,7 @@ namespace TianGongCadSuite {
             sb.Controls.Add(specGrid);
             stdInfo.AutoSize = false; stdInfo.Font = Ui.F8; stdInfo.ForeColor = Ui.Muted; stdInfo.AutoEllipsis = true; stdInfo.BackColor = Ui.Bg;
             sb.Controls.Add(stdInfo);
-            kindSeg.Width = Math.Max(340, kindSeg.PreferredWidth);
+            kindSeg.Width = Math.Max(Ui.S(340), kindSeg.PreferredWidth);
             specGrid.Add("孔型", kindSeg);
             specGrid.Add("规格", sizeBox, FieldGrid.Space(10), Ui.Caption("孔径"), diaNum, FieldGrid.Unit("mm"));
             specGrid.Add("深度", throughRadio, blindRadio, depthNum, FieldGrid.Unit("mm"));
@@ -101,18 +101,18 @@ namespace TianGongCadSuite {
             tips.SetToolTip(threadPartRadio, "从孔口往下攻指定深度（盲孔不能超过孔深）。");
             tips.SetToolTip(slotCheck, "沿线排布时可以把每个孔排成长圆孔（腰孔），用通切做；圆周均布不支持。");
             sb.Layout += (s, e) => {
-                int w = Math.Max(80, sb.ClientSize.Width);
+                int w = Math.Max(Ui.S(80), sb.ClientSize.Width);
                 specGrid.SetBounds(0, 0, w, specGrid.PreferredHeight);
-                stdInfo.SetBounds(0, specGrid.PreferredHeight + 6, w, 20);
+                stdInfo.SetBounds(0, specGrid.PreferredHeight + Ui.S(6), w, Ui.S(24));
             };
 
             // ---- ④ 预览并打孔 ----
-            var pv = rootStack = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = 12, AutoScroll = false };
+            var pv = rootStack = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = Ui.S(12), AutoScroll = false };
             pPrev.Body.Controls.Add(pv);
-            previewText.Height = 64; previewText.AutoSize = false; previewText.Font = Ui.F9B;
+            previewText.Height = Ui.S(72); previewText.AutoSize = false; previewText.Font = Ui.F9B;
             previewText.AutoEllipsis = true; previewText.BackColor = Ui.Bg;
             var big = Ui.Card("排孔示意", 0, "");
-            big.Fill = true; big.Padding = new Padding(10, 36, 10, 10);
+            big.Fill = true; big.Padding = Ui.SPad(10, 38, 10, 10);
             var canvas2 = new Panel { Dock = DockStyle.Fill, BackColor = Ui.Rail };
             canvas2.Paint += DrawPreview;
             canvas2.Resize += (s, e) => canvas2.Invalidate();
@@ -135,7 +135,7 @@ namespace TianGongCadSuite {
             pv.Add(previewText); pv.Add(big, true); pv.Add(resultCard);
 
             // ---- 侧栏底部：预设 ----
-            var presetCard = new RailCard("预设", 116);
+            var presetCard = new RailCard("预设", 120);
             var savePreset = Ui.Small("存为预设"); var delPreset = Ui.Small("删除");
             ((FlatButton)delPreset).SetFore(Ui.Muted);
             presetBox.Font = Ui.F8;
@@ -145,9 +145,9 @@ namespace TianGongCadSuite {
             tips.SetToolTip(savePreset, "把现在这套排布 + 孔规格存个名字，下次在下拉里一点就填好。");
             presetCard.Controls.Add(presetBox); presetCard.Controls.Add(savePreset); presetCard.Controls.Add(delPreset);
             presetCard.Resize += (s, e) => {
-                presetBox.SetBounds(12, 34, presetCard.Width - 24, 26);
-                savePreset.Location = new Point(6, presetCard.Height - 34);
-                delPreset.Location = new Point(savePreset.Right + 2, presetCard.Height - 34);
+                presetBox.SetBounds(Ui.S(12), Ui.S(36), Math.Max(40, presetCard.Width - Ui.S(24)), Ui.S(28));
+                savePreset.Location = new Point(Ui.S(6), presetCard.Height - Ui.S(34));
+                delPreset.Location = new Point(savePreset.Right + Ui.S(2), presetCard.Height - Ui.S(34));
             };
             shell.RailBottom = presetCard;
 
@@ -185,8 +185,8 @@ namespace TianGongCadSuite {
             bool canRun = run.Enabled;
             bool showRun = busy || canRun || cur >= PagePreview;
             run.Visible = showRun; nextButton.Visible = !showRun;
-            if (!busy) run.Text = canRun ? "开始打孔 " + lastHoles + " 个孔" : "开始打孔";
-            if (!showRun) nextButton.Text = "下一步：" + shell.Pages[Math.Min(cur + 1, shell.Pages.Count - 1)].Title;
+            if (!busy) { run.Text = canRun ? "开始打孔 " + lastHoles + " 个孔" : "开始打孔"; Ui.FitButton(run); }
+            if (!showRun) { nextButton.Text = "下一步：" + shell.Pages[Math.Min(cur + 1, shell.Pages.Count - 1)].Title; Ui.FitButton(nextButton); }
             shell.Footer.PerformLayout();
         }
 

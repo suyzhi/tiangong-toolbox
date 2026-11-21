@@ -21,26 +21,27 @@ namespace TianGongCadSuite {
         sealed class ParentChoice {public string Id,Text;public override string ToString(){return Text;}}
         static TextBox EntryText(){return new TextBox{Dock=DockStyle.Fill};}
         void InitializeEntry(){
-            entryPanel=new Panel{Dock=DockStyle.Top,Height=150,BackColor=Ui.Rail,Padding=new Padding(14,10,14,6)};
-            var setup=new FlowLayoutPanel{Dock=DockStyle.Top,Height=38,WrapContents=false,AutoScroll=true,BackColor=Ui.Rail};
-            entryPrefix=EntryText();entryPrefix.Width=86;entryPrefix.Text=project.NumberPrefix;
-            entryIsland=new NumericUpDown{Width=54,Minimum=1,Maximum=9999,Value=Math.Min(9999,Math.Max(1,project.ActiveIsland))};
-            entryParent=new ComboBox{Width=205,DropDownStyle=ComboBoxStyle.DropDownList};
-            entryQuantity=new NumericUpDown{Width=53,Minimum=1,Maximum=500,Value=1};
-            entrySensors=new CheckBox{Text="同时生成 H/W",AutoSize=true,Margin=new Padding(6,5,2,0)};
-            entryPosition=new ComboBox{Width=50,DropDownStyle=ComboBoxStyle.DropDownList};entryPosition.Items.AddRange(new[]{"H","W","M"});entryPosition.SelectedIndex=0;
-            Action<string,Control> add=(label,control)=>{setup.Controls.Add(new Label{Text=label,AutoSize=true,Margin=new Padding(3,8,2,0),ForeColor=Ui.Text2,Font=Ui.F9B});setup.Controls.Add(control);};
+            entryPanel=new Panel{Dock=DockStyle.Top,Height=Ui.S(160),BackColor=Ui.Rail,Padding=Ui.SPad(14,10,14,6)};
+            var setup=new FlowLayoutPanel{Dock=DockStyle.Top,Height=Ui.S(42),WrapContents=false,AutoScroll=true,BackColor=Ui.Rail};
+            entryPrefix=EntryText();entryPrefix.Width=Ui.S(86);entryPrefix.Text=project.NumberPrefix;
+            entryIsland=new NumericUpDown{Width=Ui.S(58),Minimum=1,Maximum=9999,Value=Math.Min(9999,Math.Max(1,project.ActiveIsland))};
+            entryParent=new ComboBox{Width=Ui.S(210),DropDownStyle=ComboBoxStyle.DropDownList};
+            entryQuantity=new NumericUpDown{Width=Ui.S(58),Minimum=1,Maximum=500,Value=1};
+            entrySensors=new CheckBox{Text="同时生成 H/W",AutoSize=true,Margin=Ui.SPad(6,5,2,0)};
+            entryPosition=new ComboBox{Width=Ui.S(54),DropDownStyle=ComboBoxStyle.DropDownList};entryPosition.Items.AddRange(new[]{"H","W","M"});entryPosition.SelectedIndex=0;
+            Action<string,Control> add=(label,control)=>{setup.Controls.Add(new Label{Text=label,AutoSize=true,Margin=Ui.SPad(3,8,2,0),ForeColor=Ui.Text2,Font=Ui.F9B});setup.Controls.Add(control);};
             add("前缀",entryPrefix);add("Y",entryIsland);add("上级",entryParent);setup.Controls.Add(entrySensors);setup.Controls.Add(entryPosition);add("数量",entryQuantity);
             Button(setup,"加入 / 新增 ↵",()=>QuickEntry(false));Button(setup,"连续新增",()=>StartContinuous("add"));Button(setup,"清空共用字段",()=>WriteEntry(new LineupEntryPreset{Category=entryKind}));
-            var fields=new TableLayoutPanel{Dock=DockStyle.Top,Height=70,ColumnCount=8,RowCount=2,BackColor=Ui.Rail};
-            for(int i=0;i<4;i++){fields.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,45));fields.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,i==0?34:i==1?22:22));}
+            var fields=new TableLayoutPanel{Dock=DockStyle.Top,Height=Ui.S(76),ColumnCount=8,RowCount=2,BackColor=Ui.Rail};
+            int lblW=Math.Max(Ui.S(48),TextRenderer.MeasureText("机构",Ui.F9B).Width+Ui.S(12));
+            for(int i=0;i<4;i++){fields.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,lblW));fields.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,i==0?34:i==1?22:22));}
             entryModel=new ComboBox{Dock=DockStyle.Fill,DropDownStyle=ComboBoxStyle.DropDown,AutoCompleteMode=AutoCompleteMode.SuggestAppend,AutoCompleteSource=AutoCompleteSource.ListItems};
             entryBrand=EntryText();entryConnector=EntryText();entryDescription=EntryText();entryMechanism=EntryText();entryHome=EntryText();entryMounting=EntryText();
             Action<int,int,string,Control> field=(row,col,label,control)=>{fields.Controls.Add(new Label{Text=label,Dock=DockStyle.Fill,TextAlign=ContentAlignment.MiddleLeft,ForeColor=Ui.Text2,Font=Ui.F9B},col*2,row);fields.Controls.Add(control,col*2+1,row);};
             field(0,0,"型号",entryModel);field(0,1,"品牌",entryBrand);field(0,2,"接口",entryConnector);field(0,3,"机构",entryMechanism);
             field(1,0,"描述",entryDescription);field(1,1,"原位",entryHome);field(1,2,"安装",entryMounting);
             var reuse=Ui.Secondary("沿用当前行",120,30);reuse.Dock=DockStyle.Fill;reuse.Click+=(s,e)=>Try(UseCurrentEntry);fields.Controls.Add(reuse,6,1);fields.SetColumnSpan(reuse,2);
-            entryHint=new Label{Dock=DockStyle.Bottom,Height=24,Text="共用字段只填一次；选模型后加入，无选择则按数量新增。",Padding=new Padding(2,3,0,0),ForeColor=Ui.Muted,Font=Ui.F8};
+            entryHint=new Label{Dock=DockStyle.Bottom,Height=Ui.S(26),Text="共用字段只填一次；选模型后加入，无选择则按数量新增。",Padding=Ui.SPad(2,3,0,0),ForeColor=Ui.Muted,Font=Ui.F8};
             entryPanel.Controls.Add(fields);entryPanel.Controls.Add(setup);entryPanel.Controls.Add(entryHint);
             Controls.Add(entryPanel);Controls.SetChildIndex(entryPanel,Controls.IndexOf(helpBar));
             entryModel.TextChanged+=(s,e)=>CompleteEntryModel();

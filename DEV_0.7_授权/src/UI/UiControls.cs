@@ -14,14 +14,14 @@ namespace TianGongCadSuite {
         float hot;            // 0 = 常态，1 = 悬停（渐变用）
         bool down;
         float progress = -1;  // <0：不画进度
-        public int Radius = 8;
+        public int Radius = Ui.S(8);
 
         public FlatButton(string text, Kind kind, int width, int height){
             Style = kind;
             Init(text, width, height);
             switch (kind) {
-                case Kind.Primary:   back = Ui.Accent; fore = Color.White; hover = Ui.AccentD; press = Ui.AccentPress; line = Color.Empty; Font = height >= 40 ? Ui.BtnB : Ui.F9B; Radius = height >= 40 ? 10 : 8; break;
-                case Kind.Secondary: back = Color.White; fore = Ui.Text; hover = Ui.Subtle; press = Ui.Line; line = Ui.Line; Font = height >= 36 ? Ui.Btn : Ui.F9; break;
+                case Kind.Primary:   back = Ui.Accent; fore = Color.White; hover = Ui.AccentD; press = Ui.AccentPress; line = Color.Empty; Font = height >= Ui.S(40) ? Ui.BtnB : Ui.F9B; Radius = Ui.S(height >= Ui.S(40) ? 10 : 8); break;
+                case Kind.Secondary: back = Color.White; fore = Ui.Text; hover = Ui.Subtle; press = Ui.Line; line = Ui.Line; Font = height >= Ui.S(36) ? Ui.Btn : Ui.F9; break;
                 default:             back = Color.Empty; fore = Ui.Accent; hover = Ui.Subtle; press = Ui.Line; line = Color.Empty; Font = Ui.F9; break;
             }
         }
@@ -112,7 +112,7 @@ namespace TianGongCadSuite {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer
                    | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
             Items.AddRange(items);
-            Font = Ui.F9; Height = 32; BackColor = Color.White; TabStop = true; Cursor = Cursors.Hand;
+            Font = Ui.F9; Height = Ui.S(34); BackColor = Color.White; TabStop = true; Cursor = Cursors.Hand;
             if (Items.Count > 0) selected = 0;
         }
         public int SelectedIndex {
@@ -131,13 +131,14 @@ namespace TianGongCadSuite {
         int[] Edges(){
             var e = new int[Items.Count + 1];
             if (Items.Count == 0) return e;
-            int inner = Width - 6;
+            int m = Ui.S(3), pad = Ui.S(22);
+            int inner = Math.Max(1, Width - m * 2);
             var w = new int[Items.Count]; int total = 0;
-            for (int i = 0; i < Items.Count; i++) { w[i] = TextRenderer.MeasureText(Items[i], Font).Width + 22; total += w[i]; }
+            for (int i = 0; i < Items.Count; i++) { w[i] = TextRenderer.MeasureText(Items[i], Ui.F9B).Width + pad; total += w[i]; }
             double scale = (double)inner / Math.Max(1, total);
-            double x = 3;
+            double x = m;
             for (int i = 0; i < Items.Count; i++) { e[i] = (int)Math.Round(x); x += w[i] * scale; }
-            e[Items.Count] = Width - 3;
+            e[Items.Count] = Width - m;
             return e;
         }
         void SlideThumb(int old){
@@ -155,7 +156,7 @@ namespace TianGongCadSuite {
             return -1;
         }
         // 刚好放得下全部文字的宽度
-        public int PreferredWidth { get { int t = 7; foreach (var s in Items) t += TextRenderer.MeasureText(s, Font).Width + 22; return t; } }
+        public int PreferredWidth { get { int t = Ui.S(7), pad = Ui.S(22); foreach (var s in Items) t += TextRenderer.MeasureText(s, Ui.F9B).Width + pad; return t; } }
         protected override void OnMouseMove(MouseEventArgs e){ int h = HitTest(e.X); if (h != hover) { hover = h; Invalidate(); } base.OnMouseMove(e); }
         protected override void OnMouseLeave(EventArgs e){ hover = -1; Invalidate(); base.OnMouseLeave(e); }
         protected override void OnMouseDown(MouseEventArgs e){
@@ -176,17 +177,18 @@ namespace TianGongCadSuite {
             g.Clear(Parent != null ? Parent.BackColor : Color.White);
             var e = Edges();
             var outer = new Rectangle(0, 0, Width - 1, Height - 1);
-            Ui.FillRound(g, outer, 8, Ui.Subtle);
-            if (Focused) Ui.DrawRound(g, outer, 8, Ui.AccentRing, 2);
+            int m = Ui.S(3), rOut = Ui.S(8), rIn = Ui.S(6);
+            Ui.FillRound(g, outer, rOut, Ui.Subtle);
+            if (Focused) Ui.DrawRound(g, outer, rOut, Ui.AccentRing, 2);
             if (selected >= 0 && e.Length > selected + 1) {
                 if (thumbX < 0) { thumbX = e[selected]; thumbW = e[selected + 1] - e[selected]; }
-                var tr = new Rectangle((int)thumbX, 3, (int)thumbW, Height - 7);
-                Ui.FillRound(g, new Rectangle(tr.X, tr.Y + 1, tr.Width, tr.Height), 6, Color.FromArgb(24, 24, 24, 27));
-                Ui.FillRound(g, tr, 6, Color.White);
+                var tr = new Rectangle((int)thumbX, m, (int)thumbW, Height - m * 2 - 1);
+                Ui.FillRound(g, new Rectangle(tr.X, tr.Y + 1, tr.Width, tr.Height), rIn, Color.FromArgb(24, 24, 24, 27));
+                Ui.FillRound(g, tr, rIn, Color.White);
             }
             for (int i = 0; i < Items.Count; i++) {
                 var r = new Rectangle(e[i], 0, e[i + 1] - e[i], Height - 1);
-                if (i == hover && i != selected && Enabled) Ui.FillRound(g, Rectangle.Inflate(new Rectangle(r.X, 3, r.Width, Height - 7), -1, 0), 6, Color.FromArgb(0xEA, 0xEA, 0xEC));
+                if (i == hover && i != selected && Enabled) Ui.FillRound(g, Rectangle.Inflate(new Rectangle(r.X, m, r.Width, Height - m * 2 - 1), -1, 0), rIn, Color.FromArgb(0xEA, 0xEA, 0xEC));
                 Color fore = i == selected ? (Enabled ? Ui.Accent : Ui.Muted) : (Enabled ? Ui.Text : Ui.Faint);
                 TextRenderer.DrawText(g, Items[i], i == selected ? Ui.F9B : Font, r, fore,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
@@ -201,7 +203,7 @@ namespace TianGongCadSuite {
         public event EventHandler CheckedChanged;
         public ToggleChip(){
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-            BackColor = Color.White; Font = Ui.F8; Height = 26; Cursor = Cursors.Hand;
+            BackColor = Color.White; Font = Ui.F8; Height = Ui.S(28); Cursor = Cursors.Hand;
         }
         public bool Checked {
             get { return on; }
@@ -217,26 +219,30 @@ namespace TianGongCadSuite {
             g.Clear(Parent != null ? Parent.BackColor : Color.White);
             var r = new Rectangle(0, 0, Width - 1, Height - 1);
             if (RailStyle) { PaintRail(g, r); return; }
-            if (on) Ui.FillRound(g, r, 8, Color.FromArgb(hover ? 44 : 26, ChipColor));
-            else if (hover) Ui.FillRound(g, r, 8, Ui.Subtle);
-            Ui.DrawRound(g, r, 8, on ? Color.FromArgb(110, ChipColor) : Ui.Line, 1);
+            int rad = Ui.S(8);
+            if (on) Ui.FillRound(g, r, rad, Color.FromArgb(hover ? 44 : 26, ChipColor));
+            else if (hover) Ui.FillRound(g, r, rad, Ui.Subtle);
+            Ui.DrawRound(g, r, rad, on ? Color.FromArgb(110, ChipColor) : Ui.Line, 1);
             TextRenderer.DrawText(g, (on ? "✓ " : "") + Text, on ? Ui.F9B : Font, r, on ? ChipColor : Ui.Muted,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
         }
         void PaintRail(Graphics g, Rectangle r){
-            if (on) { Ui.FillRound(g, r, 8, Color.White); Ui.DrawRound(g, r, 8, Ui.Line, 1); }
-            else if (hover) Ui.FillRound(g, r, 8, Color.FromArgb(0xEF, 0xEF, 0xF1));
+            int rad = Ui.S(8);
+            if (on) { Ui.FillRound(g, r, rad, Color.White); Ui.DrawRound(g, r, rad, Ui.Line, 1); }
+            else if (hover) Ui.FillRound(g, r, rad, Color.FromArgb(0xEF, 0xEF, 0xF1));
             string t = Text ?? ""; int sp = t.LastIndexOf(' ');
             string name = sp > 0 ? t.Substring(0, sp) : t, count = sp > 0 ? t.Substring(sp + 1) : "";
             var sm = g.SmoothingMode; g.SmoothingMode = SmoothingMode.AntiAlias;
-            var dot = new Rectangle(12, r.Height / 2 - 4, 8, 8);
+            int ds = Ui.S(8), cs = Ui.S(12);
+            var dot = new Rectangle(Ui.S(12), r.Height / 2 - ds / 2, ds, ds);
             if (on) using (var b = new SolidBrush(ChipColor)) g.FillEllipse(b, dot);
             else using (var p = new Pen(Ui.Faint, 1.4f)) g.DrawEllipse(p, dot);
-            if (on) Ui.DrawCheck(g, new Rectangle(r.Right - 22, r.Height / 2 - 6, 12, 12), ChipColor, 1.6f);
+            if (on) Ui.DrawCheck(g, new Rectangle(r.Right - Ui.S(22), r.Height / 2 - cs / 2, cs, cs), ChipColor, 1.6f);
             g.SmoothingMode = sm;
-            TextRenderer.DrawText(g, name, on ? Ui.F9B : Ui.F9, new Rectangle(30, 0, r.Width - 90, r.Height), on ? Ui.Text : Ui.DisabledText,
+            int nameX = Ui.S(30), countW = Ui.S(42), countX = r.Right - Ui.S(70);
+            TextRenderer.DrawText(g, name, on ? Ui.F9B : Ui.F9, new Rectangle(nameX, 0, Math.Max(10, countX - nameX - Ui.S(4)), r.Height), on ? Ui.Text : Ui.DisabledText,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-            TextRenderer.DrawText(g, count, on ? Ui.F9B : Ui.F9, new Rectangle(r.Right - 70, 0, 42, r.Height), on ? Ui.Text : Ui.DisabledText,
+            TextRenderer.DrawText(g, count, on ? Ui.F9B : Ui.F9, new Rectangle(countX, 0, countW, r.Height), on ? Ui.Text : Ui.DisabledText,
                 TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
         }
     }
@@ -246,13 +252,13 @@ namespace TianGongCadSuite {
         public Color ChipColor = Ui.Accent;
         public Chip(){
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-            BackColor = Ui.Bg; Font = Ui.F9B; Height = 26;
+            BackColor = Ui.Bg; Font = Ui.F9B; Height = Ui.S(26);
         }
         protected override void OnPaint(PaintEventArgs e){
             var g = e.Graphics;
             g.Clear(Parent != null ? Parent.BackColor : Ui.Bg);
             var r = new Rectangle(0, 0, Width - 1, Height - 1);
-            Ui.FillRound(g, r, 6, Color.FromArgb(30, ChipColor));
+            Ui.FillRound(g, r, Ui.S(6), Color.FromArgb(30, ChipColor));
             TextRenderer.DrawText(g, Text, Font, r, ChipColor,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
         }

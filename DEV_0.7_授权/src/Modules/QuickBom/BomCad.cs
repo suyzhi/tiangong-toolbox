@@ -125,10 +125,12 @@ namespace TianGongCadSuite {
             }
 
             var items = new List<BomItem>();
-            // 若根装配本身有工程图且没有其他子加工件（例如直接打开了一个焊接件子装配），把根装配本身也列出来
+            // 根装配本身：若本身就是焊接件（无独立子加工件且有图号/工程图）则默认勾选；
+            // 若是总装配（下面有独立子加工件）也收进表里（默认不勾），方便在三合一工作台里同时改总装配的属性卡或文件名。
             bool rootHasCustomChild = HasCustomChild(rootFile, childrenOf, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
-            if (!rootHasCustomChild && (BomRules.PairDraftPath(rootFile).Length > 0 || BomRules.HasCompanyDrawingNumber(Path.GetFileNameWithoutExtension(rootFile)))) {
-                var rootItem = BuildItem(rootFile, BomRules.PairDraftPath(rootFile), 1, true, "", rootAsm);
+            bool rootIsWeld = !rootHasCustomChild && (BomRules.PairDraftPath(rootFile).Length > 0 || BomRules.HasCompanyDrawingNumber(Path.GetFileNameWithoutExtension(rootFile)));
+            if (!string.IsNullOrEmpty(rootFile) && File.Exists(rootFile)) {
+                var rootItem = BuildItem(rootFile, BomRules.PairDraftPath(rootFile), 1, rootIsWeld, rootIsWeld ? "" : "顶层总装配", rootAsm);
                 TryReadOpenMetrics(rootAsm, rootItem);
                 ApplyAutoCategory(rootItem);
                 items.Add(rootItem);
@@ -254,23 +256,13 @@ namespace TianGongCadSuite {
             return true;
         }
 
-        // 从文件夹扫描模型（自动配对同名 .dft）
+        // 从文件夹扫描模型（自动配对同名 .dft，支持递归遍历子文件夹）
         public List<BomItem> CollectFromFolder(string folder, bool recursive, Action<string> pulse) {
             var items = new List<BomItem>();
             if (string.IsNullOrEmpty(folder) || !Directory.Exists(folder)) return items;
 
-            var option = recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
-            var modelFiles = new List<string>();
-            foreach (string pat in new[] { "*.par", "*.psm", "*.asm" }) {
-                try { modelFiles.AddRange(Directory.GetFiles(folder, pat, option)); } catch { }
-            }
-            modelFiles = modelFiles.Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(p => Path.GetFileName(p), StringComparer.OrdinalIgnoreCase).ToList();
-
-            string topProject = "";
-            foreach (var f in modelFiles) {
-                string p = BomRules.ExtractProjectCode(Path.GetFileNameWithoutExtension(f));
-                if (p.Length > 0) { topProject = p; break; }
-            }
+            var modelFiles = BomRules.ScanFolderModels(folder, recursive);
+            string topProject = BomRules.PickTopProject(modelFiles);
 
             for (int i = 0; i < modelFiles.Count; i++) {
                 string f = modelFiles[i];
@@ -279,6 +271,7 @@ namespace TianGongCadSuite {
                 string why;
                 bool selected = BomRules.IsCustomBomPart(f, topProject, dft.Length > 0, out why);
                 var it = BuildItem(f, dft, 1, selected, why, null);
+                it.SubFolder = BomRules.RelativeSubFolder(folder, f);
                 ApplyAutoCategory(it);
                 items.Add(it);
             }
@@ -286,6 +279,7 @@ namespace TianGongCadSuite {
             return items
                 .OrderByDescending(x => x.Selected)
                 .ThenBy(x => x.DrawingNo, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(x => x.SubFolder, StringComparer.OrdinalIgnoreCase)
                 .ToList();
         }
 
@@ -299,10 +293,11 @@ namespace TianGongCadSuite {
                 if (string.IsNullOrEmpty(raw) || !File.Exists(raw)) continue;
                 string model = raw;
                 string dft = "";
+                bool draftOnly = false;
                 if (raw.EndsWith(".dft", StringComparison.OrdinalIgnoreCase)) {
                     dft = raw;
                     model = BomRules.PairModelPathForDraft(raw);
-                    if (string.IsNullOrEmpty(model)) continue;
+                    if (string.IsNullOrEmpty(model)) { model = raw; draftOnly = true; }
                 } else if (BomRules.IsModelExtension(raw)) {
                     dft = BomRules.PairDraftPath(raw);
                 } else {
@@ -311,8 +306,8 @@ namespace TianGongCadSuite {
                 try { model = Path.GetFullPath(model); } catch { }
                 if (!seen.Add(model)) continue;
                 if (pulse != null) pulse("读取文件 " + (i + 1) + "/" + list.Count + "：" + Path.GetFileName(model));
-                var it = BuildItem(model, dft, 1, true, "", null);
-                ApplyAutoCategory(it);
+                var it = BuildItem(model, dft, 1, !draftOnly, draftOnly ? "独立工程图（仅改名）" : "", null);
+                if (!draftOnly) ApplyAutoCategory(it);
                 items.Add(it);
             }
             return items;
@@ -376,6 +371,9 @@ namespace TianGongCadSuite {
             }
 
             if (!ok) return;
+
+            item.RawCustomProps.Clear();
+            foreach (var kv in custom) item.RawCustomProps[kv.Key] = kv.Value ?? "";
 
             string partName = FirstNonEmpty(custom, "零件名称", "零件名", "名称", "标题", "Title");
             if (partName.Length > 0) item.PartName = partName;

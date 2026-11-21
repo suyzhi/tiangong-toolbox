@@ -16,6 +16,7 @@ namespace TianGongCadSuite {
         readonly FlatButton download = (FlatButton)Ui.Primary("下载更新", 128, 40);
         readonly Button later = Ui.Secondary("稍后提醒", 96, 36);
         readonly Button skip = Ui.Ghost("跳过这个版本");
+        readonly ActionBar actions = new ActionBar { Dock = DockStyle.Bottom, Height = Ui.S(68), Padding = Ui.SPad(18, 0, 18, 0) };
         volatile bool cancel;
         bool busy, done, scheduled;
         string pkg;
@@ -24,30 +25,29 @@ namespace TianGongCadSuite {
         public UpdateForm(UpdateManifest manifest) : this(manifest, null) { }
         public UpdateForm(UpdateManifest manifest, string stagedPkg){
             m = manifest;
-            Ui.Shell(this, "发现新版本", 560, 470, 480, 400);
+            Ui.Shell(this, "发现新版本", 560, 490, 480, 420);
             FormBorderStyle = FormBorderStyle.FixedToolWindow;
             Text = "天工工具箱 更新";
 
-            var body = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(24, 20, 24, 8), Gap = 6, AutoScroll = false };
-            body.Add(new Label { Text = "发现新版本 " + m.Version, AutoSize = false, Height = 34, Font = Ui.Title, ForeColor = Ui.Text, BackColor = Ui.Bg });
+            var body = new VerticalStack { Dock = DockStyle.Fill, Padding = Ui.SPad(24, 20, 24, 8), Gap = Ui.S(6), AutoScroll = false };
+            body.Add(new Label { Text = "发现新版本 " + m.Version, AutoSize = false, Height = Ui.S(40), Font = Ui.Title, ForeColor = Ui.Text, BackColor = Ui.Bg });
             body.Add(new Label { Text = "你现在用的是 " + Product.Version + "　·　" + (m.Date.Length > 0 ? m.Date + " 发布　·　" : "") + "安装包 " + m.SizeText,
-                                 AutoSize = false, Height = 24, Font = Ui.F8, ForeColor = Ui.Muted, BackColor = Ui.Bg });
-            body.Add(new Label { Text = "更新内容", AutoSize = false, Height = 26, Font = Ui.F9B, ForeColor = Ui.Text2, BackColor = Ui.Bg, TextAlign = ContentAlignment.BottomLeft });
+                                 AutoSize = false, Height = Ui.S(24), Font = Ui.F8, ForeColor = Ui.Muted, BackColor = Ui.Bg });
+            body.Add(new Label { Text = "更新内容", AutoSize = false, Height = Ui.S(28), Font = Ui.F9B, ForeColor = Ui.Text2, BackColor = Ui.Bg, TextAlign = ContentAlignment.BottomLeft });
             var notes = new TextBox {
                 Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BorderStyle = BorderStyle.None,
                 BackColor = Ui.Rail, ForeColor = Ui.Text, Font = Ui.F9, TabStop = false,
                 Text = m.Notes.Length > 0 ? m.Notes.Replace("\r\n", "\n").Replace("\n", "\r\n") : "（这次发布没有写更新说明）"
             };
-            var notesFrame = new Panel { BackColor = Ui.Rail, Padding = new Padding(12, 10, 8, 10) };
+            var notesFrame = new Panel { BackColor = Ui.Rail, Padding = Ui.SPad(12, 10, 8, 10) };
             notes.Dock = DockStyle.Fill; notesFrame.Controls.Add(notes);
             body.Add(notesFrame, true);
-            bar.Height = 8;
+            bar.Height = Ui.S(8);
             body.Add(bar);
-            status.AutoSize = false; status.Height = 44; status.Font = Ui.F8; status.ForeColor = Ui.Muted; status.BackColor = Ui.Bg;
+            status.AutoSize = false; status.Height = Ui.S(54); status.Font = Ui.F8; status.ForeColor = Ui.Muted; status.BackColor = Ui.Bg;
             status.Text = "下载好以后，关闭天工时自动安装（大约 10 秒），再打开天工就是新版本。下载时可以照常用天工。";
             body.Add(status);
 
-            var actions = new ActionBar { Dock = DockStyle.Bottom, Height = 68, Padding = new Padding(18, 0, 18, 0) };
             download.Click += (s, e) => { if (done) RestartNow(); else StartDownload(); };
             later.Click += (s, e) => {
                 if (done) { ScheduleOnClose(); Choice = Answer.Downloaded; Close(); }
@@ -87,9 +87,10 @@ namespace TianGongCadSuite {
             status.ForeColor = Ui.Ok;
             status.Text = (alreadyWaiting ? "已经下载好了，正等着天工关闭后安装。" : "已下载好。")
                         + "点「立即更新」：天工关闭、装好 " + m.Version + " 后自动重新打开（大约半分钟）；手上有活就点「关闭天工时再装」。";
-            download.Text = "立即更新"; download.Enabled = true;
-            later.Text = "关闭天工时再装"; later.Width = 128; later.Enabled = true; later.Visible = true;
+            download.Text = "立即更新"; download.Enabled = true; Ui.FitButton(download);
+            later.Text = "关闭天工时再装"; later.Enabled = true; later.Visible = true; Ui.FitButton(later);
             skip.Visible = false;
+            actions.PerformLayout();
         }
 
         void StartDownload(){

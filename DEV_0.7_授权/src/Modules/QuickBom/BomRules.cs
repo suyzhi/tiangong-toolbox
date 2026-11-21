@@ -244,6 +244,97 @@ namespace TianGongCadSuite {
             return ext == ".par" || ext == ".psm" || ext == ".asm";
         }
 
+        // 安全遍历目录内的三维模型（支持可选递归子文件夹）：
+        // 跳过隐藏/系统/符号链接目录、临时锁文件（~*），并自动跳过已导出的《加工件清单》成品目录防止重复扫入。
+        public static List<string> ScanFolderModels(string rootFolder, bool recursive) {
+            var results = new List<string>();
+            if (string.IsNullOrEmpty(rootFolder) || !Directory.Exists(rootFolder)) return results;
+
+            string rootFull;
+            try { rootFull = Path.GetFullPath(rootFolder.TrimEnd('\\', '/')); }
+            catch { rootFull = rootFolder; }
+
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var stack = new Stack<string>();
+            stack.Push(rootFull);
+
+            while (stack.Count > 0) {
+                string dir = stack.Pop();
+                string[] files;
+                try { files = Directory.GetFiles(dir); }
+                catch { continue; }
+
+                foreach (string f in files) {
+                    if (!IsModelExtension(f)) continue;
+                    string fn = Path.GetFileName(f) ?? "";
+                    if (fn.Length == 0 || fn[0] == '~') continue;
+                    string full = f;
+                    try { full = Path.GetFullPath(f); } catch { }
+                    if (seen.Add(full)) results.Add(full);
+                }
+
+                if (!recursive) continue;
+
+                string[] subdirs;
+                try { subdirs = Directory.GetDirectories(dir); }
+                catch { continue; }
+                Array.Sort(subdirs, StringComparer.OrdinalIgnoreCase);
+                for (int i = subdirs.Length - 1; i >= 0; i--) {
+                    string sub = subdirs[i];
+                    if (ShouldSkipScanSubdir(sub)) continue;
+                    stack.Push(sub);
+                }
+            }
+
+            results.Sort((a, b) => {
+                string ra = RelativeSubFolder(rootFull, a);
+                string rb = RelativeSubFolder(rootFull, b);
+                int c = StringComparer.OrdinalIgnoreCase.Compare(ra, rb);
+                if (c != 0) return c;
+                return StringComparer.OrdinalIgnoreCase.Compare(Path.GetFileName(a), Path.GetFileName(b));
+            });
+            return results;
+        }
+
+        static bool ShouldSkipScanSubdir(string sub) {
+            try {
+                var attr = File.GetAttributes(sub);
+                if ((attr & (FileAttributes.Hidden | FileAttributes.System | FileAttributes.ReparsePoint)) != 0) return true;
+                string name = Path.GetFileName(sub.TrimEnd('\\', '/')) ?? "";
+                if (name.Length == 0 || name[0] == '.') return true;
+                // 跳过同目录下之前导出的清单成品目录（目录名含「加工件清单」且里面已有清单 .xlsx），避免重复扫出同一批零件
+                if (name.IndexOf("加工件清单", StringComparison.Ordinal) >= 0) {
+                    try {
+                        if (Directory.GetFiles(sub, "*加工件清单*.xlsx").Length > 0) return true;
+                    } catch { }
+                }
+            } catch {
+                return true;
+            }
+            return false;
+        }
+
+        public static string RelativeSubFolder(string rootFolder, string filePath) {
+            if (string.IsNullOrEmpty(rootFolder) || string.IsNullOrEmpty(filePath)) return "";
+            try {
+                string root = Path.GetFullPath(rootFolder.TrimEnd('\\', '/'));
+                string dir = Path.GetFullPath((Path.GetDirectoryName(filePath) ?? "").TrimEnd('\\', '/'));
+                if (string.Equals(root, dir, StringComparison.OrdinalIgnoreCase)) return "";
+                string prefix = root + Path.DirectorySeparatorChar;
+                if (dir.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return dir.Substring(prefix.Length);
+            } catch { }
+            return "";
+        }
+
+        // 从候选模型列表里推断主项目号：优先按「有同名 .dft 的文件」里出现最多的项目号，避免深层参考件带偏主项目
+        public static string PickTopProject(IEnumerable<string> modelFiles) {
+            if (modelFiles == null) return "";
+            var all = modelFiles.ToList();
+            var withDft = MostCommon(all.Where(f => PairDraftPath(f).Length > 0).Select(f => ExtractProjectCode(Path.GetFileNameWithoutExtension(f))));
+            if (withDft.Length > 0) return withDft;
+            return MostCommon(all.Select(f => ExtractProjectCode(Path.GetFileNameWithoutExtension(f))));
+        }
+
         // ---- 表头自动推断 ----
         public static void InferHeader(IList<BomItem> items, string sourcePath, BomHeader header) {
             if (header == null) return;

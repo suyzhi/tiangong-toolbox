@@ -243,11 +243,11 @@ namespace TianGongCadSuite {
 
         // "正在检查更新…"小窗口：线程结束自动关，返回 true；用户关掉 = 不等了，返回 false
         static bool WaitDialog(IWin32Window owner, Thread t){
-            using (var f = new Form { Text = "检查更新", FormBorderStyle = FormBorderStyle.FixedDialog, MinimizeBox = false, MaximizeBox = false,
-                                      ShowInTaskbar = false, StartPosition = FormStartPosition.CenterParent, ClientSize = new System.Drawing.Size(340, 70), BackColor = Ui.Bg })
+            using (var f = new Form { Text = "检查更新", AutoScaleMode = AutoScaleMode.None, FormBorderStyle = FormBorderStyle.FixedDialog, MinimizeBox = false, MaximizeBox = false,
+                                      ShowInTaskbar = false, StartPosition = FormStartPosition.CenterParent, ClientSize = new System.Drawing.Size(Ui.S(360), Ui.S(82)), BackColor = Ui.Bg })
             using (var timer = new System.Windows.Forms.Timer { Interval = 100 }) {
                 f.Controls.Add(new Label { Text = "正在连接更新服务器…（网络慢时最多 15 秒，关掉这个窗口就不等了）", Font = Ui.F9, ForeColor = Ui.Text,
-                                           Dock = DockStyle.Fill, Padding = new Padding(14, 0, 14, 0), TextAlign = System.Drawing.ContentAlignment.MiddleLeft });
+                                           Dock = DockStyle.Fill, Padding = Ui.SPad(14, 0, 14, 0), TextAlign = System.Drawing.ContentAlignment.MiddleLeft });
                 bool finished = false;
                 timer.Tick += (s, e) => { if (!t.IsAlive) { finished = true; f.Close(); } };
                 f.Shown += (s, e) => timer.Start();

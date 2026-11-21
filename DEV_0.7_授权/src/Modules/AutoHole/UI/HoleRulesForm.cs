@@ -26,12 +26,16 @@ namespace TianGongCadSuite {
             presetSeg.SelectedIndex = -1;
 
             // 0.9.0「D」对话框：预设（分段按钮）→ 规则表 → 说明，底部操作栏
-            var presetCard = new Panel { Height = 104, BackColor = Ui.Bg };
+            var presetCard = new Panel { Height = Ui.S(112), BackColor = Ui.Bg };
             var ptitle = new Label { Text = "点一套常用的，下面的表会照它填好", AutoSize = false, Font = Ui.F9B, ForeColor = Ui.Text2, BackColor = Ui.Bg };
-            ptitle.SetBounds(0, 0, 560, 22);
-            presetSeg.SetBounds(0, 28, Math.Max(500, presetSeg.PreferredWidth), 32);
-            nameLabel.SetBounds(0, 68, 560, 22); nameLabel.AutoSize = false; nameLabel.Font = Ui.F8; nameLabel.ForeColor = Ui.Muted; nameLabel.BackColor = Ui.Bg;
+            nameLabel.AutoSize = false; nameLabel.Font = Ui.F8; nameLabel.ForeColor = Ui.Muted; nameLabel.BackColor = Ui.Bg; nameLabel.AutoEllipsis = true;
             presetCard.Controls.Add(ptitle); presetCard.Controls.Add(presetSeg); presetCard.Controls.Add(nameLabel);
+            presetCard.Resize += (s, e) => {
+                int w = Math.Max(Ui.S(200), presetCard.Width);
+                ptitle.SetBounds(0, 0, w, Ui.S(24));
+                presetSeg.SetBounds(0, Ui.S(28), Math.Min(w, Math.Max(Ui.S(500), presetSeg.PreferredWidth)), Ui.S(34));
+                nameLabel.SetBounds(0, Ui.S(70), w, Ui.S(24));
+            };
             presetSeg.SelectedIndexChanged += (s, e) => { if (!loading && presetSeg.SelectedIndex >= 0) Fill(presets[presetSeg.SelectedIndex]); };
 
             var tableCard = Ui.Card("规则表", 0, "先找这个规格专门的一行，没有再用「全部规格」");
@@ -43,10 +47,10 @@ namespace TianGongCadSuite {
             BuildGrid();
             tableCard.Controls.Add(grid);
 
-            var hint = new Label { AutoSize = false, Height = 54, ForeColor = Ui.Muted, Font = Ui.F8, BackColor = Ui.Bg,
+            var hint = new Label { AutoSize = false, Height = Ui.S(64), ForeColor = Ui.Muted, Font = Ui.F8, BackColor = Ui.Bg,
                 Text = "参考孔是螺纹底孔 = 参考件上是螺纹孔，螺钉从目标件这边穿过去；参考孔是过孔 = 螺钉穿过参考件拧进/穿过目标件。\r\n过孔配合决定通孔、沉孔、锥沉的孔径（天工孔标准表「常规螺钉间隙」的紧密 / 普通 / 宽松三档）。" };
 
-            var actions = new ActionBar { Dock = DockStyle.Bottom, Height = 68, Padding = new Padding(18, 0, 18, 0) };
+            var actions = new ActionBar { Dock = DockStyle.Bottom, Height = Ui.S(68), Padding = Ui.SPad(18, 0, 18, 0) };
             var ok = Ui.Primary("保存并应用", 132, 40);
             var cancel = Ui.Secondary("取消", 80, 36);
             ok.Click += (s, e) => Save();
@@ -55,7 +59,7 @@ namespace TianGongCadSuite {
             actions.Status = status; status.ForeColor = Ui.Bad;
             CancelButton = cancel;
 
-            var stack = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(20, 16, 20, 4), AutoScroll = false };
+            var stack = new VerticalStack { Dock = DockStyle.Fill, Padding = Ui.SPad(20, 16, 20, 4), AutoScroll = false };
             stack.Add(presetCard); stack.Add(tableCard, true); stack.Add(hint);
             Controls.Add(stack); Controls.Add(actions);
 
@@ -86,6 +90,7 @@ namespace TianGongCadSuite {
             var fit = Combo("过孔配合", 26);
             foreach (var f in HoleRuleBook.Fits) fit.Items.Add(f);
             grid.Columns.Add(size); grid.Columns.Add(role); grid.Columns.Add(target); grid.Columns.Add(fit);
+            Ui.FitGrid(grid);
             grid.CellValueChanged += (s, e) => { if (!loading) Changed(); };
             grid.CurrentCellDirtyStateChanged += (s, e) => { if (grid.IsCurrentCellDirty) grid.CommitEdit(DataGridViewDataErrorContexts.Commit); };
             grid.DataError += (s, e) => { e.ThrowException = false; };

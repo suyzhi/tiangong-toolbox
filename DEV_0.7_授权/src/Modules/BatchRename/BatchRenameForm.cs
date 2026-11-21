@@ -53,16 +53,19 @@ namespace TianGongCadSuite {
             var page = shell.AddPage(Title, Title, "");
 
             // ---- 侧栏：来源、筛选、跟着改 ----
-            var top = new Panel { BackColor = Ui.Rail, Height = 38 + 6 + 32 + 12 + 22 + 30 };
+            int hReload = Ui.S(38), hAdd = Ui.S(30), hLf = Ui.S(20), hFilter = Ui.S(28);
+            var top = new Panel { BackColor = Ui.Rail, Height = hReload + Ui.S(6) + hAdd + Ui.S(12) + hLf + Ui.S(4) + hFilter + Ui.S(4) };
             var reload = Ui.Secondary("载入当前文档", 200, 38); reload.Click += (s, e) => LoadActive();
             var add = Ui.Ghost("添加文件…"); add.Click += (s, e) => AddFiles();
             var lf = new Label { Text = "按文件名筛选", AutoSize = false, Font = Ui.F8, ForeColor = Ui.Text2, BackColor = Ui.Rail };
             filter.BorderStyle = BorderStyle.FixedSingle; filter.Font = Ui.F9;
             top.Controls.AddRange(new Control[] { reload, add, lf, filter });
             top.Resize += (s, e) => {
-                int w = top.Width;
-                reload.SetBounds(0, 0, w, 38); add.SetBounds(0, 44, w, 32);
-                lf.SetBounds(2, 88, w, 20); filter.SetBounds(0, 110, w, 26);
+                int w = top.Width, y = 0;
+                reload.SetBounds(0, y, w, hReload); y += hReload + Ui.S(6);
+                add.SetBounds(0, y, w, hAdd); y += hAdd + Ui.S(12);
+                lf.SetBounds(Ui.S(2), y, w, hLf); y += hLf + Ui.S(4);
+                filter.SetBounds(0, y, w, hFilter);
             };
             shell.RailTop = top;
             shell.Rail.Visible = true;
@@ -72,7 +75,7 @@ namespace TianGongCadSuite {
             shell.Rail.Add("有问题的", "").Dot = Ui.Bad;
             shell.Rail.SelectedChanged += (s, e) => { stateFilter = shell.Rail.Selected; Rebuild(); };
             filter.TextChanged += (s, e) => Rebuild();
-            var foot = new Panel { BackColor = Ui.Rail, Height = 64 };
+            var foot = new Panel { BackColor = Ui.Rail, Height = Ui.S(74) };
             follow.Text = "同文件夹里同名的工程图（.dft）、显示配置（.cfg）跟着改名";
             follow.Checked = true; Choices.Bind(follow, "rename.follow"); follow.AutoSize = false; follow.BackColor = Ui.Rail; follow.Font = Ui.F8;
             follow.CheckAlign = ContentAlignment.TopLeft; follow.TextAlign = ContentAlignment.TopLeft;
@@ -90,22 +93,22 @@ namespace TianGongCadSuite {
             };
             foreach (var b2 in new[] { remove, revert }) ((FlatButton)b2).SetFore(Ui.Text2);
             shell.AddHeader(page, remove); shell.AddHeader(page, revert);
-            var stack = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = 10, AutoScroll = false };
+            var stack = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = Ui.S(8), AutoScroll = false };
             page.Body.Controls.Add(stack);
             // 查找替换、前后加字各占一行：原来挤在一行、不换行，窗口窄一点（1366 宽的屏幕）「前面加 / 后面加 / 加上」就被截在外面点不到
             stack.Add(ToolRow(Label("查找"), Box(findBox, 150), Label("替换成"), Box(replaceBox, 150), Act("替换", ApplyReplace)));
             stack.Add(ToolRow(Label("前面加"), Box(prefixBox, 150), Label("后面加"), Box(suffixBox, 150), Act("加上", ApplyAffix)));
-            var tip = Ui.Muted8("{原名} 原文件名　{序号} 01、02…（{序号:3} 三位）　{属性名} 零件的自定义属性，比如 {图号}"); tip.BackColor = Ui.Bg; tip.AutoSize = true;
+            var tip = Ui.Muted8("{原名} 原文件名　{序号} 01、02…（{序号:3} 三位）　{属性名} 零件的自定义属性，比如 {图号}"); tip.BackColor = Ui.Bg; tip.AutoSize = true; tip.Margin = Ui.SPad(0, 8, 0, 0);
             stack.Add(ToolRow(Label("按模板"), Box(templateBox, 260), Act("生成", ApplyTemplate), FieldGrid.Space(12), tip));
             findBox.KeyDown += OnEnter(ApplyReplace); replaceBox.KeyDown += OnEnter(ApplyReplace);
             prefixBox.KeyDown += OnEnter(ApplyAffix); suffixBox.KeyDown += OnEnter(ApplyAffix);
             templateBox.KeyDown += OnEnter(ApplyTemplate);
             var gridFrame = Ui.Card("", 0, "");
-            gridFrame.Padding = new Padding(2, 2, 2, 8);
+            gridFrame.Padding = Ui.SPad(2, 2, 2, 8);
             BuildGrid();
             gridFrame.Controls.Add(grid);
             shell.AddHeader(page, PartPreview.Attach(gridFrame, preview, "rename.preview"));
-            var legend = new Label { Text = "选中两行以上 = 只改选中的，否则改表里筛出来的全部　·　Ctrl+V 粘贴一列新名字（可从 Excel 复制）　·　Delete 恢复原名　·　黄底 = 要改名　灰字 = 跟着主文件改的同名工程图", AutoSize = false, Height = 18, Font = Ui.F8, ForeColor = Ui.Muted, BackColor = Ui.Bg };
+            var legend = new Label { Text = "选中两行以上 = 只改选中的，否则改表里筛出来的全部　·　Ctrl+V 粘贴一列新名字（可从 Excel 复制）　·　Delete 恢复原名　·　黄底 = 要改名　灰字 = 跟着主文件改的同名工程图", AutoSize = false, Height = Ui.S(36), Font = Ui.F8, ForeColor = Ui.Muted, BackColor = Ui.Bg };
             stack.Add(gridFrame, true); stack.Add(legend);
 
             // ---- 底部 ----
@@ -113,7 +116,7 @@ namespace TianGongCadSuite {
             var close = Ui.Secondary("关闭", 84, 38);
             run.Click += (s, e) => RunRename();
             close.Click += (s, e) => Close();
-            shell.Footer.Padding = new Padding(28, 0, 20, 0);
+            shell.Footer.Padding = Ui.SPad(28, 0, 20, 0);
             shell.Footer.AddRight(close); shell.Footer.AddRight(run);
             shell.Footer.Status = status;
             status.ForeColor = Ui.Muted;
@@ -125,12 +128,12 @@ namespace TianGongCadSuite {
             UpdateStatus();
         }
 
-        static Label Label(string text){ return new Label { Text = text, AutoSize = true, Font = Ui.F8, ForeColor = Ui.Text2, BackColor = Ui.Bg, Margin = new Padding(0, 8, 6, 0) }; }
-        static TextBox Box(TextBox box, int width){ box.BorderStyle = BorderStyle.FixedSingle; box.Font = Ui.F9; box.Width = width; box.Margin = new Padding(0, 2, 10, 0); return box; }
+        static Label Label(string text){ return new Label { Text = text, AutoSize = true, Font = Ui.F8, ForeColor = Ui.Text2, BackColor = Ui.Bg, Margin = Ui.SPad(0, 8, 6, 0) }; }
+        static TextBox Box(TextBox box, int width){ box.BorderStyle = BorderStyle.FixedSingle; box.Font = Ui.F9; box.Width = Ui.S(width); box.Margin = Ui.SPad(0, 3, 10, 0); return box; }
         static Control Act(string text, Action click){ var b = Ui.Secondary(text, 64, 30); b.Margin = new Padding(0, 0, 0, 0); b.Click += (s, e) => click(); return b; }
         static KeyEventHandler OnEnter(Action a){ return (s, e) => { if (e.KeyCode == Keys.Enter) { a(); e.SuppressKeyPress = true; } }; }
         static Control ToolRow(params Control[] items){
-            var row = new FlowLayoutPanel { Height = 34, BackColor = Ui.Bg, WrapContents = false, FlowDirection = FlowDirection.LeftToRight, Padding = new Padding(0), Margin = new Padding(0) };
+            var row = new FlowLayoutPanel { Height = Ui.S(36), BackColor = Ui.Bg, WrapContents = false, FlowDirection = FlowDirection.LeftToRight, Padding = new Padding(0), Margin = new Padding(0) };
             row.Controls.AddRange(items);
             return row;
         }
@@ -164,6 +167,7 @@ namespace TianGongCadSuite {
             Column("新文件名（不含扩展名）", 280, false);
             Column("扩展名", 64, true);
             Column("说明", 320, true).AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+            Ui.FitGrid(grid);
             grid.CellValueChanged += (s, e) => {
                 if (loading || e.RowIndex < 0 || e.ColumnIndex != ColNew) return;
                 ((RenameRow)grid.Rows[e.RowIndex].Tag).SetNewBase(Convert.ToString(grid.Rows[e.RowIndex].Cells[ColNew].Value));

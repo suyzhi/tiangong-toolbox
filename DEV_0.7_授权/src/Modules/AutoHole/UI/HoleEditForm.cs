@@ -108,45 +108,45 @@ namespace TianGongCadSuite {
             remove.Click += (s, e) => RemoveSelected();
             clear.Click += (s, e) => { if (busy) return; targets.Clear(); picked.Clear(); RefreshAll(); SetStatus("已清空。重新点要改的孔。", Ui.Accent); };
             shell.AddHeader(pHoles, remove); shell.AddHeader(pHoles, clear);
-            var hs = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = 8, AutoScroll = false };
+            var hs = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = Ui.S(8), AutoScroll = false };
             pHoles.Body.Controls.Add(hs);
-            hs.Add(new Label { Text = "在模型里点孔口圆边、孔内壁，或点带孔的平面（面上的孔全加进来）。可以连续点。", AutoSize = false, Height = 40, ForeColor = Ui.Text2, BackColor = Ui.Bg });
+            hs.Add(new Label { Text = "在模型里点孔口圆边、孔内壁，或点带孔的平面（面上的孔全加进来）。可以连续点。", AutoSize = false, Height = Ui.S(48), ForeColor = Ui.Text2, BackColor = Ui.Bg });
             var frame = new Panel { BackColor = Color.White };
             list.Dock = DockStyle.Fill; list.BorderStyle = BorderStyle.None; list.IntegralHeight = false; list.Font = Ui.F9;
             list.HorizontalScrollbar = true;
-            list.DrawMode = DrawMode.OwnerDrawFixed; list.ItemHeight = 40;
+            list.DrawMode = DrawMode.OwnerDrawFixed; list.ItemHeight = Ui.S(44);
             list.DrawItem += DrawHoleItem;
             list.SelectedIndexChanged += (s, e) => JumpToSelected();
             holeEmpty.Dock = DockStyle.Top;
             frame.Controls.Add(list); frame.Controls.Add(holeEmpty); holeEmpty.BringToFront();
-            wholeGroup.Font = Ui.F9; wholeGroup.BackColor = Ui.Bg; wholeGroup.Height = 28;
+            wholeGroup.Font = Ui.F9; wholeGroup.BackColor = Ui.Bg; wholeGroup.Height = Ui.S(30);
             tips.SetToolTip(wholeGroup, "勾着：点中一个孔，它所在特征组里的孔全部一起改（组名、孔名按新规格重起）。\r\n不勾：只改点中的那个孔特征（阵列里的孔仍然整排跟着种子孔变）。");
             hs.Add(frame, true); hs.Add(wholeGroup);
             flash = new Flash(list);
 
             // ---- ② 改成 ----
-            var st = rootStack = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = 12, AutoScroll = false };
+            var st = rootStack = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = Ui.S(12), AutoScroll = false };
             pSpec.Body.Controls.Add(st);
-            previewBox = new RoundBox { Height = 66, Fill = Ui.AccentSoft, Padding = new Padding(14, 8, 14, 6) };
+            previewBox = new RoundBox { Height = Ui.S(74), Fill = Ui.AccentSoft, Padding = Ui.SPad(14, 8, 14, 6) };
             preview.AutoSize = false; preview.Font = Ui.F9B; preview.AutoEllipsis = true; preview.BackColor = Ui.AccentSoft;
             preview.Dock = DockStyle.Fill;
             previewBox.Controls.Add(preview);
-            var sb = new Panel { BackColor = Ui.Bg, Height = 4 * 40 + 30 };
+            var sb = new Panel { BackColor = Ui.Bg, Height = 4 * Ui.S(40) + Ui.S(32) };
             specGrid.BackColor = Ui.Bg;
             sb.Controls.Add(specGrid);
             stdInfo.AutoSize = false; stdInfo.Font = Ui.F8; stdInfo.ForeColor = Ui.Muted; stdInfo.AutoEllipsis = true; stdInfo.BackColor = Ui.Bg;
             sb.Controls.Add(stdInfo);
-            kindSeg.Width = Math.Max(340, kindSeg.PreferredWidth);
+            kindSeg.Width = Math.Max(Ui.S(340), kindSeg.PreferredWidth);
             specGrid.Add("孔型", kindSeg);
             specGrid.Add("规格", sizeBox, FieldGrid.Space(10), Ui.Caption("孔径"), diaNum, FieldGrid.Unit("mm"));
             specGrid.Add("深度", throughRadio, blindRadio, depthNum, FieldGrid.Unit("mm"));
             threadRow = specGrid.Add("螺纹", threadFullRadio, threadPartRadio, threadNum, FieldGrid.Unit("mm"));
             tips.SetToolTip(blindRadio, "贯通孔不能直接改成盲孔（天工接口限制，实测会让孔失效）；盲孔可以改深度、也可以改成贯通。");
             EventHandler fit = (s, e) => {
-                int w = Math.Max(80, sb.ClientSize.Width);
+                int w = Math.Max(Ui.S(80), sb.ClientSize.Width);
                 specGrid.SetBounds(0, 0, w, specGrid.PreferredHeight);
-                stdInfo.SetBounds(0, specGrid.PreferredHeight + 4, w, 20);
-                int h = specGrid.PreferredHeight + 28;
+                stdInfo.SetBounds(0, specGrid.PreferredHeight + Ui.S(4), w, Ui.S(24));
+                int h = specGrid.PreferredHeight + Ui.S(32);
                 if (sb.Height != h) { sb.Height = h; if (rootStack != null) rootStack.Relayout(); }
             };
             sb.Resize += fit; specGrid.Resize += fit;
@@ -183,11 +183,11 @@ namespace TianGongCadSuite {
             using (var w = new SolidBrush(Color.White)) g.FillRectangle(w, e.Bounds);
             if (e.Index < 0 || e.Index >= list.Items.Count) return;
             bool sel = (e.State & DrawItemState.Selected) != 0;
-            var r = new Rectangle(e.Bounds.X, e.Bounds.Y + 2, e.Bounds.Width - 1, e.Bounds.Height - 5);
+            var r = new Rectangle(e.Bounds.X, e.Bounds.Y + Ui.S(2), e.Bounds.Width - 1, e.Bounds.Height - Ui.S(5));
             object key = e.Index < targets.Count ? (object)targets[e.Index] : null;
-            Ui.FillRound(g, r, 10, flash.Back(key, sel ? Ui.AccentSoft : Color.White));
-            Ui.DrawRound(g, r, 10, sel ? Ui.Accent : Ui.Line, sel ? 1.5f : 1f);
-            TextRenderer.DrawText(g, list.Items[e.Index].ToString(), sel ? Ui.F9B : Ui.F9, new Rectangle(r.X + 14, r.Y, r.Width - 20, r.Height), Ui.Text,
+            Ui.FillRound(g, r, Ui.S(10), flash.Back(key, sel ? Ui.AccentSoft : Color.White));
+            Ui.DrawRound(g, r, Ui.S(10), sel ? Ui.Accent : Ui.Line, sel ? 1.5f : 1f);
+            TextRenderer.DrawText(g, list.Items[e.Index].ToString(), sel ? Ui.F9B : Ui.F9, new Rectangle(r.X + Ui.S(14), r.Y, r.Width - Ui.S(20), r.Height), Ui.Text,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
         }
 
@@ -196,7 +196,7 @@ namespace TianGongCadSuite {
             backButton.Enabled = cur > 0 && !busy;
             bool showApply = busy || apply.Enabled || cur == PageSpec;
             apply.Visible = showApply; nextButton.Visible = !showApply;
-            if (!busy) apply.Text = apply.Enabled && lastN > 0 ? "应用到 " + lastN + " 个孔" : "应用";
+            if (!busy) { apply.Text = apply.Enabled && lastN > 0 ? "应用到 " + lastN + " 个孔" : "应用"; Ui.FitButton(apply); }
             shell.Rail.Set(PageHoles, targets.Count == 0 ? "点孔口圆边或带孔的面" : targets.Count + " 个孔" + (wholeGroup.Checked ? " · 整组一起改" : ""), targets.Count > 0, false);
             string problem = ""; try { problem = SpecNow().SpecProblem; } catch { }
             string name = ""; try { name = HoleNaming.Short(SpecNow()); } catch { }

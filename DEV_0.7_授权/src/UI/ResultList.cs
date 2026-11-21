@@ -30,10 +30,10 @@ namespace TianGongCadSuite {
 
         public ResultList(){
             BackColor = Color.White;
-            headline.Dock = DockStyle.Top; headline.Height = 24; headline.Font = Ui.F9B; headline.AutoEllipsis = true;
+            headline.Dock = DockStyle.Top; headline.Height = Ui.S(28); headline.Font = Ui.F9B; headline.AutoEllipsis = true;
             headline.TextAlign = ContentAlignment.MiddleLeft; headline.BackColor = Color.White;
             list.Dock = DockStyle.Fill; list.BorderStyle = BorderStyle.None; list.IntegralHeight = false;
-            list.DrawMode = DrawMode.OwnerDrawFixed; list.ItemHeight = 22; list.BackColor = Color.White;
+            list.DrawMode = DrawMode.OwnerDrawFixed; list.ItemHeight = Ui.S(26); list.BackColor = Color.White;
             list.DrawItem += DrawItem;
             list.Click += (s, e) => Fire();
             list.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { Fire(); e.Handled = true; } };
@@ -86,13 +86,15 @@ namespace TianGongCadSuite {
             bool sel = (e.State & DrawItemState.Selected) != 0;
             using (var b = new SolidBrush(sel ? Ui.ChipBg : Color.White)) e.Graphics.FillRectangle(b, e.Bounds);
             var c = ColorOf(it.Kind);
-            TextRenderer.DrawText(e.Graphics, Mark(it.Kind), Ui.F9B, new Rectangle(e.Bounds.X + 6, e.Bounds.Y, 16, e.Bounds.Height), c,
+            int markX = Ui.S(6), markW = Ui.S(18), textX = Ui.S(28);
+            TextRenderer.DrawText(e.Graphics, Mark(it.Kind), Ui.F9B, new Rectangle(e.Bounds.X + markX, e.Bounds.Y, markW, e.Bounds.Height), c,
                 TextFormatFlags.VerticalCenter | TextFormatFlags.HorizontalCenter);
-            int right = it.HasWhere ? 46 : 4;
-            TextRenderer.DrawText(e.Graphics, it.Text, Ui.F9, new Rectangle(e.Bounds.X + 26, e.Bounds.Y, e.Bounds.Width - 26 - right, e.Bounds.Height),
+            int jumpW = Ui.S(56);
+            int right = it.HasWhere ? jumpW + Ui.S(6) : Ui.S(4);
+            TextRenderer.DrawText(e.Graphics, it.Text, Ui.F9, new Rectangle(e.Bounds.X + textX, e.Bounds.Y, Math.Max(10, e.Bounds.Width - textX - right), e.Bounds.Height),
                 it.Kind == Kind.Info ? Ui.Muted : it.Kind == Kind.Warn ? Ui.Warn : Ui.Text, TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
             if (it.HasWhere)
-                TextRenderer.DrawText(e.Graphics, "跳转 ›", Ui.F8, new Rectangle(e.Bounds.Right - 46, e.Bounds.Y, 42, e.Bounds.Height), Ui.Accent,
+                TextRenderer.DrawText(e.Graphics, "跳转 ›", Ui.F8, new Rectangle(e.Bounds.Right - jumpW - Ui.S(4), e.Bounds.Y, jumpW, e.Bounds.Height), Ui.Accent,
                     TextFormatFlags.VerticalCenter | TextFormatFlags.Right);
         }
 

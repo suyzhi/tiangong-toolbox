@@ -121,29 +121,29 @@ namespace TianGongCadSuite {
             clear.Click += (s, e) => ClearMembers();
             tips.SetToolTip(read, "用 CAD 里当前选中的型材重新识别（替换掉已读的）。");
             tips.SetToolTip(append, "把 CAD 里当前选中的型材加到已读的里面再识别。\n例如：先选整个子围栏读取，再点选隔壁子装配的立柱「追加选择」。");
-            var infoBox = new RoundBox { Fill = Ui.Rail, Padding = new Padding(16, 12, 16, 12) };
+            var infoBox = new RoundBox { Fill = Ui.Rail, Padding = Ui.SPad(16, 12, 16, 12) };
             memberInfo.Dock = DockStyle.Fill; memberInfo.AutoSize = false; memberInfo.ForeColor = Ui.Text2; memberInfo.BackColor = Ui.Rail;
             memberInfo.Text = Hint;
             infoBox.Controls.Add(memberInfo);
             mb.Controls.AddRange(new Control[] { mHint, read, append, clear, infoBox });
             mb.Layout += (s, e) => {
                 int w = mb.ClientSize.Width;
-                mHint.SetBounds(0, 0, w, 44);
-                read.Location = new Point(0, 52); append.Location = new Point(read.Right + 8, 53); clear.Location = new Point(append.Right + 4, 56);
-                infoBox.SetBounds(0, 108, w, Math.Max(80, Math.Min(200, mb.ClientSize.Height - 120)));
+                mHint.SetBounds(0, 0, w, Ui.S(50));
+                read.Location = new Point(0, Ui.S(58)); append.Location = new Point(read.Right + Ui.S(8), Ui.S(59)); clear.Location = new Point(append.Right + Ui.S(4), Ui.S(62));
+                infoBox.SetBounds(0, Ui.S(114), w, Math.Max(Ui.S(80), Math.Min(Ui.S(210), mb.ClientSize.Height - Ui.S(126))));
             };
 
             // ---- ② 板子 ----
-            var grid = new FieldGrid { LabelWidth = 84, BackColor = Ui.Bg };
+            var grid = new FieldGrid { LabelWidth = Ui.S(84), BackColor = Ui.Bg };
             grid.Add("总厚度", thickness, FieldGrid.Unit("mm"));
             grid.Add("每边间隙", gap, FieldGrid.Unit("mm"), FieldGrid.Space(8), Ui.Muted8("板边离型材槽底的距离"));
-            material.FlatStyle = FlatStyle.Flat; material.Width = 170;
+            material.FlatStyle = FlatStyle.Flat; material.Width = Ui.S(170);
             grid.Add("材质", material, FieldGrid.Space(8), Ui.Muted8("写进零件属性，可留空"));
             tips.SetToolTip(material, "写进零件的自定义属性「材质」，并尝试套用天工材料库里同名的材料。可以直接输入别的名字。");
             var pb = new Panel { Dock = DockStyle.Fill, BackColor = Ui.Bg };
             var pHint = new Label { Text = "改了数字停一下就会重新识别框口。", AutoSize = false, ForeColor = Ui.Muted, Font = Ui.F8, BackColor = Ui.Bg };
             pb.Controls.Add(grid); pb.Controls.Add(pHint);
-            pb.Layout += (s, e) => { grid.SetBounds(0, 0, pb.ClientSize.Width, grid.PreferredHeight); pHint.SetBounds(0, grid.PreferredHeight + 6, pb.ClientSize.Width, 22); };
+            pb.Layout += (s, e) => { grid.SetBounds(0, 0, pb.ClientSize.Width, grid.PreferredHeight); pHint.SetBounds(0, grid.PreferredHeight + Ui.S(6), pb.ClientSize.Width, Ui.S(24)); };
             pP.Body.Controls.Add(pb);
 
             // ---- ③ 框口：左列表，右位置预览 ----
@@ -152,9 +152,9 @@ namespace TianGongCadSuite {
             all.Click += (s, e) => SetAllChecked(true);
             none.Click += (s, e) => SetAllChecked(false);
             shell.AddHeader(pO, all); shell.AddHeader(pO, none);
-            var cols = new SplitColumns(340) { Dock = DockStyle.Fill, Gap = 20 };
+            var cols = new SplitColumns(340) { Dock = DockStyle.Fill, Gap = Ui.S(20) };
             var listFrame = Ui.Card("", 0, "");
-            listFrame.Padding = new Padding(8, 8, 4, 8);
+            listFrame.Padding = Ui.SPad(8, 8, 4, 8);
             openings.Dock = DockStyle.Fill; openings.BorderStyle = BorderStyle.None; openings.IntegralHeight = false;
             openings.CheckOnClick = true; openings.BackColor = Color.White; openings.Font = Ui.F9;
             openings.SelectedIndexChanged += (s, e) => ShowPreview();
@@ -164,7 +164,7 @@ namespace TianGongCadSuite {
             listFrame.Controls.Add(openings);
             // 预览控件自己画标题和操作提示，卡片不再写一遍
             var previewCard = Ui.Card("", 0, "");
-            previewCard.Padding = new Padding(2, 2, 2, 2);
+            previewCard.Padding = Ui.SPad(2, 2, 2, 2);
             preview.Dock = DockStyle.Fill;
             preview.EmptyText = "读取型材、识别出框口后，点左边列表里的框口在这里看位置。";
             previewCard.Controls.Add(preview);
@@ -172,12 +172,12 @@ namespace TianGongCadSuite {
             pO.Body.Controls.Add(cols);
 
             // ---- 侧栏底部：输出目录 ----
-            var outCard = new RailCard("输出目录", 110);
+            var outCard = new RailCard("输出目录", 116);
             var change = Ui.Small("更改…");
             change.Click += (s, e) => PickOutputDir();
             outputLabel.AutoEllipsis = true; outputLabel.BackColor = Color.White; outputLabel.ForeColor = Ui.Muted; outputLabel.Font = Ui.F8;
             outCard.Controls.Add(outputLabel); outCard.Controls.Add(change);
-            outCard.Resize += (s, e) => { outputLabel.SetBounds(12, 32, outCard.Width - 24, 40); change.Location = new Point(6, outCard.Height - 34); };
+            outCard.Resize += (s, e) => { outputLabel.SetBounds(Ui.S(12), Ui.S(36), Math.Max(40, outCard.Width - Ui.S(24)), Ui.S(44)); change.Location = new Point(Ui.S(6), outCard.Height - Ui.S(34)); };
             tips.SetToolTip(outputLabel, "每批一个子目录，每个框口一个 PAR");
             shell.RailBottom = outCard;
 

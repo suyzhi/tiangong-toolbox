@@ -10,28 +10,38 @@ namespace TianGongCadSuite {
     // 第一版窗口就是这么翻车的（预览跑到最上面、"开始打孔"被挤没了）。
     // 高度为 0 或 Tag="fill" 的控件分配剩余高度；窗口不够高时自动出现滚动条。
     public sealed class VerticalStack : Panel {
-        public int Gap = 10;
+        public int Gap = Ui.S(10);
         public VerticalStack(){
             SetStyle(ControlStyles.ResizeRedraw, true);
             BackColor = Ui.Bg;
             AutoScroll = true;
-            Padding = new Padding(12, 10, 12, 10);
+            Padding = Ui.SPad(12, 10, 12, 10);
         }
         protected override void OnLayout(LayoutEventArgs e){
             SuspendLayout();
             try {
+                int w = ClientSize.Width - Padding.Horizontal;
                 var fills = new List<Control>();
                 int used = 0, visible = 0;
                 foreach (Control c in Controls) {
                     if (!c.Visible) continue;
                     visible++;
-                    if ((c.Tag as string) == "fill") fills.Add(c); else used += c.Height;
+                    if ((c.Tag as string) == "fill") {
+                        fills.Add(c);
+                    } else {
+                        if ((c.Tag as string) == "autoheight" && w >= Ui.S(200)) {
+                            int pref = c.GetPreferredSize(new Size(w, 0)).Height;
+                            int minH = c.MinimumSize.Height > 0 ? c.MinimumSize.Height : Ui.S(34);
+                            int wantH = Math.Max(minH, pref + Ui.S(4));
+                            if (c.Height != wantH) c.Height = wantH;
+                        }
+                        used += c.Height;
+                    }
                 }
                 used += Gap * Math.Max(0, visible - 1);
                 int avail = ClientSize.Height - Padding.Vertical;
-                int each = fills.Count > 0 ? Math.Max(70, (avail - used) / fills.Count) : 0;
+                int each = fills.Count > 0 ? Math.Max(Ui.S(70), (avail - used) / fills.Count) : 0;
                 int y = Padding.Top;
-                int w = ClientSize.Width - Padding.Horizontal;
                 foreach (Control c in Controls) {
                     if (!c.Visible) continue;
                     int h = (c.Tag as string) == "fill" ? each : c.Height;
@@ -56,12 +66,12 @@ namespace TianGongCadSuite {
     // 和 VerticalStack 一样手动排版 —— Dock 的填充顺序按 z-order 逆序，
     // 两个 Dock 混着用很容易变成"左列被右列挤没"。
     public sealed class SplitColumns : Panel {
-        public int Gap = 20;
+        public int Gap = Ui.S(20);
         public int LeftWidth;        // >0：左列固定宽度
         public float LeftFraction;   // >0：左列占可用宽度的比例
         public bool Divider;         // 中间画分隔线（D 里一般不画，靠留白分开）
         public SplitColumns(int leftWidth){
-            LeftWidth = leftWidth;
+            LeftWidth = Ui.S(leftWidth);
             BackColor = Ui.Bg;
             SetStyle(ControlStyles.ResizeRedraw, true);
         }
@@ -75,9 +85,10 @@ namespace TianGongCadSuite {
             try {
                 if (Controls.Count < 2) return;
                 int avail = ClientSize.Width - Gap;
+                int minCol = Ui.S(60);
                 int left = LeftWidth > 0 ? LeftWidth : (LeftFraction > 0 ? (int)(avail * LeftFraction) : avail / 2);
-                if (left < 60) left = 60;
-                if (left > avail - 60) left = Math.Max(60, avail - 60);
+                if (left < minCol) left = minCol;
+                if (left > avail - minCol) left = Math.Max(minCol, avail - minCol);
                 var a = Controls[0]; var b = Controls[1];
                 var wa = new Rectangle(0, 0, left, ClientSize.Height);
                 var wb = new Rectangle(left + Gap, 0, Math.Max(0, ClientSize.Width - left - Gap), ClientSize.Height);
@@ -106,7 +117,7 @@ namespace TianGongCadSuite {
         public Card(){
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
             BackColor = Ui.Bg;
-            Padding = new Padding(14, 38, 14, 12);
+            Padding = Ui.SPad(14, 38, 14, 12);
             Dock = DockStyle.None;
         }
         // 标题行右侧的小按钮（"移除""清空"这类），从右往左排
@@ -117,34 +128,36 @@ namespace TianGongCadSuite {
         }
         int HeaderLeft {
             get {
-                int x = Width - 10;
-                foreach (var c in header) x -= c.Width + 4;
+                int x = Width - Ui.S(10);
+                foreach (var c in header) x -= c.Width + Ui.S(4);
                 return x;
             }
         }
         protected override void OnLayout(LayoutEventArgs e){
             base.OnLayout(e);
-            int x = Width - 8;
+            int x = Width - Ui.S(8), topY = Ui.S(7), gap = Ui.S(4);
             for (int i = header.Count - 1; i >= 0; i--) {
                 var c = header[i];
                 x -= c.Width;
-                c.Location = new Point(x, 7);
-                x -= 4;
+                c.Location = new Point(x, topY);
+                x -= gap;
             }
         }
         protected override void OnPaint(PaintEventArgs e){
             var g = e.Graphics;
             g.Clear(Parent != null ? Parent.BackColor : Ui.Bg);
             var r = new Rectangle(0, 0, Width - 1, Height - 1);
-            Ui.FillRound(g, r, 10, Fill ? Ui.Rail : Ui.CardBg);
-            if (!Fill) Ui.DrawRound(g, r, 10, Ui.Line, 1);
+            int rad = Ui.S(10);
+            Ui.FillRound(g, r, rad, Fill ? Ui.Rail : Ui.CardBg);
+            if (!Fill) Ui.DrawRound(g, r, rad, Ui.Line, 1);
             if (Title.Length > 0) {
-                TextRenderer.DrawText(g, Title, Ui.F9B, new Point(14, 11), Ui.Text);
+                int tx = Ui.S(14), ty = Ui.S(10);
+                TextRenderer.DrawText(g, Title, Ui.F9B, new Point(tx, ty), Ui.Text);
                 if (Hint.Length > 0) {
                     // 说明文字只能画到标题行按钮的左边，放不下就省略号 —— 不能糊到按钮底下
                     var sz = TextRenderer.MeasureText(g, Title, Ui.F9B);
-                    int hx = 14 + sz.Width + 6;
-                    var hr = new Rectangle(hx, 10, Math.Max(0, HeaderLeft - hx - 4), 22);
+                    int hx = tx + sz.Width + Ui.S(6);
+                    var hr = new Rectangle(hx, Ui.S(9), Math.Max(0, HeaderLeft - hx - Ui.S(4)), Ui.S(24));
                     TextRenderer.DrawText(g, Hint, Ui.F8, hr, Ui.Muted,
                         TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
                 }
@@ -168,17 +181,17 @@ namespace TianGongCadSuite {
             var g = e.Graphics;
             g.Clear(BackColor);
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            int d = 22, cy = Height / 2;
+            int d = Ui.S(22), cy = Height / 2;
             var circle = new Rectangle(1, cy - d / 2, d, d);
             using (var b = new SolidBrush(Ui.Accent)) g.FillEllipse(b, circle);
             TextRenderer.DrawText(g, Number.ToString(), Ui.F8, circle, Color.White,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
             g.SmoothingMode = SmoothingMode.Default;
             var sz = TextRenderer.MeasureText(g, Title, Ui.F10B);
-            TextRenderer.DrawText(g, Title, Ui.F10B, new Point(1 + d + 10, cy - sz.Height / 2), Ui.Text);
+            TextRenderer.DrawText(g, Title, Ui.F10B, new Point(1 + d + Ui.S(10), cy - sz.Height / 2), Ui.Text);
             // 说明文字用带省略号的矩形画：列宽不够时截断，而不是糊到右边那列上去
             if (Hint.Length > 0) {
-                int hx = 1 + d + 14 + sz.Width;
+                int hx = 1 + d + Ui.S(14) + sz.Width;
                 var hr = new Rectangle(hx, 0, Math.Max(0, Width - hx - 2), Height);
                 TextRenderer.DrawText(g, Hint, Ui.F8, hr, Ui.Muted,
                     TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
@@ -191,7 +204,7 @@ namespace TianGongCadSuite {
     // 隐藏状态记在 Row.Shown 里而不是读 Control.Visible：窗口还没显示时 Visible 的 getter 一律是 false，
     // 拿它当排版依据会时灵时不灵（无窗口的单元测试下就翻车）。
     public sealed class FieldGrid : Panel {
-        public int RowHeight = 40, LabelWidth = 52, Gap = 8;
+        public int RowHeight = Ui.S(40), LabelWidth = Ui.S(56), Gap = Ui.S(8);
         public sealed class Row {
             public Label Caption;
             public Panel Host;
@@ -202,7 +215,7 @@ namespace TianGongCadSuite {
         public FieldGrid(){ BackColor = Color.White; }
 
         // 空白占位（控件之间要多空一点时用）
-        public static Control Space(int width){ return new Panel { Width = width, Height = 1, BackColor = Color.Transparent }; }
+        public static Control Space(int width){ return new Panel { Width = Ui.S(width), Height = 1, BackColor = Color.Transparent }; }
         // 单位：紧跟在数字框后面，间距比一般控件小
         public static Label Unit(string text){
             var l = new Label { Text = text, AutoSize = true, ForeColor = Ui.Muted, Font = Ui.F8, BackColor = Color.Transparent };
@@ -211,6 +224,9 @@ namespace TianGongCadSuite {
         }
 
         public Row Add(string caption, params Control[] items){
+            int needW = string.IsNullOrEmpty(caption) ? 0 : TextRenderer.MeasureText(caption, Ui.F9B).Width + Ui.S(14);
+            bool widened = needW > LabelWidth;
+            if (widened) LabelWidth = needW;
             var row = new Row();
             row.Host = new Panel { BackColor = BackColor, Height = RowHeight };
             row.Caption = new Label { Text = caption, AutoSize = false, ForeColor = Ui.Text2, BackColor = Color.Transparent,
@@ -219,7 +235,7 @@ namespace TianGongCadSuite {
             foreach (var c in items) { row.Items.Add(c); row.Host.Controls.Add(c); }
             Rows.Add(row);
             Controls.Add(row.Host);
-            LayoutRow(row);
+            if (widened) { foreach (var r in Rows) LayoutRow(r); } else LayoutRow(row);
             PerformLayout();
             return row;
         }
@@ -246,7 +262,7 @@ namespace TianGongCadSuite {
             Control prev = null;
             foreach (var c in row.Items) {
                 bool unit = (c.Tag as string) == "unit";
-                if (prev != null) x += unit ? 3 : Gap;
+                if (prev != null) x += unit ? Ui.S(3) : Gap;
                 var size = c.AutoSize ? c.PreferredSize : c.Size;
                 c.SetBounds(x, Math.Max(0, (RowHeight - size.Height) / 2), size.Width, size.Height);
                 x += size.Width;

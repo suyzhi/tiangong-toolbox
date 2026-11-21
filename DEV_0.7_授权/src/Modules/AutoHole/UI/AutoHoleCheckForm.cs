@@ -112,23 +112,24 @@ namespace TianGongCadSuite {
             var page = shell.AddPage("检查结果", "配孔检查", "");
 
             // ---- 侧栏顶部：开始检查 + 四类筛选 ----
-            var top = new Panel { BackColor = Ui.Rail, Height = 44 + 34 + 4 * 40 };
+            int hRun = Ui.S(44), hCnt = Ui.S(24), hChip = Ui.S(36), chipStep = Ui.S(40);
+            var top = new Panel { BackColor = Ui.Rail, Height = hRun + Ui.S(34) + 4 * chipStep };
             run.Font = Ui.BtnB;
             top.Controls.Add(run);
             countLine.AutoSize = false; countLine.Font = Ui.F8; countLine.ForeColor = Ui.Muted; countLine.BackColor = Ui.Rail; countLine.Text = "还没检查";
             countLine.TextAlign = ContentAlignment.MiddleLeft;
             top.Controls.Add(countLine);
             foreach (var c in new[]{ cMissing, cMis, cWrong, cUnpaired }) {
-                c.RailStyle = true; c.Height = 36;
+                c.RailStyle = true; c.Height = hChip;
                 c.CheckedChanged += (s, e) => ApplyFilter();
                 top.Controls.Add(c);
             }
             top.Resize += (s, e) => {
                 int w = top.Width;
-                run.SetBounds(0, 0, w, 44);
-                countLine.SetBounds(10, 48, w - 10, 24);
-                int y = 78;
-                foreach (var c in new[]{ cMissing, cMis, cWrong, cUnpaired }) { c.SetBounds(0, y, w, 36); y += 40; }
+                run.SetBounds(0, 0, w, hRun);
+                countLine.SetBounds(Ui.S(10), hRun + Ui.S(4), Math.Max(10, w - Ui.S(10)), hCnt);
+                int y = hRun + Ui.S(34);
+                foreach (var c in new[]{ cMissing, cMis, cWrong, cUnpaired }) { c.SetBounds(0, y, w, hChip); y += chipStep; }
             };
             run.Click += (s, e) => RunCheck();
             tips.SetToolTip(run, "Ctrl+Enter");
@@ -136,25 +137,25 @@ namespace TianGongCadSuite {
             shell.RailTop = top;
 
             // ---- 侧栏底部：复制结果 · 判定口径 ----
-            var links = new Panel { BackColor = Ui.Rail, Height = 72 };
+            var links = new Panel { BackColor = Ui.Rail, Height = Ui.S(74) };
             copy.Enabled = false;
             copy.Click += (s, e) => CopyResults();
             rules.Text = "判定口径…"; rules.AutoSize = true; rules.ForeColor = Ui.Accent; rules.Cursor = Cursors.Hand; rules.BackColor = Ui.Rail;
             tips.SetToolTip(rules, HoleCheck.Options.Describe());
             rules.Click += (s, e) => EditOptions();
             links.Controls.Add(copy); links.Controls.Add(rules);
-            copy.Location = new Point(0, 4); rules.Location = new Point(10, 44);
+            copy.Location = new Point(0, Ui.S(4)); rules.Location = new Point(Ui.S(10), Ui.S(44));
             shell.RailBottom = links;
 
             // ---- 正文：一句话结论 → 问题列表 → 涉及的孔 ----
-            var stack = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = 10, AutoScroll = false };
+            var stack = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = Ui.S(10), AutoScroll = false };
             page.Body.Controls.Add(stack);
             summary.AutoSize = false; summary.TextAlign = ContentAlignment.MiddleLeft; summary.AutoEllipsis = true;
-            summary.ForeColor = Ui.Muted; summary.BackColor = Ui.Bg; summary.Font = Ui.F9; summary.Height = 22;
+            summary.ForeColor = Ui.Muted; summary.BackColor = Ui.Bg; summary.Font = Ui.F9; summary.Height = Ui.S(24);
             summary.Text = "还没检查";
             summary.TextChanged += (s, e) => tips.SetToolTip(summary, summary.Text);
             list.IntegralHeight = false; list.BorderStyle = BorderStyle.None;
-            list.DrawMode = DrawMode.OwnerDrawFixed; list.ItemHeight = 66; list.BackColor = Color.White;
+            list.DrawMode = DrawMode.OwnerDrawFixed; list.ItemHeight = Ui.S(70); list.BackColor = Color.White;
             list.DrawItem += DrawIssue;
             list.SelectedIndexChanged += (s, e) => { HighlightSelected(); ShowDetail(); if (autoJump.Checked) JumpToSelected(false); };
             list.DoubleClick += (s, e) => JumpToSelected(true);
@@ -193,21 +194,21 @@ namespace TianGongCadSuite {
             if (e.Index < 0 || e.Index >= shown.Count) return;
             var it = shown[e.Index];
             bool sel = (e.State & DrawItemState.Selected) != 0;
-            var r = new Rectangle(e.Bounds.X, e.Bounds.Y + 3, e.Bounds.Width - 1, e.Bounds.Height - 7);
-            Ui.FillRound(g, r, 10, sel ? Ui.AccentSoft : Color.White);
-            Ui.DrawRound(g, r, 10, sel ? Ui.Accent : Ui.Line, sel ? 1.5f : 1f);
+            var r = new Rectangle(e.Bounds.X, e.Bounds.Y + Ui.S(3), e.Bounds.Width - 1, e.Bounds.Height - Ui.S(7));
+            Ui.FillRound(g, r, Ui.S(10), sel ? Ui.AccentSoft : Color.White);
+            Ui.DrawRound(g, r, Ui.S(10), sel ? Ui.Accent : Ui.Line, sel ? 1.5f : 1f);
             Color c = ColorFor(it.Kind);
             bool done = it.Done.Length > 0;
             string tagText = done ? "已配" : it.KindName;
-            int tw = TextRenderer.MeasureText(tagText, Ui.F8).Width + 16;
-            var tag = new Rectangle(r.X + 14, r.Y + 11, tw, 24);
-            Ui.FillRound(g, tag, 6, done ? Ui.OkSoft : SoftFor(it.Kind));
+            int tw = TextRenderer.MeasureText(tagText, Ui.F8).Width + Ui.S(16);
+            var tag = new Rectangle(r.X + Ui.S(14), r.Y + Ui.S(10), tw, Ui.S(26));
+            Ui.FillRound(g, tag, Ui.S(6), done ? Ui.OkSoft : SoftFor(it.Kind));
             TextRenderer.DrawText(g, tagText, Ui.F8, tag, done ? Ui.Ok : c, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-            int x = tag.Right + 12, w = Math.Max(10, r.Right - x - 12);
-            TextRenderer.DrawText(g, it.Message, Ui.F9, new Rectangle(x, r.Y + 10, w, 22), Ui.Text, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+            int x = tag.Right + Ui.S(12), w = Math.Max(10, r.Right - x - Ui.S(12));
+            TextRenderer.DrawText(g, it.Message, Ui.F9, new Rectangle(x, r.Y + Ui.S(10), w, Ui.S(24)), Ui.Text, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
             var parts = it.Holes.Select(h => HoleCheck.ShortPart(h.PartName)).Distinct().ToArray();
             TextRenderer.DrawText(g, it.Holes.Count + " 个孔 · " + parts.Length + " 个零件：" + string.Join("、", parts), Ui.F8,
-                new Rectangle(x, r.Y + 34, w, 18), Ui.Muted, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+                new Rectangle(x, r.Y + Ui.S(36), w, Ui.S(20)), Ui.Muted, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
         }
 
         static Color SoftFor(HoleIssueKind k){
