@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Xml.Serialization;
 namespace TianGongCadSuite {
     public sealed class LineupRecord {
@@ -13,6 +14,29 @@ namespace TianGongCadSuite {
         public string SourceFile="",ReferenceKey="";
         public override string ToString(){return Number+"  "+Description+"  "+Model;}
     }
+    public sealed class LineupLocationPoint {
+        public string Id="",Number="",Model="",Category="",State="",Reason="",Method="";
+        public string Side="",Tag="",Description="";
+        public double X,Y;public int Pixels;
+        public LineupLocationPoint Copy(){return (LineupLocationPoint)MemberwiseClone();}
+    }
+    public sealed class LineupLocationPackage {
+        public int Version=1,Width,Height;public string Image="view.png",AssemblyFile="";
+        public List<LineupLocationPoint> Points=new List<LineupLocationPoint>();
+    }
+    // 持久化在 .lineup.xml 里的「LineUP第三版_CAD」单页位置图数据；截图文件存在装配旁 .lineup.cad 目录
+    public sealed class LineupCadPage {
+        public string Id=Guid.NewGuid().ToString("N");
+        public string Name="总图",LineCode="",ImageFile="",ViewMode="isometric";
+        public int Width,Height;
+        public List<LineupLocationPoint> Points=new List<LineupLocationPoint>();
+        public LineupCadPage Copy(){
+            return new LineupCadPage{
+                Id=Id,Name=Name,LineCode=LineCode,ImageFile=ImageFile,ViewMode=ViewMode,Width=Width,Height=Height,
+                Points=(Points??new List<LineupLocationPoint>()).Select(p=>p.Copy()).ToList()
+            };
+        }
+    }
     public sealed class LineupProject {
         public int Version=1;
         public string AssemblyFile="";
@@ -22,6 +46,34 @@ namespace TianGongCadSuite {
         public int ActiveIsland=1;
         public List<LineupIsland> Islands=new List<LineupIsland>();
         public List<LineupEntryPreset> EntryPresets=new List<LineupEntryPreset>();
+        // 项目抬头元数据与多页 CAD 位置图（兼容旧 .lineup.xml：缺省值均为空/空集合）
+        public string ProjectCode="",StationCode="",LineCode="L1",Designer="",Editor="",Revision="V1.0";
+        public bool Export11Columns;
+        public List<LineupCadPage> CadPages=new List<LineupCadPage>();
+        public static string CadAssetsDir(string assemblyFile){
+            return string.IsNullOrEmpty(assemblyFile)?"":Path.ChangeExtension(Path.GetFullPath(assemblyFile),".lineup.cad");
+        }
+        public static string ResolveCadImagePath(string assemblyFile,string imageFile){
+            if(string.IsNullOrWhiteSpace(imageFile))return "";
+            if(Path.IsPathRooted(imageFile))return imageFile;
+            string dir=CadAssetsDir(assemblyFile);
+            return string.IsNullOrEmpty(dir)?imageFile:Path.Combine(dir,imageFile);
+        }
+        public void InferMetadataFromAssembly(string assemblyPath){
+            if(string.IsNullOrWhiteSpace(assemblyPath))return;
+            string stem=Path.GetFileNameWithoutExtension(assemblyPath)??"";
+            if(string.IsNullOrWhiteSpace(ProjectCode)){
+                var m=Regex.Match(stem,@"\b([A-Z]{2}\d{2}\.\d{2}[A-Z0-9]*)\b",RegexOptions.IgnoreCase);
+                if(m.Success)ProjectCode=m.Groups[1].Value.ToUpperInvariant();
+            }
+            if(string.IsNullOrWhiteSpace(StationCode)){
+                var m=Regex.Match(stem,@"(?:^|[-_\s])((?:OK|OP|ST|AF|M)\d{2,4}|C\d{2})(?:$|[-_\s（(])",RegexOptions.IgnoreCase);
+                if(m.Success)StationCode=m.Groups[1].Value.ToUpperInvariant();
+            }
+            if(string.IsNullOrWhiteSpace(NumberPrefix)&&!string.IsNullOrWhiteSpace(StationCode))NumberPrefix=StationCode;
+            if(string.IsNullOrWhiteSpace(LineCode))LineCode="L1";
+            if(string.IsNullOrWhiteSpace(Revision))Revision="V1.0";
+        }
         public void Save(string file) {
             var temporary=file+"."+Guid.NewGuid().ToString("N")+".tmp";
             try {
@@ -33,6 +85,11 @@ namespace TianGongCadSuite {
             LineupProject p;
             using(var stream=File.OpenRead(file))p=(LineupProject)new XmlSerializer(typeof(LineupProject)).Deserialize(stream);
             if(p.Version!=1)throw new InvalidDataException("不支持的 Lineup 文件版本。");
+            if(p.Records==null)p.Records=new List<LineupRecord>();
+            if(p.Sections==null)p.Sections=new List<LineupSection>();
+            if(p.Islands==null)p.Islands=new List<LineupIsland>();
+            if(p.EntryPresets==null)p.EntryPresets=new List<LineupEntryPreset>();
+            if(p.CadPages==null)p.CadPages=new List<LineupCadPage>();
             if(!string.Equals(Path.GetFullPath(p.AssemblyFile),Path.GetFullPath(assembly),StringComparison.OrdinalIgnoreCase)){
                 // 0.10.3：数据文件就是这个装配旁边、同名的那个 .lineup.xml → 装配连同文件夹被拷走 / 挪走 / 改过名（记的还是老路径）。
                 // 原来一律报"属于另一装配"、Lineup 打不开：H 盘上到处是「项目 - 副本」，拷一份接着做就再也打不开清单。

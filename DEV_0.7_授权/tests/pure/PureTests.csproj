@@ -58,9 +58,21 @@
     <Compile Include="../../src/Modules/QuickBom/BomXlsxWriter.cs" />
     <Compile Include="../../src/Modules/QuickBom/WorkbenchData.cs" />
 
-    <!-- Embedded Excel Templates -->
+    <!-- Lineup Pure Logic & OpenXML -->
+    <Compile Include="../../src/Modules/Lineup/LineupData.cs" />
+    <Compile Include="../../src/Modules/Lineup/LineupTableData.cs" />
+    <Compile Include="../../src/Modules/Lineup/LineupSmartData.cs" />
+    <Compile Include="../../src/Modules/Lineup/LineupEntryData.cs" />
+    <Compile Include="../../src/Modules/Lineup/LineupHierarchy.cs" />
+    <Compile Include="../../src/Modules/Lineup/LineupAudit.cs" />
+    <Compile Include="../../src/Modules/Lineup/LineupCadLayout.cs" />
+    <Compile Include="../../src/Modules/Lineup/LineupXlsxWriter.cs" />
+    <Compile Include="../../src/Modules/Lineup/LineupXlsxReader.cs" />
+
+    <!-- Embedded Excel Templates & Lineup Seed -->
     <EmbeddedResource Include="../../src/Modules/QuickBom/Templates/ProcessingListTemplate.xlsx" LogicalName="TianGongCadSuite.QuickBom.ProcessingListTemplate.xlsx" />
     <EmbeddedResource Include="../../src/Modules/QuickBom/Templates/CodeRequestTemplate.xlsx" LogicalName="TianGongCadSuite.QuickBom.CodeRequestTemplate.xlsx" />
+    <EmbeddedResource Include="../../src/Modules/Lineup/lineup-models-seed.xml" LogicalName="TianGongCadSuite.Lineup.lineup-models-seed.xml" Condition="Exists('../../src/Modules/Lineup/lineup-models-seed.xml')" />
 
     <!-- Pure Test Suites -->
     <Compile Include="../AutoHolePureTests.cs" />
@@ -76,6 +88,7 @@
     <Compile Include="../DrawingPlanPureTests.cs" />
     <Compile Include="../DrawingTolerancePureTests.cs" />
     <Compile Include="../QuickBomPureTests.cs" />
+    <Compile Include="../LineupXlsxPureTests.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Stubs.cs" />
   </ItemGroup>

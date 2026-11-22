@@ -48,7 +48,18 @@ namespace TianGongCadSuite {
                 if(island==null){var config=p.Islands.FirstOrDefault(x=>string.Equals(x.Key,key,StringComparison.OrdinalIgnoreCase));island=new LineupRecord{Category="阀岛",Number=key,Model=config==null?"":config.Model};p.Records.Add(island);}
             }
             foreach(var capturedRow in incoming){
-                var r=new LineupRecord{Category=preset.Category,Model=preset.Model.Trim(),Brand=preset.Brand.Trim(),Connector=preset.Connector.Trim(),Description=preset.Description,Home=preset.Home,Mounting=preset.Mounting,Mechanism=preset.Mechanism,ReferenceKey=capturedRow.ReferenceKey,SourceFile=capturedRow.SourceFile,InstancePath=(capturedRow.InstancePath??new string[0]).ToArray()};
+                var r=new LineupRecord{
+                    Category=preset.Category,
+                    Model=string.IsNullOrWhiteSpace(preset.Model)?(capturedRow.Model??"").Trim():preset.Model.Trim(),
+                    Brand=string.IsNullOrWhiteSpace(preset.Brand)?(capturedRow.Brand??"").Trim():preset.Brand.Trim(),
+                    Connector=string.IsNullOrWhiteSpace(preset.Connector)?(capturedRow.Connector??"").Trim():preset.Connector.Trim(),
+                    Description=string.IsNullOrWhiteSpace(preset.Description)?(capturedRow.Description??""):preset.Description,
+                    Home=preset.Home,Mounting=preset.Mounting,
+                    Mechanism=string.IsNullOrWhiteSpace(preset.Mechanism)?(capturedRow.Mechanism??""):preset.Mechanism,
+                    Notes=string.IsNullOrWhiteSpace(capturedRow.Notes)?(string.IsNullOrWhiteSpace(preset.Mechanism)?(capturedRow.Mechanism??""):preset.Mechanism):capturedRow.Notes,
+                    ReferenceKey=capturedRow.ReferenceKey,SourceFile=capturedRow.SourceFile,
+                    InstancePath=(capturedRow.InstancePath??new string[0]).ToArray()
+                };
                 if(r.Model.Length==0&&!string.IsNullOrEmpty(r.SourceFile)){
                     var known=source.Records.Where(x=>x.Category==r.Category&&string.Equals(x.SourceFile,r.SourceFile,StringComparison.OrdinalIgnoreCase)&&!string.IsNullOrWhiteSpace(x.Model)).Select(x=>new{x.Model,x.Brand,x.Connector}).Distinct().ToList();
                     if(known.Count==1&&(r.Brand.Length==0||r.Brand==known[0].Brand)&&(r.Connector.Length==0||r.Connector==known[0].Connector)){r.Model=known[0].Model;r.Brand=known[0].Brand;r.Connector=known[0].Connector;}

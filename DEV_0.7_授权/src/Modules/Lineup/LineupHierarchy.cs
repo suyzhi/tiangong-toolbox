@@ -26,7 +26,7 @@ namespace TianGongCadSuite {
             for(int i=0;i<children.Length;i++){
                 var c=children[i];c.Number=stem+(children.Length>1?"-"+(i+1):"");c.IslandId=valve.IslandId;
                 foreach(var s in p.Records.Where(r=>r.CylinderId==c.Id&&r.Category=="气缸传感器")){
-                    if(s.Position!="H"&&s.Position!="W"&&s.Position!="M")throw new InvalidOperationException("传感器位置须为 H/W/M："+s.Number);
+                    if(!Regex.IsMatch(s.Position??"",@"^[HWM][0-9]*$"))throw new InvalidOperationException("传感器位置须为 H/W/M（或 H1/W1 等）："+s.Number);
                     s.Number=c.Number+s.Position;s.ValveId=valve.Id;s.IslandId=valve.IslandId;
                 }
             }

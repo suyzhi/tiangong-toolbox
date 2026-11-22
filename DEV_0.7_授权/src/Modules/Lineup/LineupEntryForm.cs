@@ -7,8 +7,8 @@ using System.Windows.Forms;
 namespace TianGongCadSuite {
     public sealed partial class LineupTableForm {
         Panel entryPanel;
-        TextBox entryPrefix,entryBrand,entryConnector,entryDescription,entryMechanism,entryHome,entryMounting;
-        ComboBox entryModel,entryParent,entryPosition;
+        TextBox entryPrefix,entryBrand,entryDescription,entryMechanism;
+        ComboBox entryModel,entryParent,entryPosition,entryConnector,entryHome,entryMounting;
         NumericUpDown entryIsland,entryQuantity;
         CheckBox entrySensors;
         Label entryHint;
@@ -20,8 +20,13 @@ namespace TianGongCadSuite {
         Button watchStop;
         sealed class ParentChoice {public string Id,Text;public override string ToString(){return Text;}}
         static TextBox EntryText(){return new TextBox{Dock=DockStyle.Fill};}
+        static ComboBox EntryCombo(string[] items){
+            var c=new ComboBox{Dock=DockStyle.Fill,DropDownStyle=ComboBoxStyle.DropDown,AutoCompleteMode=AutoCompleteMode.SuggestAppend,AutoCompleteSource=AutoCompleteSource.ListItems};
+            if(items!=null)c.Items.AddRange(items.Cast<object>().ToArray());
+            return c;
+        }
         void InitializeEntry(){
-            entryPanel=new Panel{Dock=DockStyle.Top,Height=Ui.S(160),BackColor=Ui.Rail,Padding=Ui.SPad(14,10,14,6)};
+            entryPanel=new Panel{Dock=DockStyle.Top,Height=Ui.S(162),BackColor=Ui.Rail,Padding=Ui.SPad(14,10,14,6)};
             var setup=new FlowLayoutPanel{Dock=DockStyle.Top,Height=Ui.S(42),WrapContents=false,AutoScroll=true,BackColor=Ui.Rail};
             entryPrefix=EntryText();entryPrefix.Width=Ui.S(86);entryPrefix.Text=project.NumberPrefix;
             entryIsland=new NumericUpDown{Width=Ui.S(58),Minimum=1,Maximum=9999,Value=Math.Min(9999,Math.Max(1,project.ActiveIsland))};
@@ -32,16 +37,16 @@ namespace TianGongCadSuite {
             Action<string,Control> add=(label,control)=>{setup.Controls.Add(new Label{Text=label,AutoSize=true,Margin=Ui.SPad(3,8,2,0),ForeColor=Ui.Text2,Font=Ui.F9B});setup.Controls.Add(control);};
             add("前缀",entryPrefix);add("Y",entryIsland);add("上级",entryParent);setup.Controls.Add(entrySensors);setup.Controls.Add(entryPosition);add("数量",entryQuantity);
             Button(setup,"加入 / 新增 ↵",()=>QuickEntry(false));Button(setup,"连续新增",()=>StartContinuous("add"));Button(setup,"清空共用字段",()=>WriteEntry(new LineupEntryPreset{Category=entryKind}));
-            var fields=new TableLayoutPanel{Dock=DockStyle.Top,Height=Ui.S(76),ColumnCount=8,RowCount=2,BackColor=Ui.Rail};
+            var fields=new TableLayoutPanel{Dock=DockStyle.Top,Height=Ui.S(78),ColumnCount=8,RowCount=2,BackColor=Ui.Rail};
             int lblW=Math.Max(Ui.S(48),TextRenderer.MeasureText("机构",Ui.F9B).Width+Ui.S(12));
             for(int i=0;i<4;i++){fields.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,lblW));fields.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,i==0?34:i==1?22:22));}
             entryModel=new ComboBox{Dock=DockStyle.Fill,DropDownStyle=ComboBoxStyle.DropDown,AutoCompleteMode=AutoCompleteMode.SuggestAppend,AutoCompleteSource=AutoCompleteSource.ListItems};
-            entryBrand=EntryText();entryConnector=EntryText();entryDescription=EntryText();entryMechanism=EntryText();entryHome=EntryText();entryMounting=EntryText();
+            entryBrand=EntryText();entryConnector=EntryCombo(LineupPresets.Connectors);entryDescription=EntryText();entryMechanism=EntryText();entryHome=EntryCombo(LineupPresets.Homes);entryMounting=EntryCombo(LineupPresets.CylinderMountings);
             Action<int,int,string,Control> field=(row,col,label,control)=>{fields.Controls.Add(new Label{Text=label,Dock=DockStyle.Fill,TextAlign=ContentAlignment.MiddleLeft,ForeColor=Ui.Text2,Font=Ui.F9B},col*2,row);fields.Controls.Add(control,col*2+1,row);};
             field(0,0,"型号",entryModel);field(0,1,"品牌",entryBrand);field(0,2,"接口",entryConnector);field(0,3,"机构",entryMechanism);
             field(1,0,"描述",entryDescription);field(1,1,"原位",entryHome);field(1,2,"安装",entryMounting);
             var reuse=Ui.Secondary("沿用当前行",120,30);reuse.Dock=DockStyle.Fill;reuse.Click+=(s,e)=>Try(UseCurrentEntry);fields.Controls.Add(reuse,6,1);fields.SetColumnSpan(reuse,2);
-            entryHint=new Label{Dock=DockStyle.Bottom,Height=Ui.S(26),Text="共用字段只填一次；选模型后加入，无选择则按数量新增。",Padding=Ui.SPad(2,3,0,0),ForeColor=Ui.Muted,Font=Ui.F8};
+            entryHint=new Label{Dock=DockStyle.Bottom,Height=Ui.S(26),Text="共用字段只填一次；选三维件加入时若型号留空将自动从属性卡/文件名识别型号与品牌。",Padding=Ui.SPad(2,3,0,0),ForeColor=Ui.Muted,Font=Ui.F8};
             entryPanel.Controls.Add(fields);entryPanel.Controls.Add(setup);entryPanel.Controls.Add(entryHint);
             Controls.Add(entryPanel);Controls.SetChildIndex(entryPanel,Controls.IndexOf(helpBar));
             entryModel.TextChanged+=(s,e)=>CompleteEntryModel();
@@ -64,6 +69,8 @@ namespace TianGongCadSuite {
         internal void WriteEntry(LineupEntryPreset preset){
             entryLoading=true;entryKind=preset.Category;
             entryModel.Items.Clear();entryModel.Items.AddRange(catalog.Entries.Where(x=>x.Category==entryKind).Select(x=>x.Model).Distinct().OrderBy(x=>x).Cast<object>().ToArray());
+            entryMounting.Items.Clear();
+            entryMounting.Items.AddRange((entryKind=="阀片"?LineupPresets.ValveKinds:LineupPresets.CylinderMountings).Cast<object>().ToArray());
             entryModel.Text=preset.Model;entryBrand.Text=preset.Brand;entryConnector.Text=preset.Connector;entryDescription.Text=preset.Description;entryMechanism.Text=preset.Mechanism;entryHome.Text=preset.Home;entryMounting.Text=preset.Mounting;entrySensors.Checked=preset.GenerateSensors;entryPosition.SelectedItem=preset.Position;entryAutoBrand="";entryAutoConnector="";
             RefreshEntryParents(preset.ParentId);
             entrySensors.Visible=entryKind=="气缸";entryPosition.Visible=entryKind=="气缸传感器";entryQuantity.Enabled=entryKind!="气缸传感器";
@@ -82,7 +89,7 @@ namespace TianGongCadSuite {
         }
         void CompleteEntryModel(){
             if(entryLoading||entryModel==null)return;
-            if(entryAutoBrand.Length>0&&entryBrand.Text==entryAutoBrand)entryBrand.Clear();if(entryAutoConnector.Length>0&&entryConnector.Text==entryAutoConnector)entryConnector.Clear();entryAutoBrand="";entryAutoConnector="";
+            if(entryAutoBrand.Length>0&&entryBrand.Text==entryAutoBrand)entryBrand.Clear();if(entryAutoConnector.Length>0&&entryConnector.Text==entryAutoConnector)entryConnector.Text="";entryAutoBrand="";entryAutoConnector="";
             var matches=catalog.Match(entryKind,entryModel.Text).ToList();
             if(matches.Count==1){if(entryBrand.Text.Length==0){entryAutoBrand=matches[0].Brand;entryBrand.Text=entryAutoBrand;}if(entryConnector.Text.Length==0){entryAutoConnector=matches[0].Connector;entryConnector.Text=entryAutoConnector;}}
             entryHint.Text=matches.Count>1?"此型号有多种品牌/接口，请填写对应规格；手填值会保留。":"共用字段自动记忆；Enter 加入，Ctrl+D 向下填充；连续模式只需点模型。";
@@ -106,13 +113,25 @@ namespace TianGongCadSuite {
         }
         LineupProject EntrySnapshot(){
             var next=Snapshot();string prefix=entryPrefix.Text.Trim();int island=(int)entryIsland.Value;
-            if(prefix.Length>0){string key=prefix+"-Y"+island;var configured=next.Islands.FirstOrDefault(x=>string.Equals(x.Key,key,StringComparison.OrdinalIgnoreCase));LineupNumbering.SetIsland(next,prefix,island,configured==null?"":configured.Model);}
+            if(prefix.Length>0){string key=prefix+"-Y"+island;var configured=next.Islands.FirstOrDefault(x=>string.Equals(x.Key,key,StringComparison.OrdinalIgnoreCase));LineupNumbering.SetIsland(next,prefix,island,configured==null?"":configured.Model,configured==null?"阀岛":configured.Kind);}
             else {next.NumberPrefix="";next.ActiveIsland=island;}
             return next;
         }
         List<LineupRecord> CaptureEntrySelections(){
             var incoming=new List<LineupRecord>();int count=assembly.SelectSet.Count;
-            for(int i=1;i<=count;i++){var row=new LineupRecord();LineupCad.CaptureOccurrence(assembly.SelectSet.Item(i),row);incoming.Add(row);}
+            for(int i=1;i<=count;i++){
+                var row=new LineupRecord();LineupCad.CaptureOccurrence(assembly.SelectSet.Item(i),row);
+                // 自动从三维零件文件名/属性卡与内置型号库补全型号、品牌、接口、机构
+                try{
+                    var meta=LineupCad.ReadPartMeta(row.SourceFile,row.InstancePath,catalog,entryKind??ActiveCategory);
+                    if(!string.IsNullOrWhiteSpace(meta.Model))row.Model=meta.Model;
+                    if(!string.IsNullOrWhiteSpace(meta.Brand))row.Brand=meta.Brand;
+                    if(!string.IsNullOrWhiteSpace(meta.Connector))row.Connector=meta.Connector;
+                    if(!string.IsNullOrWhiteSpace(meta.Title))row.Description=meta.Title;
+                    if(!string.IsNullOrWhiteSpace(meta.Mechanism))row.Mechanism=meta.Mechanism;
+                }catch{}
+                incoming.Add(row);
+            }
             if(assembly.SelectSet.Count!=count)throw new InvalidOperationException("选择正在变化，请完成选择后重试。");return incoming;
         }
         internal int QuickEntry(bool requireSelection){

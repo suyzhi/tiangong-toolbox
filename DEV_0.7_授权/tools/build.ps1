@@ -50,6 +50,8 @@ $shared=@(
     ('/resource:' + (Join-Path $root 'src\Modules\QuickBom\Templates\ProcessingListTemplate.xlsx') + ',TianGongCadSuite.QuickBom.ProcessingListTemplate.xlsx'),
     ('/resource:' + (Join-Path $root 'src\Modules\QuickBom\Templates\CodeRequestTemplate.xlsx') + ',TianGongCadSuite.QuickBom.CodeRequestTemplate.xlsx')
 )
+$lineupSeedRes=Join-Path $root 'src\Modules\Lineup\lineup-models-seed.xml'
+if(Test-Path $lineupSeedRes){$shared+=('/resource:' + $lineupSeedRes + ',TianGongCadSuite.Lineup.lineup-models-seed.xml')}
 if($DevBuild){$shared+='/define:TG_DEV_BUILD'}
 & $csc ($shared + $sources)
 if($LASTEXITCODE -ne 0){throw '插件编译失败'}

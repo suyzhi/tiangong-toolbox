@@ -3,11 +3,14 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 namespace TianGongCadSuite {
     public sealed class LineupSection {public string Category="";public string[] Cells=new string[0];}
     public sealed class LineupImport {
         public List<LineupRecord> Records=new List<LineupRecord>();
         public List<LineupSection> Sections=new List<LineupSection>();
+        public List<LineupIsland> Islands=new List<LineupIsland>();
+        public string ProjectCode="",StationCode="",LineCode="";
     }
     public static class LineupTableData {
         public static readonly string[] Headers={"编号","地址","功能参数","描述","型号","品牌","原位","安装方式","机构名称","传感器接口类型","备注"};
@@ -72,15 +75,68 @@ namespace TianGongCadSuite {
                 rows.Add(header);
                 var displayedIslands=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 foreach(var r in project.Records.Where(r=>Category(r.Category)==category)){
-                    var cells=Cells(r);string model=LineupNumbering.IslandModel(project,r),key=LineupNumbering.IslandKey(r.Number);
-                    if(!string.IsNullOrWhiteSpace(model)){
+                    var cells=Cells(r);string label=LineupNumbering.IslandLabel(project,r),key=LineupNumbering.IslandKey(r.Number);
+                    if(!string.IsNullOrWhiteSpace(label)){
                         // A configured island model is the authority; preserve unrelated mounting text.
-                        cells[7]=System.Text.RegularExpressions.Regex.Replace(cells[7]??"", @"(?:阀岛|阀组)：[^\r\n]*","").Trim();
-                        if(displayedIslands.Add(key))cells[7]=(cells[7].Length>0?cells[7]+"\n":"")+"阀岛："+model;
+                        cells[7]=Regex.Replace(cells[7]??"",@"(?:阀岛|汇流排|阀组|单片阀)(?:[：:][^\r\n]*)?","").Trim();
+                        if(displayedIslands.Add(key))cells[7]=(cells[7].Length>0?cells[7]+"\n":"")+label;
                     }rows.Add(cells);
                 }
                 rows.Add(Enumerable.Repeat("",11).ToArray());
             }return rows;
+        }
+        // 从导入记录的编号和阀片安装方式自动重建阀岛配置、编号前缀以及「阀岛 → 阀片 → 气缸 → 气缸传感器」关联
+        public static void InferHierarchy(LineupProject project){
+            if(project==null||project.Records==null)return;
+            if(project.Islands==null)project.Islands=new List<LineupIsland>();
+            // 1. 提取阀片安装方式里的阀岛 / 汇流排 / 阀组 / 单片阀配置
+            foreach(var v in project.Records.Where(r=>Category(r.Category)=="阀片")){
+                string key=LineupNumbering.IslandKey(v.Number);
+                if(key.Length==0)continue;
+                if(string.IsNullOrWhiteSpace(project.NumberPrefix)){
+                    var m=Regex.Match(key,@"^(.+)-Y([0-9]+)$",RegexOptions.IgnoreCase);
+                    if(m.Success){project.NumberPrefix=m.Groups[1].Value;int n;if(int.TryParse(m.Groups[2].Value,out n)&&n>0)project.ActiveIsland=n;}
+                }
+                var im=Regex.Match(v.Mounting??"",@"(阀岛|汇流排|阀组)[：:]\s*([^\r\n]+)");
+                if(im.Success){
+                    var existing=LineupNumbering.IslandEntry(project,key);
+                    if(existing==null)project.Islands.Add(new LineupIsland{Key=key,Kind=im.Groups[1].Value.Trim(),Model=im.Groups[2].Value.Trim()});
+                    else if(string.IsNullOrWhiteSpace(existing.Model)){existing.Kind=im.Groups[1].Value.Trim();existing.Model=im.Groups[2].Value.Trim();}
+                }else if((v.Mounting??"").Trim()=="单片阀"){
+                    var existing=LineupNumbering.IslandEntry(project,key);
+                    if(existing==null)project.Islands.Add(new LineupIsland{Key=key,Kind="单片阀",Model=""});
+                }
+            }
+            // 若还没推断出前缀，从气缸编号推断
+            if(string.IsNullOrWhiteSpace(project.NumberPrefix)){
+                foreach(var c in project.Records.Where(r=>Category(r.Category)=="气缸")){
+                    string key=LineupNumbering.IslandKey(c.Number);
+                    var m=Regex.Match(key,@"^(.+)-Y([0-9]+)$",RegexOptions.IgnoreCase);
+                    if(m.Success){project.NumberPrefix=m.Groups[1].Value;int n;if(int.TryParse(m.Groups[2].Value,out n)&&n>0)project.ActiveIsland=n;break;}
+                }
+            }
+            // 2. 重建 气缸 -> 阀片
+            var valvesByNum=new Dictionary<string,LineupRecord>(StringComparer.OrdinalIgnoreCase);
+            foreach(var v in project.Records.Where(r=>Category(r.Category)=="阀片"&&!string.IsNullOrWhiteSpace(r.Number)))
+                if(!valvesByNum.ContainsKey(v.Number.Trim()))valvesByNum[v.Number.Trim()]=v;
+            foreach(var c in project.Records.Where(r=>Category(r.Category)=="气缸"&&string.IsNullOrEmpty(r.ValveId))){
+                string vn=LineupNumbering.ValveNumberForCylinder(c.Number);
+                LineupRecord valve;if(vn.Length>0&&valvesByNum.TryGetValue(vn,out valve)){c.ValveId=valve.Id;if(!string.IsNullOrEmpty(valve.IslandId))c.IslandId=valve.IslandId;}
+            }
+            // 3. 重建 气缸传感器 -> 气缸（兼容 H/W/M 及 H1/W1/H2/W2）
+            var cylsByNum=new Dictionary<string,LineupRecord>(StringComparer.OrdinalIgnoreCase);
+            foreach(var c in project.Records.Where(r=>Category(r.Category)=="气缸"&&!string.IsNullOrWhiteSpace(r.Number)))
+                if(!cylsByNum.ContainsKey(c.Number.Trim()))cylsByNum[c.Number.Trim()]=c;
+            foreach(var s in project.Records.Where(r=>Category(r.Category)=="气缸传感器"&&string.IsNullOrEmpty(r.CylinderId))){
+                var m=Regex.Match((s.Number??"").Trim(),@"^(.+?)([HWM][0-9]*)$",RegexOptions.IgnoreCase);
+                if(!m.Success)continue;
+                LineupRecord cyl;
+                if(cylsByNum.TryGetValue(m.Groups[1].Value.Trim(),out cyl)){
+                    s.CylinderId=cyl.Id;s.Position=m.Groups[2].Value.ToUpperInvariant();
+                    if(string.IsNullOrEmpty(s.ValveId))s.ValveId=cyl.ValveId;
+                    if(string.IsNullOrEmpty(s.IslandId))s.IslandId=cyl.IslandId;
+                }
+            }
         }
         public static string Tsv(IEnumerable<string[]> rows){return string.Join("\r\n",rows.Select(r=>string.Join("\t",r.Select(c=>{c=c??"";return c.IndexOfAny(new[]{'\t','\r','\n','"'})<0?c:"\""+c.Replace("\"","\"\"")+"\"";}))))+"\r\n";}
     }

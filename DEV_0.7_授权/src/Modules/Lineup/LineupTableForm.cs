@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
@@ -19,21 +20,25 @@ namespace TianGongCadSuite {
         readonly Stack<LineupProject> undo=new Stack<LineupProject>();
         readonly Timer saver=new Timer{Interval=600};
         readonly CadKeyShield keyShield;
-        bool loading,dirty;dynamic highlight;
+        Panel gridHost;
+        PartPreview preview;
+        Splitter previewSplit;
+        bool loading,dirty,previewWasVisible;dynamic highlight;
         public LineupTableForm(F.Application host,A.AssemblyDocument doc,string modelLibraryPath=null){
             app=host;assembly=doc;file=LineupCad.AssemblyFile(doc);store=Path.ChangeExtension(file,".lineup.xml");
             project=File.Exists(store)?LineupProject.Load(store,file):new LineupProject{AssemblyFile=file};
+            project.InferMetadataFromAssembly(file);
             InitializeCatalog(modelLibraryPath);
             AutoScaleMode=AutoScaleMode.None;
             Text="Lineup 快速录入";Font=Ui.F9;BackColor=Ui.Bg;ForeColor=Ui.Text;
             var area=Screen.PrimaryScreen.WorkingArea;
-            Width=Math.Min(Ui.S(1320),area.Width-Ui.S(24));Height=Math.Min(Ui.S(660),area.Height-Ui.S(24));
+            Width=Math.Min(Ui.S(1360),area.Width-Ui.S(24));Height=Math.Min(Ui.S(700),area.Height-Ui.S(24));
             MinimumSize=new Size(Math.Min(Ui.S(1040),area.Width-Ui.S(24)),Math.Min(Ui.S(520),area.Height-Ui.S(24)));
             StartPosition=FormStartPosition.Manual;Location=new Point(Math.Max(area.Left,area.Right-Width-Ui.S(20)),Math.Max(area.Top,area.Bottom-Height-Ui.S(40)));
             WindowStateStore.Bind(this,"lineup",()=>!pickingMode);
             keyShield=new CadKeyShield(this,null,ResolveLineupShortcut);
             var tools=BuildToolbar();
-            helpBar=new Label{Text="上方填写本批共用字段，下方直接修改已有记录。F4 型号库 · Ctrl+V 粘贴 · Ctrl+Z 撤销",Dock=DockStyle.Top,Height=Ui.S(32),Padding=Ui.SPad(16,8,0,0),ForeColor=Ui.Muted,Font=Ui.F8,BackColor=Ui.Bg};
+            helpBar=new Label{Text="上方填写本批共用字段，下方直接修改已有记录。F4 型号库 · Ctrl+V 粘贴 · Ctrl+Z 撤销 · 右键快捷操作 · 支持一键导出 5 页签标准 .xlsx",Dock=DockStyle.Top,Height=Ui.S(32),Padding=Ui.SPad(16,8,0,0),ForeColor=Ui.Muted,Font=Ui.F8,BackColor=Ui.Bg};
             grid.Dock=DockStyle.Fill;grid.AutoGenerateColumns=false;grid.AllowUserToAddRows=false;grid.AllowUserToDeleteRows=false;grid.RowHeadersWidth=Ui.S(50);grid.SelectionMode=DataGridViewSelectionMode.CellSelect;grid.MultiSelect=true;grid.BackgroundColor=Color.White;grid.BorderStyle=BorderStyle.None;
             grid.ClipboardCopyMode=DataGridViewClipboardCopyMode.EnableWithoutHeaderText;
             grid.EnableHeadersVisualStyles=false;grid.ColumnHeadersDefaultCellStyle.BackColor=Ui.Rail;grid.ColumnHeadersDefaultCellStyle.ForeColor=Ui.Muted;grid.ColumnHeadersDefaultCellStyle.Font=Ui.F8;grid.ColumnHeadersDefaultCellStyle.SelectionBackColor=Ui.Rail;grid.ColumnHeadersHeightSizeMode=DataGridViewColumnHeadersHeightSizeMode.DisableResizing;grid.ColumnHeadersHeight=34;grid.RowTemplate.Height=32;grid.AlternatingRowsDefaultCellStyle.BackColor=Color.FromArgb(0xFA,0xFA,0xFB);
@@ -48,17 +53,65 @@ namespace TianGongCadSuite {
             Ui.FitGrid(grid);
             grid.Columns[0].Frozen=true;grid.Columns[1].Frozen=true;
             grid.DataSource=data;
+            BuildGridContextMenu();
+            gridHost=new Panel{Dock=DockStyle.Fill,BackColor=Ui.Bg};
+            gridHost.Controls.Add(grid);
+            InitPreviewPane();
             status.BackColor=Ui.Bg;status.ForeColor=Ui.Muted;status.Font=Ui.F8;status.Padding=Ui.SPad(16,0,0,0);status.TextAlign=ContentAlignment.MiddleLeft;
-            Controls.Add(grid);Controls.Add(helpBar);Controls.Add(BuildNav());Controls.Add(tools);Controls.Add(status);InitializePickingPanel(tools);
+            Controls.Add(gridHost);Controls.Add(helpBar);Controls.Add(BuildNav());Controls.Add(tools);Controls.Add(status);InitializePickingPanel(tools);
             category.SelectedIndexChanged+=(s,e)=>Filter();search.TextChanged+=(s,e)=>Filter();
             grid.CellBeginEdit+=(s,e)=>{if(!loading)undo.Push(Snapshot(false));};
             grid.CellEndEdit+=(s,e)=>{if(!loading){if(e.ColumnIndex==5)Try(()=>CompleteKnownModel(e.RowIndex));dirty=true;saver.Stop();saver.Start();}};
+            grid.CurrentCellChanged+=(s,e)=>UpdatePreviewForCurrentRow();
             grid.DataError+=(s,e)=>{e.ThrowException=false;status.Text="请选择有效类目。";};
             grid.KeyDown+=(s,e)=>{if(e.Control&&e.KeyCode==Keys.V){e.SuppressKeyPress=true;Try(()=>PasteCells(Clipboard.GetText()));}if(e.Control&&e.KeyCode==Keys.Z){e.SuppressKeyPress=true;Try(Undo);}};
             saver.Tick+=(s,e)=>{saver.Stop();Try(()=>SaveDraft(false));};
-            FormClosing+=(s,e)=>{saver.Stop();grid.EndEdit();if(dirty){try{SaveDraft(false);}catch(Exception ex){if(MessageBox.Show(this,ex.Message+"\n是否放弃尚未保存的修改并关闭？","Lineup",MessageBoxButtons.YesNo,MessageBoxIcon.Warning)!=DialogResult.Yes)e.Cancel=true;}}};
-            FormClosed+=(s,e)=>{saver.Dispose();ClearHighlight();};
+            FormClosing+=(s,e)=>{saver.Stop();grid.EndEdit();if(preview!=null)preview.Hold(true);if(dirty){try{SaveDraft(false);}catch(Exception ex){if(MessageBox.Show(this,ex.Message+"\n是否放弃尚未保存的修改并关闭？","Lineup",MessageBoxButtons.YesNo,MessageBoxIcon.Warning)!=DialogResult.Yes)e.Cancel=true;}}};
+            FormClosed+=(s,e)=>{saver.Dispose();ClearHighlight();if(preview!=null)preview.Dispose();};
             SetupModelEditing();InitializeHierarchy();Reload(null);InitializeEntry();UpdateStatus("已加载");
+        }
+        void InitPreviewPane(){
+            preview=new PartPreview{App=app};
+            previewSplit=new Splitter{Dock=DockStyle.Right,Width=Ui.S(6),MinExtra=Ui.S(360),MinSize=Ui.S(220),BackColor=Ui.Bg};
+            int logicalW=290;int parsed;
+            if(int.TryParse(Choices.Get("lineup.preview.w",""),out parsed)&&parsed>=220&&parsed<=640)logicalW=parsed;
+            preview.Dock=DockStyle.Right;preview.Width=Ui.S(logicalW);
+            previewSplit.SplitterMoved+=(s,e)=>{if(!preview.Visible||preview.Width<Ui.S(200))return;int lw=(int)Math.Round(preview.Width/Math.Max(1f,Ui.DpiScale));if(lw>=220&&lw<=640)Choices.Set("lineup.preview.w",lw.ToString(System.Globalization.CultureInfo.InvariantCulture));};
+            gridHost.Controls.Add(previewSplit);gridHost.Controls.Add(preview);
+            bool show=Choices.Get("lineup.preview","0")=="1";
+            preview.Visible=show;previewSplit.Visible=show;
+        }
+        void TogglePreview(){
+            if(preview==null)return;
+            bool next=!preview.Visible;
+            preview.Visible=next;previewSplit.Visible=next;
+            Choices.Set("lineup.preview",next?"1":"0");
+            if(next)UpdatePreviewForCurrentRow();
+            else preview.Hold(true);
+        }
+        void UpdatePreviewForCurrentRow(){
+            if(preview==null||!preview.Visible||pickingMode)return;
+            try{
+                string id=CurrentId();
+                var r=id==null?null:project.Records.FirstOrDefault(x=>x.Id==id);
+                preview.ShowFile(r!=null&&!string.IsNullOrEmpty(r.SourceFile)?r.SourceFile:"");
+            }catch{}
+        }
+        void BuildGridContextMenu(){
+            var cm=new ContextMenuStrip{Font=Ui.F9};
+            Action<string,Action> add=(t,a)=>{var mi=new ToolStripMenuItem(t);mi.Click+=(s,e)=>Try(a);cm.Items.Add(mi);};
+            add("在 CAD 中定位模型",Locate);
+            add("选择型号（F4）",()=>PickModel(false));
+            add("套用型号到选中多行",()=>PickModel(true));
+            cm.Items.Add(new ToolStripSeparator());
+            add("从选中气缸一键生成配套阀片",GenerateValvesForSelected);
+            add("从选中气缸生成 H/W 传感器",GenerateSensorPairs);
+            add("批量设置备注 / 模块名…",BatchSetNotesDialog);
+            cm.Items.Add(new ToolStripSeparator());
+            add("打开 CAD 位置图工作台…",OpenCadPageStudio);
+            add("复制行通用字段",DuplicateRows);
+            add("删除选中行",DeleteRows);
+            grid.ContextMenuStrip=cm;
         }
         Action ResolveLineupShortcut(Keys keyData){
             if(keyData==(Keys.Control|Keys.F))return ()=>{ if(search.Visible&&search.CanFocus){ search.Focus(); search.SelectAll(); } };
@@ -91,7 +144,22 @@ namespace TianGongCadSuite {
         internal LineupProject CurrentProject {get{SaveDraft();return project;}}
         internal void SetCategory(string value){category.SelectedItem=value;}
         LineupProject Snapshot(bool endEdit=true){
-            if(endEdit)grid.EndEdit();var p=new LineupProject{AssemblyFile=file,Sections=new List<LineupSection>(project.Sections??new List<LineupSection>()),NumberPrefix=project.NumberPrefix,ActiveIsland=project.ActiveIsland,Islands=(project.Islands??new List<LineupIsland>()).Select(i=>new LineupIsland{Key=i.Key,Model=i.Model}).ToList()};
+            if(endEdit)grid.EndEdit();
+            var p=new LineupProject{
+                AssemblyFile=file,
+                Sections=new List<LineupSection>(project.Sections??new List<LineupSection>()),
+                NumberPrefix=project.NumberPrefix,
+                ActiveIsland=project.ActiveIsland,
+                Islands=(project.Islands??new List<LineupIsland>()).Select(i=>i.Copy()).ToList(),
+                ProjectCode=project.ProjectCode??"",
+                StationCode=project.StationCode??"",
+                LineCode=project.LineCode??"L1",
+                Designer=project.Designer??"",
+                Editor=project.Editor??"",
+                Revision=project.Revision??"V1.0",
+                Export11Columns=project.Export11Columns,
+                CadPages=(project.CadPages??new List<LineupCadPage>()).Select(pg=>pg.Copy()).ToList()
+            };
             p.EntryPresets=project.EntryPresets.Select(x=>x.Copy()).ToList();
             var previous=project.Records.ToDictionary(r=>r.Id);
             foreach(DataRow row in data.Rows){string id=(string)row["Id"];LineupRecord original;var r=previous.TryGetValue(id,out original)?LineupTableData.Copy(original):new LineupRecord{Id=id};r.Category=(string)row["类别"];LineupTableData.SetCells(r,LineupTableData.Headers.Select(h=>Convert.ToString(row[h])).ToArray());p.Records.Add(r);}return p;
@@ -101,6 +169,7 @@ namespace TianGongCadSuite {
             foreach(var r in project.Records){var values=new List<object>{r.Id,LineupTableData.Category(r.Category)};values.AddRange(LineupTableData.Cells(r));values.Add(string.Join(" / ",r.InstancePath??new string[0]));values.Add(LineupNumbering.IslandModel(project,r));values.Add(LineupHierarchy.Parent(project,r));data.Rows.Add(values.ToArray());}
             loading=false;Filter();
             if(selectedId!=null)SelectId(selectedId);
+            UpdatePreviewForCurrentRow();
         }
         void Filter(){
             if(loading)return;string filter="";
@@ -116,20 +185,63 @@ namespace TianGongCadSuite {
         void Commit(LineupProject next,string selected,string message){
             Ensure();LineupTableData.RejectDuplicates(next.Records);var before=Snapshot();next.Save(store);undo.Push(before);project=next;dirty=false;Reload(selected);UpdateStatus(message);LearnAfterSave();
         }
-        void UpdateStatus(string message){RefreshPickingLabel();RefreshNav();status.Text=message+" · "+project.NumberPrefix+" Y"+project.ActiveIsland+" · 共 "+project.Records.Count+" 条，未编号 "+project.Records.Count(r=>string.IsNullOrWhiteSpace(r.Number))+" 条，未绑定模型 "+project.Records.Count(r=>string.IsNullOrEmpty(r.ReferenceKey))+" 条。";}
+        void CommitFileOnly(LineupProject next,string selected,string message){
+            EnsureFile();LineupTableData.RejectDuplicates(next.Records);var before=Snapshot();next.Save(store);undo.Push(before);project=next;dirty=false;Reload(selected);UpdateStatus(message);LearnAfterSave();
+        }
+        void UpdateStatus(string message){
+            RefreshPickingLabel();RefreshNav();
+            int cadCnt=project.CadPages==null?0:project.CadPages.Count;
+            status.Text=message+" · "+project.NumberPrefix+" Y"+project.ActiveIsland+" · 共 "+project.Records.Count+" 条，未编号 "+project.Records.Count(r=>string.IsNullOrWhiteSpace(r.Number))+" 条，未绑定 "+project.Records.Count(r=>string.IsNullOrEmpty(r.ReferenceKey))+" 条"+(cadCnt>0?" · CAD页 "+cadCnt+" 张":"")+"。";
+        }
         internal void SaveDraft(){SaveDraft(true);}
         // 只存旁边的 .lineup.xml，不碰模型：不要求装配是当前文档（原来切到工程图再关 Lineup，会问"放弃尚未保存的修改吗"；自动保存也一直失败）
         internal void SaveDraft(bool requireActive){if(requireActive)Ensure();else EnsureFile();var next=Snapshot();var changed=next.Records.Where(r=>string.IsNullOrWhiteSpace(r.Number)&&!string.IsNullOrWhiteSpace(r.Model)&&project.Records.Any(old=>old.Id==r.Id&&old.Model!=r.Model)&&(r.Category=="普通传感器"||r.Category=="其他电气件"||((r.Category=="气缸"||r.Category=="阀片")&&!string.IsNullOrWhiteSpace(next.NumberPrefix)))).ToList();LineupNumbering.FillMissing(next,changed);foreach(var valve in next.Records.Where(r=>r.Category=="阀片"&&project.Records.Any(old=>old.Id==r.Id&&old.Number!=r.Number)))LineupHierarchy.RenumberChildren(next,valve);foreach(var cylinder in next.Records.Where(r=>r.Category=="气缸"&&project.Records.Any(old=>old.Id==r.Id&&old.Number!=r.Number)))foreach(var sensor in next.Records.Where(r=>r.CylinderId==cylinder.Id))sensor.Number=cylinder.Number+sensor.Position;LineupTableData.RejectDuplicates(next.Records);if(dirty){next.Save(store);project=next;dirty=false;foreach(System.Data.DataRow row in data.Rows){var record=project.Records.First(r=>r.Id==(string)row["Id"]);row["编号"]=record.Number;row["阀岛型号"]=LineupNumbering.IslandModel(project,record);row["上级"]=LineupHierarchy.Parent(project,record);}UpdateStatus("已保存");LearnAfterSave();}else UpdateStatus("已保存");}
         internal void ImportText(string text,char separator){
             Ensure();var batch=LineupTableData.Parse(text,ActiveCategory,separator);if(batch.Records.Count==0)throw new InvalidOperationException("没有找到可导入的数据行。");
             var next=Snapshot();next.Records.AddRange(batch.Records);foreach(var section in batch.Sections){next.Sections.RemoveAll(s=>s.Category==section.Category);next.Sections.Add(section);}
+            LineupTableData.InferHierarchy(next);
             Commit(next,null,"已追加 "+batch.Records.Count+" 条");category.SelectedIndex=0;
+        }
+        internal void ImportXlsx(string xlsxPath){
+            Ensure();
+            var batch=LineupXlsxReader.Read(xlsxPath);
+            var next=Snapshot();
+            next.Records.AddRange(batch.Records);
+            foreach(var section in batch.Sections){next.Sections.RemoveAll(s=>s.Category==section.Category);next.Sections.Add(section);}
+            if(batch.Islands!=null)foreach(var isl in batch.Islands){
+                var old=next.Islands.FirstOrDefault(x=>string.Equals(x.Key,isl.Key,StringComparison.OrdinalIgnoreCase));
+                if(old==null)next.Islands.Add(isl.Copy());
+                else if(string.IsNullOrWhiteSpace(old.Model)){old.Model=isl.Model;old.Kind=isl.Kind;}
+            }
+            if(string.IsNullOrWhiteSpace(next.ProjectCode)&&!string.IsNullOrWhiteSpace(batch.ProjectCode))next.ProjectCode=batch.ProjectCode;
+            if(string.IsNullOrWhiteSpace(next.StationCode)&&!string.IsNullOrWhiteSpace(batch.StationCode))next.StationCode=batch.StationCode;
+            if(!string.IsNullOrWhiteSpace(batch.LineCode))next.LineCode=batch.LineCode;
+            LineupTableData.InferHierarchy(next);
+            Commit(next,null,"已从 Excel 导入 "+batch.Records.Count+" 条记录，识别 "+next.Islands.Count+" 个阀岛/汇流排");
+            if(entryPrefix!=null&&!string.IsNullOrWhiteSpace(project.NumberPrefix)){entryPrefix.Text=project.NumberPrefix;entryIsland.Value=Math.Min(9999,Math.Max(1,project.ActiveIsland));}
+            category.SelectedIndex=0;
+        }
+        internal LineupXlsxSummary ExportXlsx(string path,LineupXlsxOptions opts=null){
+            SaveDraft(false);
+            return LineupXlsxWriter.Write(path,project,opts??new LineupXlsxOptions{Export11Columns=project.Export11Columns,IncludeCadPages=true});
         }
         internal void AddEmpty(){if(ActiveCategory=="气缸传感器"){GenerateSensorPairs();return;}if(!ReadyNumbering(ActiveCategory))return;var next=Snapshot();var r=new LineupRecord{Category=ActiveCategory,Number=LineupNumbering.Next(next,ActiveCategory)};next.Records.Add(r);Commit(next,r.Id,"已新增并自动编号");}
         internal int AddSelectedModels(){
             Ensure();if(ActiveCategory=="气缸传感器")throw new InvalidOperationException("请先从气缸生成 H/W 记录，再按行绑定传感器模型。");if(!ReadyNumbering(ActiveCategory))return 0;if(assembly.SelectSet.Count==0)throw new InvalidOperationException("请先在 CAD 中多选模型实例。");
             var incoming=new List<LineupRecord>();
-            for(int i=1;i<=assembly.SelectSet.Count;i++){var r=new LineupRecord{Category=ActiveCategory};LineupCad.CaptureOccurrence(assembly.SelectSet.Item(i),r);incoming.Add(r);}
+            for(int i=1;i<=assembly.SelectSet.Count;i++){
+                var r=new LineupRecord{Category=ActiveCategory};
+                LineupCad.CaptureOccurrence(assembly.SelectSet.Item(i),r);
+                try{
+                    var meta=LineupCad.ReadPartMeta(r.SourceFile,r.InstancePath,catalog,ActiveCategory);
+                    if(!string.IsNullOrWhiteSpace(meta.Model))r.Model=meta.Model;
+                    if(!string.IsNullOrWhiteSpace(meta.Brand))r.Brand=meta.Brand;
+                    if(!string.IsNullOrWhiteSpace(meta.Connector))r.Connector=meta.Connector;
+                    if(!string.IsNullOrWhiteSpace(meta.Title))r.Description=meta.Title;
+                    if(!string.IsNullOrWhiteSpace(meta.Mechanism)){r.Mechanism=meta.Mechanism;r.Notes=meta.Mechanism;}
+                }catch{}
+                incoming.Add(r);
+            }
             var next=Snapshot();var keys=new HashSet<string>(next.Records.Where(r=>!string.IsNullOrEmpty(r.ReferenceKey)).Select(r=>r.ReferenceKey));int added=0;string last=CurrentId();
             foreach(var r in incoming)if(keys.Add(r.ReferenceKey)){r.Number=LineupNumbering.Next(next,r.Category);next.Records.Add(r);last=r.Id;added++;}
             if(added>0)Commit(next,last,"已另建 "+added+" 条记录并绑定模型；重复选择已跳过");else UpdateStatus("所选模型均已有记录；未新建，请选择其他模型");return added;
@@ -179,6 +291,10 @@ namespace TianGongCadSuite {
         internal void Undo(){StopContinuous();if(undo.Count==0)return;Ensure();var previous=undo.Peek();LineupTableData.RejectDuplicates(previous.Records);previous.Save(store);undo.Pop();project=previous;dirty=false;Reload(null);RefreshEntryParents();UpdateStatus("已撤销");}
         internal void Locate(){
             Ensure();var r=Snapshot().Records.FirstOrDefault(record=>record.Id==CurrentId());if(r==null)throw new InvalidOperationException("请选择一行。");
+            LocateRecord(r);
+        }
+        internal void LocateRecord(LineupRecord r){
+            Ensure();if(r==null)return;
             ClearHighlight();object resolved=LineupCad.ResolveTarget(assembly,r);dynamic target=resolved;highlight=assembly.HighlightSets.Add();highlight.Color=0x00FFFF;highlight.AddItem(LineupCad.HighlightTarget(resolved));highlight.Draw();
             double x,y,z,u,v,w;target.Range(out x,out y,out z,out u,out v,out w);double p=Math.Max(Math.Max(u-x,v-y),w-z)*.15+.001;dynamic view=((dynamic)app.ActiveWindow).View;view.RangeZoomCamera(x-p,y-p,z-p,u+p,v+p,w+p);view.Update();status.Text="已定位："+target.Name;
         }
