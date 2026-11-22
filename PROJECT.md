@@ -4,15 +4,14 @@
 
 ## 当前版本
 
-**0.12.0**（版本号只有一个来源：`DEV_0.7_授权/VERSION`），工作目录 `DEV_0.7_授权` —— **唯一**在用的宿主。
+以 **`DEV_0.7_授权/VERSION`** 为唯一版本号来源（当前工作目录 `DEV_0.7_授权` —— **唯一**在用的宿主）。
 
 - 接手先读 [HANDOVER.md](HANDOVER.md)：构建/测试/安装命令、当前状态、要真机确认的清单、踩过的坑、下一步。
-- 各功能的设计与实测：[自动打孔系列](DEV_0.7_授权/AUTO-HOLE.md)、[授权](DEV_0.7_授权/LICENSE.md)、
+- 各功能的设计与说明：[自动打孔系列](DEV_0.7_授权/AUTO-HOLE.md)、[一键出图](DEV_0.7_授权/DRAWING.md)、[授权](DEV_0.7_授权/LICENSE.md)、
   [批量格式转换](DEV_0.7_授权/FORMAT-CONVERT.md)、[Lineup](DEV_0.7_授权/README.md)、[tools 目录说明](DEV_0.7_授权/tools/README.md)。
-- 2026-09-26 那个"装配里的实例零件打不进孔"的问题早已查明（往已有孔的位置重复打孔，CAD 只报含糊的 COM 错误），
-  完整排查过程见 [排查记录](DEV_0.7_授权/排查记录-实例零件打孔-20260926.md)。
+- 历史版本交接、实测报告与竞品调研均已归档至 `docs/archive/`（`handover/`、`reports/`、`research/`）。
 
-`DEV_0.2`～`DEV_0.6` 是历史快照：2026-10-14 起不再进 git（本地文件保留；旧代码见 tag `archive/dev-0.2-0.6-snapshots`）。
+`DEV_0.2`～`DEV_0.6` 是历史快照：2026-10-14 起不再进 git（旧代码见 tag `archive/dev-0.2-0.6-snapshots`）。
 
 ## 开发约定
 
@@ -79,6 +78,6 @@ DEV_0.7_授权/            唯一在用的宿主
   tests/                PanelTests.exe（开发构建才编）；tests/pure 不需要 CAD 的纯逻辑测试（dotnet run）
   tools/                构建、安装、真机测试、探针，分类见 tools/README.md
   build/ artifacts/     本机编译输出 / 测试输出（不进 git）
-交付_DEV_*、*_安装包_*    历史交付包（不进 git）
-DEV_0.2～0.6            历史开发快照（不进 git，本地保留）
+docs/archive/           历史交接记录（handover/）、历史实测报告（reports/）、竞品调研（research/）
+releases/               本地发版目录：安装包 zip 与对外图文说明书（不进 git）
 ```
