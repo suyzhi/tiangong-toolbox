@@ -125,8 +125,9 @@ namespace TianGongCadSuite {
     public sealed partial class LineupTableForm {
         void ExportLocationDialog(){
             SaveDraft();var ids=SelectedIds();if(ids.Count==0)throw new InvalidOperationException("请选择本张位置图需要标注的清单行；可跨类别多选。");
-            using(var d=new FolderBrowserDialog{Description="选择位置图包保存目录（会新建带时间的子目录）"})if(d.ShowDialog(this)==DialogResult.OK){
-                string folder=Path.Combine(d.SelectedPath,"Lineup位置图-"+DateTime.Now.ToString("yyyyMMdd-HHmmss-fff"));ClearHighlight();Hide();
+            string picked=FolderPicker.Pick(this,"选择位置图包保存目录（会新建带时间的子目录）",Path.GetDirectoryName(file),"lineup.location");
+            if(!string.IsNullOrEmpty(picked)){
+                string folder=Path.Combine(picked,"Lineup位置图-"+DateTime.Now.ToString("yyyyMMdd-HHmmss-fff"));ClearHighlight();Hide();
                 try{var package=LineupLocation.Export(app,assembly,project,ids,folder);status.Text="已导出："+folder+"；识别 "+package.Points.Count(p=>p.State=="ok")+" / "+package.Points.Count+"。请核对位置后导入 WPS。";}
                 finally{Show();}
             }

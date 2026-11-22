@@ -13,16 +13,16 @@ namespace TianGongCadSuite {
         public string Id { get { return "drawing"; } }
         public IEnumerable<ToolCommand> Commands { get {
             yield return new ToolCommand(CommandId, "一键出图", "按公司模板自动出零件图 / 装配图",
-                "打开零件、钣金件或装配 → 点本命令 →「出图」。\r\n"
+                "打开零件、钣金件或装配（或直接扫描模型文件夹 / 拖入文件）→ 点「出图」。\r\n"
                 + "零件：自动选主视图和投影、排版、选 A4/A3 和比例，标坐标尺寸、孔（数量 / 贯通 / 深度 / 螺纹 / 沉孔）、圆角、刻字，标题栏从零件属性带出。\r\n"
                 + "装配：出装配图（外形尺寸、零件序号、明细表），并列出装配里的加工件，勾上的一起出图。\r\n"
-                + "工程图存在模型旁边；已有同名工程图时默认另存为「名字(自动).dft」，不覆盖人画的图。",
-                Applicable,
-                () => context.Show(() => new DrawingForm(context.Application), f => ((DrawingForm)f).LoadActive()));
+                + "支持右侧 3D 预览、一键只选缺图、右键单件重跑与打开模型/工程图。",
+                delegate { return true; },
+                () => context.Show(
+                    () => new DrawingForm(context.Application),
+                    f => ((DrawingForm)f).LoadActive(),
+                    f => f is DrawingForm && ((DrawingForm)f).ReuseIfOpen()));
         } }
-        bool Applicable(){
-            try { var d = context.Application.ActiveDocument; return d is P.PartDocument || d is P.SheetMetalDocument || d is A.AssemblyDocument; } catch { return false; }
-        }
         public void Dispose(){}
     }
 }

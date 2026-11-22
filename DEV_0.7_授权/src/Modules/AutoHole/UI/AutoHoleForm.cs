@@ -147,10 +147,13 @@ namespace TianGongCadSuite {
 
         readonly FieldGrid grid = new FieldGrid();
         FieldGrid.Row kindRow, sizeRow, depthRow, threadRow, cboreRow, csinkRow, chamferRow;
+        readonly CadKeyShield keyShield;
 
         public AutoHoleForm(F.Application application, A.AssemblyDocument document){
             app = application; assembly = document;
             Ui.Shell(this, "自动打孔", 1160, 790, 1000, 680);
+            keyShield = new CadKeyShield(this, () => busy);
+            WindowStateStore.Bind(this, "autohole");
 
             // 规格下拉框：第 0 项是「自定义」，后面跟表里的全部规格。
             // 漏了这段会怎样：参考孔是 Φ13.5（M12 过孔）时要选中第 7 项，而框里只有 1 项 →

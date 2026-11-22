@@ -63,10 +63,13 @@ namespace TianGongCadSuite {
         readonly Button goDrill = Ui.Primary("去配孔", 120, 44);
         // 「去配孔」：打开自动打孔，把这条漏打孔涉及的孔带进去当参考孔（由命令模块接上，见 AutoHoleModule）
         public Func<List<HoleRecord>, string, AutoHoleForm> GoDrill;
+        readonly CadKeyShield keyShield;
 
         public AutoHoleCheckForm(F.Application application, A.AssemblyDocument document){
             app = application; assembly = document;
             Ui.Shell(this, "配孔检查", 900, 680, 760, 560);
+            keyShield = new CadKeyShield(this, () => busy);
+            WindowStateStore.Bind(this, "holecheck");
             // 用户改过判定口径就按他的来（读不到就是默认值）
             try { HoleCheck.Options = HoleCheckOptions.Load(SettingsFile.PathOf(HoleCheckOptions.FileName)); }
             catch (Exception e) { Log.Write("HoleCheckOptionsLoad", e); }

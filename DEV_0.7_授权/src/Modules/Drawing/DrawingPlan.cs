@@ -125,21 +125,37 @@ namespace TianGongCadSuite {
 
         // ---- 坐标尺寸要标的落点 ----
         // horizontal=true：量 x —— 竖线、圆心、整半圆以上的弧心（腰孔两头）都是落点；
-        // 同一个 x 有好几个图元时挑一个：圆心优先（孔位是加工最要的），其次最长的线。
+        // 同一个 x 有好几个图元时挑一个：圆心优先（孔位是加工最要的），同类别优先挑离尺寸文字线最近的那一个
+        // （上方坐标串挂在靠上的孔 / 边端，避免延伸线从零件底边贯穿整张视图），再按半径 / 长度决胜。
         // 圆角（扫角不到半圆的弧）不当落点：它的位置由两条直边定，人画的图也不标圆角心。
         public static List<DwgTarget> Targets(IList<DwgEdge> edges, bool horizontal){
+            return Targets(edges, horizontal, true);
+        }
+        public static List<DwgTarget> Targets(IList<DwgEdge> edges, bool horizontal, bool lowSide){
             var raw = new List<DwgTarget>();
             foreach (var e in edges) {
                 if (e.Kind == DwgKind.Line) {
-                    if (horizontal ? e.IsVertical : e.IsHorizontal) raw.Add(new DwgTarget { Edge = e, KeyPoint = false, X = (e.X1 + e.X2) / 2, Y = (e.Y1 + e.Y2) / 2, Coord = horizontal ? e.X1 : e.Y1 });
+                    if (horizontal ? e.IsVertical : e.IsHorizontal) {
+                        double lo = horizontal ? Math.Min(e.Y1, e.Y2) : Math.Min(e.X1, e.X2);
+                        double hi = horizontal ? Math.Max(e.Y1, e.Y2) : Math.Max(e.X1, e.X2);
+                        // 落点选在靠近文字线一端往里缩一点的位置（≤2mm 或 10% 边长），既避开角点交汇，又避免延伸线穿过整个零件
+                        double inset = Math.Min((hi - lo) * 0.1, 0.002);
+                        double along = lowSide ? lo + inset : hi - inset;
+                        raw.Add(new DwgTarget {
+                            Edge = e, KeyPoint = false,
+                            X = horizontal ? e.X1 : along,
+                            Y = horizontal ? along : e.Y1,
+                            Coord = horizontal ? e.X1 : e.Y1
+                        });
+                    }
                 } else if (e.Kind == DwgKind.Circle || Math.Abs(e.Sweep) >= Math.PI - 1e-6) {
                     raw.Add(new DwgTarget { Edge = e, KeyPoint = true, X = e.Cx, Y = e.Cy, Coord = horizontal ? e.Cx : e.Cy });
                 }
             }
             // 外形的最外端是圆弧（销子的球头、圆头板）时那里没有直线，总长就标不出来：补一个落在圆弧最外点上的落点
             var box = Box(edges);
-            double lo = horizontal ? box[0] : box[1], hi = horizontal ? box[2] : box[3];
-            foreach (double ext in new[] { lo, hi }) {
+            double blo = horizontal ? box[0] : box[1], bhi = horizontal ? box[2] : box[3];
+            foreach (double ext in new[] { blo, bhi }) {
                 if (raw.Any(t => Math.Abs(t.Coord - ext) <= SameCoord)) continue;
                 foreach (var e in edges) {
                     if (e.Kind == DwgKind.Line) continue;
@@ -152,9 +168,25 @@ namespace TianGongCadSuite {
                     break;
                 }
             }
+            // 图元向尺寸线一侧伸到的极值（按 0.5mm 量化，同侧平齐的两条边再按长度挑更长的主轮廓边）
+            Func<DwgTarget, double> reach = t => {
+                double p;
+                if (t.Edge.Kind == DwgKind.Line) {
+                    double l = horizontal ? Math.Min(t.Edge.Y1, t.Edge.Y2) : Math.Min(t.Edge.X1, t.Edge.X2);
+                    double h = horizontal ? Math.Max(t.Edge.Y1, t.Edge.Y2) : Math.Max(t.Edge.X1, t.Edge.X2);
+                    p = lowSide ? -l : h;
+                } else {
+                    double c = horizontal ? t.Y : t.X;
+                    p = lowSide ? -c : c;
+                }
+                return Math.Round(p * 2000.0);
+            };
             var result = new List<DwgTarget>();
             foreach (var g in Cluster(raw, t => t.Coord, SameCoord)) {
-                var best = g.OrderByDescending(t => t.KeyPoint ? 1 : 0).ThenByDescending(t => t.KeyPoint ? t.Edge.R : t.Edge.Length).First();
+                var best = g.OrderByDescending(t => t.KeyPoint ? 1 : 0)
+                    .ThenByDescending(reach)
+                    .ThenByDescending(t => t.KeyPoint ? t.Edge.R : t.Edge.Length)
+                    .First();
                 result.Add(best);
             }
             return result;
@@ -238,7 +270,7 @@ namespace TianGongCadSuite {
             return Ordinate(edges, horizontal, scale, box, lowSide, offsetPaper, 0);
         }
         public static OrdinateRun Ordinate(IList<DwgEdge> edges, bool horizontal, double scale, double[] box, bool lowSide, double offsetPaper, double chamferTol){
-            var ts = Targets(edges, horizontal);
+            var ts = Targets(edges, horizontal, lowSide);
             ts = DropNearOutline(ts, horizontal ? box[0] : box[1], horizontal ? box[2] : box[3], chamferTol);
             ts = Significant(ts, horizontal ? box[3] - box[1] : box[2] - box[0]);
             if (ts.Count < 2) return null;
@@ -305,10 +337,13 @@ namespace TianGongCadSuite {
             return r;
         }
 
-        // 倒角：视图里 45° 的短斜线（两条直角边各 C），同样大小归一组。C 超过 6mm 的斜线不当倒角（多半是斜面）
+        // 倒角：视图里 45° 的短斜线（两条直角边各 C），同样大小归一组。
+        // 下限 0.1mm 过滤掉三维投影里的微小数值碎片（避免出现「2-C0」），上限 6mm 排除斜面。
         public static List<RadiusGroup> Chamfers(IList<DwgEdge> edges){
             var lines = edges.Where(e => e.Kind == DwgKind.Line && !e.IsHorizontal && !e.IsVertical
-                && Math.Abs(Math.Abs(e.X2 - e.X1) - Math.Abs(e.Y2 - e.Y1)) < 1e-5 && Math.Abs(e.X2 - e.X1) <= 0.006 + 1e-9).ToList();
+                && Math.Abs(Math.Abs(e.X2 - e.X1) - Math.Abs(e.Y2 - e.Y1)) < 1e-5
+                && Math.Abs(e.X2 - e.X1) >= 0.0001 - 1e-9
+                && Math.Abs(e.X2 - e.X1) <= 0.006 + 1e-9).ToList();
             var r = new List<RadiusGroup>();
             foreach (var g in Cluster(lines, l => Math.Round(Math.Abs(l.X2 - l.X1), 6), SameCoord)) {
                 var rg = new RadiusGroup { RadiusMm = Math.Round(Math.Abs(g[0].X2 - g[0].X1) * 1000, 2) };
@@ -338,8 +373,9 @@ namespace TianGongCadSuite {
         public static string RadiusPrefix(int count){ return count > 1 ? count + "-" : ""; }
 
         // ---- 比例 ----
-        // GB/T 14690 优先比例 + 普查里出现过的（1:3、1:4、1:15、1:25 等）。从大到小试，第一个放得下的。
-        public static readonly double[] Scales = { 10, 5, 4, 3, 2, 1.5, 1, 1 / 1.5, 0.5, 0.4, 1 / 3.0, 0.25, 0.2, 0.1, 1 / 15.0, 0.05, 0.04, 1 / 30.0, 0.025, 0.02, 0.01, 0.005, 0.002 };
+        // GB/T 14690 优先比例 + 公司图纸普查里常用比例（1:3、1:4、1:6、1:8、1:12.5、1:15、1:25 等）。
+        // 补入 1:6 / 1:8 / 1:12.5 填平 1:5→1:10 的 2 倍断档，避免 1.3m 细长件在 A3 上被迫掉到 1:10 被判回 A4 缩成细条。
+        public static readonly double[] Scales = { 10, 5, 4, 3, 2, 1.5, 1, 1 / 1.5, 0.5, 0.4, 1 / 3.0, 0.25, 0.2, 1 / 6.0, 0.125, 0.1, 0.08, 1 / 15.0, 0.05, 0.04, 1 / 30.0, 0.025, 0.02, 0.01, 0.005, 0.002 };
         public static double PickScale(double needW, double needH, double availW, double availH){
             foreach (double s in Scales) if (needW * s <= availW && needH * s <= availH) return s;
             return Scales[Scales.Length - 1];
@@ -424,18 +460,32 @@ namespace TianGongCadSuite {
             if (!isHole) return;
             var spec = h == null ? null : h.Spec;
             bool through = h == null ? true : h.Through;
-            if (spec != null && spec.Kind == HoleKind.Tapped && spec.ThreadSize.Length > 0) {
+            double holeDepthMm = DrawingStyleRules.NominalHoleDepthMm(h);
+            // 双重校验孔径合理性：过孔（Ø5.5 / Ø6.6）绝不能按 M5 / M6 螺纹孔输出
+            bool validTapped = spec != null && spec.Kind == HoleKind.Tapped && spec.ThreadSize.Length > 0
+                && DrawingStyleRules.IsNominalTappedDiameter(h != null && h.Radius > 0 ? h.Radius * 2000 : diameterMm, spec.ThreadSize);
+            if (validTapped) {
                 valueOverride = spec.ThreadSize;
-                if (spec.ThreadFull && (h == null || h.Through)) suffix = " 贯通";
-                else suffix = "%DP" + N(spec.ThreadFull ? (h != null ? h.Depth * 1000 : spec.EffectiveThreadDepth) : spec.ThreadDepth);
-                // 盲螺纹孔第二行写底孔：Ø3.3↧10.1（人画的图都带，钻孔深度机加工要用）。底孔直径写标准攻丝底孔（M4→3.3），不写模型里的小径 3.24
-                if (h != null && !h.Through && h.Radius > 0) subfix = "%DI" + N(TapDrill(spec.ThreadSize, h.Radius * 2000)) + "%DP" + N(h.Depth * 1000);
+                if (spec.ThreadFull && (h == null || h.Through)) {
+                    suffix = " 贯通";
+                } else if (spec.ThreadFull) {
+                    // 全长盲螺纹孔：优先用特征名义深度（10mm），避免把 V 底钻尖扣掉写成 8.76 / 8.52；
+                    // 写法对齐公司模板 HoleCalloutSimpleThreaded（%QN%TS %ZT → 「4×M5↧10」），不重复写同深度底孔。
+                    double td = holeDepthMm > 0 ? holeDepthMm : spec.EffectiveThreadDepth;
+                    suffix = "%DP" + N(td);
+                } else {
+                    double td = spec.ThreadDepth > 0 ? spec.ThreadDepth : spec.EffectiveThreadDepth;
+                    suffix = "%DP" + N(td);
+                    // 指定较浅螺纹深度的盲螺纹孔（例如 M5↧10，底孔深 12）：第二行标标准攻丝底孔与钻孔总深
+                    if (h != null && !h.Through && h.Radius > 0 && holeDepthMm > td + 0.1)
+                        subfix = "%DI" + N(TapDrill(spec.ThreadSize, h.Radius * 2000)) + "%DP" + N(holeDepthMm);
+                }
                 return;
             }
             if (h != null && h.CbRadius > 0) subfix = "%CB%DI" + N(h.CbRadius * 2000) + "%DP" + N(h.CbDepth * 1000);
             else if (spec != null && spec.Kind == HoleKind.Counterbore && spec.CounterboreDiameter > 0) subfix = "%CB%DI" + N(spec.CounterboreDiameter) + "%DP" + N(spec.CounterboreDepth);
             if (through) suffix = " 贯通";
-            else if (h != null) suffix = "%DP" + N(h.Depth * 1000);
+            else if (h != null && holeDepthMm > 0) suffix = "%DP" + N(holeDepthMm);
         }
     }
 }

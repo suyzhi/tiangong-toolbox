@@ -18,6 +18,7 @@ namespace TianGongCadSuite {
         readonly Label status=new Label{Dock=DockStyle.Bottom,Height=Ui.S(42)};
         readonly Stack<LineupProject> undo=new Stack<LineupProject>();
         readonly Timer saver=new Timer{Interval=600};
+        readonly CadKeyShield keyShield;
         bool loading,dirty;dynamic highlight;
         public LineupTableForm(F.Application host,A.AssemblyDocument doc,string modelLibraryPath=null){
             app=host;assembly=doc;file=LineupCad.AssemblyFile(doc);store=Path.ChangeExtension(file,".lineup.xml");
@@ -29,6 +30,8 @@ namespace TianGongCadSuite {
             Width=Math.Min(Ui.S(1320),area.Width-Ui.S(24));Height=Math.Min(Ui.S(660),area.Height-Ui.S(24));
             MinimumSize=new Size(Math.Min(Ui.S(1040),area.Width-Ui.S(24)),Math.Min(Ui.S(520),area.Height-Ui.S(24)));
             StartPosition=FormStartPosition.Manual;Location=new Point(Math.Max(area.Left,area.Right-Width-Ui.S(20)),Math.Max(area.Top,area.Bottom-Height-Ui.S(40)));
+            WindowStateStore.Bind(this,"lineup",()=>!pickingMode);
+            keyShield=new CadKeyShield(this,null,ResolveLineupShortcut);
             var tools=BuildToolbar();
             helpBar=new Label{Text="上方填写本批共用字段，下方直接修改已有记录。F4 型号库 · Ctrl+V 粘贴 · Ctrl+Z 撤销",Dock=DockStyle.Top,Height=Ui.S(32),Padding=Ui.SPad(16,8,0,0),ForeColor=Ui.Muted,Font=Ui.F8,BackColor=Ui.Bg};
             grid.Dock=DockStyle.Fill;grid.AutoGenerateColumns=false;grid.AllowUserToAddRows=false;grid.AllowUserToDeleteRows=false;grid.RowHeadersWidth=Ui.S(50);grid.SelectionMode=DataGridViewSelectionMode.CellSelect;grid.MultiSelect=true;grid.BackgroundColor=Color.White;grid.BorderStyle=BorderStyle.None;
@@ -56,6 +59,16 @@ namespace TianGongCadSuite {
             FormClosing+=(s,e)=>{saver.Stop();grid.EndEdit();if(dirty){try{SaveDraft(false);}catch(Exception ex){if(MessageBox.Show(this,ex.Message+"\n是否放弃尚未保存的修改并关闭？","Lineup",MessageBoxButtons.YesNo,MessageBoxIcon.Warning)!=DialogResult.Yes)e.Cancel=true;}}};
             FormClosed+=(s,e)=>{saver.Dispose();ClearHighlight();};
             SetupModelEditing();InitializeHierarchy();Reload(null);InitializeEntry();UpdateStatus("已加载");
+        }
+        Action ResolveLineupShortcut(Keys keyData){
+            if(keyData==(Keys.Control|Keys.F))return ()=>{ if(search.Visible&&search.CanFocus){ search.Focus(); search.SelectAll(); } };
+            if(grid.IsCurrentCellInEditMode)return null;
+            if(keyData==(Keys.Control|Keys.C))return ()=>{ Try(()=>{ var dataObj=grid.GetClipboardContent(); if(dataObj!=null){ string t=dataObj.GetText(); if(t!=null)ClipboardUtil.SetText(t); } }); };
+            if(keyData==(Keys.Control|Keys.V))return ()=>{ Try(()=>PasteCells(ClipboardUtil.GetText())); };
+            if(keyData==(Keys.Control|Keys.D))return ()=>{ Try(FillDown); };
+            if(keyData==(Keys.Control|Keys.Z))return ()=>{ Try(Undo); };
+            if(keyData==(Keys.Control|Keys.S))return ()=>{ Try(SaveDraft); };
+            return null;
         }
         void Button(FlowLayoutPanel p,string title,Action action){var b=title.StartsWith("加入",StringComparison.Ordinal)?Ui.Primary(title,60,32):Ui.Secondary(title,60,32);b.Margin=Ui.SPad(4,1,2,1);b.Click+=(s,e)=>Try(action);p.Controls.Add(b);}
         void Try(Action action){try{action();}catch(Exception ex){string m=Plain(ex);status.Text=m;if(pickingMode&&pickingLabel!=null)pickingLabel.Text=m;}}

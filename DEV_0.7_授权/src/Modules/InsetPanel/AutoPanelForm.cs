@@ -60,6 +60,7 @@ namespace TianGongCadSuite {
         readonly Preview preview = new Preview();
         readonly Timer debounce = new Timer { Interval = 350 };
         readonly ToolTip tips = new ToolTip { AutoPopDelay = 15000, InitialDelay = 400 };
+        readonly CadKeyShield keyShield;
 
         List<object> selection = new List<object>();
         List<FrameMember> cachedMembers;
@@ -82,6 +83,8 @@ namespace TianGongCadSuite {
         public AutoPanelForm(F.Application app, A.AssemblyDocument assembly){
             this.app = app; this.assembly = assembly;
             Ui.Shell(this, Product.Title("型材自动填充"), 1120, 720, 960, 600);
+            keyShield = new CadKeyShield(this, () => busy);
+            WindowStateStore.Bind(this, "autopanel");
             material.Items.AddRange(Materials);
             BuildLayout();
             LoadSettings();
@@ -245,10 +248,9 @@ namespace TianGongCadSuite {
         }
 
         bool PickOutputDir(){
-            using (var dialog = new FolderBrowserDialog { Description = "选择输出目录：每批会建一个子目录，每个框口一个 PAR", SelectedPath = outputDir }) {
-                if (dialog.ShowDialog(this) != DialogResult.OK) return false;
-                outputDir = dialog.SelectedPath;
-            }
+            string picked = FolderPicker.Pick(this, "选择输出目录（每批会建一个子目录，每个框口一个 PAR）", outputDir, "autopanel.output");
+            if (string.IsNullOrEmpty(picked)) return false;
+            outputDir = picked;
             ShowOutputDir();
             SaveSettings();
             return true;

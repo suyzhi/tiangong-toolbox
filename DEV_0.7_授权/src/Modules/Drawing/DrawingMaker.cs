@@ -14,8 +14,8 @@ namespace TianGongCadSuite {
             var o = new DrawingOutcome { Model = modelPath };
             D.DraftDocument dft = null;
             try {
-                string a4 = string.IsNullOrEmpty(opt.TemplateA4) ? DrawingTemplates.Find("A4") : opt.TemplateA4;
-                string a3 = string.IsNullOrEmpty(opt.TemplateA3) ? DrawingTemplates.Find("A3") : opt.TemplateA3;
+                string a4 = string.IsNullOrEmpty(opt.TemplateA4) ? DrawingTemplates.Find(app, "A4") : opt.TemplateA4;
+                string a3 = string.IsNullOrEmpty(opt.TemplateA3) ? DrawingTemplates.Find(app, "A3") : opt.TemplateA3;
                 if (a3.Length == 0) throw new InvalidOperationException("找不到工程图模板（天工安装目录 Template\\SK先惠）。");
                 // 1. 先用 A4 模板建一张，借它的模型链接读零件（不用在 CAD 里另开窗口）
                 dft = (D.DraftDocument)app.Documents.Add("SolidEdge.DraftDocument", a4.Length > 0 ? a4 : a3);
@@ -41,7 +41,16 @@ namespace TianGongCadSuite {
                     link = dft.ModelLinks.Add(modelPath);
                 }
                 o.Sheet = lay.Zones.Name; o.Scale = DrawingPlan.ScaleText(lay.Scale);
+                // 切换为公司标准尺寸样式（A3-国标-水平 或 A3-国标）：模板保存时常停留在 A4-水平2（1.5mm 细字）或 A3-孔（单边箭头），
+                // 必须同时锁定文档活动样式 + 标注集合 Style + 逐对象兜底核验，确保所有尺寸、孔标注、倒角、形位公差、粗糙度均不落回默认样式。
+                var stylesAvail = DwgWriter.AvailableStyles(dft);
+                string dimStyle = DrawingStyleRules.PrimaryDimensionStyle(stylesAvail, lay.Zones.Name, opt.DimensionStyle);
+                string engraveStyle = DrawingStyleRules.EngravingStyle(stylesAvail, lay.Zones.Name);
+                string centerStyle = DrawingStyleRules.CenterMarkStyle(stylesAvail, lay.Zones.Name);
+                o.Style = dimStyle;
+                if (dimStyle.Length == 0) o.Notes.Add("模板未找到 A3-国标 / A3-国标-水平 尺寸样式，已沿用模板原样式");
                 D.Sheet sheet = dft.ActiveSheet;
+                DwgWriter.ApplySheetStyle(dft, sheet, dimStyle);
                 // 标题栏的「比例」读的是图纸比例
                 try { if (lay.Scale >= 1) sheet.SheetSetup.SetScale(lay.Scale, 1); else sheet.SheetSetup.SetScale(1, Math.Round(1 / lay.Scale, 3)); } catch (Exception e) { o.Notes.Add("图纸比例没设上：" + e.Message); }
                 // 3. 视图
@@ -50,6 +59,7 @@ namespace TianGongCadSuite {
                 var main = sheet.DrawingViews.AddPartView(link, D.ViewOrientationConstants.igTopView, lay.Scale, mainSpec.X, mainSpec.Y, D.PartDrawingViewTypeConstants.sePartDesignedView);
                 var dMain = Unit(mainSpec.Axis, mainSpec.Sign); var xMain = Unit(mainSpec.Horizontal, 1);
                 main.SetViewOrientation(dMain.X, dMain.Y, dMain.Z, xMain.X, xMain.Y, xMain.Z);
+                SetViewScaleText(main, lay.Scale);
                 // 改朝向后必须 Update：不然视图里的图元还是原来俯视的样子，折叠出的投影却按新朝向（探针 4，015 主视图"转了 90°"就是这个）
                 try { main.Update(); } catch { }
                 Idle(app);
@@ -58,16 +68,16 @@ namespace TianGongCadSuite {
                 var below = lay.Get(DwgViewRole.Below);
                 if (below != null && below.Section) {
                     var sec = Section(main, holes, app);
-                    if (sec != null) { Center(sec, below.X, below.Y, true, true); views[DwgViewRole.Below] = sec; o.Notes.Add("视图 加了剖视 A-A（台阶孔）"); }
+                    if (sec != null) { SetViewScaleText(sec, lay.Scale); Center(sec, below.X, below.Y, true, true); views[DwgViewRole.Below] = sec; o.Notes.Add("视图 加了剖视 A-A（台阶孔）"); }
                     else below.Section = false;
                 }
                 if (below != null && !below.Section) {
-                    try { var v = sheet.DrawingViews.AddByFold(main, D.FoldTypeConstants.igFoldDown, below.X, below.Y); Idle(app); Center(v, below.X, below.Y, false, true); views[DwgViewRole.Below] = v; }
+                    try { var v = sheet.DrawingViews.AddByFold(main, D.FoldTypeConstants.igFoldDown, below.X, below.Y); Idle(app); SetViewScaleText(v, lay.Scale); Center(v, below.X, below.Y, false, true); views[DwgViewRole.Below] = v; }
                     catch (Exception e) { o.Notes.Add("俯视图建不出来：" + e.Message); }
                 }
                 var right = lay.Get(DwgViewRole.Right);
                 if (right != null) {
-                    try { var v = sheet.DrawingViews.AddByFold(main, D.FoldTypeConstants.igFoldRight, right.X, right.Y); Idle(app); Center(v, right.X, right.Y, true, false); views[DwgViewRole.Right] = v; }
+                    try { var v = sheet.DrawingViews.AddByFold(main, D.FoldTypeConstants.igFoldRight, right.X, right.Y); Idle(app); SetViewScaleText(v, lay.Scale); Center(v, right.X, right.Y, true, false); views[DwgViewRole.Right] = v; }
                     catch (Exception e) { o.Notes.Add("左视图建不出来：" + e.Message); }
                 }
                 // 左视图 / 主视图看不到的那面有盲孔口：补右视图 / 后视图（DrawingLayout.Facing；补了比例会缩小就不补，提示人工）；底面的只提示
@@ -75,7 +85,7 @@ namespace TianGongCadSuite {
                 if (facts.BottomBlind > 0 && (below == null || !below.Section)) o.Notes.Add("视图 底面有 " + facts.BottomBlind + " 个盲孔，俯视图里看不到，请人工补仰视图或局部视图标注");
                 var leftV = lay.Get(DwgViewRole.Left);
                 if (leftV != null) {
-                    try { var v = sheet.DrawingViews.AddByFold(main, D.FoldTypeConstants.igFoldLeft, leftV.X, leftV.Y); Idle(app); Center(v, leftV.X, leftV.Y, true, false); views[DwgViewRole.Left] = v; o.Notes.Add("视图 右端面有盲孔：加了右视图"); }
+                    try { var v = sheet.DrawingViews.AddByFold(main, D.FoldTypeConstants.igFoldLeft, leftV.X, leftV.Y); Idle(app); SetViewScaleText(v, lay.Scale); Center(v, leftV.X, leftV.Y, true, false); views[DwgViewRole.Left] = v; o.Notes.Add("视图 右端面有盲孔：加了右视图"); }
                     catch (Exception e) { o.Notes.Add("右视图建不出来：" + e.Message); }
                 }
                 var back = lay.Get(DwgViewRole.Back);
@@ -84,6 +94,7 @@ namespace TianGongCadSuite {
                         // 后视图：视线反过来、屏幕 x 也反过来（上方不变）
                         var v = sheet.DrawingViews.AddPartView(link, D.ViewOrientationConstants.igTopView, lay.Scale, back.X, back.Y, D.PartDrawingViewTypeConstants.sePartDesignedView);
                         v.SetViewOrientation(-dMain.X, -dMain.Y, -dMain.Z, -xMain.X, -xMain.Y, -xMain.Z);
+                        SetViewScaleText(v, lay.Scale);
                         try { v.Update(); } catch { }
                         Idle(app); Center(v, back.X, back.Y, true, true); views[DwgViewRole.Back] = v; o.Notes.Add("视图 背面有盲孔：加了后视图");
                     } catch (Exception e) { o.Notes.Add("后视图建不出来：" + e.Message); }
@@ -94,13 +105,15 @@ namespace TianGongCadSuite {
                     try {
                         // 轴测图一律 Z 朝上（和人画的一样，板子平躺），四个上方轴测里挑最能看到主视图那一面的
                         iso = sheet.DrawingViews.AddPartView(link, IsoOrientation(dMain), lay.IsoScale, isoSpec.X, isoSpec.Y, D.PartDrawingViewTypeConstants.sePartDesignedView);
+                        SetViewScaleText(iso, lay.IsoScale);
+                        try { iso.Defaults_ShowTangentEdges = false; } catch { }
                         Idle(app); Center(iso, isoSpec.X, isoSpec.Y, true, true);
                         views[DwgViewRole.Iso] = iso;
                     } catch (Exception e) { o.Notes.Add("轴测图建不出来：" + e.Message); }
                 }
                 o.Views = views.Count;
                 // 4. 尺寸
-                var w = new DwgWriter(sheet);
+                var w = new DwgWriter(sheet, dft, dimStyle);
                 w.Space = new DwgSpace(lay.Zones);
                 foreach (var kv in views) { var b = DwgWriter.SheetBox(kv.Value); w.Space.Add(b[0] - 0.001, b[1] - 0.001, b[2] + 0.001, b[3] + 0.001); }
                 // 刻字引线的文字最后才挂，位置照模板那条：先把那块占上，孔标注别压在它上面（视图多了整组右移时 02-007 压上过）
@@ -108,10 +121,18 @@ namespace TianGongCadSuite {
                 if (eb != null) w.Space.Add(eb);
                 Annotate(w, views, lay, holes, range, facts, o);
                 foreach (var kv in views) o.Notes.Add("视图 " + kv.Key + " " + Describe(kv.Value));
-                try { ((dynamic)main).RetrieveCenterLinesCenterMarks(true); } catch (Exception e) { Log.Write("DrawingCenterMarks", e); }
-                foreach (var kv in views) if (kv.Key != DwgViewRole.Main && kv.Key != DwgViewRole.Iso) try { ((dynamic)kv.Value).RetrieveCenterLinesCenterMarks(true); } catch { }
-                // 5. 刻字：模板里那条引线挂到轴测图上
-                if (iso != null) Engrave(sheet, iso, o);
+                // 检索圆孔十字中心标记与圆柱中心线（以前只传一个 true，其余参数默认全 false 导致一张图一个中心标记都没出）
+                DwgWriter.SetActiveStyle(dft, centerStyle);
+                try {
+                    RetrieveCenters(main, centerStyle);
+                    foreach (var kv in views) if (kv.Key != DwgViewRole.Main && kv.Key != DwgViewRole.Iso) RetrieveCenters(kv.Value, centerStyle);
+                } finally {
+                    DwgWriter.ApplySheetStyle(dft, sheet, dimStyle);
+                }
+                // 5. 刻字：模板里那条引线挂到轴测图上（用模板同款 A3-国标，挂完恢复主尺寸样式为文档活动样式）
+                if (iso != null) Engrave(dft, sheet, iso, engraveStyle, dimStyle, o);
+                else DwgWriter.SetActiveStyle(dft, dimStyle);
+                DwgWriter.ClearCollectionStyles(sheet);
                 o.Dimensions = w.Created; o.Failed = w.Failed; o.Notes.AddRange(w.Notes);
                 // 6. 存
                 if (opt.Save) o.Output = SaveAs(app, dft, modelPath, opt, o);
@@ -131,11 +152,16 @@ namespace TianGongCadSuite {
             var o = new DrawingOutcome { Model = asmPath };
             D.DraftDocument dft = null;
             try {
-                string a3 = string.IsNullOrEmpty(opt.TemplateA3) ? DrawingTemplates.Find("A3") : opt.TemplateA3;
+                string a3 = string.IsNullOrEmpty(opt.TemplateA3) ? DrawingTemplates.Find(app, "A3") : opt.TemplateA3;
                 if (a3.Length == 0) throw new InvalidOperationException("找不到工程图模板（天工安装目录 Template\\SK先惠）。");
                 dft = (D.DraftDocument)app.Documents.Add("SolidEdge.DraftDocument", a3);
                 Idle(app);
+                // 装配图同样切到 A3-国标-水平 / A3-国标，避免外形线性尺寸继承 A3-孔 变成单边箭头
+                string dimStyle = DrawingStyleRules.PrimaryDimensionStyle(DwgWriter.AvailableStyles(dft), "A3", opt.DimensionStyle);
+                o.Style = dimStyle;
+                if (dimStyle.Length == 0) o.Notes.Add("模板未找到 A3-国标 / A3-国标-水平 尺寸样式，已沿用模板原样式");
                 D.Sheet sheet = dft.ActiveSheet;
+                DwgWriter.ApplySheetStyle(dft, sheet, dimStyle);
                 var link = dft.ModelLinks.Add(asmPath);
                 // 装配的 ModelLink.Range3d 天工给的是一个假的 200×200×200（e2e asm-3 实测），外形尺寸要从视图量：
                 // 先按 1:10 放主视图 + 俯视图，读它们在图纸上多大，换算出真实的长宽高，再定比例、挪位置
@@ -155,8 +181,8 @@ namespace TianGongCadSuite {
                 double scale = DrawingPlan.PickScale(sx, sz + sy, availW, availH);
                 o.Sheet = "A3"; o.Scale = DrawingPlan.ScaleText(scale);
                 try { if (scale >= 1) sheet.SheetSetup.SetScale(scale, 1); else sheet.SheetSetup.SetScale(1, Math.Round(1 / scale, 3)); } catch { }
-                try { main.ScaleFactor = scale; Idle(app); } catch (Exception e) { Log.Write("DrawingAsmScale", e); }
-                if (below != null) { try { if (Math.Abs(below.ScaleFactor - scale) > 1e-9) below.ScaleFactor = scale; Idle(app); } catch { } }
+                try { main.ScaleFactor = scale; SetViewScaleText(main, scale); Idle(app); } catch (Exception e) { Log.Write("DrawingAsmScale", e); }
+                if (below != null) { try { if (Math.Abs(below.ScaleFactor - scale) > 1e-9) below.ScaleFactor = scale; SetViewScaleText(below, scale); Idle(app); } catch { } }
                 double left = z.Main[0] + DrawingLayout.DimBand, top = z.Main[3] - DrawingLayout.DimBand;
                 double mx = left + sx * scale / 2, my = top - sz * scale / 2;
                 Center(main, mx, my, true, true);
@@ -168,7 +194,7 @@ namespace TianGongCadSuite {
                 var iso = sheet.DrawingViews.AddAssemblyView(link, D.ViewOrientationConstants.igTopFrontRightView, isoScale, (isoX0 + isoX1) / 2, (isoY0 + isoY1) / 2, D.AssemblyDrawingViewTypeConstants.seAssemblyDesignedView);
                 Idle(app); Center(iso, (isoX0 + isoX1) / 2, (isoY0 + isoY1) / 2, true, true);
                 o.Views = below == null ? 2 : 3;
-                var w = new DwgWriter(sheet);
+                var w = new DwgWriter(sheet, dft, dimStyle);
                 // 外形尺寸：主视图 长 × 高，俯视图 宽
                 Overall(w, main, true, o); Overall(w, main, false, o);
                 if (below != null) Overall(w, below, false, o);
@@ -199,6 +225,8 @@ namespace TianGongCadSuite {
                 o.Notes.Add("视图 范围 " + Math.Round(sx * 1000) + "×" + Math.Round(sy * 1000) + "×" + Math.Round(sz * 1000) + "；主视图 " + Describe(main) + (below != null ? "；俯视图 " + Describe(below) : "") + "；轴测 " + Describe(iso));
                 // 装配不刻字：模板里那条刻字引线删掉
                 try { var bs = (S.Balloons)sheet.Balloons; for (int i = bs.Count; i >= 1; i--) { string t = ""; try { t = bs.Item(i).BalloonText ?? ""; } catch { } if (t.Contains("刻字")) bs.Item(i).Delete(); } } catch { }
+                DwgWriter.SetActiveStyle(dft, dimStyle);
+                DwgWriter.ClearCollectionStyles(sheet);
                 o.Dimensions = w.Created; o.Failed = w.Failed; o.Notes.AddRange(w.Notes);
                 if (opt.Save) o.Output = SaveAs(app, dft, asmPath, opt, o);
                 o.Ok = true;
@@ -265,6 +293,25 @@ namespace TianGongCadSuite {
         }
 
         static V3 Unit(int axis, int sign){ return new V3(axis == 0 ? sign : 0, axis == 1 ? sign : 0, axis == 2 ? sign : 0); }
+
+        static void SetViewScaleText(D.DrawingView v, double scale){
+            if (v == null || scale <= 0) return;
+            try { v.ScaleDefinitionText = DrawingPlan.ScaleText(scale); } catch { }
+        }
+
+        static void RetrieveCenters(D.DrawingView v, string centerStyle){
+            if (v == null) return;
+            try {
+                object st = string.IsNullOrEmpty(centerStyle) ? (object)Type.Missing : centerStyle;
+                // 显式开启圆孔中心标记（不含小圆角弧）与完整圆柱孔中心线，使用模板红色「中心线」样式
+                ((dynamic)v).RetrieveCenterLinesCenterMarks(
+                    true, st,
+                    true, true, true, false,
+                    true, false,
+                    true, false, false, false,
+                    false, false, 0.0, 0.0, 0.0, 0.0);
+            } catch (Exception e) { Log.Write("DrawingCenterMarks", e); }
+        }
 
         // 把视图挪到中心 = (x,y)。折叠出来的视图只沿折叠方向挪（另一方向要和主视图对齐）
         static void Center(D.DrawingView v, double x, double y, bool moveX, bool moveY){

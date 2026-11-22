@@ -94,12 +94,15 @@ namespace TianGongCadSuite {
         FieldGrid.Row countRow, pitchRow, edgeRow, lateralRow, angleRow, threadRow, slotRow;
         VerticalStack rootStack;
         Panel previewCanvas;
+        readonly CadKeyShield keyShield;
 
         public AutoHolePatternForm(F.Application application, P.PartDocument part) : this(application, (A.AssemblyDocument)null, part){ }
         public AutoHolePatternForm(F.Application application, A.AssemblyDocument document) : this(application, document, null){ }
         AutoHolePatternForm(F.Application application, A.AssemblyDocument document, P.PartDocument part){
             app = application; assembly = document; partDoc = part;
             Ui.Shell(this, "批量排孔", 1080, 760, 940, 640);
+            keyShield = new CadKeyShield(this, () => busy);
+            WindowStateStore.Bind(this, "pattern");
             BuildLayout();
             WireEvents();
             loading = true;

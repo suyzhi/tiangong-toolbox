@@ -18,7 +18,10 @@ namespace TianGongCadSuite {
                     + "3. 底部可分步点「执行改名」「写入属性」「开始出清单」，也可点「开始出清单」一键串联执行；\r\n"
                     + "4. 输出公司标准《加工件清单.xlsx》、可选《编码申请-加工件.xlsx》及每件 6 种格式（原三维 / .dft / .dwg / .jpg / .pdf / .step），原三维与 .dft 经独立进程复制保持公司透明加密不变。",
                     delegate { return true; },
-                    () => context.Show(() => new QuickBomForm(context.Application), f => ((QuickBomForm)f).LoadActive()));
+                    () => context.Show(
+                        () => new QuickBomForm(context.Application),
+                        f => ((QuickBomForm)f).LoadActive(),
+                        f => f is QuickBomForm && ((QuickBomForm)f).ReuseIfOpen()));
             }
         }
         public void Dispose() { }

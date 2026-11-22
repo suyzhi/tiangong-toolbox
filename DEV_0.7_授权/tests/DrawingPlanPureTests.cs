@@ -233,6 +233,69 @@ namespace TianGongCadSuite {
             Check(rings.Count == 1 && rings[0].DiameterMm == 64, "同心圆外圈 Ø64 拿得出来");
             string s1, s2; DrawingText.ThreadOnly("M4", new ModelHole { Radius = 1.62 * mm, Through = false, Depth = 10.12 * mm }, out s1, out s2);
             Check(s1 == "" && s2 == "%DI3.3%DP10.12", "只有螺纹线的盲螺纹孔：不写假螺纹深度，底孔 Ø3.3↧10.12");
+
+            // ---- 0.13.4 样式、盲孔名义深度、单跨线性、靠侧落点、倒角邻边与细长件比例 ----
+            var a4Styles = new[] { "中心线", "A3-国标-水平", "ISO", "DIN", "A3-国标", "A4-国标", "标题栏文本", "A4-国标-水平", "A4-水平2", "A4-孔" };
+            var a3Styles = new[] { "中心线", "A3-国标-水平", "ISO", "DIN", "A3-国标", "A4-国标", "A3-水平2", "A4-国标-水平", "A3-孔" };
+            Check(DrawingStyleRules.PrimaryDimensionStyle(a4Styles, "A4") == "A3-国标-水平", "A4 模板主尺寸样式选 A3-国标-水平（不用 1.5mm A4-水平2）");
+            Check(DrawingStyleRules.PrimaryDimensionStyle(a3Styles, "A3") == "A3-国标-水平", "A3 模板主尺寸样式选 A3-国标-水平（不用单边箭头 A3-孔）");
+            Check(DrawingStyleRules.PrimaryDimensionStyle(a3Styles, "A3", "A3-国标") == "A3-国标", "指定偏好 A3-国标 时优先选 A3-国标");
+            Check(DrawingStyleRules.PrimaryDimensionStyle(a3Styles, "A3", "A3-国标水平") == "A3-国标-水平", "指定偏好 A3-国标水平 兼容匹配模板中的 A3-国标-水平");
+            Check(DrawingStyleRules.PrimaryDimensionStyle(new[] { "ISO", "A3-国标水平", "A3-孔" }, "A3") == "A3-国标水平", "模板样式名为无连字符的 A3-国标水平 也能命中");
+            Check(DrawingStyleRules.PrimaryDimensionStyle(new[] { "ISO", "A3－国标", "A3-孔" }, "A3", "A3-国标") == "A3－国标", "全角连字符变体 A3－国标 也能按偏好命中");
+            Check(DrawingStyleRules.PrimaryDimensionStyle(new[] { "ISO", "A3-国标", "A3-孔" }, "A3") == "A3-国标", "只有 A3-国标 时选 A3-国标（绝不落回 A3-孔）");
+            Check(DrawingStyleRules.NormalizePreferredStyle("A3-国标水平") == "A3-国标-水平" && DrawingStyleRules.NormalizePreferredStyle("A3-国标") == "A3-国标" && DrawingStyleRules.NormalizePreferredStyle("") == "A3-国标-水平", "样式偏好归一化正确");
+            Check(DrawingStyleRules.ParseTemplateFolder(@"C:\Program Files\NDS\TianGong 2025\Template\SK先惠//LISTTYPE_3/0/") == @"C:\Program Files\NDS\TianGong 2025\Template\SK先惠", "天工模板路径清洗去掉 //LISTTYPE 后缀");
+            Check(DrawingStyleRules.PrimaryDimensionStyle(new[] { "ISO", "DIN" }, "A3") == "", "非公司模板保留原活动样式");
+            Check(DrawingStyleRules.EngravingStyle(a4Styles, "A4") == "A3-国标", "刻字引线样式选 A3-国标");
+            Check(DrawingStyleRules.CenterMarkStyle(a4Styles, "A4") == "中心线", "中心标记样式选红色 中心线");
+
+            // 过孔孔径校验 + V 底盲螺纹孔深度（02-015 M5 深 10 圆柱 8.76；02-023 M6 深 10 圆柱 8.52）
+            Check(DrawingStyleRules.IsNominalTappedDiameter(4.134, "M5") && DrawingStyleRules.IsNominalTappedDiameter(4.2, "M5"), "M5 小径/底孔通过螺纹校验");
+            Check(!DrawingStyleRules.IsNominalTappedDiameter(5.5, "M5") && !DrawingStyleRules.IsNominalTappedDiameter(6.6, "M6"), "Ø5.5 / Ø6.6 过孔绝不被当成 M5 / M6 螺纹孔");
+            var vBlindM5 = ModelHole.Merge(new[] { new ModelHole { Point = new V3(0, 0, 0), Axis = new V3(0, 0, 1), Radius = 2.067 * mm, Lo = 0, Hi = 8.76 * mm, BlindLo = true } })[0];
+            vBlindM5.Spec = new HoleSpec { Kind = HoleKind.Tapped, ThreadSize = "M5", ThreadFull = true, ThreadDepth = 10, Depth = 10, Bottom = HoleBottom.VBottom };
+            DrawingText.Hole(4, vBlindM5, 4.134, out pre, out val, out suf, out sub);
+            Check(pre == "4×" && val == "M5" && suf == "%DP10" && sub == "", "V 底全长盲螺纹孔 02-015：标 4×M5↧10（不把钻尖扣成 8.76，不重复写同深底孔）");
+            var vBlindPin = ModelHole.Merge(new[] { new ModelHole { Point = new V3(0, 0, 0), Axis = new V3(0, 0, 1), Radius = 4.0 * mm, Lo = 0, Hi = 8.52 * mm, BlindLo = true } })[0];
+            vBlindPin.Spec = new HoleSpec { Kind = HoleKind.Through, HoleDiameter = 8, Depth = 10, Bottom = HoleBottom.VBottom };
+            DrawingText.Hole(2, vBlindPin, 8.0, out pre, out val, out suf, out sub);
+            Check(pre == "2×" && val == "" && suf == "%DP10", "V 底盲光孔：按特征名义深度标 Ø8↧10");
+            var falseTap = ModelHole.Merge(new[] { new ModelHole { Point = new V3(0, 0, 0), Axis = new V3(0, 0, 1), Radius = 2.75 * mm, Lo = 0, Hi = 9.4 * mm } })[0];
+            falseTap.Spec = new HoleSpec { Kind = HoleKind.Tapped, ThreadSize = "M5", ThreadFull = true };
+            DrawingText.Hole(4, falseTap, 5.5, out pre, out val, out suf, out sub);
+            Check(val == "" && suf == " 贯通", "Ø5.5 过孔即使挂了误配 M5 规格也兜底按 Ø5.5 贯通输出");
+
+            // 2 点单跨度改线性尺寸 + 靠侧落点选择
+            var thinRun = DrawingPlan.Ordinate(Rect(0, 0, 115 * mm, 4 * mm), false, 1.0, new[] { 0, 0, 115 * mm, 4 * mm }, true, 0.009);
+            Check(DrawingStyleRules.ShouldUseLinearSpan(thinRun), "4mm 板厚 2 点跨度改用线性尺寸");
+            Check(!DrawingStyleRules.ShouldUseLinearSpan(run), "4 点坐标串保持坐标尺寸");
+            var topTs = DrawingPlan.Targets(plate, true, false);
+            var botTs = DrawingPlan.Targets(plate, true, true);
+            Check(Near(topTs[1].Y, 23 * mm) && Near(botTs[1].Y, 8 * mm), "同列两孔：上方坐标串挂靠上的孔(y=23)，下方挂靠下的孔(y=8)");
+            Check(topTs[0].Y > 30 * mm && botTs[0].Y < 7 * mm, "竖边落点靠近文字线一端，延伸线不穿零件");
+
+            // 倒角邻边查找（优先水平边使倒角标注水平引出）与坐标文字落入视图防错判定
+            var adjChamfer = DrawingStyleRules.ChamferReferenceEdge(cg[0].Leader, ch);
+            Check(adjChamfer != null && adjChamfer.IsHorizontal, "倒角斜线优先选水平相邻参考边（保证水平引出）");
+            var vBox = new[] { 0.0445, 0.1384, 0.2480, 0.2623 };
+            Check(DrawingStyleRules.IsTextInsideView(0.1161, 0.2287, vBox, true, false, 0.0005), "识别出 02-015 上落进视图内部的 87.5 文字");
+            Check(!DrawingStyleRules.IsTextInsideView(0.1161, 0.2695, vBox, true, false, 0.0005), "视图外上方的正常坐标文字不误判");
+
+            // 细长件 02-023（1325×95×20）：补齐 1:6 / 1:8 后优先 A3 1:6，不再掉回 A4 1:10
+            var longBar = new ModelFacts(); longBar.Size = new[] { 0.020, 1.325, 0.095 }; longBar.Holes = new[] { 12, 0, 11 }; longBar.Steps = new[] { 2, 8, 5 }; longBar.FaceArea = new[] { 0.25, 0.004, 0.05 };
+            DrawingLayout.IsoBox(longBar.Size, out iw, out ih);
+            var longLay = DrawingLayout.Arrange(DrawingLayout.Choose(longBar), iw, ih);
+            Check(longLay.Zones.Name == "A3" && longLay.Scale > 0.12, "1325 长细长件选 A3 大比例（实际 " + longLay.Zones.Name + " " + DrawingPlan.ScaleText(longLay.Scale) + "）");
+            Check(DrawingPlan.ScaleText(1 / 6.0) == "1:6" && DrawingPlan.ScaleText(0.125) == "1:8" && DrawingPlan.ScaleText(0.08) == "1:12.5", "新增比例文字格式正确");
+
+            // 微小数值碎片斜线（<0.1mm）不当倒角，避免标出「2-C0」；主区与轴测区间跨缝标注区畅通
+            var tinyCh = new List<DwgEdge> { DwgEdge.Line(0, 0, 0.000003, 0.000003), DwgEdge.Line(10 * mm, 0, 10.25 * mm, 0.25 * mm) };
+            var tinyCg = DrawingPlan.Chamfers(tinyCh);
+            Check(tinyCg.Count == 1 && Math.Abs(tinyCg[0].RadiusMm - 0.25) < 1e-6, "微小碎片斜线过滤掉不标 C0，保留真实 C0.25");
+            var spA3 = new DwgSpace(SheetZones.A3());
+            var rSeam = spA3.Place(new[] { 0.031, 0.131, 0.267, 0.149 }, 0.140, 0.023, 0.010);
+            Check(rSeam != null && rSeam[2] <= SheetZones.A3().Iso[0] + 1e-9, "宽 23mm 的孔标注跨过 Main[2] 到 Iso[0] 仍能找到不重叠空位");
         }
     }
 }

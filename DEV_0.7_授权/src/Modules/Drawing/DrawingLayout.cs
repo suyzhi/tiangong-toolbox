@@ -230,8 +230,8 @@ namespace TianGongCadSuite {
         readonly List<double[]> allowed = new List<double[]>();
         public DwgSpace(SheetZones z){
             allowed.Add(z.Main); allowed.Add(z.Iso);
-            // 主区和轴测区之间那条竖带也能放字（主区右边到轴测区左边）
-            allowed.Add(new[] { z.Main[2], z.Iso[1], z.Iso[0], z.Main[3] });
+            // 主区与轴测区之间连成一整块（不要切成 5mm 孤立窄条，否则宽 20mm 的孔标注跨过 Main[2] 接缝被判越界、全部退化叠在一起）
+            allowed.Add(new[] { z.Main[0], z.Iso[1], z.Iso[0], z.Main[3] });
         }
         public void Add(double[] r){ if (r != null && r[2] > r[0] && r[3] > r[1]) used.Add(r); }
         public void Add(double x0, double y0, double x1, double y1){ Add(new[] { Math.Min(x0, x1), Math.Min(y0, y1), Math.Max(x0, x1), Math.Max(y0, y1) }); }
@@ -248,13 +248,16 @@ namespace TianGongCadSuite {
         // 从 (x, y) 附近找一块 w×h 的空地：先在右边从 y 开始上下错开，再试左边、上面、下面。找不到给 null
         public double[] Place(double[] box, double y, double w, double h){
             var tries = new List<double[]>();
-            for (int i = 0; i < 16; i++) {
-                double dy = (i % 2 == 0 ? 1 : -1) * (i / 2) * 0.0055;
+            for (int i = 0; i < 18; i++) {
+                double dy = (i % 2 == 0 ? 1 : -1) * (i / 2) * 0.0068;
                 tries.Add(new[] { box[2] + 0.004, y + dy });
             }
-            for (int i = 0; i < 16; i++) { double dy = (i % 2 == 0 ? 1 : -1) * (i / 2) * 0.0055; tries.Add(new[] { box[0] - 0.004 - w, y + dy }); }
+            for (int i = 0; i < 18; i++) { double dy = (i % 2 == 0 ? 1 : -1) * (i / 2) * 0.0068; tries.Add(new[] { box[0] - 0.004 - w, y + dy }); }
             for (int i = 0; i < 10; i++) { tries.Add(new[] { box[2] - w - i * 0.012, box[3] + 0.004 }); tries.Add(new[] { box[2] - w - i * 0.012, box[1] - 0.004 - h }); }
-            foreach (var t in tries) { var r = new[] { t[0], t[1], t[0] + w, t[1] + h }; if (Free(r)) { Add(r); return r; } }
+            foreach (var t in tries) {
+                var r = new[] { t[0], t[1], t[0] + w, t[1] + h };
+                if (Free(r)) { Add(r[0] - 0.001, r[1] - 0.0015, r[2] + 0.001, r[3] + 0.0015); return r; }
+            }
             return null;
         }
     }

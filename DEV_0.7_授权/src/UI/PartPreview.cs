@@ -111,11 +111,19 @@ namespace TianGongCadSuite {
             Say("点表里的一行，这里显示它的三维模型");
         }
 
-        // 放到表格所在的卡片右边（中间一条可拖的分隔条），返回标题栏上的「隐藏预览 / 显示预览」按钮；开关记在 choices.tsv 的 key 下。
+        // 放到表格所在的卡片右边（中间一条可拖的分隔条），返回标题栏上的「隐藏预览 / 显示预览」按钮；开关与宽度记在 choices.tsv 的 key 下。
         // 卡片里要先放好 Dock=Fill 的表格：停靠按 Controls 倒序排，后加的预览先占右边，表格填剩下的
         public static Button Attach(Control frame, PartPreview preview, string key){
-            var split = new Splitter { Dock = DockStyle.Right, Width = Ui.S(6), MinExtra = Ui.S(360), MinSize = Ui.S(240), BackColor = Ui.Bg };
-            preview.Dock = DockStyle.Right; preview.Width = Ui.S(360);
+            var split = new Splitter { Dock = DockStyle.Right, Width = Ui.S(6), MinExtra = Ui.S(320), MinSize = Ui.S(220), BackColor = Ui.Bg };
+            int logicalW = 360;
+            int parsed;
+            if (int.TryParse(Choices.Get(key + ".w", ""), out parsed) && parsed >= 220 && parsed <= 760) logicalW = parsed;
+            preview.Dock = DockStyle.Right; preview.Width = Ui.S(logicalW);
+            split.SplitterMoved += (s, e) => {
+                if (!preview.Visible || preview.Width < Ui.S(200)) return;
+                int lw = (int)Math.Round(preview.Width / Math.Max(1f, Ui.DpiScale));
+                if (lw >= 220 && lw <= 760) Choices.Set(key + ".w", lw.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            };
             frame.Controls.Add(split); frame.Controls.Add(preview);
             var toggle = Ui.Small("隐藏预览"); ((FlatButton)toggle).SetFore(Ui.Text2);
             Action sync = () => { bool on = Choices.Get(key, "1") != "0"; preview.Visible = on; split.Visible = on; toggle.Text = on ? "隐藏预览" : "显示预览"; };

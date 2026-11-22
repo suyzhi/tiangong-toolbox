@@ -25,6 +25,7 @@ namespace TianGongCadSuite {
             TestValidation();
             TestWorkbenchSyncAndRename();
             TestWorkbenchSortFilterAndUndo();
+            TestWindowBoundsAndUxRules();
             TestProcessingListXlsx();
             TestCodeRequestXlsxAndDictionaries();
             Console.WriteLine("QuickBomPureTests PASSED " + passed);
@@ -380,6 +381,50 @@ namespace TianGongCadSuite {
             var parsed = PropCardFields.ParseClipboard(tsv);
             Check(parsed.Count == 2 && parsed[0].Length == 2 && parsed[0][0] == "零件A" && parsed[0][1] == "SK-01 带Tab" && parsed[1][0] == "零件B 换行" && parsed[1][1] == "SK-02",
                 "FormatClipboardBlock + ParseClipboard roundtrips cleanly: " + tsv);
+        }
+
+        static void TestWindowBoundsAndUxRules() {
+            // 1. 窗口位置/尺寸格式化与解析
+            var b = new SavedWindowBounds { X = 1950, Y = 80, W = 1400, H = 820, Maximized = true };
+            string encoded = WindowBoundsRules.Format(b);
+            SavedWindowBounds back;
+            Check(WindowBoundsRules.TryParse(encoded, out back) && back.X == 1950 && back.Y == 80 && back.W == 1400 && back.H == 820 && back.Maximized,
+                "WindowBoundsRules Format/TryParse roundtrip");
+            SavedWindowBounds bad;
+            Check(!WindowBoundsRules.TryParse("10,10,50,50,0", out bad), "WindowBoundsRules rejects tiny bounds");
+            Check(!WindowBoundsRules.TryParse("broken", out bad), "WindowBoundsRules rejects malformed text");
+
+            // 2. 多屏适配：副屏仍在 -> 保留副屏位置；拔掉副屏 -> 自动拉回主屏居中且不超工作区
+            var primary = new RectI(0, 0, 1920, 1040);
+            var secondary = new RectI(1920, 0, 1920, 1040);
+            var onSec = WindowBoundsRules.FitToScreens(new RectI(2000, 60, 1400, 820), new[] { primary, secondary }, primary, 860, 500);
+            Check(onSec.X == 2000 && onSec.Y == 60 && onSec.W == 1400 && onSec.H == 820, "FitToScreens preserves valid secondary monitor placement");
+
+            var unplugged = WindowBoundsRules.FitToScreens(new RectI(2200, 60, 1400, 820), new[] { primary }, primary, 860, 500);
+            Check(unplugged.X >= 0 && unplugged.Right <= primary.Right && unplugged.Y >= 0 && unplugged.Bottom <= primary.Bottom,
+                "FitToScreens rescues unplugged monitor window onto primary work area");
+
+            var topOff = WindowBoundsRules.FitToScreens(new RectI(100, -10, 1000, 700), new[] { primary }, primary, 600, 400);
+            Check(topOff.Y >= 0, "FitToScreens clamps negative top edge back onto screen");
+
+            // 3. 列宽记忆往返与过滤异常项
+            var wMap = new Dictionary<string, int>(StringComparer.Ordinal) { { "col:old", 220 }, { "prop:零件名称", 180 }, { "bad:tiny", 5 } };
+            string wText = WindowBoundsRules.FormatWidths(wMap);
+            var wBack = WindowBoundsRules.ParseWidths(wText);
+            Check(wBack.Count == 2 && wBack["col:old"] == 220 && wBack["prop:零件名称"] == 180, "FormatWidths/ParseWidths roundtrip");
+
+            // 4. 文本批量替换纯逻辑
+            bool ch;
+            string rCi = WindowBoundsRules.ReplaceInText("SK26-a-A", "a", "B", false, out ch);
+            Check(ch && rCi == "SK26-B-B", "ReplaceInText case-insensitive");
+            string rCs = WindowBoundsRules.ReplaceInText("SK26-a-A", "a", "B", true, out ch);
+            Check(ch && rCs == "SK26-B-A", "ReplaceInText case-sensitive");
+            string rNone = WindowBoundsRules.ReplaceInText("SK26-01", "ZZ", "YY", false, out ch);
+            Check(!ch && rNone == "SK26-01", "ReplaceInText reports unchanged when not found");
+
+            // 5. 自动补全候选合并去重（保留预设在前 + 表内新值追加在后）
+            var sug = WorkbenchRules.BuildSuggestions(new[] { "45#", "Q235-B" }, new[] { "q235-b", "AL6061-T6", "", "45#" });
+            Check(sug.Length == 3 && sug[0] == "45#" && sug[1] == "Q235-B" && sug[2] == "AL6061-T6", "BuildSuggestions deduplicates preserving preset order");
         }
 
         static void TestCodeRequestXlsxAndDictionaries() {

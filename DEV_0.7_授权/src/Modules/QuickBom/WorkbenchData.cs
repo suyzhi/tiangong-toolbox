@@ -291,6 +291,45 @@ namespace TianGongCadSuite {
             "零件名称", "图号", "数量", "表面处理", "批次", "优先等级"
         };
 
+        // 常用机械工程字段下拉联想词库（用于单元格编辑自动补全，仍支持自由输入任意值）
+        public static readonly string[] SuggestedMaterials = {
+            "45#", "45#钢", "Q235-B", "Q235A", "AL6061", "AL6061-T6", "AL5052", "AL7075",
+            "SUS304", "SUS316", "Cr12MoV", "SKD11", "40Cr", "SPCC", "SGCC", "SECC",
+            "POM", "白色POM", "黑色POM", "PC", "防静电PC", "电木", "尼龙", "MC尼龙", "FR4", "PEEK", "6063-T5"
+        };
+        public static readonly string[] SuggestedSurfaceTreatments = {
+            "无", "本色阳极氧化", "黑色阳极氧化", "硬质阳极氧化", "镀镍", "镀化学镍",
+            "镀铬", "镀硬铬", "发黑", "镀锌", "镀蓝白锌", "哑光喷塑RAL9003", "喷粉",
+            "喷塑", "烤漆", "拉丝", "抛光", "调质", "高频淬火", "真空淬火", "氮化"
+        };
+        public static readonly string[] SuggestedBatches = {
+            "第一批", "第二批", "第三批", "第四批", "补单", "变更"
+        };
+        public static readonly string[] SuggestedPriorities = {
+            "A", "B", "C", "紧急", "加急", "正常"
+        };
+        public static readonly string[] SuggestedChangeReasons = {
+            "新增", "设变", "尺寸变更", "材质变更", "补单", "加急"
+        };
+
+        public static string[] BuildSuggestions(IEnumerable<string> presets, IEnumerable<string> existingValues) {
+            var list = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (presets != null) {
+                foreach (var s in presets) {
+                    string t = (s ?? "").Trim();
+                    if (t.Length > 0 && seen.Add(t)) list.Add(t);
+                }
+            }
+            if (existingValues != null) {
+                foreach (var s in existingValues) {
+                    string t = (s ?? "").Trim();
+                    if (t.Length > 0 && seen.Add(t)) list.Add(t);
+                }
+            }
+            return list.ToArray();
+        }
+
         public static bool IsCoreSharedField(string field) {
             for (int i = 0; i < CoreSharedPropFields.Length; i++) {
                 if (string.Equals(CoreSharedPropFields[i], field, StringComparison.Ordinal)) return true;

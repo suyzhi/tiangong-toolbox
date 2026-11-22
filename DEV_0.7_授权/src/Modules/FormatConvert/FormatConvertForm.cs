@@ -59,13 +59,19 @@ namespace TianGongCadSuite {
         readonly FlatButton next=(FlatButton)Ui.Primary("下一步",200,44);
         readonly FlatButton back=(FlatButton)Ui.Secondary("上一步",84,38);
         readonly StatTile statDone=new StatTile("完成"),statOk=new StatTile("成功"),statFail=new StatTile("失败"),statSkip=new StatTile("已存在跳过");
-        readonly EmptyHint inputEmpty=new EmptyHint("还没有输入：点右上角「添加文件…」或「添加文件夹…」");
+        readonly EmptyHint inputEmpty=new EmptyHint("还没有输入：点右上角「添加文件…」「添加文件夹…」，或直接把文件 / 文件夹拖进窗口");
+        readonly CadKeyShield keyShield;
 
         public FormatConvertForm(){
             Ui.Shell(this,Product.Title("批量格式转换 SolidWorks / STEP"),1000,700,860,580);
             FormBorderStyle=FormBorderStyle.Sizable;
             StartPosition=FormStartPosition.CenterScreen;
             ShowInTaskbar=true;
+            AllowDrop=true;
+            DragEnter+=OnFormDragEnter;
+            DragDrop+=OnFormDragDrop;
+            keyShield=new CadKeyShield(this,()=>timer.Enabled);
+            WindowStateStore.Bind(this,"convert");
             Controls.Add(shell);
             var pIn=shell.AddPage("输入","输入","SolidWorks / STEP 文件或文件夹");
             var pOut=shell.AddPage("输出设置","输出设置","");
@@ -219,10 +225,31 @@ namespace TianGongCadSuite {
             }
         }
         void AddFolder(){
-            using(var dialog=new FolderBrowserDialog()){
-                dialog.Description="选择包含 SolidWorks 文件的文件夹（可重复添加多个）";
-                if(dialog.ShowDialog(this)!=DialogResult.OK)return;
-                AddSource(dialog.SelectedPath);
+            string init=sources.Count>0?sources[sources.Count-1]:"";
+            string dir=FolderPicker.Pick(this,"选择包含 SolidWorks / STEP 文件的文件夹（可重复添加多个）",init,"convert.input");
+            if(!string.IsNullOrEmpty(dir))AddSource(dir);
+        }
+        void OnFormDragEnter(object sender,DragEventArgs e){
+            if(!timer.Enabled&&e.Data!=null&&e.Data.GetDataPresent(DataFormats.FileDrop))e.Effect=DragDropEffects.Copy;
+            else e.Effect=DragDropEffects.None;
+        }
+        void OnFormDragDrop(object sender,DragEventArgs e){
+            if(timer.Enabled||e.Data==null||!e.Data.GetDataPresent(DataFormats.FileDrop))return;
+            var dropped=e.Data.GetData(DataFormats.FileDrop) as string[];
+            if(dropped==null||dropped.Length==0)return;
+            int added=0,skipped=0;
+            foreach(string raw in dropped){
+                if(string.IsNullOrEmpty(raw))continue;
+                if(Directory.Exists(raw)){ AddSource(raw); added++; }
+                else if(File.Exists(raw)&&ConvertPlanner.IsSupported(raw)){ AddSource(raw); added++; }
+                else skipped++;
+            }
+            if(added>0){
+                shell.Go(0,false);
+                RefreshRail();
+                status.Text="已拖入 "+added+" 项"+(skipped>0?"（跳过 "+skipped+" 个非 SolidWorks / STEP 文件）":"")+"。";
+            }else if(skipped>0){
+                status.Text="拖入的文件里没有 SolidWorks（.sldprt/.sldasm/.slddrw）或 STEP（.stp/.step）文件。";
             }
         }
         void AddSource(string path){
@@ -253,11 +280,8 @@ namespace TianGongCadSuite {
             }
         }
         void BrowseOutput(){
-            using(var dialog=new FolderBrowserDialog()){
-                dialog.Description="选择转换结果的输出目录";
-                if(dialog.ShowDialog(this)!=DialogResult.OK)return;
-                output.Text=dialog.SelectedPath;
-            }
+            string dir=FolderPicker.Pick(this,"选择转换结果的输出目录",output.Text,"convert.output");
+            if(!string.IsNullOrEmpty(dir))output.Text=dir;
         }
         void OpenOutputFolder(){
             string path=output.Text;

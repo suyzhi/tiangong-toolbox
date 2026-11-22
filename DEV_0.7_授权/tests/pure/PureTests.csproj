@@ -20,6 +20,7 @@
     <Compile Include="../../src/Infrastructure/Geometry.cs" />
     <Compile Include="../../src/Infrastructure/Log.cs" />
     <Compile Include="../../src/Infrastructure/SettingsFile.cs" />
+    <Compile Include="../../src/Infrastructure/WindowBoundsRules.cs" />
 
     <!-- InsetPanel -->
     <Compile Include="../../src/Modules/InsetPanel/PanelNaming.cs" />
@@ -51,6 +52,7 @@
     <Compile Include="../../src/Modules/Drawing/DrawingPlan.cs" />
     <Compile Include="../../src/Modules/Drawing/DrawingLayout.cs" />
     <Compile Include="../../src/Modules/Drawing/DrawingTolerance.cs" />
+    <Compile Include="../../src/Modules/Drawing/DrawingStyleRules.cs" />
     <Compile Include="../../src/Modules/QuickBom/BomModels.cs" />
     <Compile Include="../../src/Modules/QuickBom/BomRules.cs" />
     <Compile Include="../../src/Modules/QuickBom/BomXlsxWriter.cs" />

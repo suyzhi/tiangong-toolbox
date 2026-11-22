@@ -60,12 +60,15 @@ namespace TianGongCadSuite {
         readonly Button undoButton = Ui.Secondary("撤销修改", 96, 38);
         readonly Label status = new Label();
         readonly ToolTip tips = new ToolTip { AutoPopDelay = 15000, InitialDelay = 400 };
+        readonly CadKeyShield keyShield;
 
         public HoleEditForm(F.Application application, P.PartDocument part) : this(application, (A.AssemblyDocument)null, part){ }
         public HoleEditForm(F.Application application, A.AssemblyDocument document) : this(application, document, null){ }
         HoleEditForm(F.Application application, A.AssemblyDocument document, P.PartDocument part){
             app = application; assembly = document; partDoc = part;
             Ui.Shell(this, "改孔型", 900, 680, 780, 560);
+            keyShield = new CadKeyShield(this, () => busy);
+            WindowStateStore.Bind(this, "holeedit");
             BuildLayout();
             WireEvents();
             loading = true;

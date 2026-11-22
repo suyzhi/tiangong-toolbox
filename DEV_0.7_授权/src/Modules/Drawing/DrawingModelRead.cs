@@ -168,7 +168,10 @@ namespace TianGongCadSuite {
             } catch { return false; }
         }
 
-        // 孔特征的规格挂到几何孔上：按孔心落在孔轴线上（0.05mm）配
+        // 孔特征的规格挂到几何孔上：按孔心落在孔轴线上（径向 ≤ 0.05mm）、轴向靠近该孔段、且孔径与规格相容。
+        // 原因（2026-11-21 实测 02-015 / 02-023）：
+        //   1. 只判无限长轴线会把一个凸缘上的螺纹孔误挂到另一侧同轴过孔（Ø5.5 / Ø6.6）上，导致过孔被误标成 M5 / M6；
+        //   2. 阵列 / 镜像出来的孔不在种子孔的 Profile 里，挂完后把同规格同深的几何孔同步补上，避免标引线落到阵列实例上丢规格。
         static void AttachSpecs(object document, List<ModelHole> holes){
             if (holes.Count == 0) return;
             dynamic models = ((dynamic)document).Models;
@@ -190,12 +193,54 @@ namespace TianGongCadSuite {
                             try {
                                 double x2, y2, x, y, z; prof.Holes2d.Item(k).GetCenterPoint(out x2, out y2); prof.Convert2DCoordinate(x2, y2, out x, out y, out z);
                                 var c = new V3(x, y, z);
-                                foreach (var mh in holes) if (mh.Spec == null && mh.OnAxis(c, 5e-5)) mh.Spec = spec;
+                                foreach (var mh in holes) {
+                                    if (mh.Spec != null || !mh.OnAxis(c, 5e-5)) continue;
+                                    if (!SpecMatchesHole(mh, c, spec, through)) continue;
+                                    mh.Spec = spec;
+                                }
                             } catch { }
                         }
                     }
                 }
             }
+            // 把种子孔读到的规格传播给阵列 / 镜像生成的同径同深同形式几何孔（仅当所有已匹配同组孔规格一致时才传播）
+            foreach (var mh in holes) {
+                if (mh.Spec != null) continue;
+                HoleSpec shared = null; bool conflict = false;
+                foreach (var src in holes) {
+                    if (src.Spec == null) continue;
+                    if (src.Through != mh.Through) continue;
+                    if (Math.Abs(src.Radius - mh.Radius) > 1e-5) continue;
+                    if (Math.Abs(src.CbRadius - mh.CbRadius) > 1e-5) continue;
+                    if (!mh.Through && Math.Abs(src.Depth - mh.Depth) > 3e-4) continue;
+                    if (shared == null) shared = src.Spec;
+                    else if (shared.Kind != src.Spec.Kind || !string.Equals(shared.ThreadSize, src.Spec.ThreadSize, StringComparison.OrdinalIgnoreCase)
+                        || Math.Abs(shared.Depth - src.Spec.Depth) > 0.05) { conflict = true; break; }
+                }
+                if (shared != null && !conflict) mh.Spec = shared;
+            }
+        }
+
+        static bool SpecMatchesHole(ModelHole mh, V3 profilePt, HoleSpec spec, bool specThrough){
+            if (mh == null || spec == null) return false;
+            // 1. 轴向范围校验：草图点位于孔的端面附近（留 3mm 余量兼容孔口倒角 / 偏移面）
+            double minLo = mh.Lo, maxHi = mh.Hi;
+            foreach (var sg in mh.Segments) { if (sg.Lo < minLo) minLo = sg.Lo; if (sg.Hi > maxHi) maxHi = sg.Hi; }
+            double t = (profilePt - mh.Point).Dot(mh.Axis);
+            if (t < minLo - 0.003 || t > maxHi + 0.003) return false;
+            // 2. 孔径校验：螺纹孔的几何孔径必须严格小于螺纹公称直径（避免过孔 Ø5.5 / Ø6.6 被错认成 M5 / M6）
+            double diaMm = mh.Radius * 2000.0;
+            if (spec.Kind == HoleKind.Tapped && spec.ThreadSize.Length > 0) {
+                return DrawingStyleRules.IsNominalTappedDiameter(diaMm, spec.ThreadSize);
+            }
+            if (spec.HoleDiameter > 0) {
+                bool diaOk = Math.Abs(diaMm - spec.HoleDiameter) <= 0.35
+                    || (mh.CbRadius > 0 && spec.CounterboreDiameter > 0 && Math.Abs(mh.CbRadius * 2000.0 - spec.CounterboreDiameter) <= 0.35);
+                if (!diaOk) return false;
+            }
+            // 3. 盲孔 / 通孔一致性：盲孔特征绝不挂到贯通孔上（贯通特征可能打在厚板上被截断成盲孔，故只防盲→通串配）
+            if (!specThrough && mh.Through) return false;
+            return true;
         }
 
         static int AxisOf(Array n){
