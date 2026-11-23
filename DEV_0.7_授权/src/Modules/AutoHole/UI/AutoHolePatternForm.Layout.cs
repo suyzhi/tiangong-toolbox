@@ -73,6 +73,7 @@ namespace TianGongCadSuite {
             var sketch = Ui.Card("排孔示意", 0, "改了数字马上重画");
             sketch.Fill = true; sketch.Padding = Ui.SPad(10, 38, 10, 10);
             var canvas = new Panel { Dock = DockStyle.Fill, BackColor = Ui.Rail };
+            Ui.EnableDoubleBuffer(canvas);
             canvas.Paint += DrawPreview;
             canvas.Resize += (s, e) => canvas.Invalidate();
             sketch.Controls.Add(canvas);
@@ -114,6 +115,7 @@ namespace TianGongCadSuite {
             var big = Ui.Card("排孔示意", 0, "");
             big.Fill = true; big.Padding = Ui.SPad(10, 38, 10, 10);
             var canvas2 = new Panel { Dock = DockStyle.Fill, BackColor = Ui.Rail };
+            Ui.EnableDoubleBuffer(canvas2);
             canvas2.Paint += DrawPreview;
             canvas2.Resize += (s, e) => canvas2.Invalidate();
             big.Controls.Add(canvas2);
@@ -152,7 +154,7 @@ namespace TianGongCadSuite {
             shell.RailBottom = presetCard;
 
             // ---- 底部操作栏 ----
-            var more = new ContextMenuStrip { ShowImageMargin = false, Font = Ui.F9 };
+            var more = moreMenu = new ContextMenuStrip { ShowImageMargin = false, Font = Ui.F9 };
             var miEdit = more.Items.Add("改孔型…（刚排的这批孔整组换孔型）");
             var miUndo = more.Items.Add("撤销本次打孔");
             miEdit.Click += (s, e) => OpenEdit();
@@ -181,13 +183,32 @@ namespace TianGongCadSuite {
 
         void UpdatePrimary(){
             int cur = shell.Current;
-            backButton.Enabled = cur > 0 && !busy;
+            bool wantBack = cur > 0 && !busy;
+            if (backButton.Enabled != wantBack) backButton.Enabled = wantBack;
             bool canRun = run.Enabled;
             bool showRun = busy || canRun || cur >= PagePreview;
-            run.Visible = showRun; nextButton.Visible = !showRun;
-            if (!busy) { run.Text = canRun ? "开始打孔 " + lastHoles + " 个孔" : "开始打孔"; Ui.FitButton(run); }
-            if (!showRun) { nextButton.Text = "下一步：" + shell.Pages[Math.Min(cur + 1, shell.Pages.Count - 1)].Title; Ui.FitButton(nextButton); }
-            shell.Footer.PerformLayout();
+            bool layoutDirty = false;
+            if (run.Visible != showRun) { run.Visible = showRun; layoutDirty = true; }
+            if (nextButton.Visible != !showRun) { nextButton.Visible = !showRun; layoutDirty = true; }
+            if (!busy) {
+                string wantRunText = canRun ? "开始打孔 " + lastHoles + " 个孔" : "开始打孔";
+                if (run.Text != wantRunText) {
+                    int oldW = run.Width;
+                    run.Text = wantRunText;
+                    Ui.FitButton(run);
+                    if (run.Width != oldW) layoutDirty = true;
+                }
+            }
+            if (!showRun) {
+                string wantNextText = "下一步：" + shell.Pages[Math.Min(cur + 1, shell.Pages.Count - 1)].Title;
+                if (nextButton.Text != wantNextText) {
+                    int oldW = nextButton.Width;
+                    nextButton.Text = wantNextText;
+                    Ui.FitButton(nextButton);
+                    if (nextButton.Width != oldW) layoutDirty = true;
+                }
+            }
+            if (layoutDirty) shell.Footer.PerformLayout();
         }
 
         void RefreshRail(bool ok, int holes, string problem){
@@ -200,8 +221,9 @@ namespace TianGongCadSuite {
             string sp = SlotMode ? "腰孔 " + Num((double)slotLen.Value) + "×" + Num((double)slotWidth.Value) : ShortName(HoleSpecNow());
             shell.Rail.Set(PageSpec, problem.Length > 0 ? "规格有问题，打不了" : sp, problem.Length == 0, problem.Length > 0);
             shell.Rail.Set(PagePreview, ok ? "将打 " + holes + " 个孔" : (drilledOnce ? "已打完一批" : "确认后一次打完"), drilledOnce && !ok, false);
-            faceEmpty.Visible = target == null;
-            if (faceCardD != null) faceCardD.Visible = target != null;
+            bool wantEmpty = target == null;
+            if (faceEmpty.Visible != wantEmpty) faceEmpty.Visible = wantEmpty;
+            if (faceCardD != null && faceCardD.Visible != !wantEmpty) faceCardD.Visible = !wantEmpty;
             lastHoles = holes;
             UpdatePrimary();
         }
@@ -313,24 +335,36 @@ namespace TianGongCadSuite {
         }
 
         void WireEvents(){
-            modeSeg.SelectedIndexChanged += (s, e) => { if (!loading) { ConfigureFilter(); RefreshPreview(); } };
-            latMode.SelectedIndexChanged += (s, e) => { if (!loading) RefreshPreview(); };
+            modeSeg.SelectedIndexChanged += (s, e) => { if (!loading) { ConfigureFilter(); RefreshPreview(false); } };
+            latMode.SelectedIndexChanged += (s, e) => { if (!loading) RefreshPreview(false); };
             kindSeg.SelectedIndexChanged += (s, e) => { if (!loading) ApplySize(); };
             sizeBox.SelectedIndexChanged += (s, e) => { if (!loading) ApplySize(); };
-            foreach (var n in new NumericUpDown[]{ count, pitch, edge, endEdge, lateral, startAngle, diaNum, depthNum, threadNum, slotLen, slotWidth })
-                n.ValueChanged += (s, e) => { if (!loading) RefreshPreview(); };
-            // 两端相同：末端跟着起端走（勾掉时末端从起端当前值开始改）
-            edge.ValueChanged += (s, e) => { if (sameEdge.Checked && endEdge.Value != edge.Value) endEdge.Value = Ui.Clamp(edge.Value, endEdge.Minimum, endEdge.Maximum); };
+            foreach (var n in new NumericUpDown[]{ count, pitch, endEdge, lateral, startAngle, diaNum, depthNum, threadNum, slotLen, slotWidth })
+                n.ValueChanged += (s, e) => { if (!loading) RefreshPreview(false); };
+            // 两端相同：末端跟着起端走，且屏蔽重入避免一次调整触发两次 RefreshPreview
+            edge.ValueChanged += (s, e) => {
+                if (loading) return;
+                if (sameEdge.Checked && endEdge.Value != edge.Value) {
+                    loading = true;
+                    try { endEdge.Value = Ui.Clamp(edge.Value, endEdge.Minimum, endEdge.Maximum); }
+                    finally { loading = false; }
+                }
+                RefreshPreview(false);
+            };
             sameEdge.CheckedChanged += (s, e) => {
-                if (sameEdge.Checked) endEdge.Value = Ui.Clamp(edge.Value, endEdge.Minimum, endEdge.Maximum);
-                if (!loading) RefreshPreview();
+                if (sameEdge.Checked && endEdge.Value != edge.Value) {
+                    bool was = loading; loading = true;
+                    try { endEdge.Value = Ui.Clamp(edge.Value, endEdge.Minimum, endEdge.Maximum); }
+                    finally { loading = was; }
+                }
+                if (!loading) RefreshPreview(false);
             };
             foreach (var rb in new[]{ throughRadio, blindRadio, threadFullRadio, threadPartRadio }) {
                 var r = rb;
-                r.CheckedChanged += (s, e) => { if (!loading && r.Checked) RefreshPreview(); };
+                r.CheckedChanged += (s, e) => { if (!loading && r.Checked) RefreshPreview(false); };
             }
-            slotCheck.CheckedChanged += (s, e) => { if (!loading) RefreshPreview(); };
-            asPattern.CheckedChanged += (s, e) => { if (!loading) RefreshPreview(); };
+            slotCheck.CheckedChanged += (s, e) => { if (!loading) RefreshPreview(false); };
+            asPattern.CheckedChanged += (s, e) => { if (!loading) RefreshPreview(false); };
         }
 
         HoleKind KindNow { get { return (HoleKind)Math.Max(0, kindSeg.SelectedIndex); } }
@@ -349,7 +383,7 @@ namespace TianGongCadSuite {
                 diaNum.Value = Ui.Clamp((decimal)Math.Round(sp.HoleDiameter, 3), diaNum.Minimum, diaNum.Maximum);
                 if (!threadPartRadio.Checked) threadNum.Value = Ui.Clamp((decimal)sp.ThreadDepth, threadNum.Minimum, threadNum.Maximum);
             } finally { loading = false; }
-            RefreshPreview();
+            RefreshPreview(false);
         }
 
         HolePatternKind Kind { get { return modeSeg.SelectedIndex == 2 ? HolePatternKind.Circular : (modeSeg.SelectedIndex == 1 ? HolePatternKind.Pitch : HolePatternKind.Divide); } }

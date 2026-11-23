@@ -31,11 +31,11 @@ namespace TianGongCadSuite {
         internal int PreviewDrawCount {get{return preview==null?0:preview.DrawCount;}}
         public PanelForm(F.Application app,A.AssemblyDocument assembly){
             this.app=app;this.assembly=assembly;
-            Text=Product.Title("生成矩形板");ClientSize=new Size(390,600);Font=new Font("Microsoft YaHei UI",9);FormBorderStyle=FormBorderStyle.SizableToolWindow;MinimumSize=new Size(406,639);MaximizeBox=false;MinimizeBox=false;ShowInTaskbar=false;StartPosition=FormStartPosition.Manual;Location=new Point(Screen.PrimaryScreen.WorkingArea.Left+12,Screen.PrimaryScreen.WorkingArea.Top+150);
+            Text=Product.Title("生成矩形板");ClientSize=new Size(390,600);Font=Ui.F9;FormBorderStyle=FormBorderStyle.SizableToolWindow;MinimumSize=new Size(406,639);MaximizeBox=false;MinimizeBox=false;ShowInTaskbar=false;StartPosition=FormStartPosition.Manual;Location=new Point(Screen.PrimaryScreen.WorkingArea.Left+12,Screen.PrimaryScreen.WorkingArea.Top+150);
             var split=new TableLayoutPanel{Dock=DockStyle.Fill,ColumnCount=2,RowCount=1};split.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,390));split.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));Controls.Add(split);
             preview=new Preview();split.Controls.Add(preview,1,0);
             var layout=new TableLayoutPanel{Dock=DockStyle.Fill,Padding=new Padding(16),ColumnCount=2,RowCount=11};layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,112));layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));split.Controls.Add(layout,0,0);
-            prompt.AutoSize=false;prompt.Dock=DockStyle.Fill;prompt.Font=new Font(Font,FontStyle.Bold);layout.Controls.Add(prompt,0,0);layout.SetColumnSpan(prompt,2);layout.RowStyles.Add(new RowStyle(SizeType.Absolute,52));
+            prompt.AutoSize=false;prompt.Dock=DockStyle.Fill;prompt.Font=Ui.F9B;layout.Controls.Add(prompt,0,0);layout.SetColumnSpan(prompt,2);layout.RowStyles.Add(new RowStyle(SizeType.Absolute,52));
             picked.Dock=DockStyle.Fill;layout.Controls.Add(picked,0,1);layout.SetColumnSpan(picked,2);layout.RowStyles.Add(new RowStyle(SizeType.Absolute,116));
             var undo=new Button{Text="撤回上次选择",Dock=DockStyle.Fill};undo.Click+=(s,e)=>UndoPick();layout.Controls.Add(undo,0,2);
             var reset=new Button{Text="重新选择",Dock=DockStyle.Fill};reset.Click+=(s,e)=>{faces.Clear();point=null;Changed();};layout.Controls.Add(reset,1,2);layout.RowStyles.Add(new RowStyle(SizeType.Absolute,36));
@@ -114,13 +114,15 @@ namespace TianGongCadSuite {
         void Cleanup(){if(closing)return;closing=true;if(highlights!=null){try{highlights.Delete();}catch{}highlights=null;}StopCommand();if(preview!=null){preview.Dispose();preview=null;}faces.Clear();point=null;}
         public new void MouseClick(short b,short s,double x,double y,double z,object w,int k,object g){if(b==1){if(g==null){message.Text="此处未捕捉到面或边，请移动到实体面内部；可拖动窗口让出模型。";Log.Write("PickMiss","key="+k);return;}AcceptPick(g);}else if(b==2)Close();}
         public new void MouseDown(short b,short s,double x,double y,double z,object w,int k,object g){}public new void MouseUp(short b,short s,double x,double y,double z,object w,int k,object g){}
-        void ClearHover(){hovered=null;if(hoverHighlights!=null)try{hoverHighlights.RemoveAll();hoverHighlights.Draw();}catch(Exception e){Log.Write("HoverClear",e);}hoverStatus.Text="请将鼠标移入模型，悬停查看可选对象。";hoverStatus.ForeColor=SystemColors.ControlText;}
+        void ClearHover(bool draw=true){hovered=null;if(hoverHighlights!=null)try{hoverHighlights.RemoveAll();if(draw)hoverHighlights.Draw();}catch(Exception e){Log.Write("HoverClear",e);}hoverStatus.Text="请将鼠标移入模型，悬停查看可选对象。";hoverStatus.ForeColor=SystemColors.ControlText;}
         public new void MouseMove(short b,short s,double x,double y,double z,object w,int k,object g){
             if(closing||busy)return;
             if(!moveLogged){Log.Write("PickMove","first move; key="+k+", object="+PickGeometry.Describe(g));moveLogged=true;}
-            if(g==null){if(hovered!=null)ClearHover();hoverStatus.Text="当前未捕捉到对象，请指向可见的实体面。";return;}
+            if(g==null){if(hovered!=null)ClearHover(true);hoverStatus.Text="当前未捕捉到对象，请指向可见的实体面。";return;}
             if(ReferenceEquals(hovered,g))return;
-            ClearHover();
+            // 切换悬停对象时只清空旧高亮不急着 Draw，等新对象加上后一次 Draw，减少一半 3D 视口重绘
+            bool hadHover=hovered!=null;
+            ClearHover(false);
             try{
                 var geometry=PickGeometry.Unwrap(g);
                 if(!(g is F.Reference)&&!(g is A.TopologyReference)&&!(faces.Count>=4&&g is A.AsmRefPoint))throw new ArgumentException("请指向装配内零件的面或边。");
@@ -128,7 +130,7 @@ namespace TianGongCadSuite {
                 hovered=g;hoverStatus.Text=faces.Count<4?"可选平面：单击加入（"+faces.Count+" / 4）":"可选定位点 / 边：单击确认";hoverStatus.ForeColor=Color.DarkGreen;
                 if(!hoverLogged){Log.Write("PickHover",PickGeometry.Describe(g));hoverLogged=true;}
                 if(hoverHighlights!=null)try{hoverHighlights.AddItem(g);hoverHighlights.Draw();}catch(Exception e){Log.Write("HoverDraw",e);}
-            }catch(Exception e){hoverStatus.Text=e.Message;}
+            }catch(Exception e){if(hadHover&&hoverHighlights!=null)try{hoverHighlights.Draw();}catch{}hoverStatus.Text=e.Message;}
         }
         public void MouseDblClick(short b,short s,double x,double y,double z,object w,int k,object g){}
         public void MouseDrag(short b,short s,double x,double y,double z,object w,short ds,int k,object g){}

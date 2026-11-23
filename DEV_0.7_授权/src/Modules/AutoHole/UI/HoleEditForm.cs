@@ -38,7 +38,7 @@ namespace TianGongCadSuite {
         HoleEditUndo lastUndo;
         bool busy, closing, loading;
 
-        readonly ListBox list = new ListBox();
+        readonly SmoothListBox list = new SmoothListBox();
         readonly CheckBox wholeGroup = new CheckBox { Text = "整组一起改（推荐：自动打孔、批量排孔打的同规格孔是一个组）", AutoSize = true, Checked = true };
         readonly Segmented kindSeg = new Segmented("通孔", "螺纹孔", "圆柱沉孔", "锥形沉孔");
         readonly ComboBox sizeBox = Ui.Combo(84, HoleMatcher.Table.Select(r => r.Size).ToArray());
@@ -115,11 +115,14 @@ namespace TianGongCadSuite {
             pHoles.Body.Controls.Add(hs);
             hs.Add(new Label { Text = "在模型里点孔口圆边、孔内壁，或点带孔的平面（面上的孔全加进来）。可以连续点。", AutoSize = false, Height = Ui.S(48), ForeColor = Ui.Text2, BackColor = Ui.Bg });
             var frame = new Panel { BackColor = Color.White };
+            Ui.EnableDoubleBuffer(frame);
             list.Dock = DockStyle.Fill; list.BorderStyle = BorderStyle.None; list.IntegralHeight = false; list.Font = Ui.F9;
+            list.BackColor = Color.White;
             list.HorizontalScrollbar = true;
             list.DrawMode = DrawMode.OwnerDrawFixed; list.ItemHeight = Ui.S(44);
+            Ui.EnableDoubleBuffer(list);
             list.DrawItem += DrawHoleItem;
-            list.SelectedIndexChanged += (s, e) => JumpToSelected();
+            list.SelectedIndexChanged += (s, e) => { if (!loading) JumpToSelected(); };
             holeEmpty.Dock = DockStyle.Top;
             frame.Controls.Add(list); frame.Controls.Add(holeEmpty); holeEmpty.BringToFront();
             wholeGroup.Font = Ui.F9; wholeGroup.BackColor = Ui.Bg; wholeGroup.Height = Ui.S(30);
@@ -183,7 +186,7 @@ namespace TianGongCadSuite {
 
         void DrawHoleItem(object sender, DrawItemEventArgs e){
             var g = e.Graphics;
-            using (var w = new SolidBrush(Color.White)) g.FillRectangle(w, e.Bounds);
+            g.FillRectangle(Ui.CachedBrush(Color.White), e.Bounds);
             if (e.Index < 0 || e.Index >= list.Items.Count) return;
             bool sel = (e.State & DrawItemState.Selected) != 0;
             var r = new Rectangle(e.Bounds.X, e.Bounds.Y + Ui.S(2), e.Bounds.Width - 1, e.Bounds.Height - Ui.S(5));
@@ -196,27 +199,39 @@ namespace TianGongCadSuite {
 
         void UpdatePrimary(){
             int cur = shell.Current;
-            backButton.Enabled = cur > 0 && !busy;
+            bool wantBack = cur > 0 && !busy;
+            if (backButton.Enabled != wantBack) backButton.Enabled = wantBack;
             bool showApply = busy || apply.Enabled || cur == PageSpec;
-            apply.Visible = showApply; nextButton.Visible = !showApply;
-            if (!busy) { apply.Text = apply.Enabled && lastN > 0 ? "应用到 " + lastN + " 个孔" : "应用"; Ui.FitButton(apply); }
+            bool layoutDirty = false;
+            if (apply.Visible != showApply) { apply.Visible = showApply; layoutDirty = true; }
+            if (nextButton.Visible != !showApply) { nextButton.Visible = !showApply; layoutDirty = true; }
+            if (!busy) {
+                string wantText = apply.Enabled && lastN > 0 ? "应用到 " + lastN + " 个孔" : "应用";
+                if (apply.Text != wantText) {
+                    int oldW = apply.Width;
+                    apply.Text = wantText;
+                    Ui.FitButton(apply);
+                    if (apply.Width != oldW) layoutDirty = true;
+                }
+            }
             shell.Rail.Set(PageHoles, targets.Count == 0 ? "点孔口圆边或带孔的面" : targets.Count + " 个孔" + (wholeGroup.Checked ? " · 整组一起改" : ""), targets.Count > 0, false);
             string problem = ""; try { problem = SpecNow().SpecProblem; } catch { }
             string name = ""; try { name = HoleNaming.Short(SpecNow()); } catch { }
             shell.Rail.Set(PageSpec, problem.Length > 0 ? "规格有问题" : name, apply.Enabled, problem.Length > 0);
-            holeEmpty.Visible = targets.Count == 0;
-            shell.Footer.PerformLayout();
+            bool wantEmpty = targets.Count == 0;
+            if (holeEmpty.Visible != wantEmpty) holeEmpty.Visible = wantEmpty;
+            if (layoutDirty) shell.Footer.PerformLayout();
         }
 
         void WireEvents(){
             kindSeg.SelectedIndexChanged += (s, e) => { if (!loading) ApplySize(); };
             sizeBox.SelectedIndexChanged += (s, e) => { if (!loading) ApplySize(); };
-            foreach (var n in new[]{ diaNum, depthNum, threadNum }) n.ValueChanged += (s, e) => { if (!loading) RefreshAll(); };
+            foreach (var n in new[]{ diaNum, depthNum, threadNum }) n.ValueChanged += (s, e) => { if (!loading) RefreshAll(false); };
             foreach (var rb in new[]{ throughRadio, blindRadio, threadFullRadio, threadPartRadio }) {
                 var r = rb;
-                r.CheckedChanged += (s, e) => { if (!loading && r.Checked) RefreshAll(); };
+                r.CheckedChanged += (s, e) => { if (!loading && r.Checked) RefreshAll(false); };
             }
-            wholeGroup.CheckedChanged += (s, e) => { if (!loading) RefreshAll(); };
+            wholeGroup.CheckedChanged += (s, e) => { if (!loading) RefreshAll(false); };
         }
 
         HoleKind KindNow { get { return (HoleKind)Math.Max(0, kindSeg.SelectedIndex); } }
@@ -235,7 +250,7 @@ namespace TianGongCadSuite {
                 diaNum.Value = Ui.Clamp((decimal)Math.Round(sp.HoleDiameter, 3), diaNum.Minimum, diaNum.Maximum);
                 if (!threadPartRadio.Checked) threadNum.Value = Ui.Clamp((decimal)sp.ThreadDepth, threadNum.Minimum, threadNum.Maximum);
             } finally { loading = false; }
-            RefreshAll();
+            RefreshAll(false);
         }
 
         // 面板 → 规格。沉孔/锥孔尺寸按表，孔径/深度/螺纹深度按手填。
@@ -267,7 +282,7 @@ namespace TianGongCadSuite {
             } finally { loading = false; }
         }
 
-        void RefreshAll(){
+        void RefreshAll(bool picksChanged = true){
             specGrid.Show(threadRow, KindNow == HoleKind.Tapped);
             depthNum.Enabled = blindRadio.Checked;
             threadNum.Enabled = threadPartRadio.Checked;
@@ -276,13 +291,33 @@ namespace TianGongCadSuite {
             stdInfo.Text = HoleStandards.Describe(hs);
             stdInfo.ForeColor = HoleStandards.Resolve(hs) != null ? Ui.Muted : Ui.Warn;
 
-            int sel = list.SelectedIndex;
-            list.BeginUpdate();
-            try {
-                list.Items.Clear();
-                foreach (var t in targets) list.Items.Add(t.Label);
-                if (sel >= 0 && sel < list.Items.Count) list.SelectedIndex = sel;
-            } finally { list.EndUpdate(); }
+            if (picksChanged) {
+                int sel = list.SelectedIndex;
+                bool wasLoading = loading;
+                loading = true;
+                list.BeginUpdate();
+                try {
+                    if (list.Items.Count == targets.Count) {
+                        for (int i = 0; i < targets.Count; i++) {
+                            if (!string.Equals(list.Items[i] as string, targets[i].Label, StringComparison.Ordinal))
+                                list.Items[i] = targets[i].Label;
+                        }
+                    } else {
+                        list.Items.Clear();
+                        if (targets.Count > 0) {
+                            var arr = new object[targets.Count];
+                            for (int i = 0; i < targets.Count; i++) arr[i] = targets[i].Label;
+                            list.Items.AddRange(arr);
+                        }
+                    }
+                    if (sel >= 0 && sel < list.Items.Count && list.SelectedIndex != sel) list.SelectedIndex = sel;
+                    bool wantEmpty = targets.Count == 0;
+                    if (holeEmpty.Visible != wantEmpty) holeEmpty.Visible = wantEmpty;
+                } finally {
+                    list.EndUpdate();
+                    loading = wasLoading;
+                }
+            }
 
             bool ok = false;
             if (targets.Count == 0) { preview.Text = "还没有选孔。"; preview.ForeColor = Ui.Muted; }
@@ -306,7 +341,7 @@ namespace TianGongCadSuite {
             apply.Enabled = ok && !busy;
             undoButton.Enabled = lastUndo != null && !lastUndo.IsEmpty && !busy;
             UpdatePrimary();
-            DrawHighlights();
+            if (picksChanged) DrawHighlights();
         }
 
         void DrawHighlights(){
@@ -333,7 +368,10 @@ namespace TianGongCadSuite {
             CadView.ZoomToHole(app, targets[i].Where, targets[i].DiameterMm);
         }
 
-        void SetStatus(string text, Color color){ status.Text = text; status.ForeColor = color; }
+        void SetStatus(string text, Color color){
+            if (status.Text == text && status.ForeColor == color) return;
+            status.Text = text; status.ForeColor = color;
+        }
 
         // ---- 测试 / 截图用的缝 ----
         public bool SuppressDialogs;
@@ -359,7 +397,7 @@ namespace TianGongCadSuite {
                 if (depthMm > 0) { blindRadio.Checked = true; depthNum.Value = Ui.Clamp((decimal)depthMm, depthNum.Minimum, depthNum.Maximum); }
                 else throughRadio.Checked = true;
             } finally { loading = false; }
-            RefreshAll();
+            RefreshAll(false);
         }
 
         // 「自动打孔 / 批量排孔」带过来的那一批
@@ -484,7 +522,8 @@ namespace TianGongCadSuite {
                 // QuickPick（0.8.5，用户要的）：和天工自己的选择一样，右键 / 停一下会弹出光标下层层叠叠的面、边列表，
                 // 点里面那个被挡住的就选中它（原来 seLocateSimple 只认最前面那层，右键还被拿去关窗口，遮挡面根本选不到）
                 mouse.LocateMode = (int)SolidEdgeConstants.seLocateModes.seLocateQuickPick;
-                mouse.EnabledMove = true;
+                // MouseMove 为空处理函数，关闭以消除三维视口每像素 COM 回调风暴
+                mouse.EnabledMove = false;
                 ((F.ISEMouseEx)mouse).InterDocumentLocate = assembly != null;
                 ((F.ISEMouseEx2)mouse).LocateFrontToBack = true;
                 ((F.ISEMouseEx3)mouse).PathfinderLocate = false;
@@ -501,11 +540,19 @@ namespace TianGongCadSuite {
         public void AcceptPick(object selected){
             if (busy || closing || selected == null) return;
             int before = targets.Count;
-            AcceptPickCore(selected);
-            // 点了新孔：翻回「要改的孔」，新加的几行闪一下
+            bool willFlip = shell.Current != PageHoles;
+            bool frozen = willFlip && Ui.BeginRedrawFreeze(shell);
+            try {
+                AcceptPickCore(selected);
+                // 点了新孔：翻回「要改的孔」，新加的几行轻提示
+                if (targets.Count > before) {
+                    if (shell.Current != PageHoles) shell.Go(PageHoles);
+                }
+            } finally {
+                Ui.EndRedrawFreeze(shell, frozen);
+            }
             if (targets.Count > before) {
                 for (int i = before; i < targets.Count; i++) flash.Mark(targets[i]);
-                shell.Go(PageHoles);
             }
         }
         void AcceptPickCore(object selected){

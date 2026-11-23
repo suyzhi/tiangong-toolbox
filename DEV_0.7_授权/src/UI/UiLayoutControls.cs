@@ -12,15 +12,17 @@ namespace TianGongCadSuite {
     public sealed class VerticalStack : Panel {
         public int Gap = Ui.S(10);
         public VerticalStack(){
-            SetStyle(ControlStyles.ResizeRedraw, true);
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
             BackColor = Ui.Bg;
             AutoScroll = true;
             Padding = Ui.SPad(12, 10, 12, 10);
         }
         protected override void OnLayout(LayoutEventArgs e){
+            // ResumeLayout(false)：严禁在 OnLayout 结尾传 true，否则每次缩放/切页都会同步再触发一遍整棵子树的级联二次布局！
             SuspendLayout();
             try {
                 int w = ClientSize.Width - Padding.Horizontal;
+                if (w < 0) w = 0;
                 var fills = new List<Control>();
                 int used = 0, visible = 0;
                 foreach (Control c in Controls) {
@@ -44,13 +46,16 @@ namespace TianGongCadSuite {
                 int y = Padding.Top;
                 foreach (Control c in Controls) {
                     if (!c.Visible) continue;
-                    int h = (c.Tag as string) == "fill" ? each : c.Height;
+                    int h = (c.Tag as string) == "fill" ? Math.Max(each, c.MinimumSize.Height) : c.Height;
                     var want = new Rectangle(Padding.Left, y, w, h);
                     if (c.Bounds != want) c.Bounds = want;
-                    y += h + Gap;
+                    y += c.Height + Gap;
                 }
-                AutoScrollMinSize = new Size(0, y - Gap + Padding.Bottom);
-            } finally { ResumeLayout(true); }
+                if (AutoScroll) {
+                    var wantMin = new Size(0, Math.Max(0, y - Gap + Padding.Bottom));
+                    if (AutoScrollMinSize != wantMin) AutoScrollMinSize = wantMin;
+                }
+            } finally { ResumeLayout(false); }
         }
         // 加控件：一律清掉 Dock —— 本容器手动排版，Dock 会跟它打架。
         public void Add(Control c, bool fill = false){
@@ -58,8 +63,8 @@ namespace TianGongCadSuite {
             if (fill) c.Tag = "fill";
             Controls.Add(c);
         }
-        // 子控件显示/隐藏后要重新排
-        public void Relayout(){ PerformLayout(); Invalidate(true); }
+        // 子控件显示/隐藏后要重新排：不再 Invalidate(true) 暴力重绘所有子控件（包括整张 DataGridView）
+        public void Relayout(){ PerformLayout(); Invalidate(); }
     }
 
     // 两列容器：左列固定宽（或按比例），右列吃掉剩下的宽度。
@@ -73,12 +78,12 @@ namespace TianGongCadSuite {
         public SplitColumns(int leftWidth){
             LeftWidth = Ui.S(leftWidth);
             BackColor = Ui.Bg;
-            SetStyle(ControlStyles.ResizeRedraw, true);
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
         }
         public SplitColumns(float leftFraction){
             LeftFraction = leftFraction;
             BackColor = Ui.Bg;
-            SetStyle(ControlStyles.ResizeRedraw, true);
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
         }
         protected override void OnLayout(LayoutEventArgs e){
             SuspendLayout();
@@ -94,7 +99,7 @@ namespace TianGongCadSuite {
                 var wb = new Rectangle(left + Gap, 0, Math.Max(0, ClientSize.Width - left - Gap), ClientSize.Height);
                 if (a.Bounds != wa) a.Bounds = wa;
                 if (b.Bounds != wb) b.Bounds = wb;
-            } finally { ResumeLayout(true); Invalidate(); }
+            } finally { ResumeLayout(false); if (Divider) Invalidate(); }
         }
         public void Add(Control c){
             c.Dock = DockStyle.None;
@@ -104,7 +109,7 @@ namespace TianGongCadSuite {
             base.OnPaint(e);
             if (!Divider || Controls.Count < 2) return;
             int x = Controls[0].Right + Gap / 2;
-            using (var p = new Pen(Ui.Line)) e.Graphics.DrawLine(p, x, 4, x, ClientSize.Height - 4);
+            e.Graphics.DrawLine(Ui.CachedPen(Ui.Line, 1f), x, 4, x, ClientSize.Height - 4);
         }
     }
 
@@ -212,7 +217,10 @@ namespace TianGongCadSuite {
             public bool Shown = true;
         }
         public readonly List<Row> Rows = new List<Row>();
-        public FieldGrid(){ BackColor = Color.White; }
+        public FieldGrid(){
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
+            BackColor = Color.White;
+        }
 
         // 空白占位（控件之间要多空一点时用）
         public static Control Space(int width){ return new Panel { Width = Ui.S(width), Height = 1, BackColor = Color.Transparent }; }
@@ -257,28 +265,33 @@ namespace TianGongCadSuite {
         }
 
         void LayoutRow(Row row){
-            row.Caption.SetBounds(0, 0, LabelWidth, RowHeight);
+            var capRect = new Rectangle(0, 0, LabelWidth, RowHeight);
+            if (row.Caption.Bounds != capRect) row.Caption.Bounds = capRect;
             int x = LabelWidth;
             Control prev = null;
             foreach (var c in row.Items) {
                 bool unit = (c.Tag as string) == "unit";
                 if (prev != null) x += unit ? Ui.S(3) : Gap;
                 var size = c.AutoSize ? c.PreferredSize : c.Size;
-                c.SetBounds(x, Math.Max(0, (RowHeight - size.Height) / 2), size.Width, size.Height);
+                var want = new Rectangle(x, Math.Max(0, (RowHeight - size.Height) / 2), size.Width, size.Height);
+                if (c.Bounds != want) c.Bounds = want;
                 x += size.Width;
                 prev = c;
             }
         }
 
         protected override void OnLayout(LayoutEventArgs e){
-            base.OnLayout(e);
-            int y = 0, w = ClientSize.Width;
-            foreach (var r in Rows) {
-                if (!r.Shown) continue;
-                r.Host.SetBounds(0, y, w, RowHeight);
-                LayoutRow(r);
-                y += RowHeight;
-            }
+            SuspendLayout();
+            try {
+                int y = 0, w = ClientSize.Width;
+                foreach (var r in Rows) {
+                    if (!r.Shown) continue;
+                    var want = new Rectangle(0, y, w, RowHeight);
+                    if (r.Host.Bounds != want) r.Host.Bounds = want;
+                    LayoutRow(r);
+                    y += RowHeight;
+                }
+            } finally { ResumeLayout(false); }
         }
         protected override void OnBackColorChanged(EventArgs e){
             base.OnBackColorChanged(e);

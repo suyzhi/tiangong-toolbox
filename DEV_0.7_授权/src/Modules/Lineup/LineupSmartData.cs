@@ -156,18 +156,19 @@ namespace TianGongCadSuite {
     public sealed class LineupModelCatalog {
         public const string SeedResource="TianGongCadSuite.Lineup.lineup-models-seed.xml";
         public List<LineupModelEntry> Entries=new List<LineupModelEntry>();
+        static readonly XmlSerializer CatalogSerializer=new XmlSerializer(typeof(LineupModelCatalog));
         public static string UserFile {get{return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"TianGongCadSuite","lineup-models.xml");}}
-        public static LineupModelCatalog Load(string file){if(!File.Exists(file))return new LineupModelCatalog();using(var s=File.OpenRead(file))return (LineupModelCatalog)new XmlSerializer(typeof(LineupModelCatalog)).Deserialize(s);}
+        public static LineupModelCatalog Load(string file){if(!File.Exists(file))return new LineupModelCatalog();using(var s=File.OpenRead(file))return (LineupModelCatalog)CatalogSerializer.Deserialize(s);}
         public static LineupModelCatalog LoadSeed(string diskPath){
             if(!string.IsNullOrEmpty(diskPath)&&File.Exists(diskPath))return Load(diskPath);
             using(var s=typeof(LineupModelCatalog).Assembly.GetManifestResourceStream(SeedResource)){
-                if(s!=null)return (LineupModelCatalog)new XmlSerializer(typeof(LineupModelCatalog)).Deserialize(s);
+                if(s!=null)return (LineupModelCatalog)CatalogSerializer.Deserialize(s);
             }
             return new LineupModelCatalog();
         }
         public void Save(string file){
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(file)));string tmp=file+"."+Guid.NewGuid().ToString("N")+".tmp";
-            try{using(var s=File.Create(tmp))new XmlSerializer(typeof(LineupModelCatalog)).Serialize(s,this);if(File.Exists(file))File.Replace(tmp,file,file+".bak");else File.Move(tmp,file);}finally{if(File.Exists(tmp))File.Delete(tmp);}
+            try{using(var s=File.Create(tmp))CatalogSerializer.Serialize(s,this);if(File.Exists(file))File.Replace(tmp,file,file+".bak");else File.Move(tmp,file);}finally{if(File.Exists(tmp))File.Delete(tmp);}
         }
         static bool Same(string a,string b){return string.Equals((a??"").Trim(),(b??"").Trim(),StringComparison.OrdinalIgnoreCase);}
         static string Norm(string s){

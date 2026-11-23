@@ -26,13 +26,14 @@ namespace TianGongCadSuite {
         readonly NumericUpDown workers=new NumericUpDown();
         readonly FlatButton start=(FlatButton)Ui.Primary("开始转换",220,44);
         readonly Button stop=Ui.Secondary("停止",72,38);
-        readonly Button openOutput=new Button();
         readonly Button saveReport=Ui.Secondary("导出报告",96,38);
         readonly SlimProgress progress=new SlimProgress();
         readonly Label status=new Label();
         readonly TextBox logBox=new TextBox();
         readonly Timer timer=new Timer();
         readonly Label estimate=new Label();
+        readonly StringBuilder pendingLog=new StringBuilder();
+        bool deferLog;
 
         readonly List<ConvertItem> items=new List<ConvertItem>();
         // 用户加进来的文件 / 文件夹（列表扫描后显示的是扫到的文件，但扫描、转换永远从这里出发）。
@@ -87,6 +88,7 @@ namespace TianGongCadSuite {
             pIn.Body.Controls.Add(inStack);
             var frame=Ui.Card("",0,"");frame.Padding=Ui.SPad(6,8,6,8);
             inputs.Dock=DockStyle.Fill;inputs.SelectionMode=SelectionMode.MultiExtended;inputs.BorderStyle=BorderStyle.None;inputs.IntegralHeight=false;inputs.Font=Ui.F9;inputs.ItemHeight=Ui.S(26);
+            Ui.EnableDoubleBuffer(inputs);
             inputEmpty.Dock=DockStyle.Top;
             frame.Controls.Add(inputs);frame.Controls.Add(inputEmpty);inputEmpty.BringToFront();
             var kinds=new FlowLayoutPanel{ Height=Ui.S(92),BackColor=Ui.Bg,FlowDirection=FlowDirection.LeftToRight,WrapContents=true,Padding=new Padding(0) };
@@ -121,7 +123,6 @@ namespace TianGongCadSuite {
                 openDir.Location=new Point(browse.Right+Ui.S(6),Ui.S(29));
             };
             output.TextChanged+=delegate{ if(!settingOutput)outputAuto=output.Text.Trim().Length==0; RefreshRail(); };
-            openOutput.Visible=false;
             var opts=new FieldGrid{ BackColor=Ui.Bg,LabelWidth=Ui.S(84) };
             mirror.Text="镜像源目录结构（推荐，避免同名覆盖）";mirror.Checked=true;mirror.AutoSize=true;mirror.CheckedChanged+=delegate{ Unscan(); };
             force.Text="覆盖已存在的转换结果";force.AutoSize=true;
@@ -221,7 +222,7 @@ namespace TianGongCadSuite {
             using(var dialog=new OpenFileDialog()){
                 dialog.Multiselect=true;dialog.Filter="CAD 文件|*.sldasm;*.SLDASM;*.sldprt;*.SLDPRT;*.slddrw;*.SLDDRW;*.stp;*.STP;*.step;*.STEP|SolidWorks|*.sldasm;*.SLDASM;*.sldprt;*.SLDPRT;*.slddrw;*.SLDDRW|STEP|*.stp;*.STP;*.step;*.STEP|所有文件|*.*";
                 if(dialog.ShowDialog(this)!=DialogResult.OK)return;
-                foreach(string file in dialog.FileNames)AddSource(file);   // 输出目录（没改过时）和加文件夹一样放「天工格式输出」子文件夹：原来直接输出到源文件旁边，转出来的 .par 和 SolidWorks 原件混在一起
+                AddSources(dialog.FileNames);   // 批量加入只刷新一次列表和侧栏，避免多选文件 O(N²) 卡顿
             }
         }
         void AddFolder(){
@@ -237,24 +238,34 @@ namespace TianGongCadSuite {
             if(timer.Enabled||e.Data==null||!e.Data.GetDataPresent(DataFormats.FileDrop))return;
             var dropped=e.Data.GetData(DataFormats.FileDrop) as string[];
             if(dropped==null||dropped.Length==0)return;
-            int added=0,skipped=0;
+            var accepted=new List<string>(dropped.Length);
+            int skipped=0;
             foreach(string raw in dropped){
                 if(string.IsNullOrEmpty(raw))continue;
-                if(Directory.Exists(raw)){ AddSource(raw); added++; }
-                else if(File.Exists(raw)&&ConvertPlanner.IsSupported(raw)){ AddSource(raw); added++; }
+                if(Directory.Exists(raw))accepted.Add(raw);
+                else if(File.Exists(raw)&&ConvertPlanner.IsSupported(raw))accepted.Add(raw);
                 else skipped++;
             }
-            if(added>0){
+            if(accepted.Count>0){
+                AddSources(accepted);
                 shell.Go(0,false);
                 RefreshRail();
-                status.Text="已拖入 "+added+" 项"+(skipped>0?"（跳过 "+skipped+" 个非 SolidWorks / STEP 文件）":"")+"。";
+                status.Text="已拖入 "+accepted.Count+" 项"+(skipped>0?"（跳过 "+skipped+" 个非 SolidWorks / STEP 文件）":"")+"。";
             }else if(skipped>0){
                 status.Text="拖入的文件里没有 SolidWorks（.sldprt/.sldasm/.slddrw）或 STEP（.stp/.step）文件。";
             }
         }
         void AddSource(string path){
-            if(timer.Enabled)return;
-            if(!sources.Contains(path,StringComparer.OrdinalIgnoreCase))sources.Add(path);
+            AddSources(new[]{ path });
+        }
+        void AddSources(IEnumerable<string> paths){
+            if(timer.Enabled||paths==null)return;
+            var existing=new HashSet<string>(sources,StringComparer.OrdinalIgnoreCase);
+            bool changed=false;
+            foreach(string path in paths){
+                if(!string.IsNullOrEmpty(path)&&existing.Add(path)){ sources.Add(path); changed=true; }
+            }
+            if(!changed)return;
             AutoOutput();
             Unscan();
         }
@@ -294,8 +305,17 @@ namespace TianGongCadSuite {
             inputs.BeginUpdate();
             try{
                 inputs.Items.Clear();
-                if(scanned)foreach(ConvertItem item in items)inputs.Items.Add(item.Source);
-                else foreach(string s in sources)inputs.Items.Add(s);
+                if(scanned){
+                    if(items.Count>0){
+                        var arr=new object[items.Count];
+                        for(int i=0;i<items.Count;i++)arr[i]=items[i].Source;
+                        inputs.Items.AddRange(arr);
+                    }
+                }else if(sources.Count>0){
+                    var arr=new object[sources.Count];
+                    for(int i=0;i<sources.Count;i++)arr[i]=sources[i];
+                    inputs.Items.AddRange(arr);
+                }
             }finally{ inputs.EndUpdate(); }
         }
 
@@ -342,7 +362,7 @@ namespace TianGongCadSuite {
             if(!worker.Join(300)){
                 bool was=Enabled;Enabled=false;Cursor=Cursors.WaitCursor;
                 status.Text="正在扫描文件夹…";status.Refresh();
-                try{ while(!worker.Join(100)){ try{ Application.DoEvents(); }catch{} } }
+                try{ while(!worker.Join(16)){ try{ Application.DoEvents(); }catch{} } }
                 finally{ Enabled=was;Cursor=Cursors.Default; }
             }
             if(scanError!=null){ Log.Write("ConvertScan",scanError); MessageBox.Show(this,"扫描输入失败："+scanError.Message,"天工格式转换"); return; }
@@ -446,7 +466,13 @@ namespace TianGongCadSuite {
         void Poll(){
             bool running=false;
             foreach(Process process in processes){ try{ if(!process.HasExited)running=true; }catch{} }
-            foreach(string statusFile in statusFiles)ReadStatus(statusFile);
+            deferLog=true;
+            try{
+                foreach(string statusFile in statusFiles)ReadStatus(statusFile);
+            }finally{
+                deferLog=false;
+                FlushPendingLog();
+            }
             int done=0,failed=0;double seconds=0;
             foreach(ConvertRow row in rows.Values){ if(row.Status=="ok"){done++;seconds+=row.TotalSeconds;} else if(row.Status=="fail")failed++; }
             progress.Value=Math.Min(progress.Maximum,rows.Count);
@@ -534,7 +560,27 @@ namespace TianGongCadSuite {
         void AppendLog(string message){
             if(InvokeRequired){ BeginInvoke((Action)delegate{ AppendLog(message); });return; }
             if(message==null)return;
-            logBox.AppendText(DateTime.Now.ToString("HH:mm:ss")+"  "+message+Environment.NewLine);
+            string line=DateTime.Now.ToString("HH:mm:ss")+"  "+message+Environment.NewLine;
+            if(deferLog){ pendingLog.Append(line); return; }
+            AppendLogText(line);
+        }
+        void FlushPendingLog(){
+            if(pendingLog.Length==0)return;
+            string chunk=pendingLog.ToString();
+            pendingLog.Length=0;
+            AppendLogText(chunk);
+        }
+        void AppendLogText(string chunk){
+            const int MaxLogChars=65536;
+            if(logBox.TextLength+chunk.Length>MaxLogChars){
+                string full=logBox.Text+chunk;
+                int cut=full.IndexOf('\n',Math.Max(0,full.Length-MaxLogChars/2));
+                logBox.Text=cut>=0?full.Substring(cut+1):full.Substring(Math.Max(0,full.Length-MaxLogChars/2));
+                logBox.SelectionStart=logBox.TextLength;
+                logBox.ScrollToCaret();
+            }else{
+                logBox.AppendText(chunk);
+            }
         }
         protected override void OnFormClosing(FormClosingEventArgs e){
             if(timer.Enabled){
@@ -544,8 +590,15 @@ namespace TianGongCadSuite {
                 foreach(Process process in processes){ try{ if(!process.HasExited)process.Kill(); }catch{} }
                 WorkerChildren.Kill(startedAt,workerCads,cadsBefore,AppendLog);
             }
-            if(jobHandle!=IntPtr.Zero)NativeJob.Close(jobHandle);
+            if(jobHandle!=IntPtr.Zero){ NativeJob.Close(jobHandle); jobHandle=IntPtr.Zero; }
             base.OnFormClosing(e);
+        }
+        protected override void OnFormClosed(FormClosedEventArgs e){
+            timer.Stop();
+            timer.Dispose();
+            foreach(Process process in processes){ try{ process.Dispose(); }catch{} }
+            processes.Clear();
+            base.OnFormClosed(e);
         }
 
         [StructLayout(LayoutKind.Sequential)]

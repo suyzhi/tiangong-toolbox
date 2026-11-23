@@ -16,10 +16,12 @@ namespace TianGongCadSuite {
     public static class Anim {
         sealed class Tween {
             public Control Owner; public string Key;
-            public DateTime Start; public int Ms;
+            public long StartMs; public int Ms;
             public Action<double> Step; public Action Done; public Func<double, double> Ease;
         }
         static readonly List<Tween> live = new List<Tween>();
+        static readonly List<Tween> scratch = new List<Tween>();
+        static readonly System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
         static Timer timer;
         static int setting = -1;   // -1 = 还没读；0 = 关；1 = 开
         public static bool ForceOff;   // 测试 / 截图工具用
@@ -60,47 +62,53 @@ namespace TianGongCadSuite {
             if (!On || ms <= 0 || owner.IsDisposed || !owner.IsHandleCreated || !owner.Visible) {
                 Safe(step, 1); if (done != null) Safe(done); return;
             }
-            live.Add(new Tween { Owner = owner, Key = key, Start = DateTime.Now, Ms = ms, Step = step, Done = done, Ease = ease ?? EaseOut });
-            if (timer == null) { timer = new Timer { Interval = 15 }; timer.Tick += Tick; }
+            live.Add(new Tween { Owner = owner, Key = key, StartMs = clock.ElapsedMilliseconds, Ms = ms, Step = step, Done = done, Ease = ease ?? EaseOut });
+            if (timer == null) { timer = new Timer { Interval = 33 }; timer.Tick += Tick; }
             if (!timer.Enabled) timer.Start();
         }
         public static void Cancel(Control owner, string key){
             for (int i = live.Count - 1; i >= 0; i--) if (live[i].Owner == owner && live[i].Key == key) live.RemoveAt(i);
         }
         public static bool Running(Control owner, string key){
-            foreach (var t in live) if (t.Owner == owner && t.Key == key) return true;
+            for (int i = 0; i < live.Count; i++) if (live[i].Owner == owner && live[i].Key == key) return true;
             return false;
         }
 
         static void Tick(object sender, EventArgs e){
-            var now = DateTime.Now;
-            foreach (var t in live.ToArray()) {
+            long now = clock.ElapsedMilliseconds;
+            scratch.Clear();
+            scratch.AddRange(live);
+            for (int i = 0; i < scratch.Count; i++) {
+                var t = scratch[i];
                 if (!live.Contains(t)) continue;
-                if (t.Owner.IsDisposed) { live.Remove(t); continue; }
-                double p = Math.Min(1, (now - t.Start).TotalMilliseconds / t.Ms);
+                if (t.Owner.IsDisposed || !t.Owner.Visible) { live.Remove(t); continue; }
+                double p = Math.Min(1.0, (now - t.StartMs) / (double)t.Ms);
                 Safe(t.Step, t.Ease(p));
-                if (p >= 1) { live.Remove(t); if (t.Done != null) Safe(t.Done); }
+                if (p >= 1.0) { live.Remove(t); if (t.Done != null) Safe(t.Done); }
             }
-            if (live.Count == 0) timer.Stop();
+            scratch.Clear();
+            if (live.Count == 0 && timer != null) timer.Stop();
         }
         static void Safe(Action<double> a, double v){ try { a(v); } catch (Exception ex) { Log.Write("UiMotion", ex.Message); } }
         static void Safe(Action a){ try { a(); } catch (Exception ex) { Log.Write("UiMotion", ex.Message); } }
     }
 
-    // 列表新增项闪一下：底色从浅靛蓝 800ms 褪成白。自绘列表在画每一项时问 Back(项, 原底色)。
+    // 列表新增项轻提示：底色从浅靛蓝短促平滑褪回原底色（仅控件可见时执行，避免后台定时器无效重绘）。
     public sealed class Flash {
+        const int DurationMs = 320;
+        static readonly System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
         readonly Control owner;
-        readonly Dictionary<object, DateTime> marks = new Dictionary<object, DateTime>();
+        readonly Dictionary<object, long> marks = new Dictionary<object, long>();
         public Flash(Control owner){ this.owner = owner; }
         public void Mark(object item){
-            if (item == null || !Anim.On) return;
-            marks[item] = DateTime.Now;
-            Anim.Run(owner, Anim.FlashMs + 40, t => owner.Invalidate(), () => { marks.Clear(); owner.Invalidate(); }, Anim.Linear, "flash");
+            if (item == null || !Anim.On || owner == null || owner.IsDisposed || !owner.IsHandleCreated || !owner.Visible) return;
+            marks[item] = clock.ElapsedMilliseconds;
+            Anim.Run(owner, DurationMs + 34, t => owner.Invalidate(), () => { marks.Clear(); owner.Invalidate(); }, Anim.Linear, "flash");
         }
         public Color Back(object item, Color normal){
-            DateTime at;
+            long at;
             if (item == null || !marks.TryGetValue(item, out at)) return normal;
-            double t = (DateTime.Now - at).TotalMilliseconds / Anim.FlashMs;
+            double t = (clock.ElapsedMilliseconds - at) / (double)DurationMs;
             if (t >= 1) return normal;
             return Anim.Mix(Ui.AccentRing, normal, Anim.EaseOut(t));
         }

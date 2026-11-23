@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace TianGongCadSuite {
@@ -42,7 +43,13 @@ namespace TianGongCadSuite {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
         }
         // 文字按钮的字色（「清空」用灰字）
-        public void SetFore(Color c){ fore = c; Invalidate(); }
+        public void SetFore(Color c){ if (fore == c) return; fore = c; Invalidate(); }
+        // 原地更新按钮配色：供页签/筛选胶囊原地复用，避免 Controls.Clear() 销毁重建 Win32 句柄
+        public void SetPalette(Color backColor, Color foreColor, Color hoverColor){
+            if (back == backColor && fore == foreColor && hover == hoverColor && press == hoverColor) return;
+            back = backColor; fore = foreColor; hover = hoverColor; press = hoverColor;
+            Invalidate();
+        }
 
         // 0..1 = 进度；负数 = 不显示进度
         public float Progress {
@@ -50,22 +57,18 @@ namespace TianGongCadSuite {
             set {
                 float v = value < 0 ? -1 : Math.Min(1f, value);
                 if (Math.Abs(v - progress) < 0.0001f) return;
-                float from = progress < 0 ? 0 : progress;
-                if (v < 0 || !Anim.On) { progress = v; Invalidate(); return; }
-                Anim.Run(this, 260, t => { progress = from + (v - from) * (float)t; Invalidate(); }, null, Anim.Linear, "progress");
+                progress = v;
+                Invalidate();
             }
         }
 
-        protected override void OnMouseEnter(EventArgs e){ Hover(1); base.OnMouseEnter(e); }
-        protected override void OnMouseLeave(EventArgs e){ down = false; Hover(0); base.OnMouseLeave(e); }
+        // 悬停即时响应（不再启 15ms 定时器在天工主消息循环里连发重绘与 OnIdle 探测）
+        protected override void OnMouseEnter(EventArgs e){ if (hot != 1f) { hot = 1f; Invalidate(); } base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e){ bool ch = down || hot != 0f; down = false; hot = 0f; if (ch) Invalidate(); base.OnMouseLeave(e); }
         protected override void OnMouseDown(MouseEventArgs e){ down = true; Invalidate(); base.OnMouseDown(e); }
         protected override void OnMouseUp(MouseEventArgs e){ down = false; Invalidate(); base.OnMouseUp(e); }
         protected override void OnEnabledChanged(EventArgs e){ Invalidate(); base.OnEnabledChanged(e); }
         protected override void OnTextChanged(EventArgs e){ Invalidate(); base.OnTextChanged(e); }
-        void Hover(float to){
-            float from = hot;
-            Anim.Run(this, Anim.Hover, t => { hot = from + (to - from) * (float)t; Invalidate(); }, null, null, "hover");
-        }
 
         protected override void OnPaint(PaintEventArgs pe){
             var g = pe.Graphics;
@@ -78,19 +81,20 @@ namespace TianGongCadSuite {
                 f = Style == Kind.Primary ? Ui.DisabledText : Ui.Faint;
             } else {
                 Color baseBack = back.IsEmpty ? parentBack : back;
-                b = down ? press : Anim.Mix(baseBack, hover, hot);
+                b = down ? press : (hot >= 0.5f ? hover : baseBack);
                 f = fore;
             }
             if (!b.IsEmpty) Ui.FillRound(g, r, Radius, b);
             if (progress >= 0 && Style == Kind.Primary) {
                 int w = (int)Math.Round(r.Width * progress);
                 if (w > 0) {
-                    var clip = g.Clip;
-                    using (var path = Ui.Rounded(r, Radius)) {
-                        g.SetClip(path, CombineMode.Intersect);
-                        using (var br = new SolidBrush(Ui.AccentPress)) g.FillRectangle(br, 0, 0, w, Height);
-                    }
-                    g.Clip = clip;
+                    var state = g.Save();
+                    try {
+                        using (var path = Ui.Rounded(r, Radius)) {
+                            g.SetClip(path, CombineMode.Intersect);
+                            g.FillRectangle(Ui.CachedBrush(Ui.AccentPress), 0, 0, w, Height);
+                        }
+                    } finally { g.Restore(state); }
                 }
             }
             if (!line.IsEmpty) Ui.DrawRound(g, r, Radius, Enabled ? line : Ui.Line, 1);
@@ -127,10 +131,13 @@ namespace TianGongCadSuite {
             }
         }
         public string SelectedText { get { return selected >= 0 && selected < Items.Count ? Items[selected] : ""; } }
-        // 按文字宽度给每段分宽度：中文"圆柱沉孔"和"通孔"一样宽会很难看
+        int[] cachedEdges;
+        int cachedEdgesWidth = -1, cachedEdgesCount = -1;
+        // 按文字宽度给每段分宽度并缓存边界：避免 OnMouseMove 每像素移动都对全部文本调用 TextRenderer.MeasureText
         int[] Edges(){
+            if (cachedEdges != null && cachedEdgesWidth == Width && cachedEdgesCount == Items.Count) return cachedEdges;
             var e = new int[Items.Count + 1];
-            if (Items.Count == 0) return e;
+            if (Items.Count == 0) { cachedEdges = e; cachedEdgesWidth = Width; cachedEdgesCount = 0; return e; }
             int m = Ui.S(3), pad = Ui.S(22);
             int inner = Math.Max(1, Width - m * 2);
             var w = new int[Items.Count]; int total = 0;
@@ -139,17 +146,17 @@ namespace TianGongCadSuite {
             double x = m;
             for (int i = 0; i < Items.Count; i++) { e[i] = (int)Math.Round(x); x += w[i] * scale; }
             e[Items.Count] = Width - m;
+            cachedEdges = e; cachedEdgesWidth = Width; cachedEdgesCount = Items.Count;
             return e;
         }
         void SlideThumb(int old){
             var e = Edges();
             if (selected < 0 || e.Length <= selected + 1) { Invalidate(); return; }
-            float toX = e[selected], toW = e[selected + 1] - e[selected];
-            if (old < 0 || thumbX < 0 || !IsHandleCreated) { thumbX = toX; thumbW = toW; Invalidate(); return; }
-            float fx = thumbX, fw = thumbW;
-            Anim.Run(this, Anim.Select, t => { thumbX = fx + (toX - fx) * (float)t; thumbW = fw + (toW - fw) * (float)t; Invalidate(); }, null, null, "thumb");
+            thumbX = e[selected];
+            thumbW = e[selected + 1] - e[selected];
+            Invalidate();
         }
-        protected override void OnResize(EventArgs e){ thumbX = -1; base.OnResize(e); }
+        protected override void OnResize(EventArgs e){ thumbX = -1; cachedEdges = null; base.OnResize(e); }
         int HitTest(int x){
             var e = Edges();
             for (int i = 0; i < Items.Count; i++) if (x >= e[i] && x < e[i + 1]) return i;
@@ -286,5 +293,130 @@ namespace TianGongCadSuite {
             if (warn != null) warn("再按一次" + how + "关闭窗口（" + lost + "会丢掉）。");
             return false;
         }
+    }
+
+    // 真正无闪烁的离屏双缓冲 ListBox：
+    // WinForms 原生 ListBox 封装 Win32 LISTBOX，反射开 DoubleBuffered 对其无效，每次 Invalidate / 增删项
+    // 都会触发 WM_ERASEBKGND 整片刷白后再逐条 WM_DRAWITEM，导致选孔/选面列表剧烈白闪。
+    // 这里屏蔽 WM_ERASEBKGND，在 WM_PAINT 中将原生绘制重定向到复用离屏位图，再一次性 BitBlt 上屏，
+    // 100% 保留原生滚动、选中、键盘与自绘行为，同时彻底消除白闪。
+    public class SmoothListBox : ListBox {
+        const int WM_SETREDRAW = 0x000B;
+        const int WM_PAINT = 0x000F;
+        const int WM_ERASEBKGND = 0x0014;
+        const int WM_PRINTCLIENT = 0x0318;
+        const int PRF_CLIENT = 0x00000004;
+        const int SRCCOPY = 0x00CC0020;
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct RECT { public int Left, Top, Right, Bottom; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct PAINTSTRUCT {
+            public IntPtr hdc;
+            public int fErase;
+            public RECT rcPaint;
+            public int fRestore;
+            public int fIncUpdate;
+            public int r0, r1, r2, r3, r4, r5, r6, r7;
+        }
+
+        [DllImport("user32.dll")] static extern IntPtr BeginPaint(IntPtr hWnd, ref PAINTSTRUCT lpPaint);
+        [DllImport("user32.dll")] static extern bool EndPaint(IntPtr hWnd, ref PAINTSTRUCT lpPaint);
+        [DllImport("user32.dll")] static extern int FillRect(IntPtr hDC, ref RECT lprc, IntPtr hbr);
+        [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+        [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr hdc);
+        [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int nWidth, int nHeight);
+        [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr hdc, IntPtr hgdiobj);
+        [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr hObject);
+        [DllImport("gdi32.dll")] static extern IntPtr CreateSolidBrush(int crColor);
+        [DllImport("gdi32.dll")] static extern bool BitBlt(IntPtr hdcDest, int nXDest, int nYDest, int nWidth, int nHeight, IntPtr hdcSrc, int nXSrc, int nYSrc, int dwRop);
+
+        IntPtr memDc, memBmp, oldBmp;
+        int bufW, bufH;
+        bool redrawOff, inPaint;
+
+        void EnsureBuffer(IntPtr screenDc, int w, int h){
+            if (memDc != IntPtr.Zero && memBmp != IntPtr.Zero && bufW == w && bufH == h) return;
+            ReleaseBuffer();
+            memDc = CreateCompatibleDC(screenDc);
+            if (memDc == IntPtr.Zero) return;
+            memBmp = CreateCompatibleBitmap(screenDc, w, h);
+            if (memBmp == IntPtr.Zero) { DeleteDC(memDc); memDc = IntPtr.Zero; return; }
+            oldBmp = SelectObject(memDc, memBmp);
+            bufW = w; bufH = h;
+        }
+
+        void ReleaseBuffer(){
+            if (memDc != IntPtr.Zero) {
+                if (oldBmp != IntPtr.Zero) { SelectObject(memDc, oldBmp); oldBmp = IntPtr.Zero; }
+                DeleteDC(memDc);
+                memDc = IntPtr.Zero;
+            }
+            if (memBmp != IntPtr.Zero) { DeleteObject(memBmp); memBmp = IntPtr.Zero; }
+            bufW = bufH = 0;
+        }
+
+        protected override void WndProc(ref Message m){
+            if (m.Msg == WM_SETREDRAW) {
+                redrawOff = m.WParam == IntPtr.Zero;
+                base.WndProc(ref m);
+                return;
+            }
+            if (m.Msg == WM_ERASEBKGND) {
+                m.Result = (IntPtr)1;
+                return;
+            }
+            if (m.Msg == WM_PRINTCLIENT && !inPaint && m.WParam != IntPtr.Zero) {
+                var cr = ClientRectangle;
+                if (cr.Width > 0 && cr.Height > 0) {
+                    var full = new RECT { Left = 0, Top = 0, Right = cr.Width, Bottom = cr.Height };
+                    IntPtr hbr = CreateSolidBrush(ColorTranslator.ToWin32(BackColor));
+                    if (hbr != IntPtr.Zero) { FillRect(m.WParam, ref full, hbr); DeleteObject(hbr); }
+                }
+                base.WndProc(ref m);
+                return;
+            }
+            if (m.Msg == WM_PAINT && m.WParam == IntPtr.Zero && !redrawOff && !inPaint) {
+                var cr = ClientRectangle;
+                if (cr.Width > 0 && cr.Height > 0) {
+                    var ps = new PAINTSTRUCT();
+                    IntPtr hdc = BeginPaint(Handle, ref ps);
+                    if (hdc != IntPtr.Zero) {
+                        inPaint = true;
+                        try {
+                            EnsureBuffer(hdc, cr.Width, cr.Height);
+                            if (memDc != IntPtr.Zero) {
+                                var full = new RECT { Left = 0, Top = 0, Right = cr.Width, Bottom = cr.Height };
+                                IntPtr hbr = CreateSolidBrush(ColorTranslator.ToWin32(BackColor));
+                                if (hbr != IntPtr.Zero) {
+                                    FillRect(memDc, ref full, hbr);
+                                    DeleteObject(hbr);
+                                }
+                                var pm = Message.Create(Handle, WM_PRINTCLIENT, memDc, (IntPtr)PRF_CLIENT);
+                                base.WndProc(ref pm);
+                                int x = Math.Max(0, ps.rcPaint.Left);
+                                int y = Math.Max(0, ps.rcPaint.Top);
+                                int r = Math.Min(cr.Width, ps.rcPaint.Right);
+                                int b = Math.Min(cr.Height, ps.rcPaint.Bottom);
+                                if (r > x && b > y) BitBlt(hdc, x, y, r - x, b - y, memDc, x, y, SRCCOPY);
+                                else BitBlt(hdc, 0, 0, cr.Width, cr.Height, memDc, 0, 0, SRCCOPY);
+                            } else {
+                                var pm = Message.Create(Handle, WM_PRINTCLIENT, hdc, (IntPtr)PRF_CLIENT);
+                                base.WndProc(ref pm);
+                            }
+                        } finally {
+                            inPaint = false;
+                            EndPaint(Handle, ref ps);
+                        }
+                    }
+                    return;
+                }
+            }
+            base.WndProc(ref m);
+        }
+
+        protected override void OnHandleDestroyed(EventArgs e){ ReleaseBuffer(); base.OnHandleDestroyed(e); }
+        protected override void Dispose(bool disposing){ ReleaseBuffer(); base.Dispose(disposing); }
     }
 }

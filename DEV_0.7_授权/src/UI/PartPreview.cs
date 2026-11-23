@@ -56,9 +56,10 @@ namespace TianGongCadSuite {
         readonly Panel view = new Panel();
         readonly Label hint = new Label();
         readonly PictureBox still = new PictureBox();
-        readonly Timer debounce = new Timer { Interval = 260 };
+        readonly Timer debounce = new Timer { Interval = 320 };
         readonly Timer settle = new Timer { Interval = 120 };
         readonly Timer check = new Timer { Interval = 700 };   // 装配显示后多久读屏判断画没画出来
+        readonly Timer releaseDelay = new Timer { Interval = 120 }; // 避免弹窗/菜单瞬时焦点抖动触发整套截屏+卸载重载
         public SolidEdgeFramework.Application App;            // 兜底自己画时从这里找开着的装配
         MeshView meshView;
         string meshPath = "";                                  // 正在自己画的装配
@@ -69,6 +70,7 @@ namespace TianGongCadSuite {
         string row = "";      // 表里选中的那一行的文件
         string wanted = "";   // 要显示的文件（工程图 / 显示配置已换成同名模型）
         string wantedNote = "";
+        bool wantedResolved;  // 延迟到防抖到期再做 File.Exists 解析，方向键连按不碰加密盘
         string loaded = "";   // 控件里现在打开着的文件
         string lastShown = "";
         int fits;
@@ -108,6 +110,7 @@ namespace TianGongCadSuite {
                 if (string.Equals(Path.GetExtension(loaded), ".asm", StringComparison.OrdinalIgnoreCase)) { check.Stop(); check.Start(); }
             };
             check.Tick += (s, e) => { check.Stop(); CheckDrawn(); };
+            releaseDelay.Tick += (s, e) => { releaseDelay.Stop(); if (inactive && !pinned && !IsDisposed) Release(true); };
             Say("点表里的一行，这里显示它的三维模型");
         }
 
@@ -136,15 +139,24 @@ namespace TianGongCadSuite {
         public void ShowFile(string path){
             string next = path ?? "";
             if (string.Equals(row, next, StringComparison.OrdinalIgnoreCase)) {
-                if (next.Length == 0 || debounce.Enabled || (loaded.Length > 0 && string.Equals(loaded, wanted, StringComparison.OrdinalIgnoreCase))) return;
+                if (next.Length == 0 || debounce.Enabled || (wantedResolved && loaded.Length > 0 && string.Equals(loaded, wanted, StringComparison.OrdinalIgnoreCase))) return;
             }
-            string note;
             row = next;
-            wanted = ModelFor(row, out note);
-            wantedNote = note;
-            title.Text = string.IsNullOrEmpty(next) ? "零件预览" : Path.GetFileName(next) + (note.Length > 0 && wanted.Length > 0 ? "　（" + note + "）" : "");
+            wantedResolved = false;
+            wanted = "";
+            wantedNote = "";
+            title.Text = string.IsNullOrEmpty(next) ? "零件预览" : Path.GetFileName(next);
             if (!Visible) return;
             debounce.Stop(); debounce.Start();
+        }
+
+        void EnsureWantedResolved(){
+            if (wantedResolved) return;
+            wantedResolved = true;
+            string note;
+            wanted = ModelFor(row, out note);
+            wantedNote = note;
+            title.Text = string.IsNullOrEmpty(row) ? "零件预览" : Path.GetFileName(row) + (note.Length > 0 && wanted.Length > 0 ? "　（" + note + "）" : "");
         }
 
         // 批量改名做完：正在显示的文件换成新名字（旧名字的文件已经不在了），视角不变
@@ -152,13 +164,14 @@ namespace TianGongCadSuite {
             string to;
             if (lastShown.Length > 0 && moved.TryGetValue(lastShown, out to)) lastShown = to;
             if (row.Length > 0 && moved.TryGetValue(row, out to)) ShowFile(to);
-            else if (wanted.Length > 0 && moved.TryGetValue(wanted, out to)) { wanted = to; Kick(); }
+            else if (wanted.Length > 0 && moved.TryGetValue(wanted, out to)) { wanted = to; wantedResolved = true; Kick(); }
         }
 
         // 改名 / 写属性期间放开文件（控件占着文件，别的进程改不了名）
         public void Hold(bool on){
             busy = on;
-            if (on) { debounce.Stop(); Release(); } else Kick();
+            releaseDelay.Stop();
+            if (on) { debounce.Stop(); Release(true); } else Kick();
         }
 
         protected override void OnHandleCreated(EventArgs e){
@@ -166,18 +179,23 @@ namespace TianGongCadSuite {
             var f = FindForm();
             if (f != null && f != owner) {
                 owner = f;
-                // 切到天工（或别的窗口）就放开文件：天工里保存 / 另存这个文件时不会被占着
-                f.Deactivate += (s, a) => { if (pinned) return; inactive = true; debounce.Stop(); Release(); };
-                f.Activated += (s, a) => { inactive = false; Kick(); };
-                f.FormClosed += (s, a) => { debounce.Stop(); Release(); };
+                // 切到天工（或别的窗口）就放开文件：延迟 120ms，避免右键菜单/下拉面板瞬时失焦触发整套截屏+卸载重载
+                f.Deactivate += (s, a) => { if (pinned) return; inactive = true; debounce.Stop(); releaseDelay.Stop(); releaseDelay.Start(); };
+                f.Activated += (s, a) => { inactive = false; releaseDelay.Stop(); if (loaded.Length == 0 || !wantedResolved || !string.Equals(loaded, wanted, StringComparison.OrdinalIgnoreCase)) Kick(); };
+                f.FormClosed += (s, a) => { debounce.Stop(); releaseDelay.Stop(); Release(false); };
             }
         }
         protected override void OnVisibleChanged(EventArgs e){
             base.OnVisibleChanged(e);
-            if (!Visible) { debounce.Stop(); Release(); } else Kick();
+            if (!Visible) { debounce.Stop(); releaseDelay.Stop(); Release(false); } else Kick();
         }
         protected override void Dispose(bool disposing){
-            if (disposing) { debounce.Dispose(); settle.Dispose(); check.Dispose(); Release(); if (host != null) { try { host.Dispose(); } catch { } host = null; } }
+            if (disposing) {
+                debounce.Dispose(); settle.Dispose(); check.Dispose(); releaseDelay.Dispose();
+                Release(false);
+                var oldImg = still.Image; still.Image = null; if (oldImg != null) oldImg.Dispose();
+                if (host != null) { try { host.Dispose(); } catch { } host = null; }
+            }
             base.Dispose(disposing);
         }
 
@@ -202,8 +220,9 @@ namespace TianGongCadSuite {
         void Apply(){
             var form = FindForm();
             if (busy || inactive || !Visible || IsDisposed || (form != null && (!form.Visible || form.WindowState == FormWindowState.Minimized))) return;
-            if (wanted.Length == 0) { Release(); Say(wantedNote.Length > 0 ? wantedNote : "点表里的一行，这里显示它的三维模型"); return; }
-            if (!File.Exists(wanted)) { Release(); Say("文件不在了：\r\n" + wanted); return; }
+            EnsureWantedResolved();
+            if (wanted.Length == 0) { Release(false); Say(wantedNote.Length > 0 ? wantedNote : "点表里的一行，这里显示它的三维模型"); return; }
+            if (!File.Exists(wanted)) { Release(false); Say("文件不在了：\r\n" + wanted); return; }
             if (blankAsm.Contains(wanted)) { ShowMesh(wanted); return; }   // 已经知道控件画不出来的装配：直接自己画
             if (!EnsureHost()) return;
             if (string.Equals(loaded, wanted, StringComparison.OrdinalIgnoreCase)) {
@@ -254,28 +273,29 @@ namespace TianGongCadSuite {
             }
         }
 
-        // 放开文件：先截一张当前画面顶着，再让控件关掉文件
-        void Release(){
+        // 放开文件：需要保持视觉占位时先截一张当前画面顶着，关闭/隐藏时直接放开不截屏
+        void Release(bool keepSnapshot = true){
             if (host == null || loaded.Length == 0) return;
-            Bitmap shot = host.Visible ? Snapshot() : null;
-            if (shot != null) { var old = still.Image; still.Image = shot; if (old != null) old.Dispose(); still.Visible = true; still.BringToFront(); hint.Visible = false; }
-            else if (host.Visible) Say("回到这个窗口就接着显示预览");
+            if (keepSnapshot && host.Visible) {
+                Bitmap shot = Snapshot();
+                if (shot != null) { var old = still.Image; still.Image = shot; if (old != null) old.Dispose(); still.Visible = true; still.BringToFront(); hint.Visible = false; }
+                else Say("回到这个窗口就接着显示预览");
+            }
             try { Set(host.Ocx, "Filename", ""); } catch (Exception e) { Log.Write("PartPreview", "release " + e.Message); }
             loaded = "";
             host.Visible = false;
         }
 
-        // 截当前画面：天工进程里 PrintWindow 截三维窗口常常是一片白（独立进程里正常），那就从屏幕上拷；
-        // 都是一种颜色（白 / 被别的窗口挡着）就不要，改显示一句提示
+        // 截当前画面：天工进程内优先 CopyFromScreen（PrintWindow 截三维 ActiveX 几乎恒白，跳过可省一半开销），失败再回退 PrintWindow
         Bitmap Snapshot(){
             if (!host.IsHandleCreated || host.Width <= 0 || host.Height <= 0) return null;
             for (int way = 0; way < 2; way++) {
                 Bitmap bmp = null;
                 try {
-                    bmp = new Bitmap(host.Width, host.Height);
+                    bmp = new Bitmap(host.Width, host.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
                     using (var g = Graphics.FromImage(bmp)) {
-                        if (way == 0) { IntPtr dc = g.GetHdc(); try { PrintWindow(host.Handle, dc, 2); } finally { g.ReleaseHdc(dc); } }
-                        else g.CopyFromScreen(host.PointToScreen(Point.Empty), Point.Empty, host.Size);
+                        if (way == 0) g.CopyFromScreen(host.PointToScreen(Point.Empty), Point.Empty, host.Size);
+                        else { IntPtr dc = g.GetHdc(); try { PrintWindow(host.Handle, dc, 2); } finally { g.ReleaseHdc(dc); } }
                     }
                     if (!Blank(bmp)) return bmp;
                 } catch (Exception e) { Log.Write("PartPreview", "snapshot " + way + " " + e.Message); }
@@ -283,11 +303,30 @@ namespace TianGongCadSuite {
             }
             return null;
         }
+        // 使用 LockBits 一次锁定内存采样，避免 GetPixel 逐像素加锁拖慢 UI 线程
         static bool Blank(Bitmap b){
-            var first = b.GetPixel(b.Width / 2, b.Height / 2);
-            int distinct = 0;
-            for (int y = 1; y < 10; y++) for (int x = 1; x < 10; x++) if (b.GetPixel(b.Width * x / 10, b.Height * y / 10) != first) distinct++;
-            return distinct < 3;
+            if (b.Width < 4 || b.Height < 4) return true;
+            var rect = new Rectangle(0, 0, b.Width, b.Height);
+            var data = b.LockBits(rect, System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            try {
+                int stride = data.Stride;
+                int bytes = Math.Abs(stride) * b.Height;
+                var buf = new byte[bytes];
+                Marshal.Copy(data.Scan0, buf, 0, bytes);
+                int mo = (b.Height / 2) * stride + (b.Width / 2) * 4;
+                byte fb = buf[mo], fg = buf[mo + 1], fr = buf[mo + 2];
+                int distinct = 0;
+                for (int y = 1; y < 10; y++) {
+                    int rowOff = (b.Height * y / 10) * stride;
+                    for (int x = 1; x < 10; x++) {
+                        int off = rowOff + (b.Width * x / 10) * 4;
+                        if (buf[off] != fb || buf[off + 1] != fg || buf[off + 2] != fr) {
+                            if (++distinct >= 3) return false;
+                        }
+                    }
+                }
+                return true;
+            } finally { b.UnlockBits(data); }
         }
 
         // 装配显示后读一次屏：预览区只剩背景渐变（每一行颜色都一样）= 控件没画出来 → 自己画
@@ -296,7 +335,7 @@ namespace TianGongCadSuite {
             string file = loaded;
             bool empty = forceEmpty;
             if (!empty) try {
-                using (var bmp = new Bitmap(host.Width, host.Height)) {
+                using (var bmp = new Bitmap(host.Width, host.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb)) {
                     using (var g = Graphics.FromImage(bmp)) g.CopyFromScreen(host.PointToScreen(Point.Empty), Point.Empty, host.Size);
                     empty = NothingDrawn(bmp);
                 }
@@ -308,16 +347,29 @@ namespace TianGongCadSuite {
         }
         internal static bool NothingDrawn(Bitmap b){
             if (b.Width < 8 || b.Height < 8) return false;
-            int busyRows = 0;
-            for (int y = 2; y < 40; y++) {
-                int py = b.Height * y / 42;
-                var first = b.GetPixel(2, py);
-                for (int x = 1; x < 40; x++) {
-                    var c = b.GetPixel(2 + (b.Width - 5) * x / 40, py);
-                    if (Math.Abs(c.R - first.R) + Math.Abs(c.G - first.G) + Math.Abs(c.B - first.B) > 12) { busyRows++; break; }
+            var rect = new Rectangle(0, 0, b.Width, b.Height);
+            var data = b.LockBits(rect, System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            try {
+                int stride = data.Stride;
+                int bytes = Math.Abs(stride) * b.Height;
+                var buf = new byte[bytes];
+                Marshal.Copy(data.Scan0, buf, 0, bytes);
+                int busyRows = 0;
+                for (int y = 2; y < 40; y++) {
+                    int rowOff = (b.Height * y / 42) * stride;
+                    int fOff = rowOff + 2 * 4;
+                    int fb = buf[fOff], fg = buf[fOff + 1], fr = buf[fOff + 2];
+                    for (int x = 1; x < 40; x++) {
+                        int px = 2 + (b.Width - 5) * x / 40;
+                        int off = rowOff + px * 4;
+                        if (Math.Abs(buf[off + 2] - fr) + Math.Abs(buf[off + 1] - fg) + Math.Abs(buf[off] - fb) > 12) {
+                            if (++busyRows > 1) return false;
+                            break;
+                        }
+                    }
                 }
-            }
-            return busyRows <= 1;
+                return busyRows <= 1;
+            } finally { b.UnlockBits(data); }
         }
 
         // 用天工里开着的装配自己画（不占文件）
@@ -396,7 +448,7 @@ namespace TianGongCadSuite {
                 Func<int, int, IntPtr> at = (x, y) => (IntPtr)((y << 16) | (x & 0xFFFF));
                 SendMessage(host.Handle, 0x0200, (IntPtr)MK_CONTROL, at(cx, cy));   // 先移到起点：没有这一下，新控件的第一次拖动不认
                 SendMessage(host.Handle, 0x0207, (IntPtr)(MK_CONTROL | MK_MBUTTON), at(cx, cy));
-                for (int i = 1; i <= 4; i++) SendMessage(host.Handle, 0x0200, (IntPtr)(MK_CONTROL | MK_MBUTTON), at(cx, cy - 3 * i));
+                SendMessage(host.Handle, 0x0200, (IntPtr)(MK_CONTROL | MK_MBUTTON), at(cx, cy - 12));
                 SendMessage(host.Handle, 0x0208, (IntPtr)MK_CONTROL, at(cx, cy - 12));
             } catch (Exception e) { Log.Write("PartPreview", "margin " + e.Message); }
         }
@@ -424,7 +476,7 @@ namespace TianGongCadSuite {
                 for (int i = 0; i < 3; i++) SendMessage(host.Handle, 0x020A, (IntPtr)((cmd == "zoomin" ? 120 : -120) << 16), (IntPtr)((c.Y << 16) | (c.X & 0xFFFF)));
             } else SetView(cmd);
         }
-        internal void TestDeactivate(){ inactive = true; debounce.Stop(); Release(); }
+        internal void TestDeactivate(){ inactive = true; debounce.Stop(); releaseDelay.Stop(); Release(true); }
         internal string LoadedFile { get { return loaded; } }
         internal void TestShot(string png){
             var f = FindForm();

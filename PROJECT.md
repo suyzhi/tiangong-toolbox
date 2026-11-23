@@ -8,7 +8,7 @@
 
 - 接手先读 [HANDOVER.md](HANDOVER.md)：构建/测试/安装命令、当前状态、要真机确认的清单、踩过的坑、下一步。
 - 各功能的设计与说明：[自动打孔系列](DEV_0.7_授权/AUTO-HOLE.md)、[一键出图](DEV_0.7_授权/DRAWING.md)、[授权](DEV_0.7_授权/LICENSE.md)、
-  [批量格式转换](DEV_0.7_授权/FORMAT-CONVERT.md)、[Lineup](DEV_0.7_授权/README.md)、[tools 目录说明](DEV_0.7_授权/tools/README.md)。
+  [批量格式转换](DEV_0.7_授权/FORMAT-CONVERT.md)、[Lineup 教程](DEV_0.7_授权/LINEUP.md)、[tools 目录说明](DEV_0.7_授权/tools/README.md)。
 - 历史版本交接、实测报告与竞品调研均已归档至 `docs/archive/`（`handover/`、`reports/`、`research/`）。
 
 `DEV_0.2`～`DEV_0.6` 是历史快照：2026-10-14 起不再进 git（旧代码见 tag `archive/dev-0.2-0.6-snapshots`）。

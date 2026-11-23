@@ -48,10 +48,16 @@ namespace TianGongCadSuite {
         readonly Form host;
         readonly Func<bool> isBusy;
         readonly Func<Keys, Action> resolveShortcut;
-        readonly HookProc hookDelegate;
         readonly List<Control> secondaries = new List<Control>();
-        IntPtr hookHandle = IntPtr.Zero;
+        bool registered;
         bool disposed;
+
+        // 全线程共享唯一一个 WH_GETMESSAGE 钩子：多窗口共存时不再叠加 N 层原生→托管回调；
+        // 且入口直接按偏移读取 4 字节 message 字段，99.9% 的 WM_MOUSEMOVE / WM_PAINT / WM_TIMER 零分配瞬时放行。
+        [ThreadStatic] static List<CadKeyShield> threadShields;
+        [ThreadStatic] static IntPtr threadHookHandle;
+        [ThreadStatic] static HookProc threadHookDelegate;
+        [ThreadStatic] static StringBuilder classNameBuf;
 
         // resolveShortcut：仅在非文本编辑控件（或显式注册了 Ctrl+F / Ctrl+H 等导航键）时调用；返回非空 Action 即吞掉按键并异步执行。
         public CadKeyShield(Form hostForm, Func<bool> busyCheck = null, Func<Keys, Action> shortcutResolver = null) {
@@ -59,7 +65,6 @@ namespace TianGongCadSuite {
             host = hostForm;
             isBusy = busyCheck;
             resolveShortcut = shortcutResolver;
-            hookDelegate = OnGetMessage;
 
             host.HandleCreated += OnHostHandleCreated;
             host.HandleDestroyed += OnHostHandleDestroyed;
@@ -82,14 +87,26 @@ namespace TianGongCadSuite {
         void OnHostFormClosed(object sender, FormClosedEventArgs e) { Dispose(); }
 
         void Install() {
-            if (disposed || hookHandle != IntPtr.Zero) return;
-            try { hookHandle = SetWindowsHookEx(WH_GETMESSAGE, hookDelegate, IntPtr.Zero, GetCurrentThreadId()); } catch { }
+            if (disposed || registered) return;
+            if (threadShields == null) threadShields = new List<CadKeyShield>();
+            if (!threadShields.Contains(this)) threadShields.Add(this);
+            registered = true;
+            if (threadHookHandle == IntPtr.Zero) {
+                if (threadHookDelegate == null) threadHookDelegate = OnThreadGetMessage;
+                try { threadHookHandle = SetWindowsHookEx(WH_GETMESSAGE, threadHookDelegate, IntPtr.Zero, GetCurrentThreadId()); } catch { }
+            }
         }
 
         void Uninstall() {
-            if (hookHandle == IntPtr.Zero) return;
-            try { UnhookWindowsHookEx(hookHandle); } catch { }
-            hookHandle = IntPtr.Zero;
+            if (!registered) return;
+            registered = false;
+            if (threadShields != null) {
+                threadShields.Remove(this);
+                if (threadShields.Count == 0 && threadHookHandle != IntPtr.Zero) {
+                    try { UnhookWindowsHookEx(threadHookHandle); } catch { }
+                    threadHookHandle = IntPtr.Zero;
+                }
+            }
         }
 
         public void Dispose() {
@@ -108,9 +125,10 @@ namespace TianGongCadSuite {
             if (hwnd == IntPtr.Zero) return false;
             var ctl = Control.FromHandle(hwnd);
             if (ctl is TextBoxBase) return true;
-            var sb = new StringBuilder(32);
-            if (GetClassName(hwnd, sb, sb.Capacity) > 0) {
-                return string.Equals(sb.ToString(), "EDIT", StringComparison.OrdinalIgnoreCase);
+            if (classNameBuf == null) classNameBuf = new StringBuilder(32);
+            classNameBuf.Length = 0;
+            if (GetClassName(hwnd, classNameBuf, classNameBuf.Capacity) > 0) {
+                return string.Equals(classNameBuf.ToString(), "EDIT", StringComparison.OrdinalIgnoreCase);
             }
             return false;
         }
@@ -126,63 +144,78 @@ namespace TianGongCadSuite {
             return false;
         }
 
-        IntPtr OnGetMessage(int nCode, IntPtr wParam, IntPtr lParam) {
-            try {
-                // wParam == 1 (PM_REMOVE)：只拦截真正从队列取出的按键，避免 PeekMessage(PM_NOREMOVE) 触发两次
-                if (nCode >= 0 && wParam == (IntPtr)1 && !disposed && !host.IsDisposed && host.IsHandleCreated) {
-                    if (isBusy != null && isBusy()) return CallNextHookEx(hookHandle, nCode, wParam, lParam);
-                    var m = (Win32Msg)Marshal.PtrToStructure(lParam, typeof(Win32Msg));
-                    if (m.message == WM_KEYDOWN && m.hwnd != IntPtr.Zero) {
-                        IntPtr fh = host.Handle;
-                        bool inMainForm = m.hwnd == fh || IsChild(fh, m.hwnd);
-                        bool inPopup = !inMainForm && IsInsidePopup(m.hwnd);
-                        if (inMainForm || inPopup) {
-                            bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-                            bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
-                            bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-                            int vk = m.wParam.ToInt32() & 0xFFFF;
-                            bool handled = false;
-
-                            if (!alt) {
-                                if (IsWin32EditControl(m.hwnd)) {
-                                    if (!shift) {
-                                        if (ctrl) {
-                                            if (vk == (int)Keys.C) { PostMessage(m.hwnd, WM_COPY, IntPtr.Zero, IntPtr.Zero); handled = true; }
-                                            else if (vk == (int)Keys.V) { PostMessage(m.hwnd, WM_PASTE, IntPtr.Zero, IntPtr.Zero); handled = true; }
-                                            else if (vk == (int)Keys.X) { PostMessage(m.hwnd, WM_CUT, IntPtr.Zero, IntPtr.Zero); handled = true; }
-                                            else if (vk == (int)Keys.Z) { PostMessage(m.hwnd, EM_UNDO, IntPtr.Zero, IntPtr.Zero); handled = true; }
-                                            else if (vk == (int)Keys.A) { PostMessage(m.hwnd, EM_SETSEL, IntPtr.Zero, (IntPtr)(-1)); handled = true; }
-                                            else if (inMainForm && resolveShortcut != null && (vk == (int)Keys.F || vk == (int)Keys.H)) {
-                                                var act = resolveShortcut(Keys.Control | (Keys)vk);
-                                                if (act != null) { host.BeginInvoke(act); handled = true; }
-                                            }
-                                        } else if (vk == (int)Keys.Delete) {
-                                            IntPtr target = m.hwnd, wp = m.wParam, lp = m.lParam;
-                                            host.BeginInvoke((Action)(() => { if (!host.IsDisposed && IsWindow(target)) SendMessage(target, WM_KEYDOWN, wp, lp); }));
-                                            handled = true;
-                                        }
-                                    }
-                                } else if (inMainForm && resolveShortcut != null) {
-                                    Keys kd = (Keys)vk;
-                                    if (ctrl) kd |= Keys.Control;
-                                    if (shift) kd |= Keys.Shift;
-                                    var act = resolveShortcut(kd);
-                                    if (act != null) {
-                                        host.BeginInvoke(act);
-                                        handled = true;
-                                    }
-                                }
-                            }
-
-                            if (handled) {
-                                m.message = WM_NULL;
-                                Marshal.StructureToPtr(m, lParam, false);
-                            }
+        static IntPtr OnThreadGetMessage(int nCode, IntPtr wParam, IntPtr lParam) {
+            // 极速零分配快路径：仅当 PM_REMOVE 且消息是 WM_KEYDOWN 时才进一步解析，
+            // 鼠标移动 / 绘制 / 定时器等高频消息不装箱、不 PtrToStructure、不触发任何 Win32 API。
+            if (nCode >= 0 && wParam == (IntPtr)1 && lParam != IntPtr.Zero && threadShields != null && threadShields.Count > 0) {
+                uint msg = (uint)Marshal.ReadInt32(lParam, IntPtr.Size);
+                if (msg == WM_KEYDOWN) {
+                    IntPtr hwnd = Marshal.ReadIntPtr(lParam, 0);
+                    if (hwnd != IntPtr.Zero) {
+                        for (int i = threadShields.Count - 1; i >= 0; i--) {
+                            var s = threadShields[i];
+                            if (s.TryHandleKeyDown(hwnd, lParam)) break;
                         }
                     }
                 }
-            } catch { }
-            return CallNextHookEx(hookHandle, nCode, wParam, lParam);
+            }
+            return CallNextHookEx(threadHookHandle, nCode, wParam, lParam);
+        }
+
+        bool TryHandleKeyDown(IntPtr hwnd, IntPtr lParam) {
+            try {
+                if (disposed || host.IsDisposed || !host.IsHandleCreated) return false;
+                IntPtr fh = host.Handle;
+                bool inMainForm = hwnd == fh || IsChild(fh, hwnd);
+                bool inPopup = !inMainForm && IsInsidePopup(hwnd);
+                if (!inMainForm && !inPopup) return false;
+                if (isBusy != null && isBusy()) return true;
+
+                bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+                bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
+                bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                var m = (Win32Msg)Marshal.PtrToStructure(lParam, typeof(Win32Msg));
+                int vk = m.wParam.ToInt32() & 0xFFFF;
+                bool handled = false;
+
+                if (!alt) {
+                    if (IsWin32EditControl(m.hwnd)) {
+                        if (!shift) {
+                            if (ctrl) {
+                                if (vk == (int)Keys.C) { PostMessage(m.hwnd, WM_COPY, IntPtr.Zero, IntPtr.Zero); handled = true; }
+                                else if (vk == (int)Keys.V) { PostMessage(m.hwnd, WM_PASTE, IntPtr.Zero, IntPtr.Zero); handled = true; }
+                                else if (vk == (int)Keys.X) { PostMessage(m.hwnd, WM_CUT, IntPtr.Zero, IntPtr.Zero); handled = true; }
+                                else if (vk == (int)Keys.Z) { PostMessage(m.hwnd, EM_UNDO, IntPtr.Zero, IntPtr.Zero); handled = true; }
+                                else if (vk == (int)Keys.A) { PostMessage(m.hwnd, EM_SETSEL, IntPtr.Zero, (IntPtr)(-1)); handled = true; }
+                                else if (inMainForm && resolveShortcut != null && (vk == (int)Keys.F || vk == (int)Keys.H)) {
+                                    var act = resolveShortcut(Keys.Control | (Keys)vk);
+                                    if (act != null) { host.BeginInvoke(act); handled = true; }
+                                }
+                            } else if (vk == (int)Keys.Delete) {
+                                IntPtr target = m.hwnd, wp = m.wParam, lp = m.lParam;
+                                host.BeginInvoke((Action)(() => { if (!host.IsDisposed && IsWindow(target)) SendMessage(target, WM_KEYDOWN, wp, lp); }));
+                                handled = true;
+                            }
+                        }
+                    } else if (inMainForm && resolveShortcut != null) {
+                        Keys kd = (Keys)vk;
+                        if (ctrl) kd |= Keys.Control;
+                        if (shift) kd |= Keys.Shift;
+                        var act = resolveShortcut(kd);
+                        if (act != null) {
+                            host.BeginInvoke(act);
+                            handled = true;
+                        }
+                    }
+                }
+
+                if (handled) {
+                    Marshal.WriteInt32(lParam, IntPtr.Size, (int)WM_NULL);
+                }
+                return true;
+            } catch {
+                return false;
+            }
         }
     }
 }

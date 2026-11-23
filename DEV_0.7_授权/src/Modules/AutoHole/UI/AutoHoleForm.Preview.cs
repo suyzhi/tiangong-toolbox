@@ -12,38 +12,87 @@ using G=SolidEdgeGeometry;
 namespace TianGongCadSuite {
     public sealed partial class AutoHoleForm {
         // ---------------- 刷新 ----------------
+        string FormatRefCount(){
+            string s = groups.Count == 0 ? "共 0 个孔"
+                : ("共 " + groups.Count + " 组 " + groups.Sum(x => x.Count) + " 个孔");
+            return slots.Count > 0 ? s + " · 腰孔 " + slots.Count : s;
+        }
         void RefreshList(int select){
             loading = true;
+            refList.BeginUpdate();
             try {
-                refList.Items.Clear();
-                foreach (var g in groups) refList.Items.Add(g.Head);
-                if (select >= 0 && select < refList.Items.Count) refList.SelectedIndex = select;
-                refCount.Text = groups.Count == 0 ? "共 0 个孔"
-                    : ("共 " + groups.Count + " 组 " + groups.Sum(x => x.Count) + " 个孔");
-            } finally { loading = false; }
+                if (refList.Items.Count == groups.Count) {
+                    for (int i = 0; i < groups.Count; i++) {
+                        string head = groups[i].Head;
+                        if (!string.Equals(refList.Items[i] as string, head, StringComparison.Ordinal))
+                            refList.Items[i] = head;
+                    }
+                } else {
+                    refList.Items.Clear();
+                    if (groups.Count > 0) {
+                        var arr = new object[groups.Count];
+                        for (int i = 0; i < groups.Count; i++) arr[i] = groups[i].Head;
+                        refList.Items.AddRange(arr);
+                    }
+                }
+                if (select >= 0 && select < refList.Items.Count && refList.SelectedIndex != select)
+                    refList.SelectedIndex = select;
+                bool empty = groups.Count == 0 && slots.Count == 0;
+                if (refEmpty.Visible != empty) refEmpty.Visible = empty;
+                string rc = FormatRefCount();
+                if (refCount.Text != rc) refCount.Text = rc;
+                bool hasSlots = slots.Count > 0;
+                if (delSlots.Enabled != hasSlots) delSlots.Enabled = hasSlots;
+            } finally {
+                refList.EndUpdate();
+                loading = false;
+            }
             RefreshGroupTabs();
             LoadEditor();
         }
 
         RefGroup Selected { get { int i = refList.SelectedIndex; return (i >= 0 && i < groups.Count) ? groups[i] : null; } }
 
-        void RefreshAll(){
-            RefreshFaces();
-            RefreshList(refList.SelectedIndex);
+        void RefreshAll(){ RefreshAll(true, true, int.MinValue); }
+        void RefreshAll(bool refreshFaces, bool refreshRefs, int selectRef){
+            if (refreshFaces) RefreshFaces();
+            if (refreshRefs) RefreshList(selectRef == int.MinValue ? refList.SelectedIndex : selectRef);
             RefreshPreview();
-            refEmpty.Visible = groups.Count == 0 && slots.Count == 0;
-            delSlots.Enabled = slots.Count > 0;
-            faceEmpty.Visible = targets.Count == 0;
+            bool emptyRef = groups.Count == 0 && slots.Count == 0;
+            if (refEmpty.Visible != emptyRef) refEmpty.Visible = emptyRef;
+            bool hasSlots = slots.Count > 0;
+            if (delSlots.Enabled != hasSlots) delSlots.Enabled = hasSlots;
+            bool emptyFace = targets.Count == 0;
+            if (faceEmpty.Visible != emptyFace) faceEmpty.Visible = emptyFace;
         }
 
         void RefreshFaces(){
-            faceList.Items.Clear();
-            foreach (var s in targetLabels) faceList.Items.Add(s);
-            if (faceList.Items.Count > 0 && faceList.SelectedIndex < 0) faceList.SelectedIndex = 0;
-            faceCount.Text = "共 " + targets.Count + " 个面";
+            faceList.BeginUpdate();
+            try {
+                if (faceList.Items.Count == targetLabels.Count) {
+                    for (int i = 0; i < targetLabels.Count; i++) {
+                        if (!string.Equals(faceList.Items[i] as string, targetLabels[i], StringComparison.Ordinal))
+                            faceList.Items[i] = targetLabels[i];
+                    }
+                } else {
+                    faceList.Items.Clear();
+                    if (targetLabels.Count > 0) {
+                        var arr = new object[targetLabels.Count];
+                        for (int i = 0; i < targetLabels.Count; i++) arr[i] = targetLabels[i];
+                        faceList.Items.AddRange(arr);
+                    }
+                }
+                if (faceList.Items.Count > 0 && faceList.SelectedIndex < 0) faceList.SelectedIndex = 0;
+                bool empty = targets.Count == 0;
+                if (faceEmpty.Visible != empty) faceEmpty.Visible = empty;
+                string fc = "共 " + targets.Count + " 个面";
+                if (faceCount.Text != fc) faceCount.Text = fc;
+            } finally {
+                faceList.EndUpdate();
+            }
         }
 
-        void LoadEditor(){
+        void LoadEditor(bool updateViews = true){
             // 选中的那一组优先，没选中就加载草稿 —— 两条路共用同一套加载代码，
             // 免得"有参考孔"和"没参考孔"两种状态下界面长得不一样。
             var g = Selected;
@@ -72,9 +121,11 @@ namespace TianGongCadSuite {
                 chamferSetNum.Value = Ui.Clamp((decimal)Math.Round(sp.ChamferSetback, 2), chamferSetNum.Minimum, chamferSetNum.Maximum);
                 chamferAngNum.Value = Ui.Clamp((decimal)Math.Round(sp.ChamferAngle, 0), chamferAngNum.Minimum, chamferAngNum.Maximum);
             } finally { loading = false; }
-            ShowKindFields();
-            RefreshEditHeader();
-            RefreshShapeViews();
+            if (updateViews) {
+                ShowKindFields();
+                RefreshEditHeader();
+                RefreshShapeViews();
+            }
         }
 
         void ShowKindFields(){
@@ -93,7 +144,8 @@ namespace TianGongCadSuite {
             chamferCheck.Enabled = k != HoleKind.Countersink;
             chamferSetNum.Enabled = chamferAngNum.Enabled = chamferCheck.Enabled && chamferCheck.Checked;
             // 行数变了：网格跟着变高/变矮（下面的行自动顶上来，不留空带）
-            grid.Height = grid.PreferredHeight;
+            int ph = grid.PreferredHeight;
+            if (grid.Height != ph) grid.Height = ph;
         }
 
         // 换孔型 / 换规格都要按标准表重填尺寸。选中了参考孔就改那一组；没选中就改草稿。
@@ -125,7 +177,7 @@ namespace TianGongCadSuite {
         // 有选中的参考孔就写那一组，否则写草稿。
         void CommitSpec(RefGroup g, HoleSpec spec){
             if (g != null && g.Spec != null) g.Spec = spec; else draft = spec;
-            LoadEditor();
+            LoadEditor(false);
             WriteBack();
         }
 
@@ -152,7 +204,7 @@ namespace TianGongCadSuite {
                 fresh.Note = "";
                 if (g != null && g.Spec != null) g.Spec = fresh; else draft = fresh;
             } finally { loading = false; }
-            LoadEditor();
+            LoadEditor(false);
             WriteBack();
         }
 
@@ -166,7 +218,7 @@ namespace TianGongCadSuite {
                 // 勾上"盲孔"以后深度框还是灰的 —— 用户根本填不了深度。
                 ShowKindFields();
                 RefreshEditHeader();
-                RefreshPreview();
+                RefreshPreview(false);
                 RefreshShapeViews();
                 return;
             }
@@ -183,7 +235,7 @@ namespace TianGongCadSuite {
             RefreshGroupTabs();
             ShowKindFields();
             RefreshEditHeader();
-            RefreshPreview();
+            RefreshPreview(false);
             RefreshShapeViews();
         }
 
@@ -207,7 +259,8 @@ namespace TianGongCadSuite {
 
         // ---------------- 预览 ----------------
         // 不打孔，先算一遍：每个参考孔的轴线投到每张面上，落在面内才算一个孔。
-        void RefreshPreview(){
+        // 仅改规格数值时 redrawHighlights=false，避免反复向天工三维视口发 COM Highlight.Draw
+        void RefreshPreview(bool redrawHighlights = true){
             int total = 0, outside = 0, oblique = 0, already = 0, edgeCut = 0, slotHere = 0; double obliqueDeg = 0;
             var perFace = new List<string>();
             var linkElsewhere = new List<string>();   // 要打孔、但零件的链接属于别的装配（挂不了天工关联）的那些装配名
@@ -245,20 +298,24 @@ namespace TianGongCadSuite {
                 if (here > 0 && inst.Length > 0 && !multiUse.Contains(inst)) multiUse.Add(inst);
             }
             int refTotal = groups.Sum(g => g.Count) + slots.Count;
+            string oldChipText = chip.Text, oldLine = previewLine.Text, oldSub = previewSub.Text;
+            Color oldChipColor = chip.ChipColor;
+            string newChipText, newLine, newSub;
+            Color newChipColor;
             if (refTotal == 0) {
-                chip.Text = "等待点孔"; chip.ChipColor = Ui.Muted;
-                previewLine.Text = "① 先在模型上点孔：点圆边、点孔内壁，或直接点一个带孔的面";
-                previewSub.Text = "点一个充满孔的面会把面上的孔全认出来，同孔径的自动归一组；沉孔/锥沉/倒角孔口自动取孔口下面的孔径来配做。";
+                newChipText = "等待点孔"; newChipColor = Ui.Muted;
+                newLine = "① 先在模型上点孔：点圆边、点孔内壁，或直接点一个带孔的面";
+                newSub = "点一个充满孔的面会把面上的孔全认出来，同孔径的自动归一组；沉孔/锥沉/倒角孔口自动取孔口下面的孔径来配做。";
             } else if (targets.Count == 0) {
-                chip.Text = "已选 " + refTotal + " 个孔"; chip.ChipColor = Ui.Accent;
-                previewLine.Text = lastDrilled.Length > 0 ? "② 上一批面已经打完，点下一个要打孔的面接着打" : "② 再点要打孔的面";
-                previewSub.Text = (lastDrilled.Length > 0 ? "已打：" + lastDrilled + "　—　" : "")
+                newChipText = "已选 " + refTotal + " 个孔"; newChipColor = Ui.Accent;
+                newLine = lastDrilled.Length > 0 ? "② 上一批面已经打完，点下一个要打孔的面接着打" : "② 再点要打孔的面";
+                newSub = (lastDrilled.Length > 0 ? "已打：" + lastDrilled + "　—　" : "")
                                   + groups.Count + " 组参考孔：" + string.Join("；", groups.Select(g => g.Head + " → " + g.Target).ToArray())
                                   + (slots.Count > 0 ? "；参考腰孔 " + string.Join("、", slots.Select(x => x.Label).ToArray()) : "")
                                   + (lastScanNote.Length > 0 && lastDrilled.Length == 0 ? "　—　" + lastScanNote : "");
             } else {
-                chip.Text = "将打 " + total + " 个孔"; chip.ChipColor = total > 0 ? Ui.Ok : Ui.Warn;
-                previewLine.Text = total > 0
+                newChipText = "将打 " + total + " 个孔"; newChipColor = total > 0 ? Ui.Ok : Ui.Warn;
+                newLine = total > 0
                     ? string.Join("；", perSpec.Select(n => n + " ×" + specCount[n]).Concat(slotHere > 0 ? new[]{ "腰孔 ×" + slotHere } : new string[0]).ToArray())
                     : already > 0 ? "这些位置本来就都有孔了，不用再打" : "没有孔可以打，请看下面的原因";
                 string s = "打孔面：" + string.Join("；", perFace.ToArray());
@@ -287,15 +344,19 @@ namespace TianGongCadSuite {
                     string tp = g.Spec.SpecProblem;
                     if (tp.Length > 0) { s = "⚠ " + g.Head + "：" + tp + "　" + s; break; }
                 }
-                previewSub.Text = s;
+                newSub = s;
             }
-            tips.SetToolTip(previewSub, previewSub.Text);
-            tips.SetToolTip(previewLine, previewLine.Text);
+            bool chipChanged = oldChipText != newChipText || oldChipColor != newChipColor;
+            if (chipChanged) { chip.Text = newChipText; chip.ChipColor = newChipColor; chip.Invalidate(); }
+            if (oldLine != newLine) { previewLine.Text = newLine; tips.SetToolTip(previewLine, newLine); }
+            if (oldSub != newSub) { previewSub.Text = newSub; tips.SetToolTip(previewSub, newSub); }
             bool specOk = groups.All(g => g.Spec == null || g.Spec.SpecProblem.Length == 0);
-            refCount.Text = refCount.Text.Split('·')[0].TrimEnd() + (slots.Count > 0 ? " · 腰孔 " + slots.Count : "");
-            run.Enabled = total > 0 && !busy && specOk;
+            string wantRefCount = FormatRefCount();
+            if (refCount.Text != wantRefCount) refCount.Text = wantRefCount;
+            bool wantRun = total > 0 && !busy && specOk;
+            if (run.Enabled != wantRun) run.Enabled = wantRun;
             RefreshRail(total, specOk);
-            if (highlights != null) {
+            if (redrawHighlights && highlights != null) {
                 try {
                     highlights.RemoveAll();
                     foreach (var t in targets) { try { highlights.AddItem(t); } catch { } }
@@ -308,7 +369,6 @@ namespace TianGongCadSuite {
                     highlights.Draw();
                 } catch (Exception e) { Log.Write("AutoHoleHighlight", e); }
             }
-            chip.Invalidate();
         }
 
         // 孔口（沉孔/锥孔取外径）一圈上有没有点落在面外（0.8.5）：孔心在面上、孔却切到面边上 —— 多半是点错了面或参考孔对着的是别的零件
@@ -330,6 +390,7 @@ namespace TianGongCadSuite {
         }
 
         void SetStatus(string text, Color color){
+            if (status.Text == text && status.ForeColor == color) return;
             status.Text = text; status.ForeColor = color;
         }
         object SafeActive(){ try { return app.ActiveDocument; } catch { return null; } }

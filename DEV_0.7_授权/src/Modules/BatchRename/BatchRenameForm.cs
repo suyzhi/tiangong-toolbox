@@ -32,6 +32,8 @@ namespace TianGongCadSuite {
         public bool Busy { get { return busy; } }
         public string BusyWhat { get { return "改名"; } }
         readonly Dictionary<string, string[]> folderFiles = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
+        readonly Dictionary<string, HashSet<string>> folderFileSets = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        readonly Timer filterDebounce = new Timer { Interval = 140 };
         readonly System.Diagnostics.Stopwatch pulse = new System.Diagnostics.Stopwatch();
         void Pulse(string text){
             if (pulse.IsRunning && pulse.ElapsedMilliseconds < 200) return;
@@ -74,7 +76,8 @@ namespace TianGongCadSuite {
             shell.Rail.Add("要改名的", "").Dot = Color.FromArgb(0xF5, 0x9E, 0x0B);
             shell.Rail.Add("有问题的", "").Dot = Ui.Bad;
             shell.Rail.SelectedChanged += (s, e) => { stateFilter = shell.Rail.Selected; Rebuild(); };
-            filter.TextChanged += (s, e) => Rebuild();
+            filterDebounce.Tick += (s, e) => { filterDebounce.Stop(); if (!IsDisposed) Rebuild(); };
+            filter.TextChanged += (s, e) => { filterDebounce.Stop(); filterDebounce.Start(); };
             var foot = new Panel { BackColor = Ui.Rail, Height = Ui.S(74) };
             follow.Text = "同文件夹里同名的工程图（.dft）、显示配置（.cfg）跟着改名";
             follow.Checked = true; Choices.Bind(follow, "rename.follow"); follow.AutoSize = false; follow.BackColor = Ui.Rail; follow.Font = Ui.F8;
@@ -125,6 +128,7 @@ namespace TianGongCadSuite {
                 // 填了一表新名字、手一滑点了关闭（或点了功能区别的命令）：原来一声不响全丢
                 if (!quiet && e.CloseReason == CloseReason.UserClosing && !ConfirmDiscard()) e.Cancel = true;
             };
+            FormClosed += (s, e) => { filterDebounce.Stop(); filterDebounce.Dispose(); };
             UpdateStatus();
         }
 
@@ -174,6 +178,11 @@ namespace TianGongCadSuite {
                 Refresh2();
             };
             grid.CellFormatting += OnFormat;
+            grid.CellToolTipTextNeeded += (s, e) => {
+                if (e.RowIndex < 0 || e.RowIndex >= grid.Rows.Count || e.ColumnIndex != 1) return;
+                var r = grid.Rows[e.RowIndex].Tag as RenameRow;
+                if (r != null) e.ToolTipText = r.Path;
+            };
             // 重建表格时（loading）当前格子会自己跳到第一行：不跟着预览（第一行常是总装配，要加载好几秒）；点了哪行才显示哪行
             grid.CurrentCellChanged += (s, e) => { if (!loading) ShowPreview(); };
             grid.CellClick += (s, e) => { if (e.RowIndex >= 0) ShowPreview(); };
@@ -214,7 +223,7 @@ namespace TianGongCadSuite {
             List<string> files;
             try { files = cad.Collect(out source); }
             catch (Exception e) { Log.Write("RenameCollect", e); status.Text = "读当前文档失败：" + e.Message; return; }
-            rows.Clear(); folderFiles.Clear();
+            rows.Clear(); folderFiles.Clear(); folderFileSets.Clear();
             shell.SetTitle(Title, source);
             AddPaths(files);
             cad.Warm(rows.Select(r => r.Path));
@@ -286,7 +295,21 @@ namespace TianGongCadSuite {
             if (folderFiles.TryGetValue(folder, out names)) return names;
             try { names = Directory.GetFiles(folder).Select(Path.GetFileName).ToArray(); } catch { names = new string[0]; }
             folderFiles[folder] = names;
+            folderFileSets[folder] = new HashSet<string>(names, StringComparer.OrdinalIgnoreCase);
             return names;
+        }
+
+        // 用目录缓存判断目标文件是否存在，避免每次敲字/改单元格都触发 N 次加密盘 File.Exists
+        bool FileExistsCached(string path){
+            if (string.IsNullOrEmpty(path)) return false;
+            string dir = Path.GetDirectoryName(path) ?? "";
+            string name = Path.GetFileName(path) ?? "";
+            HashSet<string> set;
+            if (!folderFileSets.TryGetValue(dir, out set)) {
+                Listing(dir);
+                folderFileSets.TryGetValue(dir, out set);
+            }
+            return set != null && set.Contains(name);
         }
 
         void RemoveSelectedRows(){
@@ -386,32 +409,37 @@ namespace TianGongCadSuite {
         // ---------- 表格 ----------
 
         void Rebuild(){
-            RenameRules.Validate(rows, File.Exists);
+            RenameRules.Validate(rows, FileExistsCached);
             loading = true;
             grid.SuspendLayout();
             try {
                 grid.Rows.Clear();
                 string key = filter.Text.Trim();
+                var batch = new List<DataGridViewRow>(rows.Count);
                 foreach (var r in rows) {
                     if (key.Length > 0 && r.FileName.IndexOf(key, StringComparison.OrdinalIgnoreCase) < 0 && r.NewFileName.IndexOf(key, StringComparison.OrdinalIgnoreCase) < 0) continue;
                     if (stateFilter == 1 && !r.Changed) continue;
                     if (stateFilter == 2 && r.Problem.Length == 0) continue;
-                    int at = grid.Rows.Add(r.Kind, r.FileName, r.NewBase, r.Extension, Note(r));
-                    grid.Rows[at].Tag = r;
+                    var row = new DataGridViewRow();
+                    row.CreateCells(grid, r.Kind, r.FileName, r.NewBase, r.Extension, Note(r));
+                    row.Tag = r;
+                    batch.Add(row);
                 }
+                if (batch.Count > 0) grid.Rows.AddRange(batch.ToArray());
             } finally { grid.ResumeLayout(); loading = false; }
             UpdateStatus();
         }
 
         // 改了名字后只刷新格子，不重建（重建会丢掉选区和滚动位置）
         void Refresh2(){
-            RenameRules.Validate(rows, File.Exists);
+            RenameRules.Validate(rows, FileExistsCached);
             loading = true;
             try {
                 foreach (DataGridViewRow g in grid.Rows) {
                     var r = (RenameRow)g.Tag;
-                    g.Cells[ColNew].Value = r.NewBase;
-                    g.Cells[4].Value = Note(r);
+                    if (!object.Equals(g.Cells[ColNew].Value, r.NewBase)) g.Cells[ColNew].Value = r.NewBase;
+                    string note = Note(r);
+                    if (!object.Equals(g.Cells[4].Value, note)) g.Cells[4].Value = note;
                 }
             } finally { loading = false; }
             grid.Invalidate();
@@ -430,8 +458,6 @@ namespace TianGongCadSuite {
             if (e.RowIndex < 0) return;
             var r = grid.Rows[e.RowIndex].Tag as RenameRow;
             if (r == null) return;
-            var cell = grid.Rows[e.RowIndex].Cells[e.ColumnIndex];
-            if (e.ColumnIndex == 1) cell.ToolTipText = r.Path;
             if (r.Master != null && e.ColumnIndex != 4) e.CellStyle.ForeColor = Ui.Muted;
             else if (e.ColumnIndex != ColNew) e.CellStyle.ForeColor = Ui.Text2;
             if (e.ColumnIndex == 4 && r.Problem.Length > 0) e.CellStyle.ForeColor = Ui.Bad;
@@ -490,7 +516,7 @@ namespace TianGongCadSuite {
                 // 预览跟着换到新名字（旧名字的文件已经不在了）
                 preview.Renamed(changed.ToDictionary(r => r.Path, r => r.NewPath, StringComparer.OrdinalIgnoreCase));
                 foreach (var r in changed) { r.Path = r.NewPath; r.Revert(); }
-                folderFiles.Clear();
+                folderFiles.Clear(); folderFileSets.Clear();
                 Rebuild();
                 status.Text = result.Summary() + (result.Warnings.Count > 0 ? "；" + string.Join("；", result.Warnings.ToArray()) : "");
                 status.ForeColor = result.Warnings.Count > 0 ? Ui.Warn : Ui.Ok;

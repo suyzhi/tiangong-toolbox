@@ -10,7 +10,7 @@ namespace TianGongCadSuite {
     public sealed class LineupModule : IToolModule {
         readonly ToolContext context; public LineupModule(ToolContext c){context=c;}
         public string Id {get{return "lineup";}}
-        public IEnumerable<ToolCommand> Commands {get{yield return new ToolCommand(3,"Lineup 模型标记","五类清单、自动编号与零件关联","保存装配 → 选择零件或子装配 → 批量加入 / 绑定清单 → 导出。",context.HasAssembly,()=>{var d=context.RequireAssembly();context.Show(()=>new LineupTableForm(context.Application,d),null);});}}
+        public IEnumerable<ToolCommand> Commands {get{yield return new ToolCommand(3,"Lineup 模型标记","三步完成：整理清单 → 标位置图 → 导出标准 Excel","打开装配即可自动识别器件、点选绑定模型、标注 CAD 位置图并导出 5 页签 Excel。",context.HasAssembly,()=>{var d=context.RequireAssembly();context.Show(()=>new LineupTableForm(context.Application,d),null,f=>{var lf=f as LineupTableForm;return lf!=null&&lf.IsSameAssembly(d);});});}}
         public void Dispose(){}
     }
     public sealed class LineupForm:Form {

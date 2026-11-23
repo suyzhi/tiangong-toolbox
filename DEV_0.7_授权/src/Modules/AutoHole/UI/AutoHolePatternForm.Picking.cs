@@ -28,7 +28,8 @@ namespace TianGongCadSuite {
                 // QuickPick（0.8.5，用户要的）：和天工自己的选择一样，右键 / 停一下会弹出光标下层层叠叠的面、边列表，
                 // 点里面那个被挡住的就选中它（原来 seLocateSimple 只认最前面那层，右键还被拿去关窗口，遮挡面根本选不到）
                 mouse.LocateMode = (int)SolidEdgeConstants.seLocateModes.seLocateQuickPick;
-                mouse.EnabledMove = true;
+                // MouseMove 为空处理函数，关闭以消除三维视口每像素 COM 回调风暴
+                mouse.EnabledMove = false;
                 ((F.ISEMouseEx)mouse).InterDocumentLocate = assembly != null;
                 ((F.ISEMouseEx2)mouse).LocateFrontToBack = true;
                 ((F.ISEMouseEx3)mouse).PathfinderLocate = false;
@@ -67,9 +68,15 @@ namespace TianGongCadSuite {
         public void AcceptPick(object selected){
             if (busy || closing || selected == null) return;
             var before = target;
-            AcceptPickCore(selected);
-            // 点了新的面：翻到「排布」（第一次选面、或换了一张面）
-            if (target != null && !ReferenceEquals(before, target) && shell.Current == PageFace) shell.Go(PageLayout);
+            bool willFlip = shell.Current == PageFace;
+            bool frozen = willFlip && Ui.BeginRedrawFreeze(shell);
+            try {
+                AcceptPickCore(selected);
+                // 点了新的面：翻到「排布」（第一次选面、或换了一张面）；合帧切页避免先闪一帧 faceCardD 再跳页
+                if (target != null && !ReferenceEquals(before, target) && shell.Current == PageFace) shell.Go(PageLayout);
+            } finally {
+                Ui.EndRedrawFreeze(shell, frozen);
+            }
         }
         void AcceptPickCore(object selected){
             try {
@@ -125,7 +132,7 @@ namespace TianGongCadSuite {
         static string Num(double v){ return v.ToString("0.##", CultureInfo.InvariantCulture); }
 
         // ---------------- 预览 ----------------
-        void RefreshPreview(){
+        void RefreshPreview(bool redrawHighlights = true){
             var k = Kind;
             layoutGrid.Show(countRow, k != HolePatternKind.Pitch);
             layoutGrid.Show(pitchRow, k == HolePatternKind.Pitch);
@@ -155,6 +162,7 @@ namespace TianGongCadSuite {
             faceInfo.ForeColor = target == null ? Ui.Muted : Ui.Text;
 
             bool ok = false;
+            int holesN = 0;
             try {
                 string tp = SlotMode ? "" : hs.SpecProblem;
                 if (target == null) { previewText.Text = "选一个面，这里会画出排孔示意。"; previewText.ForeColor = Ui.Muted; }
@@ -162,26 +170,32 @@ namespace TianGongCadSuite {
                 else if (k == HolePatternKind.Circular) {
                     if (!circleReady) { previewText.Text = "圆周均布：再点一条圆形边线（分度圆）。"; previewText.ForeColor = Ui.Warn; }
                     else {
-                        var a = HolePatternSolver.Angles(Spec());
-                        previewText.Text = "在 R" + Num(circleRadiusMm) + " 的分度圆上均布 " + a.Length + " 个孔，起始 " + Num(Spec().StartAngleDeg) + "°，间隔 " + Num(360.0 / Spec().Count) + "°。\r\n"
+                        var sp = Spec();
+                        var a = HolePatternSolver.Angles(sp);
+                        previewText.Text = "在 R" + Num(circleRadiusMm) + " 的分度圆上均布 " + a.Length + " 个孔，起始 " + Num(sp.StartAngleDeg) + "°，间隔 " + Num(360.0 / sp.Count) + "°。\r\n"
                                          + HoleNaming.Short(hs) + "　·　" + (asPattern.Checked ? "种子孔 + 圆周阵列" : "同规格的孔合成一个孔特征");
-                        var outside = Outside(Centres(Spec()));
+                        var cs = Centres(sp);
+                        var outside = Outside(cs);
+                        holesN = cs.Count - outside.Count;
                         if (outside.Count > 0) previewText.Text += "\r\n⚠ 第 " + OutsideText(outside) + " 个孔位落在面外，不会打";
                         previewText.ForeColor = outside.Count > 0 ? Ui.Warn : Ui.Ok; ok = true;
                     }
                 } else {
-                    HolePatternSolver.Offsets(frame.LengthMm, Spec());
-                    string lp = HolePatternSolver.LateralProblem(frame.WidthMm, Spec().LateralMm, HalfWidthMm(hs));
+                    var sp = Spec();
+                    HolePatternSolver.Offsets(frame.LengthMm, sp);
+                    string lp = HolePatternSolver.LateralProblem(frame.WidthMm, sp.LateralMm, HalfWidthMm(hs));
                     if (lp.Length > 0) throw new ArgumentException(lp);
-                    previewText.Text = HolePatternSolver.Describe(frame.LengthMm, Spec())
+                    previewText.Text = HolePatternSolver.Describe(frame.LengthMm, sp)
                                      + (latMode.SelectedIndex == 1 ? "，孔心离方向边 " + Num((double)lateral.Value) + "mm" : "，横向居中") + "\r\n"
                                      + (SlotMode ? "腰孔 " + Num((double)slotLen.Value) + "×" + Num((double)slotWidth.Value) + "（通切）"
                                                  : HoleNaming.Short(hs) + "　·　" + (asPattern.Checked ? "种子孔 + 阵列" : "同规格的孔合成一个孔特征"));
-                    var outside = Outside(Centres(Spec()));
+                    var cs = Centres(sp);
+                    var outside = Outside(cs);
+                    holesN = cs.Count - outside.Count;
                     if (outside.Count > 0) previewText.Text += "\r\n⚠ 第 " + OutsideText(outside) + " 个孔位落在面外（缺口/开窗处），不会打";
                     else {
                         // 孔心在面上、孔口却切到面边（离边太近 / L 形面的内角）：打出来是缺口（0.8.5）
-                        var cut = new List<int>(); var cs = Centres(Spec());
+                        var cut = new List<int>();
                         double mouth = SlotMode ? (double)slotWidth.Value : hs.Kind == HoleKind.Counterbore ? hs.CounterboreDiameter : hs.Kind == HoleKind.Countersink ? hs.CountersinkDiameter : hs.HoleDiameter;
                         for (int i = 0; i < cs.Count; i++) if (FaceFrameReader.CutsEdge(target, cs[i], mouth)) cut.Add(i + 1);
                         if (cut.Count > 0) { previewText.Text += "\r\n⚠ 第 " + OutsideText(cut) + " 个孔的孔口会切到面的边上（打出来是缺口），请调边距 / 横向位置"; outside = cut; }
@@ -189,13 +203,12 @@ namespace TianGongCadSuite {
                     previewText.ForeColor = outside.Count > 0 ? Ui.Warn : Ui.Ok; ok = true;
                 }
             } catch (Exception e) { previewText.Text = e.Message; previewText.ForeColor = Ui.Bad; }
-            tips.SetToolTip(previewText, previewText.Text);
-            run.Enabled = ok && !busy;
-            int holesN = 0;
-            if (ok) { try { var cs = Centres(Spec()); holesN = cs.Count - Outside(cs).Count; } catch { } }
+            if (tips.GetToolTip(previewText) != previewText.Text) tips.SetToolTip(previewText, previewText.Text);
+            bool wantRun = ok && !busy;
+            if (run.Enabled != wantRun) run.Enabled = wantRun;
             string specProblem = ""; try { specProblem = SlotMode ? "" : hs.SpecProblem; } catch { }
             RefreshRail(ok, holesN, specProblem);
-            if (highlights != null) {
+            if (redrawHighlights && highlights != null) {
                 try {
                     highlights.RemoveAll();
                     if (faceSelection != null) highlights.AddItem(faceSelection);
@@ -203,15 +216,18 @@ namespace TianGongCadSuite {
                     highlights.Draw();
                 } catch (Exception e) { Log.Write("AutoHolePatternHighlight", e); }
             }
-            if (previewCanvas != null) previewCanvas.Invalidate();
-            if (previewCanvas2 != null) previewCanvas2.Invalidate();
+            if (previewCanvas != null && previewCanvas.Visible) previewCanvas.Invalidate();
+            if (previewCanvas2 != null && previewCanvas2.Visible) previewCanvas2.Invalidate();
         }
 
-        // 行数变了：网格跟着变高变矮，下面的说明 / 提示顶上来
+        // 行数变了：网格跟着变高变矮，下面的说明 / 提示顶上来（高度未变时不触发无意义 Resize/Layout）
         void FitCards(){
-            layoutGrid.Height = layoutGrid.PreferredHeight;
-            specGrid.Height = specGrid.PreferredHeight;
-            stdInfo.Top = specGrid.PreferredHeight + 6;
+            int lh = layoutGrid.PreferredHeight;
+            if (layoutGrid.Height != lh) layoutGrid.Height = lh;
+            int sh = specGrid.PreferredHeight;
+            if (specGrid.Height != sh) specGrid.Height = sh;
+            int st = sh + 6;
+            if (stdInfo.Top != st) stdInfo.Top = st;
         }
 
         // 排孔示意图：面轮廓 + 每个孔的位置（腰孔画成长圆）。
@@ -286,7 +302,10 @@ namespace TianGongCadSuite {
             }
         }
 
-        void SetStatus(string text, Color color){ status.Text = text; status.ForeColor = color; }
+        void SetStatus(string text, Color color){
+            if (status.Text == text && status.ForeColor == color) return;
+            status.Text = text; status.ForeColor = color;
+        }
         object SafeActive(){ try { return app.ActiveDocument; } catch { return null; } }
     }
 }

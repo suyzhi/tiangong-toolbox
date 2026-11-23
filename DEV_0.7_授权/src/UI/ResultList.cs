@@ -24,11 +24,13 @@ namespace TianGongCadSuite {
 
         public event Action<Item> Locate;
         readonly Label headline = new Label();
-        readonly ListBox list = new ListBox();
+        readonly SmoothListBox list = new SmoothListBox();
         readonly ToolTip tip = new ToolTip { AutoPopDelay = 15000, InitialDelay = 300 };
         int lastTip = -1;
 
         public ResultList(){
+            Ui.EnableDoubleBuffer(this);
+            Ui.EnableDoubleBuffer(list);
             BackColor = Color.White;
             headline.Dock = DockStyle.Top; headline.Height = Ui.S(28); headline.Font = Ui.F9B; headline.AutoEllipsis = true;
             headline.TextAlign = ContentAlignment.MiddleLeft; headline.BackColor = Color.White;
@@ -84,7 +86,7 @@ namespace TianGongCadSuite {
             if (e.Index < 0 || e.Index >= list.Items.Count) return;
             var it = (Item)list.Items[e.Index];
             bool sel = (e.State & DrawItemState.Selected) != 0;
-            using (var b = new SolidBrush(sel ? Ui.ChipBg : Color.White)) e.Graphics.FillRectangle(b, e.Bounds);
+            e.Graphics.FillRectangle(Ui.CachedBrush(sel ? Ui.ChipBg : Color.White), e.Bounds);
             var c = ColorOf(it.Kind);
             int markX = Ui.S(6), markW = Ui.S(18), textX = Ui.S(28);
             TextRenderer.DrawText(e.Graphics, Mark(it.Kind), Ui.F9B, new Rectangle(e.Bounds.X + markX, e.Bounds.Y, markW, e.Bounds.Height), c,

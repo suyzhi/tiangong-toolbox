@@ -12,14 +12,18 @@ namespace TianGongCadSuite {
         PreviewMesh mesh;
         double az, el, zoom = 1, panX, panY;   // 看的方向：方位角（XY 平面里，从 +X 量）、仰角
         Bitmap frame;
-        bool dragging, coarse;
+        Bitmap scratchCoarse;
+        bool dragging, coarse, frameDirty = true;
         Point last;
         float[] zbuf = new float[0];
         int[] pix = new int[0];
+        bool[] edgeBuf = new bool[0];
+        readonly Timer wheelSettle = new Timer { Interval = 120 };
 
         public MeshView(){
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
             BackColor = Color.FromArgb(0xE9, 0xED, 0xF3);
+            wheelSettle.Tick += (s, e) => { wheelSettle.Stop(); if (!dragging && coarse) { coarse = false; Redraw(); } };
             Reset();
         }
 
@@ -38,14 +42,15 @@ namespace TianGongCadSuite {
         }
         public void Fit(){ zoom = 1; panX = panY = 0; Redraw(); }
 
-        void Redraw(){ if (frame != null) { frame.Dispose(); frame = null; } Invalidate(); }
+        void Redraw(){ frameDirty = true; Invalidate(); }
 
         protected override void OnPaint(PaintEventArgs e){
-            if (frame == null || frame.Width != Math.Max(1, ClientSize.Width) || frame.Height != Math.Max(1, ClientSize.Height)) {
-                if (frame != null) frame.Dispose();
-                frame = Render(Math.Max(1, ClientSize.Width), Math.Max(1, ClientSize.Height), coarse ? 2 : 1);
+            int cw = Math.Max(1, ClientSize.Width), ch = Math.Max(1, ClientSize.Height);
+            if (frameDirty || frame == null || frame.Width != cw || frame.Height != ch) {
+                RenderIntoFrame(cw, ch, coarse ? 2 : 1);
+                frameDirty = false;
             }
-            e.Graphics.DrawImageUnscaled(frame, 0, 0);
+            if (frame != null) e.Graphics.DrawImageUnscaled(frame, 0, 0);
         }
 
         // ---------- 鼠标 ----------
@@ -56,18 +61,21 @@ namespace TianGongCadSuite {
                 if ((ModifierKeys & Keys.Shift) != 0) { panX += dx; panY += dy; }
                 else if ((ModifierKeys & Keys.Control) != 0) zoom = Math.Max(0.05, Math.Min(50, zoom * Math.Exp(-dy * 0.01)));
                 else { az -= dx * 0.01; el = Math.Max(-Math.PI / 2, Math.Min(Math.PI / 2, el + dy * 0.01)); }
-                coarse = true; Redraw(); Update();
+                // 用 Invalidate() 让 Windows 自动合并高频 WM_MOUSEMOVE，不再强行同步 Update() 堵死主线程
+                coarse = true; Redraw();
             }
             base.OnMouseMove(e);
         }
         protected override void OnMouseUp(MouseEventArgs e){ if (dragging) { dragging = false; Capture = false; coarse = false; Redraw(); } base.OnMouseUp(e); }
         protected override void OnMouseDoubleClick(MouseEventArgs e){ Reset(); base.OnMouseDoubleClick(e); }
         protected override void OnMouseWheel(MouseEventArgs e){
-            // 以鼠标位置为中心缩放
+            // 以鼠标位置为中心缩放：滚轮连滚时先用半分辨率跟手绘制，停下 120ms 自动出全分辨率清晰帧
             double k = e.Delta > 0 ? 1.25 : 0.8;
             double cx = e.X - Width / 2.0 - panX, cy = e.Y - Height / 2.0 - panY;
             panX -= cx * (k - 1); panY -= cy * (k - 1);
             zoom = Math.Max(0.05, Math.Min(50, zoom * k));
+            coarse = true;
+            wheelSettle.Stop(); wheelSettle.Start();
             Redraw();
             base.OnMouseWheel(e);
         }
@@ -75,26 +83,43 @@ namespace TianGongCadSuite {
         // ---------- 渲染 ----------
         static int Lerp(int a, int b, double t){ return (int)(a + (b - a) * t); }
 
-        Bitmap Render(int w, int h, int step){
+        void RenderIntoFrame(int w, int h, int step){
             int rw = Math.Max(1, w / step), rh = Math.Max(1, h / step);
             int n = rw * rh;
             if (zbuf.Length < n) { zbuf = new float[n]; pix = new int[n]; }
-            // 背景：上浅下深的渐变（和预览控件设的一样）
             for (int y = 0; y < rh; y++) {
                 double t = rh > 1 ? y / (double)(rh - 1) : 0;
                 int c = (0xFF << 24) | (Lerp(0xF2, 0xCC, t) << 16) | (Lerp(0xF5, 0xD6, t) << 8) | Lerp(0xF8, 0xE0, t);
-                for (int x = 0; x < rw; x++) { pix[y * rw + x] = c; zbuf[y * rw + x] = float.MaxValue; }
+                int row = y * rw;
+                for (int x = 0; x < rw; x++) { pix[row + x] = c; zbuf[row + x] = float.MaxValue; }
             }
             if (mesh != null && mesh.Triangles > 0) Raster(rw, rh, step);
-            var bmp = new Bitmap(rw, rh, PixelFormat.Format32bppArgb);
-            var data = bmp.LockBits(new Rectangle(0, 0, rw, rh), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
-            try { for (int y = 0; y < rh; y++) Marshal.Copy(pix, y * rw, data.Scan0 + y * data.Stride, rw); }
-            finally { bmp.UnlockBits(data); }
-            if (step == 1) return bmp;
-            var full = new Bitmap(w, h);
-            using (var g = Graphics.FromImage(full)) { g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Bilinear; g.DrawImage(bmp, 0, 0, w, h); }
-            bmp.Dispose();
-            return full;
+            if (frame == null || frame.Width != w || frame.Height != h) {
+                if (frame != null) frame.Dispose();
+                frame = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+            }
+            if (step == 1) {
+                var data = frame.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+                try { for (int y = 0; y < h; y++) Marshal.Copy(pix, y * w, data.Scan0 + y * data.Stride, w); }
+                finally { frame.UnlockBits(data); }
+                return;
+            }
+            if (scratchCoarse == null || scratchCoarse.Width != rw || scratchCoarse.Height != rh) {
+                if (scratchCoarse != null) scratchCoarse.Dispose();
+                scratchCoarse = new Bitmap(rw, rh, PixelFormat.Format32bppArgb);
+            }
+            var cdata = scratchCoarse.LockBits(new Rectangle(0, 0, rw, rh), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+            try { for (int y = 0; y < rh; y++) Marshal.Copy(pix, y * rw, cdata.Scan0 + y * cdata.Stride, rw); }
+            finally { scratchCoarse.UnlockBits(cdata); }
+            using (var g = Graphics.FromImage(frame)) {
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Bilinear;
+                g.DrawImage(scratchCoarse, 0, 0, w, h);
+            }
+        }
+
+        Bitmap Render(int w, int h, int step){
+            RenderIntoFrame(w, h, step);
+            return (Bitmap)frame.Clone();
         }
 
         void Raster(int rw, int rh, int step){
@@ -165,22 +190,31 @@ namespace TianGongCadSuite {
             }
         }
 
-        // 深度突变处描线：模型轮廓、零件之间的台阶
+        // 深度突变处描线：模型轮廓、零件之间的台阶（复用缓冲，零帧分配）
         void Outline(int rw, int rh, float jump){
-            var edge = new bool[rw * rh];
+            int n = rw * rh;
+            if (edgeBuf.Length < n) edgeBuf = new bool[n];
+            else Array.Clear(edgeBuf, 0, n);
             for (int y = 1; y < rh - 1; y++)
                 for (int x = 1; x < rw - 1; x++) {
                     int k = y * rw + x; float d = zbuf[k];
                     float r = zbuf[k + 1], dn = zbuf[k + rw];
                     bool bgHere = d == float.MaxValue;
                     if (bgHere && r == float.MaxValue && dn == float.MaxValue) continue;
-                    if (bgHere != (r == float.MaxValue) || bgHere != (dn == float.MaxValue)) { edge[k] = true; continue; }
-                    if (!bgHere && (Math.Abs(d - r) > jump || Math.Abs(d - dn) > jump)) edge[k] = true;
+                    if (bgHere != (r == float.MaxValue) || bgHere != (dn == float.MaxValue)) { edgeBuf[k] = true; continue; }
+                    if (!bgHere && (Math.Abs(d - r) > jump || Math.Abs(d - dn) > jump)) edgeBuf[k] = true;
                 }
-            for (int k = 0; k < edge.Length; k++) if (edge[k]) pix[k] = unchecked((int)0xFF2A2E35);
+            for (int k = 0; k < n; k++) if (edgeBuf[k]) pix[k] = unchecked((int)0xFF2A2E35);
         }
 
-        protected override void Dispose(bool disposing){ if (disposing && frame != null) { frame.Dispose(); frame = null; } base.Dispose(disposing); }
+        protected override void Dispose(bool disposing){
+            if (disposing) {
+                wheelSettle.Dispose();
+                if (frame != null) { frame.Dispose(); frame = null; }
+                if (scratchCoarse != null) { scratchCoarse.Dispose(); scratchCoarse = null; }
+            }
+            base.Dispose(disposing);
+        }
 
         // 离屏渲染等轴测 PNG（快速出清单嵌入缩略图用，白底，无需显示控件）
         public static byte[] RenderPng(PreviewMesh m, int w, int h){

@@ -2,7 +2,9 @@
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace TianGongCadSuite {
@@ -63,10 +65,105 @@ namespace TianGongCadSuite {
         public static Padding SPad(int left, int top, int right, int bottom){ return new Padding(S(left), S(top), S(right), S(bottom)); }
 
         static readonly ConditionalWeakTable<object, object> scaledCols = new ConditionalWeakTable<object, object>();
+        static readonly PropertyInfo doubleBufferedProp = typeof(Control).GetProperty("DoubleBuffered", BindingFlags.Instance | BindingFlags.NonPublic);
+        [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+        [DllImport("user32.dll")] static extern bool RedrawWindow(IntPtr hWnd, IntPtr lprcUpdate, IntPtr hrgnUpdate, uint flags);
+        const int WM_SETREDRAW = 0x000B;
+        const uint RDW_INVALIDATE = 0x0001, RDW_ERASE = 0x0004, RDW_ALLCHILDREN = 0x0080;
 
-        // 让 DataGridView 表头不换行截断、行高与列宽随 DPI 放大（可重复调用，不会二次放大同一列）
+        [ThreadStatic] static Dictionary<int, SolidBrush> brushCache;
+        [ThreadStatic] static Dictionary<long, Pen> penCache;
+        [ThreadStatic] static Dictionary<IntPtr, int> redrawDepth;
+
+        // 统一开启双缓冲（DataGridView / ListView / ListBox / Panel 等 WinForms 控件默认关闭，是滚动与重绘白闪的主因）
+        public static void EnableDoubleBuffer(Control c){
+            if (c == null || doubleBufferedProp == null) return;
+            try { doubleBufferedProp.SetValue(c, true, null); } catch { }
+        }
+
+        // 批量切视图/改列可见性/切步骤时暂挂 Win32 重绘，等布局全部改完再一次性合帧绘制，避免逐控件闪烁卡顿。
+        public static bool BeginRedrawFreeze(Control c){
+            if (c == null || c.IsDisposed || !c.IsHandleCreated) return false;
+            if (redrawDepth == null) redrawDepth = new Dictionary<IntPtr, int>();
+            IntPtr h = c.Handle;
+            int d;
+            redrawDepth.TryGetValue(h, out d);
+            redrawDepth[h] = d + 1;
+            if (d == 0) {
+                try { SendMessage(h, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero); } catch { }
+            }
+            return true;
+        }
+        public static void EndRedrawFreeze(Control c){ EndRedrawFreeze(c, true, true); }
+        public static void EndRedrawFreeze(Control c, bool token, bool repaint = true){
+            if (!token || c == null || c.IsDisposed || !c.IsHandleCreated) return;
+            if (redrawDepth == null) return;
+            IntPtr h = c.Handle;
+            int d;
+            if (!redrawDepth.TryGetValue(h, out d)) return;
+            d--;
+            if (d > 0) { redrawDepth[h] = d; return; }
+            redrawDepth.Remove(h);
+            try {
+                SendMessage(h, WM_SETREDRAW, (IntPtr)1, IntPtr.Zero);
+                if (repaint && c.Visible) RedrawWindow(h, IntPtr.Zero, IntPtr.Zero, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+            } catch { }
+        }
+
+        // 安全清空并释放容器内的所有子控件：WinForms 的 Controls.Clear() 不会释放 Win32 HWND，反复重建按钮会永久泄漏句柄并越用越卡。
+        public static void DisposeChildren(Control parent){
+            if (parent == null || parent.Controls.Count == 0) return;
+            var old = new Control[parent.Controls.Count];
+            parent.Controls.CopyTo(old, 0);
+            parent.Controls.Clear();
+            for (int i = 0; i < old.Length; i++) {
+                try { if (old[i] != null && !old[i].IsDisposed) old[i].Dispose(); } catch { }
+            }
+        }
+
+        // 安全清空并释放右键菜单项，防止每次右键重建菜单时泄漏 ToolStripItem 与闭包。
+        public static void DisposeItems(ToolStripItemCollection items){
+            if (items == null || items.Count == 0) return;
+            var old = new ToolStripItem[items.Count];
+            items.CopyTo(old, 0);
+            items.Clear();
+            for (int i = 0; i < old.Length; i++) {
+                try { if (old[i] != null && !old[i].IsDisposed) old[i].Dispose(); } catch { }
+            }
+        }
+
+        internal static SolidBrush CachedBrush(Color c){
+            if (brushCache == null) brushCache = new Dictionary<int, SolidBrush>(32);
+            int key = c.ToArgb();
+            SolidBrush b;
+            if (brushCache.TryGetValue(key, out b)) return b;
+            if (brushCache.Count >= 64) {
+                foreach (var kv in brushCache) try { kv.Value.Dispose(); } catch { }
+                brushCache.Clear();
+            }
+            b = new SolidBrush(c);
+            brushCache[key] = b;
+            return b;
+        }
+        internal static Pen CachedPen(Color c, float width){
+            if (penCache == null) penCache = new Dictionary<long, Pen>(32);
+            int wKey = (int)Math.Round(width * 100f);
+            long key = ((long)(uint)c.ToArgb() << 20) ^ (uint)wKey;
+            Pen p;
+            if (penCache.TryGetValue(key, out p)) return p;
+            if (penCache.Count >= 64) {
+                foreach (var kv in penCache) try { kv.Value.Dispose(); } catch { }
+                penCache.Clear();
+            }
+            p = new Pen(c, width);
+            penCache[key] = p;
+            return p;
+        }
+
+        // 让 DataGridView 表头不换行截断、行高与列宽随 DPI 放大（可重复调用，不会二次放大同一列），并自动开启双缓冲
         public static void FitGrid(DataGridView grid){
             if (grid == null) return;
+            EnableDoubleBuffer(grid);
             grid.ColumnHeadersDefaultCellStyle.WrapMode = DataGridViewTriState.False;
             grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
             grid.ColumnHeadersHeight = Math.Max(S(34), TextRenderer.MeasureText("测", grid.ColumnHeadersDefaultCellStyle.Font ?? F8).Height + S(16));
@@ -87,9 +184,10 @@ namespace TianGongCadSuite {
             }
         }
 
-        // 让 ListView 表头文字随 DPI 不被截成「已有...」（可重复调用）
+        // 让 ListView 表头文字随 DPI 不被截成「已有...」（可重复调用），并自动开启双缓冲
         public static void FitListView(ListView lv){
             if (lv == null) return;
+            EnableDoubleBuffer(lv);
             var f = lv.Font ?? F9;
             foreach (ColumnHeader col in lv.Columns) {
                 int need = TextRenderer.MeasureText(col.Text ?? "", f).Width + S(24);
@@ -120,13 +218,19 @@ namespace TianGongCadSuite {
             return p;
         }
         public static void FillRound(Graphics g, Rectangle r, int radius, Color fill){
+            if (r.Width <= 0 || r.Height <= 0) return;
+            var b = CachedBrush(fill);
+            if (radius <= 0) { g.FillRectangle(b, r); return; }
             var sm = g.SmoothingMode; g.SmoothingMode = SmoothingMode.AntiAlias;
-            using (var path = Rounded(r, radius)) using (var b = new SolidBrush(fill)) g.FillPath(b, path);
+            using (var path = Rounded(r, radius)) g.FillPath(b, path);
             g.SmoothingMode = sm;
         }
         public static void DrawRound(Graphics g, Rectangle r, int radius, Color line, float width){
+            if (r.Width <= 0 || r.Height <= 0) return;
+            var p = CachedPen(line, width);
+            if (radius <= 0) { g.DrawRectangle(p, r); return; }
             var sm = g.SmoothingMode; g.SmoothingMode = SmoothingMode.AntiAlias;
-            using (var path = Rounded(r, radius)) using (var p = new Pen(line, width)) g.DrawPath(p, path);
+            using (var path = Rounded(r, radius)) g.DrawPath(p, path);
             g.SmoothingMode = sm;
         }
         // 勾：步骤做完、提示条成功

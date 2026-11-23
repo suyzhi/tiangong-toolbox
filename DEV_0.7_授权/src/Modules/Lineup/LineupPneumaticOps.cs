@@ -1,0 +1,895 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text.RegularExpressions;
+
+namespace TianGongCadSuite {
+    // 阀岛/阀组摘要：供方案 A 左侧阀岛树展示，实时聚合显式配置与记录推导
+    public sealed class LineupIslandSummary {
+        public string Key = "";
+        public string Prefix = "";
+        public int Number;
+        public string Kind = "阀岛";
+        public string Model = "";
+        public string IslandRecordId = "";
+        public bool Has3DBind;
+        public string BindLabel = "";
+        public int ValveCount;
+        public int SpareCount;
+        public int CylinderCount;
+        public int SensorCount;
+        public int MissingValveCylCount;
+        public int MissingSensorCylCount;
+    }
+
+    // 阀路总览行：把「阀片 ↔ 气缸 ↔ H/W 磁开」按物理阀路自然配对，支持 1阀1缸、1阀多缸、预留盖板与待配阀气缸
+    public sealed class LineupChannelRow {
+        public LineupRecord Valve;
+        public LineupRecord Cylinder;
+        public List<LineupRecord> Sensors = new List<LineupRecord>();
+        public bool IsContinuation; // 一阀控多缸时，第 2 个及后续气缸行标记为同阀续行
+        public bool IsSpare;        // 预留 / 盖板阀片
+        public bool IsBlowOrVacuum; // 吹气 / 破真空（无需 H/W 磁开）
+
+        public string PrimaryRecordId {
+            get { return Cylinder != null ? Cylinder.Id : (Valve != null ? Valve.Id : ""); }
+        }
+    }
+
+    public sealed class LineupBundleResult {
+        public string ValveId = "";
+        public string CylinderId = "";
+        public List<string> SensorIds = new List<string>();
+    }
+
+    // 方案 A 气动主线纯逻辑层（零 UI / CAD 依赖，可直接由单元测试全覆盖验证）：
+    //   · 显式管理 阀岛(Y*) → 阀片(V**) → 气缸(C**) → 气缸传感器(H/W) 四级联动；
+    //   · 严格向后兼容旧 .lineup.xml、LineupXlsxWriter 5-sheet 导出与既有自动化测试约定。
+    public static class LineupPneumaticOps {
+        static readonly Regex IslandKeyRegex = new Regex(@"^(.+)-Y([0-9]+)$", RegexOptions.IgnoreCase);
+        static readonly Regex SlotRegex = new Regex(@"-Y[0-9]+[CV]([0-9]+)", RegexOptions.IgnoreCase);
+        static readonly Regex BlowRegex = new Regex(@"C[0-9]+[a-z]$", RegexOptions.IgnoreCase);
+
+        public static bool ParseIslandKey(string key, out string prefix, out int num) {
+            prefix = "";
+            num = 0;
+            if (string.IsNullOrWhiteSpace(key)) return false;
+            var m = IslandKeyRegex.Match(key.Trim());
+            if (!m.Success) return false;
+            int parsed;
+            if (!int.TryParse(m.Groups[2].Value, out parsed) || parsed < 1) return false;
+            prefix = m.Groups[1].Value.Trim();
+            num = parsed;
+            return prefix.Length > 0;
+        }
+
+        public static string DefaultPrefix(LineupProject p) {
+            if (p == null) return "OK170";
+            if (!string.IsNullOrWhiteSpace(p.NumberPrefix)) return p.NumberPrefix.Trim();
+            if (!string.IsNullOrWhiteSpace(p.StationCode)) return p.StationCode.Trim();
+            foreach (var isl in p.Islands ?? new List<LineupIsland>()) {
+                string pre; int n;
+                if (ParseIslandKey(isl.Key, out pre, out n)) return pre;
+            }
+            return "ST01";
+        }
+
+        public static int NextIslandNumber(LineupProject p, string prefix) {
+            prefix = (prefix ?? "").Trim();
+            int max = 0;
+            if (p != null) {
+                foreach (var isl in p.Islands ?? new List<LineupIsland>()) {
+                    string pre; int n;
+                    if (ParseIslandKey(isl.Key, out pre, out n) && (prefix.Length == 0 || string.Equals(pre, prefix, StringComparison.OrdinalIgnoreCase)))
+                        if (n > max) max = n;
+                }
+                foreach (var r in p.Records ?? new List<LineupRecord>()) {
+                    string key = r.Category == "阀岛" ? (r.Number ?? "").Trim() : LineupNumbering.IslandKey(r.Number);
+                    string pre; int n;
+                    if (ParseIslandKey(key, out pre, out n) && (prefix.Length == 0 || string.Equals(pre, prefix, StringComparison.OrdinalIgnoreCase)))
+                        if (n > max) max = n;
+                }
+            }
+            return max + 1;
+        }
+
+        public static bool IsSpareRecord(LineupRecord r) {
+            if (r == null) return false;
+            string s = (r.Description ?? "") + " " + (r.Parameters ?? "") + " " + (r.Model ?? "") + " " + (r.Notes ?? "");
+            return s.Contains("预留") || s.Contains("备用") || s.Contains("盖板") || s.Contains("空位");
+        }
+
+        public static bool IsBlowOrVacuum(LineupRecord r) {
+            if (r == null) return false;
+            string d = (r.Description ?? "") + " " + (r.Number ?? "") + " " + (r.Home ?? "");
+            return d.Contains("吹气") || d.Contains("破真空") || d.Contains("吸盘") || d.Contains("减压阀")
+                || d.Contains("非真空") || d.Contains("真空发生") || BlowRegex.IsMatch((r.Number ?? "").Trim());
+        }
+
+        // 自然提取当前阀岛下的最大工位序号（同时考察 V** 与 C**，防止预留阀片与新增气缸撞号）
+        public static int NextSlotNumber(LineupProject p, string islandKey) {
+            int max = 0;
+            if (p == null || string.IsNullOrWhiteSpace(islandKey)) return 1;
+            var pat = new Regex("^" + Regex.Escape(islandKey.Trim()) + "[CV]([0-9]+)(?:-[0-9]+|[a-z])?$", RegexOptions.IgnoreCase);
+            foreach (var r in p.Records ?? new List<LineupRecord>()) {
+                string cat = LineupTableData.Category(r.Category);
+                if (cat != "气缸" && cat != "阀片") continue;
+                var m = pat.Match((r.Number ?? "").Trim());
+                int v;
+                if (m.Success && int.TryParse(m.Groups[1].Value, out v) && v > max) max = v;
+            }
+            return max + 1;
+        }
+
+        static int ExtractSlotSortKey(string number) {
+            var m = SlotRegex.Match((number ?? "").Trim());
+            int v;
+            return (m.Success && int.TryParse(m.Groups[1].Value, out v)) ? v : 999999;
+        }
+
+        // 汇总项目内全部阀岛（显式 Islands 配置 + 记录中推断出的 Y* 键），按工位号与 Y 序号自然排序
+        public static List<LineupIslandSummary> ListIslands(LineupProject p) {
+            var list = new List<LineupIslandSummary>();
+            if (p == null) return list;
+
+            var byKey = new Dictionary<string, LineupIslandSummary>(StringComparer.OrdinalIgnoreCase);
+            Func<string, LineupIslandSummary> ensure = key => {
+                key = (key ?? "").Trim();
+                string pre; int num;
+                if (!ParseIslandKey(key, out pre, out num)) return null;
+                LineupIslandSummary sum;
+                if (!byKey.TryGetValue(key, out sum)) {
+                    sum = new LineupIslandSummary { Key = key, Prefix = pre, Number = num, Kind = "阀岛" };
+                    byKey[key] = sum;
+                }
+                return sum;
+            };
+
+            foreach (var isl in p.Islands ?? new List<LineupIsland>()) {
+                var s = ensure(isl.Key);
+                if (s == null) continue;
+                s.Kind = string.IsNullOrWhiteSpace(isl.Kind) ? "阀岛" : isl.Kind.Trim();
+                s.Model = (isl.Model ?? "").Trim();
+            }
+
+            var islandRecById = new Dictionary<string, LineupRecord>(StringComparer.Ordinal);
+            foreach (var r in p.Records ?? new List<LineupRecord>()) {
+                if (r.Category == "阀岛") {
+                    islandRecById[r.Id] = r;
+                    var s = ensure(r.Number);
+                    if (s != null) {
+                        s.IslandRecordId = r.Id;
+                        if (string.IsNullOrWhiteSpace(s.Model) && !string.IsNullOrWhiteSpace(r.Model)) s.Model = r.Model.Trim();
+                        if (!string.IsNullOrEmpty(r.ReferenceKey)) {
+                            s.Has3DBind = true;
+                            string path = string.Join(" / ", r.InstancePath ?? new string[0]);
+                            int slash = path.LastIndexOf('/');
+                            s.BindLabel = slash >= 0 ? path.Substring(slash + 1).Trim() : path;
+                        }
+                    }
+                }
+            }
+
+            // 从阀片与气缸中补全未显式配置的 Y* 阀岛
+            foreach (var r in p.Records ?? new List<LineupRecord>()) {
+                string cat = LineupTableData.Category(r.Category);
+                if (cat != "阀片" && cat != "气缸") continue;
+                string key = ResolveIslandKey(p, r, islandRecById);
+                if (key.Length > 0) ensure(key);
+            }
+
+            foreach (var sum in byKey.Values) {
+                var channels = BuildChannelRows(p, sum.Key);
+                var countedValves = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var ch in channels) {
+                    if (ch.Valve != null && countedValves.Add(ch.Valve.Id)) {
+                        sum.ValveCount++;
+                        if (ch.IsSpare) sum.SpareCount++;
+                    }
+                    if (ch.Cylinder != null) {
+                        sum.CylinderCount++;
+                        sum.SensorCount += ch.Sensors.Count;
+                        if (ch.Valve == null && !IsSpareRecord(ch.Cylinder)) sum.MissingValveCylCount++;
+                        if (!ch.IsBlowOrVacuum && !IsSpareRecord(ch.Cylinder) && ch.Sensors.Count < 2) sum.MissingSensorCylCount++;
+                    }
+                }
+            }
+
+            return byKey.Values
+                .OrderBy(x => x.Prefix, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(x => x.Number)
+                .ToList();
+        }
+
+        static string ResolveIslandKey(LineupProject p, LineupRecord r, Dictionary<string, LineupRecord> islandRecById) {
+            string key = LineupNumbering.IslandKey(r.Number);
+            if (key.Length > 0) return key;
+            LineupRecord owner;
+            if (!string.IsNullOrEmpty(r.IslandId) && islandRecById.TryGetValue(r.IslandId, out owner) && !string.IsNullOrWhiteSpace(owner.Number))
+                return owner.Number.Trim();
+            return "";
+        }
+
+        // 构建指定阀岛的完整「阀路总览」行列表（无损覆盖 1阀1缸、1阀多缸、预留盖板与无阀气缸）
+        public static List<LineupChannelRow> BuildChannelRows(LineupProject p, string islandKey) {
+            var result = new List<LineupChannelRow>();
+            if (p == null || string.IsNullOrWhiteSpace(islandKey)) return result;
+
+            var records = p.Records ?? new List<LineupRecord>();
+            var islandRec = records.FirstOrDefault(r => r.Category == "阀岛" && string.Equals((r.Number ?? "").Trim(), islandKey.Trim(), StringComparison.OrdinalIgnoreCase));
+            string islandRecId = islandRec == null ? "" : islandRec.Id;
+
+            var valves = records
+                .Where(r => LineupTableData.Category(r.Category) == "阀片" && BelongsToIsland(r, islandKey, islandRecId))
+                .OrderBy(r => ExtractSlotSortKey(r.Number))
+                .ThenBy(r => r.Number ?? "", StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            var valveIds = new HashSet<string>(valves.Select(v => v.Id), StringComparer.Ordinal);
+            var valveByNum = new Dictionary<string, LineupRecord>(StringComparer.OrdinalIgnoreCase);
+            foreach (var v in valves) {
+                string vn = (v.Number ?? "").Trim();
+                if (vn.Length > 0 && !valveByNum.ContainsKey(vn)) valveByNum[vn] = v;
+            }
+
+            var cyls = records
+                .Where(r => LineupTableData.Category(r.Category) == "气缸"
+                    && (BelongsToIsland(r, islandKey, islandRecId) || (!string.IsNullOrEmpty(r.ValveId) && valveIds.Contains(r.ValveId))))
+                .OrderBy(r => ExtractSlotSortKey(r.Number))
+                .ThenBy(r => r.Number ?? "", StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            var sensorsByCyl = GroupSensorsByCylinder(records, cyls);
+
+            // 把气缸按所属阀片分组（优先 ValveId，其次按编号 V** ↔ C** 映射）
+            var cylsByValve = new Dictionary<string, List<LineupRecord>>(StringComparer.Ordinal);
+            var unattachedCyls = new List<LineupRecord>();
+            foreach (var c in cyls) {
+                LineupRecord ownerValve = null;
+                if (!string.IsNullOrEmpty(c.ValveId) && valveIds.Contains(c.ValveId))
+                    ownerValve = valves.FirstOrDefault(v => v.Id == c.ValveId);
+                if (ownerValve == null) {
+                    string vn = LineupNumbering.ValveNumberForCylinder(c.Number);
+                    if (vn.Length > 0) valveByNum.TryGetValue(vn, out ownerValve);
+                }
+                if (ownerValve != null) {
+                    List<LineupRecord> bucket;
+                    if (!cylsByValve.TryGetValue(ownerValve.Id, out bucket)) { bucket = new List<LineupRecord>(); cylsByValve[ownerValve.Id] = bucket; }
+                    bucket.Add(c);
+                } else {
+                    unattachedCyls.Add(c);
+                }
+            }
+
+            foreach (var v in valves) {
+                List<LineupRecord> bound;
+                if (!cylsByValve.TryGetValue(v.Id, out bound) || bound.Count == 0) {
+                    result.Add(new LineupChannelRow {
+                        Valve = v,
+                        Cylinder = null,
+                        IsContinuation = false,
+                        IsSpare = IsSpareRecord(v)
+                    });
+                } else {
+                    for (int i = 0; i < bound.Count; i++) {
+                        var c = bound[i];
+                        List<LineupRecord> slist;
+                        sensorsByCyl.TryGetValue(c.Id, out slist);
+                        result.Add(new LineupChannelRow {
+                            Valve = v,
+                            Cylinder = c,
+                            Sensors = slist ?? new List<LineupRecord>(),
+                            IsContinuation = i > 0,
+                            IsSpare = false,
+                            IsBlowOrVacuum = IsBlowOrVacuum(c)
+                        });
+                    }
+                }
+            }
+
+            foreach (var c in unattachedCyls) {
+                List<LineupRecord> slist;
+                sensorsByCyl.TryGetValue(c.Id, out slist);
+                result.Add(new LineupChannelRow {
+                    Valve = null,
+                    Cylinder = c,
+                    Sensors = slist ?? new List<LineupRecord>(),
+                    IsContinuation = false,
+                    IsSpare = IsSpareRecord(c),
+                    IsBlowOrVacuum = IsBlowOrVacuum(c)
+                });
+            }
+
+            return result;
+        }
+
+        // 查找未归属到任何 Y* 阀岛的孤立气缸/阀片（如手工自定义编号或早期导入件）
+        public static List<LineupRecord> FindOrphanPneumaticRecords(LineupProject p) {
+            var list = new List<LineupRecord>();
+            if (p == null || p.Records == null) return list;
+            var islandIds = new HashSet<string>(p.Records.Where(r => r.Category == "阀岛").Select(r => r.Id), StringComparer.Ordinal);
+            var valveIds = new HashSet<string>(p.Records.Where(r => LineupTableData.Category(r.Category) == "阀片" && (LineupNumbering.IslandKey(r.Number).Length > 0 || islandIds.Contains(r.IslandId))).Select(r => r.Id), StringComparer.Ordinal);
+            foreach (var r in p.Records) {
+                string cat = LineupTableData.Category(r.Category);
+                if (cat != "气缸" && cat != "阀片") continue;
+                bool hasIsland = LineupNumbering.IslandKey(r.Number).Length > 0
+                    || (!string.IsNullOrEmpty(r.IslandId) && islandIds.Contains(r.IslandId))
+                    || (cat == "气缸" && !string.IsNullOrEmpty(r.ValveId) && valveIds.Contains(r.ValveId));
+                if (!hasIsland) list.Add(r);
+            }
+            return list;
+        }
+
+        static bool BelongsToIsland(LineupRecord r, string islandKey, string islandRecId) {
+            string k = LineupNumbering.IslandKey(r.Number);
+            if (k.Length > 0) return string.Equals(k, islandKey, StringComparison.OrdinalIgnoreCase);
+            return islandRecId.Length > 0 && string.Equals(r.IslandId, islandRecId, StringComparison.Ordinal);
+        }
+
+        static Dictionary<string, List<LineupRecord>> GroupSensorsByCylinder(List<LineupRecord> all, List<LineupRecord> cyls) {
+            var map = new Dictionary<string, List<LineupRecord>>(StringComparer.Ordinal);
+            var cylByNum = new Dictionary<string, LineupRecord>(StringComparer.OrdinalIgnoreCase);
+            var cylIdSet = new HashSet<string>(cyls.Select(c => c.Id), StringComparer.Ordinal);
+            foreach (var c in cyls) {
+                map[c.Id] = new List<LineupRecord>();
+                string cn = (c.Number ?? "").Trim();
+                if (cn.Length > 0 && !cylByNum.ContainsKey(cn)) cylByNum[cn] = c;
+            }
+            foreach (var s in all.Where(r => LineupTableData.Category(r.Category) == "气缸传感器")) {
+                string targetId = "";
+                if (!string.IsNullOrEmpty(s.CylinderId) && cylIdSet.Contains(s.CylinderId)) {
+                    targetId = s.CylinderId;
+                } else {
+                    var m = Regex.Match((s.Number ?? "").Trim(), @"^(.+?)([HWM][0-9]*)$", RegexOptions.IgnoreCase);
+                    LineupRecord c;
+                    if (m.Success && cylByNum.TryGetValue(m.Groups[1].Value.Trim(), out c)) targetId = c.Id;
+                }
+                if (targetId.Length > 0) map[targetId].Add(s);
+            }
+            return map;
+        }
+
+        // 确保显式“阀岛”记录存在（用于挂载 IslandId 与 3D 模型绑定）
+        static LineupRecord EnsureIslandRecord(LineupProject p, string islandKey) {
+            var rec = p.Records.FirstOrDefault(r => r.Category == "阀岛" && string.Equals((r.Number ?? "").Trim(), islandKey, StringComparison.OrdinalIgnoreCase));
+            var cfg = LineupNumbering.IslandEntry(p, islandKey);
+            if (rec == null) {
+                rec = new LineupRecord {
+                    Category = "阀岛",
+                    Number = islandKey,
+                    Model = cfg == null ? "" : (cfg.Model ?? ""),
+                    Description = (cfg == null || string.IsNullOrWhiteSpace(cfg.Kind) ? "阀岛" : cfg.Kind.Trim()) + " " + islandKey
+                };
+                p.Records.Add(rec);
+            } else if (cfg != null && !string.IsNullOrWhiteSpace(cfg.Model)) {
+                rec.Model = cfg.Model.Trim();
+            }
+            return rec;
+        }
+
+        // 1. 新建阀岛 / 汇流排 / 阀组 / 单片阀
+        public static string CreateIsland(LineupProject p, string prefix, int islandNum, string kind, string model, LineupRecord cadBind = null) {
+            prefix = (prefix ?? "").Trim();
+            if (prefix.Length == 0 || islandNum < 1) throw new InvalidOperationException("工位前缀不能为空，阀岛编号必须大于 0。");
+            string key = prefix + "-Y" + islandNum;
+            if (p.Islands != null && p.Islands.Any(i => string.Equals(i.Key, key, StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidOperationException("阀岛 " + key + " 已存在，请修改编号或直接编辑原阀岛。");
+
+            LineupNumbering.SetIsland(p, prefix, islandNum, (model ?? "").Trim(), string.IsNullOrWhiteSpace(kind) ? "阀岛" : kind.Trim());
+            if (string.IsNullOrWhiteSpace(p.StationCode)) p.StationCode = prefix;
+
+            if (cadBind != null && !string.IsNullOrEmpty(cadBind.ReferenceKey)) {
+                var rec = EnsureIslandRecord(p, key);
+                Apply3DBind(p, rec, cadBind);
+            }
+            return key;
+        }
+
+        // 2. 编辑已有阀岛的形态、型号或 3D 绑定
+        public static void UpdateIsland(LineupProject p, string islandKey, string kind, string model, LineupRecord cadBind = null) {
+            string pre; int num;
+            if (!ParseIslandKey(islandKey, out pre, out num)) throw new InvalidOperationException("无效的阀岛编号：" + islandKey);
+            string k = string.IsNullOrWhiteSpace(kind) ? "阀岛" : kind.Trim();
+            string m = (model ?? "").Trim();
+            LineupNumbering.SetIsland(p, pre, num, m, k);
+
+            var rec = p.Records.FirstOrDefault(r => r.Category == "阀岛" && string.Equals((r.Number ?? "").Trim(), islandKey, StringComparison.OrdinalIgnoreCase));
+            if (rec != null) {
+                rec.Model = m;
+                rec.Description = k + " " + islandKey;
+            }
+            if (cadBind != null && !string.IsNullOrEmpty(cadBind.ReferenceKey)) {
+                if (rec == null) rec = EnsureIslandRecord(p, islandKey);
+                Apply3DBind(p, rec, cadBind);
+            }
+        }
+
+        // 3. 删除阀岛（支持带子件级联删除或先保护提示）
+        public static int DeleteIsland(LineupProject p, string islandKey, bool deleteChildren) {
+            var channels = BuildChannelRows(p, islandKey);
+            var childIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var ch in channels) {
+                if (ch.Valve != null) childIds.Add(ch.Valve.Id);
+                if (ch.Cylinder != null) childIds.Add(ch.Cylinder.Id);
+                foreach (var s in ch.Sensors) childIds.Add(s.Id);
+            }
+            if (childIds.Count > 0 && !deleteChildren)
+                throw new InvalidOperationException("阀岛 " + islandKey + " 下仍有 " + childIds.Count + " 条关联记录，请确认是否一并删除。");
+
+            if (childIds.Count > 0) p.Records.RemoveAll(r => childIds.Contains(r.Id));
+            p.Records.RemoveAll(r => r.Category == "阀岛" && string.Equals((r.Number ?? "").Trim(), islandKey, StringComparison.OrdinalIgnoreCase));
+            if (p.Islands != null) p.Islands.RemoveAll(i => string.Equals(i.Key, islandKey, StringComparison.OrdinalIgnoreCase));
+
+            var remaining = ListIslands(p);
+            if (remaining.Count > 0) {
+                p.NumberPrefix = remaining[0].Prefix;
+                p.ActiveIsland = remaining[0].Number;
+            }
+            return childIds.Count;
+        }
+
+        // 4. 在指定阀岛下新增一条气缸（默认一键配齐 阀片 + H/W 磁开，并沿用本岛常用阀片/磁开规格）
+        public static LineupBundleResult AddCylinderBundle(
+            LineupProject p, string islandKey, bool withValve, int sensorPairs, bool isBlowOrVacuum,
+            LineupRecord template = null, LineupRecord cadBind = null) {
+
+            string pre; int num;
+            if (!ParseIslandKey(islandKey, out pre, out num)) throw new InvalidOperationException("请先新建或选择一个阀岛。");
+            var cfg = LineupNumbering.IslandEntry(p, islandKey);
+            if (cfg == null) LineupNumbering.SetIsland(p, pre, num, "", "阀岛");
+            else { p.NumberPrefix = pre; p.ActiveIsland = num; }
+
+            if (cadBind != null && !string.IsNullOrEmpty(cadBind.ReferenceKey)) {
+                var conflict = p.Records.FirstOrDefault(r => string.Equals(r.ReferenceKey, cadBind.ReferenceKey, StringComparison.Ordinal));
+                if (conflict != null) throw new InvalidOperationException("所选三维模型已绑定到 " + conflict.Number + "，请点选其他零件。");
+            }
+
+            int slot = NextSlotNumber(p, islandKey);
+            string slotStr = slot.ToString("D2");
+            var islandRec = EnsureIslandRecord(p, islandKey);
+            var res = new LineupBundleResult();
+
+            LineupRecord valve = null;
+            if (withValve) {
+                var valveSample = FindDefaultValveSpec(p, islandKey);
+                valve = new LineupRecord {
+                    Category = "阀片",
+                    Number = islandKey + "V" + slotStr,
+                    Parameters = template != null ? (template.Description ?? "") : (isBlowOrVacuum ? "吹气/破真空" : ""),
+                    Description = valveSample.Description,
+                    Model = valveSample.Model,
+                    Brand = valveSample.Brand,
+                    IslandId = islandRec.Id,
+                    Mechanism = template != null ? (template.Mechanism ?? "") : "",
+                    Notes = template != null ? (template.Notes ?? "") : ""
+                };
+                p.Records.Add(valve);
+                res.ValveId = valve.Id;
+            }
+
+            var cyl = new LineupRecord {
+                Category = "气缸",
+                Number = islandKey + "C" + slotStr,
+                Description = template != null ? (template.Description ?? "") : (isBlowOrVacuum ? "吹气/破真空口" : ""),
+                Model = template != null ? (template.Model ?? "") : "",
+                Brand = template != null ? (template.Brand ?? "") : "",
+                Home = template != null && !string.IsNullOrWhiteSpace(template.Home) ? template.Home : (isBlowOrVacuum ? "非真空" : "缩回"),
+                Mounting = template != null && !string.IsNullOrWhiteSpace(template.Mounting) ? template.Mounting : (isBlowOrVacuum ? "" : "水平安装"),
+                Mechanism = template != null ? (template.Mechanism ?? "") : "",
+                Notes = template != null ? (template.Notes ?? "") : "",
+                ValveId = valve == null ? "" : valve.Id,
+                IslandId = islandRec.Id
+            };
+            if (cadBind != null) {
+                if (string.IsNullOrWhiteSpace(cyl.Model) && !string.IsNullOrWhiteSpace(cadBind.Model)) cyl.Model = cadBind.Model;
+                if (string.IsNullOrWhiteSpace(cyl.Brand) && !string.IsNullOrWhiteSpace(cadBind.Brand)) cyl.Brand = cadBind.Brand;
+                if (string.IsNullOrWhiteSpace(cyl.Description) && !string.IsNullOrWhiteSpace(cadBind.Description)) cyl.Description = cadBind.Description;
+                if (string.IsNullOrWhiteSpace(cyl.Mechanism) && !string.IsNullOrWhiteSpace(cadBind.Mechanism)) cyl.Mechanism = cadBind.Mechanism;
+                if (string.IsNullOrWhiteSpace(cyl.Notes) && !string.IsNullOrWhiteSpace(cadBind.Notes)) cyl.Notes = cadBind.Notes;
+                Apply3DBind(p, cyl, cadBind);
+                if (valve != null && string.IsNullOrWhiteSpace(valve.Parameters) && !string.IsNullOrWhiteSpace(cyl.Description))
+                    valve.Parameters = cyl.Description;
+            }
+            p.Records.Add(cyl);
+            res.CylinderId = cyl.Id;
+
+            if (!isBlowOrVacuum && sensorPairs > 0) {
+                var beforeIds = new HashSet<string>(p.Records.Select(r => r.Id), StringComparer.Ordinal);
+                LineupNumbering.SensorPairsMulti(p, new[] { cyl.Id }, sensorPairs);
+                var sensorSample = FindDefaultSensorSpec(p);
+                foreach (var s in p.Records.Where(r => !beforeIds.Contains(r.Id))) {
+                    if (!string.IsNullOrWhiteSpace(sensorSample.Model)) s.Model = sensorSample.Model;
+                    if (!string.IsNullOrWhiteSpace(sensorSample.Brand)) s.Brand = sensorSample.Brand;
+                    if (!string.IsNullOrWhiteSpace(sensorSample.Connector)) s.Connector = sensorSample.Connector;
+                    res.SensorIds.Add(s.Id);
+                }
+            }
+
+            LineupTableData.RejectDuplicates(p.Records);
+            return res;
+        }
+
+        // 5. 直接向阀岛添加 1~N 片阀片（正常阀片或预留/盖板位）
+        public static List<string> AddValveSlices(LineupProject p, string islandKey, bool isSpareCover, int count) {
+            if (count < 1 || count > 64) throw new InvalidOperationException("单次添加阀片数量需在 1～64 之间。");
+            string pre; int num;
+            if (!ParseIslandKey(islandKey, out pre, out num)) throw new InvalidOperationException("请先新建或选择一个阀岛。");
+            var cfg = LineupNumbering.IslandEntry(p, islandKey);
+            if (cfg == null) LineupNumbering.SetIsland(p, pre, num, "", "阀岛");
+            else { p.NumberPrefix = pre; p.ActiveIsland = num; }
+
+            var islandRec = EnsureIslandRecord(p, islandKey);
+            var valveSample = FindDefaultValveSpec(p, islandKey);
+            var added = new List<string>();
+            int nextSlot = NextSlotNumber(p, islandKey);
+            for (int i = 0; i < count; i++) {
+                var v = new LineupRecord {
+                    Category = "阀片",
+                    Number = islandKey + "V" + (nextSlot + i).ToString("D2"),
+                    Parameters = isSpareCover ? "预留" : "",
+                    Description = isSpareCover ? "盖板" : valveSample.Description,
+                    Model = isSpareCover ? "" : valveSample.Model,
+                    Brand = isSpareCover ? "" : valveSample.Brand,
+                    Notes = isSpareCover ? "预留位" : "",
+                    IslandId = islandRec.Id
+                };
+                p.Records.Add(v);
+                added.Add(v.Id);
+            }
+            LineupTableData.RejectDuplicates(p.Records);
+            return added;
+        }
+
+        // 6. 给指定阀片挂载气缸（既可用于给空阀片配第一支气缸，也可用于一阀控多缸自动生成 C01-1 / C01-2）
+        public static LineupBundleResult AddCylinderToValve(LineupProject p, string valveId, int sensorPairs, LineupRecord cadBind = null) {
+            var valve = p.Records.FirstOrDefault(r => r.Id == valveId && LineupTableData.Category(r.Category) == "阀片");
+            if (valve == null) throw new InvalidOperationException("找不到目标阀片。");
+            if (cadBind != null && !string.IsNullOrEmpty(cadBind.ReferenceKey)) {
+                var conflict = p.Records.FirstOrDefault(r => string.Equals(r.ReferenceKey, cadBind.ReferenceKey, StringComparison.Ordinal));
+                if (conflict != null) throw new InvalidOperationException("所选三维模型已绑定到 " + conflict.Number + "。");
+            }
+
+            // 若原本是预留盖板，挂载气缸时清掉盖板占位字样
+            if (IsSpareRecord(valve)) {
+                if (valve.Description == "盖板") valve.Description = "三位五通阀，中封式";
+                if (valve.Parameters == "预留") valve.Parameters = "";
+                if (valve.Notes == "预留位") valve.Notes = "";
+            }
+
+            // 把已经按编号归属此阀片但 ValveId 为空的气缸先绑定进来，确保多缸计数准确
+            foreach (var c in p.Records.Where(r => LineupTableData.Category(r.Category) == "气缸" && string.IsNullOrEmpty(r.ValveId))) {
+                if (string.Equals(LineupNumbering.ValveNumberForCylinder(c.Number), (valve.Number ?? "").Trim(), StringComparison.OrdinalIgnoreCase)) {
+                    c.ValveId = valve.Id;
+                    if (!string.IsNullOrEmpty(valve.IslandId)) c.IslandId = valve.IslandId;
+                }
+            }
+
+            var sibling = p.Records.LastOrDefault(r => LineupTableData.Category(r.Category) == "气缸" && r.ValveId == valve.Id);
+            var cyl = new LineupRecord {
+                Category = "气缸",
+                Number = "",
+                Description = sibling != null ? sibling.Description : "",
+                Model = sibling != null ? sibling.Model : "",
+                Brand = sibling != null ? sibling.Brand : "",
+                Home = sibling != null && !string.IsNullOrWhiteSpace(sibling.Home) ? sibling.Home : "缩回",
+                Mounting = sibling != null && !string.IsNullOrWhiteSpace(sibling.Mounting) ? sibling.Mounting : "水平安装",
+                Mechanism = sibling != null ? sibling.Mechanism : valve.Mechanism,
+                Notes = sibling != null ? sibling.Notes : valve.Notes,
+                ValveId = valve.Id,
+                IslandId = valve.IslandId
+            };
+            if (cadBind != null) {
+                if (!string.IsNullOrWhiteSpace(cadBind.Model)) cyl.Model = cadBind.Model;
+                if (!string.IsNullOrWhiteSpace(cadBind.Brand)) cyl.Brand = cadBind.Brand;
+                if (!string.IsNullOrWhiteSpace(cadBind.Description)) cyl.Description = cadBind.Description;
+                Apply3DBind(p, cyl, cadBind);
+            }
+            p.Records.Add(cyl);
+
+            // 联动重编号：1 支气缸 → Y1C01；多支气缸 → Y1C01-1 / Y1C01-2，并同步原气缸的 H/W 传感器
+            LineupHierarchy.RenumberChildren(p, valve);
+
+            var res = new LineupBundleResult { ValveId = valve.Id, CylinderId = cyl.Id };
+            if (sensorPairs > 0) {
+                var beforeIds = new HashSet<string>(p.Records.Select(r => r.Id), StringComparer.Ordinal);
+                LineupNumbering.SensorPairsMulti(p, new[] { cyl.Id }, sensorPairs);
+                var sensorSample = FindDefaultSensorSpec(p);
+                foreach (var s in p.Records.Where(r => !beforeIds.Contains(r.Id))) {
+                    if (!string.IsNullOrWhiteSpace(sensorSample.Model)) s.Model = sensorSample.Model;
+                    if (!string.IsNullOrWhiteSpace(sensorSample.Brand)) s.Brand = sensorSample.Brand;
+                    if (!string.IsNullOrWhiteSpace(sensorSample.Connector)) s.Connector = sensorSample.Connector;
+                    res.SensorIds.Add(s.Id);
+                }
+            }
+            LineupTableData.RejectDuplicates(p.Records);
+            return res;
+        }
+
+        // 7. 将空闲阀片设为预留盖板（自检自动跳过缺气缸提醒）
+        public static void SetValveAsSpare(LineupProject p, string valveId) {
+            var valve = p.Records.FirstOrDefault(r => r.Id == valveId && LineupTableData.Category(r.Category) == "阀片");
+            if (valve == null) throw new InvalidOperationException("找不到目标阀片。");
+            bool hasCyl = p.Records.Any(r => LineupTableData.Category(r.Category) == "气缸"
+                && (r.ValveId == valve.Id || string.Equals(LineupNumbering.ValveNumberForCylinder(r.Number), (valve.Number ?? "").Trim(), StringComparison.OrdinalIgnoreCase)));
+            if (hasCyl) throw new InvalidOperationException("阀片 " + valve.Number + " 下仍关联着气缸，请先删除或移走该气缸后再设为预留盖板。");
+            valve.Description = "盖板";
+            valve.Parameters = "预留";
+            valve.Notes = "预留位";
+        }
+
+        // 8. 切换单支气缸的磁开配置：0=无磁开（吹气/真空）、1=标准 H/W、2=双组 H1/W1/H2/W2
+        public static int SetCylinderSensorMode(LineupProject p, string cylinderId, int pairCount) {
+            var cyl = p.Records.FirstOrDefault(r => r.Id == cylinderId && LineupTableData.Category(r.Category) == "气缸");
+            if (cyl == null) throw new InvalidOperationException("找不到目标气缸。");
+            var existing = FindSensorsOfCylinder(p, cyl);
+            var sample = existing.FirstOrDefault(s => !string.IsNullOrWhiteSpace(s.Model)) ?? FindDefaultSensorSpec(p);
+
+            if (pairCount == 0) {
+                var ids = new HashSet<string>(existing.Select(s => s.Id), StringComparer.Ordinal);
+                p.Records.RemoveAll(r => ids.Contains(r.Id));
+                return existing.Count;
+            }
+            // 先移除与目标套数冲突的旧模式（如 1 组 H/W 升级到 2 组 H1/W1/H2/W2，或反向降级）
+            bool isSingleMode = pairCount == 1;
+            var removeIds = new HashSet<string>(
+                existing.Where(s => isSingleMode
+                    ? Regex.IsMatch((s.Position ?? "").Trim(), @"^[HW][0-9]+$", RegexOptions.IgnoreCase)
+                    : Regex.IsMatch((s.Position ?? "").Trim(), @"^[HW]$", RegexOptions.IgnoreCase))
+                .Select(s => s.Id), StringComparer.Ordinal);
+            if (removeIds.Count > 0) p.Records.RemoveAll(r => removeIds.Contains(r.Id));
+
+            var before = new HashSet<string>(p.Records.Select(r => r.Id), StringComparer.Ordinal);
+            int added = LineupNumbering.SensorPairsMulti(p, new[] { cyl.Id }, pairCount);
+            foreach (var s in p.Records.Where(r => !before.Contains(r.Id))) {
+                if (!string.IsNullOrWhiteSpace(sample.Model)) s.Model = sample.Model;
+                if (!string.IsNullOrWhiteSpace(sample.Brand)) s.Brand = sample.Brand;
+                if (!string.IsNullOrWhiteSpace(sample.Connector)) s.Connector = sample.Connector;
+            }
+            LineupTableData.RejectDuplicates(p.Records);
+            return added;
+        }
+
+        // 9. 删除一条气缸（含其 H/W 磁开）；若是 1阀多缸中的一支则只删该缸并重编同阀余缸；若是单缸且 deleteValveWhenLast=true 则连同阀片一并删除
+        public static int DeleteChannelItem(LineupProject p, string valveId, string cylinderId, bool deleteValveWhenLast) {
+            var removeIds = new HashSet<string>(StringComparer.Ordinal);
+            LineupRecord valve = string.IsNullOrEmpty(valveId) ? null : p.Records.FirstOrDefault(r => r.Id == valveId);
+            LineupRecord cyl = string.IsNullOrEmpty(cylinderId) ? null : p.Records.FirstOrDefault(r => r.Id == cylinderId);
+
+            if (cyl != null) {
+                removeIds.Add(cyl.Id);
+                foreach (var s in FindSensorsOfCylinder(p, cyl)) removeIds.Add(s.Id);
+                if (valve == null && !string.IsNullOrEmpty(cyl.ValveId))
+                    valve = p.Records.FirstOrDefault(r => r.Id == cyl.ValveId);
+            } else if (valve != null) {
+                removeIds.Add(valve.Id);
+                var boundCyls = p.Records.Where(r => LineupTableData.Category(r.Category) == "气缸" && r.ValveId == valve.Id).ToList();
+                foreach (var c in boundCyls) {
+                    removeIds.Add(c.Id);
+                    foreach (var s in FindSensorsOfCylinder(p, c)) removeIds.Add(s.Id);
+                }
+            }
+
+            p.Records.RemoveAll(r => removeIds.Contains(r.Id));
+
+            if (cyl != null && valve != null && !removeIds.Contains(valve.Id)) {
+                var leftCyls = p.Records.Where(r => LineupTableData.Category(r.Category) == "气缸" && r.ValveId == valve.Id).ToList();
+                if (leftCyls.Count == 0 && deleteValveWhenLast) {
+                    p.Records.RemoveAll(r => r.Id == valve.Id);
+                    removeIds.Add(valve.Id);
+                } else if (leftCyls.Count > 0) {
+                    LineupHierarchy.RenumberChildren(p, valve);
+                }
+            }
+            return removeIds.Count;
+        }
+
+        // 10. 将选中阀片（及其气缸与 H/W）移动到目标阀岛，自动顺延槽位编号并级联重编
+        public static int MoveValvesToIsland(LineupProject p, IEnumerable<string> valveIds, string targetIslandKey) {
+            string pre; int num;
+            if (!ParseIslandKey(targetIslandKey, out pre, out num)) throw new InvalidOperationException("目标阀岛编号无效。");
+            var cfg = LineupNumbering.IslandEntry(p, targetIslandKey);
+            if (cfg == null) throw new InvalidOperationException("目标阀岛 " + targetIslandKey + " 不存在。");
+
+            var targets = p.Records.Where(r => valveIds.Contains(r.Id) && LineupTableData.Category(r.Category) == "阀片").ToList();
+            if (targets.Count == 0) throw new InvalidOperationException("请先选择要换岛的阀片。");
+
+            var owner = EnsureIslandRecord(p, targetIslandKey);
+            int moved = 0;
+            foreach (var v in targets) {
+                // 先确保按编号匹配的气缸与传感器都已挂到 ValveId/CylinderId，避免换岛遗漏
+                LinkImplicitChildren(p, v);
+                if (!string.Equals(LineupNumbering.IslandKey(v.Number), targetIslandKey, StringComparison.OrdinalIgnoreCase)) {
+                    int slot = NextSlotNumber(p, targetIslandKey);
+                    v.Number = targetIslandKey + "V" + slot.ToString("D2");
+                }
+                v.IslandId = owner.Id;
+                LineupHierarchy.RenumberChildren(p, v);
+                moved++;
+            }
+            LineupTableData.RejectDuplicates(p.Records);
+            return moved;
+        }
+
+        // 11. 将未归属的孤立气缸/阀片一键归属到指定阀岛（可顺带补齐阀片与 H/W）
+        public static int AssignOrphansToIsland(LineupProject p, IEnumerable<string> recordIds, string targetIslandKey, bool generateValves, bool generateSensors) {
+            string pre; int num;
+            if (!ParseIslandKey(targetIslandKey, out pre, out num)) throw new InvalidOperationException("目标阀岛编号无效。");
+            var cfg = LineupNumbering.IslandEntry(p, targetIslandKey);
+            if (cfg == null) LineupNumbering.SetIsland(p, pre, num, "", "阀岛");
+            var owner = EnsureIslandRecord(p, targetIslandKey);
+
+            var ids = new HashSet<string>(recordIds, StringComparer.Ordinal);
+            var picked = p.Records.Where(r => ids.Contains(r.Id)).ToList();
+            var assignedCylIds = new List<string>();
+            int count = 0;
+
+            foreach (var r in picked) {
+                string cat = LineupTableData.Category(r.Category);
+                if (cat != "气缸" && cat != "阀片") continue;
+                int slot = NextSlotNumber(p, targetIslandKey);
+                r.Number = targetIslandKey + (cat == "气缸" ? "C" : "V") + slot.ToString("D2");
+                r.IslandId = owner.Id;
+                if (cat == "气缸") {
+                    assignedCylIds.Add(r.Id);
+                    foreach (var s in FindSensorsOfCylinder(p, r)) {
+                        s.IslandId = owner.Id;
+                        if (!string.IsNullOrWhiteSpace(s.Position)) s.Number = r.Number + s.Position;
+                    }
+                } else {
+                    LineupHierarchy.RenumberChildren(p, r);
+                }
+                count++;
+            }
+            if (assignedCylIds.Count > 0) {
+                if (generateValves) LineupNumbering.GenerateValves(p, assignedCylIds);
+                if (generateSensors) {
+                    var before = new HashSet<string>(p.Records.Select(r => r.Id), StringComparer.Ordinal);
+                    LineupNumbering.SensorPairs(p, assignedCylIds);
+                    var sample = FindDefaultSensorSpec(p);
+                    foreach (var s in p.Records.Where(r => !before.Contains(r.Id))) {
+                        if (!string.IsNullOrWhiteSpace(sample.Model)) s.Model = sample.Model;
+                        if (!string.IsNullOrWhiteSpace(sample.Brand)) s.Brand = sample.Brand;
+                        if (!string.IsNullOrWhiteSpace(sample.Connector)) s.Connector = sample.Connector;
+                    }
+                }
+            }
+            LineupTableData.RejectDuplicates(p.Records);
+            return count;
+        }
+
+        // 12. 批量给指定阀岛下的气缸传感器套用统一磁开规格（型号/品牌/接口），省去几十次重复填格
+        public static int ApplySensorSpecToIsland(LineupProject p, string islandKey, string model, string brand, string connector, bool onlyEmpty) {
+            var channels = BuildChannelRows(p, islandKey);
+            int updated = 0;
+            foreach (var ch in channels) {
+                foreach (var s in ch.Sensors) {
+                    if (onlyEmpty && !string.IsNullOrWhiteSpace(s.Model)) continue;
+                    s.Model = (model ?? "").Trim();
+                    s.Brand = (brand ?? "").Trim();
+                    s.Connector = (connector ?? "").Trim();
+                    updated++;
+                }
+            }
+            return updated;
+        }
+
+        // 13. 将配置好的阀岛本体一键同步到「其他电气件 (E**)」（幂等不重复）
+        public static int SyncIslandsToElectrical(LineupProject p, string singleIslandKey = null) {
+            var summaries = ListIslands(p);
+            if (!string.IsNullOrWhiteSpace(singleIslandKey))
+                summaries = summaries.Where(s => string.Equals(s.Key, singleIslandKey, StringComparison.OrdinalIgnoreCase)).ToList();
+
+            int added = 0;
+            foreach (var s in summaries) {
+                if (s.Kind == "单片阀") continue;
+                bool exists = p.Records.Any(r => LineupTableData.Category(r.Category) == "其他电气件"
+                    && (((r.Description ?? "").IndexOf(s.Key, StringComparison.OrdinalIgnoreCase) >= 0)
+                        || ((r.Notes ?? "").IndexOf(s.Key, StringComparison.OrdinalIgnoreCase) >= 0)));
+                if (exists) continue;
+
+                var eRec = new LineupRecord {
+                    Category = "其他电气件",
+                    Number = LineupNumbering.Next(p, "其他电气件"),
+                    Description = s.Key + " " + s.Kind + "本体（" + s.ValveCount + "位）",
+                    Model = s.Model,
+                    Notes = s.Key
+                };
+                p.Records.Add(eRec);
+                added++;
+            }
+            LineupTableData.RejectDuplicates(p.Records);
+            return added;
+        }
+
+        // 同步修改气缸描述时，自动保持配套阀片功能参数与默认 H/W 描述一致
+        public static void SyncCylinderDescription(LineupProject p, LineupRecord cyl, string oldDesc, string newDesc) {
+            if (p == null || cyl == null) return;
+            cyl.Description = newDesc ?? "";
+            oldDesc = oldDesc ?? "";
+            if (!string.IsNullOrEmpty(cyl.ValveId)) {
+                var valve = p.Records.FirstOrDefault(r => r.Id == cyl.ValveId);
+                if (valve != null) {
+                    var peers = p.Records.Where(r => LineupTableData.Category(r.Category) == "气缸" && r.ValveId == valve.Id).ToList();
+                    if (peers.Count == 1 && (string.IsNullOrWhiteSpace(valve.Parameters) || valve.Parameters == oldDesc))
+                        valve.Parameters = cyl.Description;
+                    else if (peers.Count > 1)
+                        valve.Parameters = string.Join(" / ", peers.Select(c => (c.Description ?? "").Trim()).Where(x => x.Length > 0).Distinct());
+                }
+            }
+            foreach (var s in FindSensorsOfCylinder(p, cyl)) {
+                string posLabel = PositionLabel(s.Position);
+                if (posLabel.Length > 0 && (string.IsNullOrWhiteSpace(s.Description) || s.Description == oldDesc + posLabel))
+                    s.Description = cyl.Description + posLabel;
+            }
+        }
+
+        static string PositionLabel(string pos) {
+            pos = (pos ?? "").Trim().ToUpperInvariant();
+            if (pos == "H") return "原位";
+            if (pos == "W") return "工作位";
+            if (pos == "M") return "中间位";
+            if (pos.StartsWith("H")) return "原位" + pos.Substring(1);
+            if (pos.StartsWith("W")) return "工作位" + pos.Substring(1);
+            return "";
+        }
+
+        static List<LineupRecord> FindSensorsOfCylinder(LineupProject p, LineupRecord cyl) {
+            string cn = (cyl.Number ?? "").Trim();
+            return p.Records.Where(r => LineupTableData.Category(r.Category) == "气缸传感器"
+                && (r.CylinderId == cyl.Id
+                    || (cn.Length > 0 && Regex.IsMatch((r.Number ?? "").Trim(), "^" + Regex.Escape(cn) + "[HWM][0-9]*$", RegexOptions.IgnoreCase))))
+                .ToList();
+        }
+
+        static void LinkImplicitChildren(LineupProject p, LineupRecord valve) {
+            string vn = (valve.Number ?? "").Trim();
+            if (vn.Length == 0) return;
+            foreach (var c in p.Records.Where(r => LineupTableData.Category(r.Category) == "气缸")) {
+                if (c.ValveId == valve.Id || (string.IsNullOrEmpty(c.ValveId) && string.Equals(LineupNumbering.ValveNumberForCylinder(c.Number), vn, StringComparison.OrdinalIgnoreCase))) {
+                    c.ValveId = valve.Id;
+                    foreach (var s in FindSensorsOfCylinder(p, c)) {
+                        s.CylinderId = c.Id;
+                        s.ValveId = valve.Id;
+                        if (string.IsNullOrWhiteSpace(s.Position)) {
+                            var m = Regex.Match((s.Number ?? "").Trim(), @"([HWM][0-9]*)$", RegexOptions.IgnoreCase);
+                            if (m.Success) s.Position = m.Groups[1].Value.ToUpperInvariant();
+                        }
+                    }
+                }
+            }
+        }
+
+        static LineupRecord FindDefaultValveSpec(LineupProject p, string islandKey) {
+            var sameIsland = p.Records.LastOrDefault(r => LineupTableData.Category(r.Category) == "阀片"
+                && string.Equals(LineupNumbering.IslandKey(r.Number), islandKey, StringComparison.OrdinalIgnoreCase)
+                && !IsSpareRecord(r) && !string.IsNullOrWhiteSpace(r.Model));
+            if (sameIsland != null) return sameIsland;
+            var anyValve = p.Records.LastOrDefault(r => LineupTableData.Category(r.Category) == "阀片" && !IsSpareRecord(r) && !string.IsNullOrWhiteSpace(r.Model));
+            if (anyValve != null) return anyValve;
+            var preset = p.EntryPresets == null ? null : p.EntryPresets.LastOrDefault(x => x.Category == "阀片");
+            return new LineupRecord {
+                Description = preset != null && !string.IsNullOrWhiteSpace(preset.Description) ? preset.Description : "三位五通阀，中封式",
+                Model = preset != null ? (preset.Model ?? "") : "",
+                Brand = preset != null ? (preset.Brand ?? "") : ""
+            };
+        }
+
+        static LineupRecord FindDefaultSensorSpec(LineupProject p) {
+            var existing = p.Records.LastOrDefault(r => LineupTableData.Category(r.Category) == "气缸传感器" && !string.IsNullOrWhiteSpace(r.Model));
+            if (existing != null) return existing;
+            var preset = p.EntryPresets == null ? null : p.EntryPresets.LastOrDefault(x => x.Category == "气缸传感器");
+            return new LineupRecord {
+                Model = preset != null ? (preset.Model ?? "") : "",
+                Brand = preset != null ? (preset.Brand ?? "") : "",
+                Connector = preset != null ? (preset.Connector ?? "") : ""
+            };
+        }
+
+        static void Apply3DBind(LineupProject p, LineupRecord target, LineupRecord cadBind) {
+            var conflict = p.Records.FirstOrDefault(r => r.Id != target.Id && string.Equals(r.ReferenceKey, cadBind.ReferenceKey, StringComparison.Ordinal));
+            if (conflict != null) throw new InvalidOperationException("所选三维模型已绑定到 " + conflict.Number + "。");
+            target.ReferenceKey = cadBind.ReferenceKey;
+            target.SourceFile = cadBind.SourceFile ?? "";
+            target.InstancePath = cadBind.InstancePath == null ? new string[0] : (string[])cadBind.InstancePath.Clone();
+        }
+    }
+}

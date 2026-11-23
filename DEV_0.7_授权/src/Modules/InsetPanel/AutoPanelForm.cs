@@ -70,7 +70,7 @@ namespace TianGongCadSuite {
         List<bool> hasPanel = new List<bool>();
         readonly HashSet<string> generated = new HashSet<string>();   // 生成过的框口（按中心点）
         string outputDir = "";
-        bool busy, loading;
+        bool busy, loading, batchChecking;
 
         internal int OpeningCount { get { return specs.Count; } }
         internal string StatusText { get { return status.Text; } }
@@ -78,7 +78,13 @@ namespace TianGongCadSuite {
         internal string[] OpeningTexts { get { return openings.Items.Cast<object>().Select(x => x.ToString()).ToArray(); } }
         internal bool[] OpeningChecked { get { return Enumerable.Range(0, openings.Items.Count).Select(i => openings.GetItemChecked(i)).ToArray(); } }
         internal PanelSpec Opening(int i){ return specs[i]; }
-        internal void CheckOnly(int i){ for (int k = 0; k < openings.Items.Count; k++) openings.SetItemChecked(k, k == i); UpdateGenerateButton(); }
+        internal void CheckOnly(int i){
+            batchChecking = true;
+            openings.BeginUpdate();
+            try { for (int k = 0; k < openings.Items.Count; k++) openings.SetItemChecked(k, k == i); }
+            finally { openings.EndUpdate(); batchChecking = false; }
+            UpdateGenerateButton();
+        }
 
         public AutoPanelForm(F.Application app, A.AssemblyDocument assembly){
             this.app = app; this.assembly = assembly;
@@ -160,10 +166,10 @@ namespace TianGongCadSuite {
             listFrame.Padding = Ui.SPad(8, 8, 4, 8);
             openings.Dock = DockStyle.Fill; openings.BorderStyle = BorderStyle.None; openings.IntegralHeight = false;
             openings.CheckOnClick = true; openings.BackColor = Color.White; openings.Font = Ui.F9;
+            Ui.EnableDoubleBuffer(openings);
             openings.SelectedIndexChanged += (s, e) => ShowPreview();
-            // ItemCheck 触发时勾选状态还没改，所以延后刷新按钮；窗口还没显示时（构造里读预选就会 Recompute）
-            // 不能 BeginInvoke，而 Recompute 末尾本来就会刷新，跳过即可。
-            openings.ItemCheck += (s, e) => { if (IsHandleCreated) BeginInvoke((Action)UpdateGenerateButton); };
+            // ItemCheck 触发时勾选状态还没改，所以延后刷新按钮；批量全选/全不选时屏蔽逐项 BeginInvoke 风暴。
+            openings.ItemCheck += (s, e) => { if (!batchChecking && IsHandleCreated) BeginInvoke((Action)UpdateGenerateButton); };
             listFrame.Controls.Add(openings);
             // 预览控件自己画标题和操作提示，卡片不再写一遍
             var previewCard = Ui.Card("", 0, "");
@@ -410,7 +416,10 @@ namespace TianGongCadSuite {
         }
 
         void SetAllChecked(bool on){
-            for (int i = 0; i < openings.Items.Count; i++) openings.SetItemChecked(i, on);
+            batchChecking = true;
+            openings.BeginUpdate();
+            try { for (int i = 0; i < openings.Items.Count; i++) openings.SetItemChecked(i, on); }
+            finally { openings.EndUpdate(); batchChecking = false; }
             UpdateGenerateButton();
         }
 

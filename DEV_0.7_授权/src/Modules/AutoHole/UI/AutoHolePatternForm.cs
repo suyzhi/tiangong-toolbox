@@ -88,6 +88,7 @@ namespace TianGongCadSuite {
         readonly Label status = new Label();
         readonly FlatButton run = (FlatButton)Ui.Primary("开始打孔", 220, 44);
         readonly ToolTip tips = new ToolTip { AutoPopDelay = 15000, InitialDelay = 400 };
+        ContextMenuStrip moreMenu;
 
         readonly FieldGrid layoutGrid = new FieldGrid();
         readonly FieldGrid specGrid = new FieldGrid();
@@ -149,7 +150,7 @@ namespace TianGongCadSuite {
             if (c != null) try { c.Done = true; } catch { }
         }
         internal static readonly CarriedUndo Carried = new CarriedUndo();
-        void Cleanup(){ if (closing) return; closing = true; try { Carried.Keep(HostDoc, lastUndo, lastCreated); } catch { } StopCommand(); try { tips.Dispose(); } catch { } }
+        void Cleanup(){ if (closing) return; closing = true; try { Carried.Keep(HostDoc, lastUndo, lastCreated); } catch { } StopCommand(); if (moreMenu != null) { try { moreMenu.Dispose(); } catch { } moreMenu = null; } try { tips.Dispose(); } catch { } }
 
         public new void MouseClick(short b, short s, double x, double y, double z, object w, int k, object g){
             if (b == 1) { if (g == null) { SetStatus("这里没有捕捉到对象。零件没激活（重开大装配后常见）时，先在天工里右键它选「激活」。", Ui.Warn); return; } AcceptPick(g); }

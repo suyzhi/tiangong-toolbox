@@ -26,7 +26,8 @@ namespace TianGongCadSuite {
         readonly CheckBox fillMissing = new CheckBox();
         readonly Label status = new Label();
         readonly Button write;
-        bool loading, busy;
+        readonly Timer filterDebounce = new Timer { Interval = 140 };
+        bool loading, busy, columnsBuilt;
         public bool Busy { get { return busy; } }
         public string BusyWhat { get { return "读写属性"; } }
         // 一百多个文件要读写十几秒到几十秒：期间隔一会儿泵一次消息（窗口禁用着，点不了），不然 Windows 把天工判成"未响应"
@@ -75,7 +76,8 @@ namespace TianGongCadSuite {
             shell.Rail.Add("缺属性", "").Dot = Color.FromArgb(0xA1, 0xA1, 0xAA);
             shell.Rail.Add("读取出错", "").Dot = Ui.Bad;
             shell.Rail.SelectedChanged += (s, e) => { stateFilter = shell.Rail.Selected; Rebuild(); };
-            filter.TextChanged += (s, e) => Rebuild();
+            filterDebounce.Tick += (s, e) => { filterDebounce.Stop(); if (!IsDisposed) Rebuild(); };
+            filter.TextChanged += (s, e) => { filterDebounce.Stop(); filterDebounce.Start(); };
             // 侧栏底部：顺便补齐缺的属性
             var foot = new Panel { BackColor = Ui.Rail, Height = Ui.S(76) };
             fillMissing.Text = "写入时顺便补齐缺的属性（标题栏不再显示“错误：没有参考”）";
@@ -127,6 +129,7 @@ namespace TianGongCadSuite {
             shell.Footer.Status = status;
             status.ForeColor = Ui.Muted;
             FormClosing += OnClosing;
+            FormClosed += (s, e) => { filterDebounce.Stop(); filterDebounce.Dispose(); };
             UpdateStatus();
         }
         readonly WizardShell shell = new WizardShell { StepCaption = false };
@@ -171,6 +174,7 @@ namespace TianGongCadSuite {
                 UpdateStatus();
             };
             grid.CellFormatting += OnFormat;
+            grid.CellToolTipTextNeeded += OnCellToolTip;
             // 重建表格时（loading）当前格子会自己跳到第一行：不跟着预览（第一行常是总装配，要加载好几秒）；点了哪行才显示哪行
             grid.CurrentCellChanged += (s, e) => { if (!loading) ShowPreview(); };
             grid.CellClick += (s, e) => { if (e.RowIndex >= 0) ShowPreview(); };
@@ -179,6 +183,7 @@ namespace TianGongCadSuite {
                 else if (e.KeyCode == Keys.Delete) { SetSelected(""); e.Handled = true; }
             };
             grid.DataError += (s, e) => { e.ThrowException = false; };
+            RebuildColumns();
         }
 
         // 当前行的文件显示在右边的预览里
@@ -281,16 +286,28 @@ namespace TianGongCadSuite {
                 if (firstRow >= 0 && grid.Rows.Count > 0) grid.FirstDisplayedScrollingRowIndex = Math.Min(firstRow, grid.Rows.Count - 1);
             } catch (Exception e) { Log.Write("PropCardRestoreView", e.Message); }
         }
-        void RebuildRows(){
+        void RebuildColumns(){
             loading = true;
             grid.SuspendLayout();
             try {
-                grid.Rows.Clear(); grid.Columns.Clear();
+                grid.Rows.Clear();
+                grid.Columns.Clear();
                 AddColumn("文件", null, 230, true).Frozen = true;
                 AddColumn("材料", null, 90, true);
                 foreach (var f in fields) AddColumn(f, f, 80, false);
                 Ui.FitGrid(grid);
+                columnsBuilt = true;
+            } finally { grid.ResumeLayout(); loading = false; }
+        }
+
+        void RebuildRows(){
+            if (!columnsBuilt) RebuildColumns();
+            loading = true;
+            grid.SuspendLayout();
+            try {
+                grid.Rows.Clear();
                 string key = filter.Text.Trim();
+                var batch = new List<DataGridViewRow>(rows.Count);
                 foreach (var r in rows) {
                     if (key.Length > 0 && r.FileName.IndexOf(key, StringComparison.OrdinalIgnoreCase) < 0) continue;
                     if (stateFilter == 1 && !r.Dirty) continue;
@@ -299,9 +316,12 @@ namespace TianGongCadSuite {
                     var values = new object[FixedColumns + fields.Count];
                     values[0] = r.FileName; values[1] = r.Problem.Length > 0 ? "（读取失败）" : r.Material;
                     for (int i = 0; i < fields.Count; i++) values[FixedColumns + i] = r.Value(fields[i]);
-                    int at = grid.Rows.Add(values);
-                    grid.Rows[at].Tag = r;
+                    var row = new DataGridViewRow();
+                    row.CreateCells(grid, values);
+                    row.Tag = r;
+                    batch.Add(row);
                 }
+                if (batch.Count > 0) grid.Rows.AddRange(batch.ToArray());
             } finally { grid.ResumeLayout(); loading = false; }
             UpdateStatus();
         }
@@ -317,20 +337,32 @@ namespace TianGongCadSuite {
             if (e.RowIndex < 0) return;
             var r = grid.Rows[e.RowIndex].Tag as PropCardRow;
             if (r == null) return;
-            var cell = grid.Rows[e.RowIndex].Cells[e.ColumnIndex];
             if (e.ColumnIndex < FixedColumns) {
-                cell.ToolTipText = r.Problem.Length > 0 ? r.Problem : r.Locked.Length > 0 ? r.Path + "\r\n" + r.Locked : r.Path;
                 if (r.Locked.Length > 0) e.CellStyle.ForeColor = Ui.Muted;
                 if (r.Problem.Length > 0) e.CellStyle.ForeColor = Ui.Bad;
                 return;
             }
             string field = (string)grid.Columns[e.ColumnIndex].Tag;
-            if (r.IsEdited(field)) { e.CellStyle.BackColor = EditedBg; cell.ToolTipText = "改过，还没写入"; }
-            else if (!r.Has(field)) { e.CellStyle.BackColor = MissingBg; cell.ToolTipText = "文件里还没有「" + field + "」这个属性"; }
-            else cell.ToolTipText = "";
+            if (r.IsEdited(field)) e.CellStyle.BackColor = EditedBg;
+            else if (!r.Has(field)) e.CellStyle.BackColor = MissingBg;
         }
 
-        void SetCell(DataGridViewRow gridRow, int column, string value){
+        // 悬停时按需生成提示，彻底消除滚动绘制时高频字符串分配
+        void OnCellToolTip(object sender, DataGridViewCellToolTipTextNeededEventArgs e){
+            if (e.RowIndex < 0 || e.RowIndex >= grid.Rows.Count || e.ColumnIndex < 0) return;
+            var r = grid.Rows[e.RowIndex].Tag as PropCardRow;
+            if (r == null) return;
+            if (e.ColumnIndex < FixedColumns) {
+                e.ToolTipText = r.Problem.Length > 0 ? r.Problem : r.Locked.Length > 0 ? r.Path + "\r\n" + r.Locked : r.Path;
+                return;
+            }
+            string field = (string)grid.Columns[e.ColumnIndex].Tag;
+            if (r.IsEdited(field)) e.ToolTipText = "改过，还没写入";
+            else if (!r.Has(field)) e.ToolTipText = "文件里还没有「" + field + "」这个属性";
+            else e.ToolTipText = "";
+        }
+
+        void SetCell(DataGridViewRow gridRow, int column, string value, bool invalidate = true){
             if (column < FixedColumns) return;
             var r = (PropCardRow)gridRow.Tag;
             if (r.Problem.Length > 0) return;   // 读失败的文件不改（见 WriteAll）
@@ -339,18 +371,21 @@ namespace TianGongCadSuite {
             r.Set(field, value);
             loading = true;
             try { gridRow.Cells[column].Value = r.Value(field); } finally { loading = false; }
-            grid.InvalidateCell(column, gridRow.Index);
+            if (invalidate) grid.InvalidateCell(column, gridRow.Index);
         }
 
         void SetSelected(string value){
             if (grid.IsCurrentCellInEditMode) grid.EndEdit();
             int n = 0;
-            foreach (DataGridViewCell c in grid.SelectedCells) {
-                if (c.ColumnIndex < FixedColumns) continue;
-                SetCell(grid.Rows[c.RowIndex], c.ColumnIndex, value); n++;
-            }
+            grid.SuspendLayout();
+            try {
+                foreach (DataGridViewCell c in grid.SelectedCells) {
+                    if (c.ColumnIndex < FixedColumns) continue;
+                    SetCell(grid.Rows[c.RowIndex], c.ColumnIndex, value, false); n++;
+                }
+            } finally { grid.ResumeLayout(); }
             if (n == 0) status.Text = "先在表里选中要填的格子（文件名、材料两列不能改）";
-            else UpdateStatus();
+            else { grid.Invalidate(); UpdateStatus(); }
         }
 
         // 一个值：填满所有选中的格子；一块值：从选区左上角开始照搬
@@ -363,9 +398,13 @@ namespace TianGongCadSuite {
             int top = int.MaxValue, left = int.MaxValue;
             foreach (DataGridViewCell c in grid.SelectedCells) { top = Math.Min(top, c.RowIndex); left = Math.Min(left, c.ColumnIndex); }
             if (top == int.MaxValue) return;
-            for (int i = 0; i < block.Count && top + i < grid.Rows.Count; i++)
-                for (int j = 0; j < block[i].Length && left + j < grid.Columns.Count; j++)
-                    SetCell(grid.Rows[top + i], left + j, block[i][j]);
+            grid.SuspendLayout();
+            try {
+                for (int i = 0; i < block.Count && top + i < grid.Rows.Count; i++)
+                    for (int j = 0; j < block[i].Length && left + j < grid.Columns.Count; j++)
+                        SetCell(grid.Rows[top + i], left + j, block[i][j], false);
+            } finally { grid.ResumeLayout(); }
+            grid.Invalidate();
             UpdateStatus();
         }
 
@@ -383,6 +422,7 @@ namespace TianGongCadSuite {
             }
             fields = next;
             try { PropCardFields.Save(SettingsFile.PathOf(PropCardFields.FileName), fields); } catch (Exception e) { Log.Write("PropCardFieldsSave", e); }
+            RebuildColumns();
             Rebuild();
         }
 

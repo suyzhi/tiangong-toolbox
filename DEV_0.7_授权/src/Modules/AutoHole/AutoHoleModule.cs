@@ -32,7 +32,7 @@ namespace TianGongCadSuite {
                     "① 点要打孔的面（方向自动取该面最长的边）→ ② 选排布方式并填孔数或间距 → ③ 点「开始打孔」。\n" +
                     "圆周均布时第 ② 步改成点一条圆形边线来定位圆心和半径。\n" +
                     "勾「腰孔」可排长圆孔，总长和槽宽分开填；窗口下半部分会画出排孔示意图。",
-                    () => context.HasEditableContext() || StandalonePart() != null,
+                    () => context.HasEditableContext() || context.HasStandalonePart(),
                     () => {
                         var part = context.HasEditableContext() ? null : StandalonePart();
                         if (part != null) { context.Show(() => new AutoHolePatternForm(context.Application, part), f => ((AutoHolePatternForm)f).StartPicking(), f => f is AutoHolePatternForm && ((AutoHolePatternForm)f).ReuseFor(part)); return; }
@@ -44,7 +44,7 @@ namespace TianGongCadSuite {
                     "默认整组一起改：自动打孔、批量排孔打的同规格孔是一个特征组，组名和孔名按新规格重起。\n" +
                     "点到批量排孔阵列里的孔 = 改它的种子孔，整排跟着变。\n" +
                     "盲孔可以改深度或改成贯通；贯通孔不能直接改成盲孔（天工接口限制）。改错了点「撤销修改」。",
-                    () => context.HasEditableContext() || StandalonePart() != null,
+                    () => context.HasEditableContext() || context.HasStandalonePart(),
                     () => {
                         var part = context.HasEditableContext() ? null : StandalonePart();
                         if (part != null) { context.Show(() => new HoleEditForm(context.Application, part), f => ((HoleEditForm)f).StartPicking(), f => f is HoleEditForm && ((HoleEditForm)f).ReuseFor(part)); return; }

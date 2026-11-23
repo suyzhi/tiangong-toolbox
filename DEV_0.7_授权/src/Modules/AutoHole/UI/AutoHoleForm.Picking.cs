@@ -26,7 +26,8 @@ namespace TianGongCadSuite {
                 // QuickPick（0.8.5，用户要的）：和天工自己的选择一样，右键 / 停一下会弹出光标下层层叠叠的面、边列表，
                 // 点里面那个被挡住的就选中它（原来 seLocateSimple 只认最前面那层，右键还被拿去关窗口，遮挡面根本选不到）
                 mouse.LocateMode = (int)SolidEdgeConstants.seLocateModes.seLocateQuickPick;
-                mouse.EnabledMove = true;
+                // 关闭 3D 视口每像素 COM MouseMove 回调风暴（静止提示在切换步骤与点击时已显示）
+                mouse.EnabledMove = false;
                 // 装配上下文里要允许跨零件选（点这个零件的孔、选那个零件的面）；
                 // 但**原位编辑**（活动文档是零件）时不能开：实测一开就把上下文切回装配，
                 // 随后写模型会被 CAD 拒绝（RPC_E_DISCONNECTED）——而原位编辑正是唯一能写的上下文。
@@ -98,14 +99,13 @@ namespace TianGongCadSuite {
             try {
                 var pg = PickGeometry.Unwrap(selected);
                 bool plane = pg.Geometry is G.Face && ((G.Face)pg.Geometry).Geometry is G.Plane;
-                if (plane && mode == PlanePick.Refs) { PickFaceWithHoles(selected, true); RefreshAll(); return; }
+                if (plane && mode == PlanePick.Refs) { if (PickFaceWithHoles(selected, true)) RefreshAll(false, true, int.MinValue); return; }
                 if (plane && mode == PlanePick.Face) {
                     // 刚才在参考孔页从这张面认进来的孔撤掉：孔投到自己这张面上全是"本来就有孔"，留着只会让人以为要打
                     var tf = AutoHoleReader.ReadTarget(selected);
                     int dropped = DropRefsOn(tf);
-                    AddTargetFace(selected, tf);
+                    AddTargetFace(selected, tf, dropped > 0);
                     if (dropped > 0) SetStatus("已作为打孔面：" + FaceLabel(tf) + "（之前从这张面认进来的 " + dropped + " 个参考孔已撤掉）。", Ui.Ok);
-                    RefreshAll();
                     return;
                 }
                 if (pg.Geometry is G.Edge) {
@@ -117,27 +117,33 @@ namespace TianGongCadSuite {
                         var dup = slots.FirstOrDefault(x => x.Same(slot));
                         if (dup != null) { slots.Remove(dup); slotPicks.Remove(dup); SetStatus("已取消这条参考腰孔。", Ui.Muted); }
                         else { slots.Add(slot); slotPicks[slot] = selected; SetStatus("已认出参考腰孔：" + slot.Label + "（目标件上配同样的腰孔，通切）。共 " + slots.Count + " 条腰孔。", Ui.Ok); }
-                        RefreshAll();
+                        RefreshAll(false, true, int.MinValue);
                         return;
                     }
-                    AddHole(AutoHoleReader.ReadReference(selected), selected, false);
+                    int selRef;
+                    AddHole(AutoHoleReader.ReadReference(selected), selected, false, out selRef);
+                    RefreshAll(false, true, selRef);
+                    return;
                 } else if (pg.Geometry is G.Face) {
                     var face = (G.Face)pg.Geometry;
                     if (!(face.Geometry is G.Plane)) {
                         string label;
                         var scanned = HoleScanCad.ScanSurface(selected, out label);
                         var r = AutoHoleReader.ToReference(scanned);
-                        if (AddHole(r, selected, false)) SetStatus("已从" + label + "认出 Φ" + Num(r.DiameterMm)
+                        int selRef;
+                        if (AddHole(r, selected, false, out selRef)) SetStatus("已从" + label + "认出 Φ" + Num(r.DiameterMm)
                                   + (r.MouthDiameterMm - r.DiameterMm > HoleScan.StepToleranceMm
                                      ? ("　（孔口 Φ" + Num(r.MouthDiameterMm) + "，" + r.MouthKind + "，按下面的孔径配做）") : "")
                                   + "。", Ui.Ok);
+                        RefreshAll(false, true, selRef);
+                        return;
                     } else {
-                        PickFaceWithHoles(selected, false);   // 只剩 Auto（预先选好的对象）走到这里
+                        if (PickFaceWithHoles(selected, false)) RefreshAll(true, true, int.MinValue);   // 只剩 Auto（预先选好的对象）走到这里
+                        return;
                     }
                 } else {
                     throw new ArgumentException("请点孔口的圆形边线、孔的内壁圆柱面（圆柱面/圆锥面），或者要打孔的平面。");
                 }
-                RefreshAll();
             } catch (Exception e) {
                 SetStatus(AutoHoleWriter.FriendlyPick(e), Ui.Warn);
                 Log.Write("AutoHolePick", e);
@@ -197,6 +203,11 @@ namespace TianGongCadSuite {
         }
 
         bool AddHole(ReferenceHole r, object selection, bool batch){
+            int unused;
+            return AddHole(r, selection, batch, out unused);
+        }
+        bool AddHole(ReferenceHole r, object selection, bool batch, out int selectIndex){
+            selectIndex = int.MinValue;
             // 同一根轴线上已经有参考孔了（0.8.5）：
             //   · 同一个孔再点一次 = 取消选它（原来报"已经选过了"，点错了只能去列表里找、整组移除）；
             //   · 别的零件上同轴的孔（上板 Φ6.6、垫板 Φ7 是同一根螺钉）：原来按孔径分进两组，投到打孔面上是同一个点，
@@ -211,7 +222,7 @@ namespace TianGongCadSuite {
                     og.Holes.RemoveAt(i);
                     og.Selections.Remove(dup);
                     if (og.Holes.Count == 0) groups.Remove(og);
-                    RefreshList(Math.Min(refList.SelectedIndex, groups.Count - 1));
+                    selectIndex = Math.Min(refList.SelectedIndex, groups.Count - 1);
                     SetStatus("已取消这个参考孔（再点一次又会加上）。还剩 " + groups.Sum(x => x.Count) + " 个。", Ui.Muted);
                     return false;
                 }
@@ -224,7 +235,7 @@ namespace TianGongCadSuite {
             g.Holes.Add(r);
             if (selection != null) g.Selections[r] = selection;
             if (!batch) {
-                RefreshList(groups.IndexOf(g));
+                selectIndex = groups.IndexOf(g);
                 // 新的一组：把匹配结论（含"这个直径有歧义"）完整说出来，而不是只说"已匹配到 X"
                 SetStatus(isNew ? HoleMatcher.StatusLine(match)
                                 : ("同一组又加了一个 Φ" + Num(r.DiameterMm) + "，共 " + groups.Sum(x => x.Count) + " 个孔"),
@@ -245,7 +256,7 @@ namespace TianGongCadSuite {
         // 点平面认孔：面上的圆孔、腰孔（0.9.1）全认出来当参考（**不当打孔面**）。
         // onlyRefs：参考孔页上点的 —— 用户就是要认孔，没认出孔也不往打孔面上拐；
         // 否则（预先选好的对象）一个孔都没有、或已选参考孔投到它的空位上，才当打孔面。
-        void PickFaceWithHoles(object selected, bool onlyRefs){
+        bool PickFaceWithHoles(object selected, bool onlyRefs){
             bool sheetMetal;
             var t = AutoHoleReader.ReadScanFace(selected, out sheetMetal);   // 钣金件的面也能认参考孔（0.10.2），只是不能当打孔面
             string how; int notHole, notSlot, odd;
@@ -257,24 +268,24 @@ namespace TianGongCadSuite {
             if (holes.Count + faceSlots.Count == 0 && onlyRefs) {
                 SetStatus("这张面上没有认出孔（" + FaceLabel(t) + (notHole > 0 ? "，" + notHole + " 个圆/腰形判定为凸台" : "") + (oddNote.Length > 0 ? "，" + oddNote : "") + "）。"
                           + "要在它上面打孔：点「下一步」到「打孔面」再点它。" + (how.Length > 0 ? "注意：" + how : ""), Ui.Warn);
-                return;
+                return false;
             }
             if (holes.Count + faceSlots.Count == 0) {
                 if (sheetMetal) throw new ArgumentException("这张钣金件的面上没有认出孔。" + AutoHoleReader.SheetMetalTargetMessage);
-                AddTargetFace(selected, t);
+                AddTargetFace(selected, t, false);
                 string inst = InstanceNote(t);
                 SetStatus("这个面上没有识别到孔，已作为打孔面：" + FaceLabel(t) + (oddNote.Length > 0 ? "（" + oddNote + "）" : "") + (inst.Length > 0 ? "　⚠ " + inst : "") + (how.Length > 0 ? "　注意：" + how : ""), inst.Length > 0 ? Ui.Warn : Ui.Muted);
-                return;
+                return false;
             }
             // 0.8.5：已经点好参考孔、再点要打孔的面，而这张面上本来就有几个别的孔（现场最常见：底板上早打过几个安装孔）——
             // 已选的参考孔里有能投到这张面上、而且投到的位置还空着的，这张面就是打孔面。
             // 0.9.1 起点鼠标的不走这里（按页面定），只剩预先选好的对象用这条
             int free = onlyRefs || sheetMetal ? 0 : FreeSpots(t, holes);
             if (free > 0) {
-                AddTargetFace(selected, t);
+                AddTargetFace(selected, t, false);
                 SetStatus("已作为打孔面：" + FaceLabel(t) + "（面上本来有 " + holes.Count + " 个孔，没有当参考孔；已选的参考孔里 " + free + " 个投到这张面的空位上）。"
                           + "要把面上的孔当参考孔，先在「打孔面」里移除这张面，再到「参考孔」那一步点它。" + (InstanceNote(t).Length > 0 ? "　⚠ " + InstanceNote(t) : ""), InstanceNote(t).Length > 0 ? Ui.Warn : Ui.Ok);
-                return;
+                return false;
             }
             int added = 0, dup = 0, slotsAdded = 0;
             foreach (var scanned in holes)
@@ -290,6 +301,7 @@ namespace TianGongCadSuite {
                          + "。要把这张面当打孔面：到「打孔面」那一步再点它（会撤掉从它认进来的参考孔）。";
             SetStatus("已从 " + FaceLabel(t) + " 上识别到 " + holes.Count + " 个孔" + (faceSlots.Count > 0 ? "、" + faceSlots.Count + " 条腰孔" : "")
                       + "，共 " + groups.Count + " 组（新增 " + added + " 个" + (slotsAdded > 0 ? "、腰孔 " + slotsAdded + " 条" : "") + "）。", Ui.Ok);
+            return true;
         }
 
         // 从这张面认进来的参考孔（同一个零件实例、孔口在这张面上）撤掉，返回撤掉几个
@@ -378,7 +390,7 @@ namespace TianGongCadSuite {
         }
 
         // 加一个打孔面（老行为）。known 非空时不再重复解析面片。
-        void AddTargetFace(object selected, TargetFace known){
+        void AddTargetFace(object selected, TargetFace known, bool refsChanged = false){
             var t = known != null ? known : AutoHoleReader.ReadTarget(selected);
             // 这张面挂不挂得上天工关联，点的时候就预判一下（零件的链接属于别的装配就挂不上），预览里提前说
             try { t.LinkNote = NativeHoleLink.LinkOwnerElsewhere(assembly, t); } catch (Exception e) { Log.Write("AutoHoleLinkPrecheck", e.Message); }
@@ -395,7 +407,7 @@ namespace TianGongCadSuite {
                 try { if (old != null && old.Face != null) { var id = old.Face.ID; alive = TargetFace.PartAlive(old.Part); } } catch { alive = false; }
                 if (alive && i < resolved.Count && resolved[i] != null) {
                     targets.RemoveAt(i); targetLabels.RemoveAt(i); resolved.RemoveAt(i);
-                    RefreshAll();
+                    RefreshAll(true, refsChanged, int.MinValue);
                     SetStatus("已取消打孔面：" + FaceLabel(t) + "（再点一次又会加上）。", Ui.Muted);
                     return;
                 }
@@ -405,7 +417,7 @@ namespace TianGongCadSuite {
                 targetLabels[i] = FaceLabel(t);
                 while (resolved.Count <= i) resolved.Add(null);
                 resolved[i] = t;
-                RefreshAll();
+                RefreshAll(true, refsChanged, int.MinValue);
                 SetStatus("已重新读取打孔面：" + FaceLabel(t), Ui.Ok);
                 return;
             }
@@ -413,7 +425,7 @@ namespace TianGongCadSuite {
             targetLabels.Add(FaceLabel(t));
             while (resolved.Count < targets.Count - 1) resolved.Add(null);
             resolved.Add(t);
-            RefreshAll();
+            RefreshAll(true, refsChanged, int.MinValue);
             bool linkWarn = t.LinkNote.Length > 0 && linkCheck.Checked;
             string inst = InstanceNote(t);
             SetStatus("已选 " + targets.Count + " 个打孔面：" + FaceLabel(t)

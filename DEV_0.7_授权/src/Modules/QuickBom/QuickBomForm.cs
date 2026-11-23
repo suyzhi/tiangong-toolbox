@@ -84,6 +84,10 @@ namespace TianGongCadSuite {
         readonly List<Dictionary<WorkbenchRow, WorkbenchRowSnapshot>> undoStack = new List<Dictionary<WorkbenchRow, WorkbenchRowSnapshot>>();
         readonly List<Dictionary<WorkbenchRow, WorkbenchRowSnapshot>> redoStack = new List<Dictionary<WorkbenchRow, WorkbenchRowSnapshot>>();
         readonly Dictionary<string, int> cachedDnoCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        readonly HashSet<WorkbenchRow> dupDnoRows = new HashSet<WorkbenchRow>();
+        readonly Dictionary<int, AutoCompleteStringCollection> acCache = new Dictionary<int, AutoCompleteStringCollection>();
+        int lastAcCol = -1;
+        string[] colPropFields = new string[0];
         readonly Dictionary<string, int> savedColWidths = new Dictionary<string, int>(StringComparer.Ordinal);
         readonly Timer filterDebounce = new Timer { Interval = 120 };
         readonly Timer colWidthDebounce = new Timer { Interval = 350 };
@@ -446,6 +450,9 @@ namespace TianGongCadSuite {
             renamePanel = BuildRenameCardContent(rowH);
             topDrawer.Controls.Add(headerPanel);
             topDrawer.Controls.Add(renamePanel);
+            Ui.EnableDoubleBuffer(topDrawer);
+            Ui.EnableDoubleBuffer(headerPanel);
+            Ui.EnableDoubleBuffer(renamePanel);
         }
 
         Panel BuildHeaderCardContent(int rowH) {
@@ -659,62 +666,75 @@ namespace TianGongCadSuite {
                 bAll, bNone, bDraftOnly, bMetrics, bOccQty, bReplace, clearFiltersBtn,
                 fillGroup
             });
+            Ui.EnableDoubleBuffer(bar);
             return bar;
         }
 
         void ApplyDrawerMode(int mode, bool persist) {
-            if (mode == 2) {
-                topDrawer.Visible = false;
-            } else {
-                topDrawer.Visible = true;
-                headerPanel.Visible = (mode == 0);
-                renamePanel.Visible = (mode == 1);
+            bool freeze = mainStack != null && !preview.Visible;
+            if (freeze) Ui.BeginRedrawFreeze(mainStack);
+            try {
+                if (mode == 2) {
+                    topDrawer.Visible = false;
+                } else {
+                    topDrawer.Visible = true;
+                    headerPanel.Visible = (mode == 0);
+                    renamePanel.Visible = (mode == 1);
+                }
+                if (persist) Choices.Set("quickbom.drawer", mode.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                if (mainStack != null) mainStack.Relayout();
+            } finally {
+                if (freeze) Ui.EndRedrawFreeze(mainStack);
             }
-            if (persist) Choices.Set("quickbom.drawer", mode.ToString(System.Globalization.CultureInfo.InvariantCulture));
-            if (mainStack != null) mainStack.Relayout();
         }
 
         void ApplyColumnView(int mode, bool persist) {
             colViewMode = mode;
             if (persist) Choices.Set("quickbom.colview", mode.ToString(System.Globalization.CultureInfo.InvariantCulture));
             if (grid.Columns.Count < FixedColCount) return;
+            Ui.BeginRedrawFreeze(grid);
             grid.SuspendLayout();
             try {
                 // 先逆序取消全部冻结列，避免 WinForms 在隐藏列时抛出冻结冲突异常
-                for (int i = grid.Columns.Count - 1; i >= 0; i--) grid.Columns[i].Frozen = false;
+                for (int i = grid.Columns.Count - 1; i >= 0; i--) if (grid.Columns[i].Frozen) grid.Columns[i].Frozen = false;
                 for (int i = 0; i < grid.Columns.Count; i++) {
                     var col = grid.Columns[i];
+                    bool want;
                     if (mode == 0) {
-                        col.Visible = true;
+                        want = true;
                     } else if (mode == 1) {
                         // 改名视图：勾选、序号、类型、原文件名、新文件名、零件名称、图号、工程图、说明
-                        col.Visible = i == ColSel || i == ColSeq || i == ColKind || i == ColOldName || i == ColNewName
+                        want = i == ColSel || i == ColSeq || i == ColKind || i == ColOldName || i == ColNewName
                             || i == ColPartName || i == ColDno || i == ColDraft || i == statusColIndex;
                     } else if (mode == 2) {
                         // 属性卡视图：勾选、原文件名、材料、核心 6 属性 + 全部扩展属性卡列、说明
                         bool isExtraProp = i >= FixedColCount && i < statusColIndex;
-                        col.Visible = i == ColSel || i == ColOldName || i == ColMat
+                        want = i == ColSel || i == ColOldName || i == ColMat
                             || i == ColPartName || i == ColDno || i == ColQty || i == ColSurf || i == ColBatch || i == ColPrio
                             || isExtraProp || i == statusColIndex;
                     } else {
                         // 清单视图：勾选、序号、核心清单列、说明（隐藏类型、原文件名、新文件名与扩展属性）
-                        col.Visible = i == ColSel || i == ColSeq || i == ColPartName || i == ColDno || i == ColMat
+                        want = i == ColSel || i == ColSeq || i == ColPartName || i == ColDno || i == ColMat
                             || i == ColQty || i == ColSurf || i == ColBatch || i == ColPrio || i == ColCat
                             || i == ColChange || i == ColRemark || i == ColCode || i == ColLookupDno || i == ColLookupName
                             || i == ColDraft || i == statusColIndex;
                     }
+                    if (col.Visible != want) col.Visible = want;
                 }
                 // 冻结左侧关键标识列（像 Excel 冻结窗格，横向滚动查看后面列时原文件名/零件名称始终固定在左）
-                ApplyFreezePanes();
+                ApplyFreezePanes(false);
             } finally {
                 grid.ResumeLayout();
+                Ui.EndRedrawFreeze(grid);
             }
         }
 
-        void ApplyFreezePanes() {
+        void ApplyFreezePanes(bool resetExisting = true) {
             if (grid.Columns.Count < FixedColCount) return;
             try {
-                for (int i = grid.Columns.Count - 1; i >= 0; i--) grid.Columns[i].Frozen = false;
+                if (resetExisting) {
+                    for (int i = grid.Columns.Count - 1; i >= 0; i--) if (grid.Columns[i].Frozen) grid.Columns[i].Frozen = false;
+                }
                 int target = colViewMode == 3 ? ColPartName : ColOldName;
                 if (target < 0 || target >= grid.Columns.Count || !grid.Columns[target].Visible) return;
                 int frozenW = 0;
@@ -831,40 +851,45 @@ namespace TianGongCadSuite {
         void OnGridEditingControlShowing(object sender, DataGridViewEditingControlShowingEventArgs e) {
             var box = e.Control as TextBox;
             if (box == null) return;
-            // 先清空上一列的自动补全，防止 DataGridView 复用编辑框导致跨列串词
-            box.AutoCompleteMode = AutoCompleteMode.None;
-            box.AutoCompleteSource = AutoCompleteSource.None;
-            if (grid.CurrentCell == null) return;
-
-            int col = grid.CurrentCell.ColumnIndex;
-            IEnumerable<string> presets = null;
-            IEnumerable<string> existing = null;
-            if (col == ColMat) {
-                EnsureErpDictionaries();
-                presets = erpMaterials != null && erpMaterials.Count > 0 ? WorkbenchRules.SuggestedMaterials.Concat(erpMaterials) : (IEnumerable<string>)WorkbenchRules.SuggestedMaterials;
-                existing = rows.Select(r => r.Bom.Material);
-            } else if (col == ColSurf) {
-                EnsureErpDictionaries();
-                presets = erpSurfaces != null && erpSurfaces.Count > 0 ? WorkbenchRules.SuggestedSurfaceTreatments.Concat(erpSurfaces) : (IEnumerable<string>)WorkbenchRules.SuggestedSurfaceTreatments;
-                existing = rows.Select(r => r.GetPropValue("表面处理"));
-            } else if (col == ColBatch) {
-                presets = WorkbenchRules.SuggestedBatches;
-                existing = rows.Select(r => r.GetPropValue("批次"));
-            } else if (col == ColPrio) {
-                presets = WorkbenchRules.SuggestedPriorities;
-                existing = rows.Select(r => r.GetPropValue("优先等级"));
-            } else if (col == ColChange) {
-                presets = WorkbenchRules.SuggestedChangeReasons;
-                existing = rows.Select(r => r.Bom.ChangeReason);
+            int col = grid.CurrentCell != null ? grid.CurrentCell.ColumnIndex : -1;
+            int keyCol = (col == ColMat || col == ColSurf || col == ColBatch || col == ColPrio || col == ColChange) ? col : -1;
+            // 同列连续编辑跳过重设 Shell COM IAutoComplete2，避免每次点单元格卡顿
+            if (keyCol == lastAcCol) return;
+            lastAcCol = keyCol;
+            if (keyCol < 0) {
+                if (box.AutoCompleteMode != AutoCompleteMode.None) box.AutoCompleteMode = AutoCompleteMode.None;
+                if (box.AutoCompleteSource != AutoCompleteSource.None) box.AutoCompleteSource = AutoCompleteSource.None;
+                return;
             }
-
-            if (presets != null) {
-                var src = new AutoCompleteStringCollection();
-                src.AddRange(WorkbenchRules.BuildSuggestions(presets, existing));
-                box.AutoCompleteCustomSource = src;
-                box.AutoCompleteSource = AutoCompleteSource.CustomSource;
-                box.AutoCompleteMode = AutoCompleteMode.SuggestAppend;
+            AutoCompleteStringCollection src;
+            if (!acCache.TryGetValue(keyCol, out src)) {
+                IEnumerable<string> presets = null;
+                IEnumerable<string> existing = null;
+                if (keyCol == ColMat) {
+                    EnsureErpDictionaries();
+                    presets = erpMaterials != null && erpMaterials.Count > 0 ? WorkbenchRules.SuggestedMaterials.Concat(erpMaterials) : (IEnumerable<string>)WorkbenchRules.SuggestedMaterials;
+                    existing = rows.Select(r => r.Bom.Material);
+                } else if (keyCol == ColSurf) {
+                    EnsureErpDictionaries();
+                    presets = erpSurfaces != null && erpSurfaces.Count > 0 ? WorkbenchRules.SuggestedSurfaceTreatments.Concat(erpSurfaces) : (IEnumerable<string>)WorkbenchRules.SuggestedSurfaceTreatments;
+                    existing = rows.Select(r => r.GetPropValue("表面处理"));
+                } else if (keyCol == ColBatch) {
+                    presets = WorkbenchRules.SuggestedBatches;
+                    existing = rows.Select(r => r.GetPropValue("批次"));
+                } else if (keyCol == ColPrio) {
+                    presets = WorkbenchRules.SuggestedPriorities;
+                    existing = rows.Select(r => r.GetPropValue("优先等级"));
+                } else if (keyCol == ColChange) {
+                    presets = WorkbenchRules.SuggestedChangeReasons;
+                    existing = rows.Select(r => r.Bom.ChangeReason);
+                }
+                src = new AutoCompleteStringCollection();
+                if (presets != null) src.AddRange(WorkbenchRules.BuildSuggestions(presets, existing));
+                acCache[keyCol] = src;
             }
+            box.AutoCompleteCustomSource = src;
+            box.AutoCompleteSource = AutoCompleteSource.CustomSource;
+            box.AutoCompleteMode = AutoCompleteMode.SuggestAppend;
         }
 
         void RebuildGridColumns() {
@@ -912,6 +937,14 @@ namespace TianGongCadSuite {
 
                 statusColIndex = grid.Columns.Count;
                 grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "说明 / 状态", Width = 200, ReadOnly = true, Tag = TagColStatus });
+
+                // 预计算每列对应的属性字段名，消除 CellFormatting 高频绘制时的 Substring 分配
+                colPropFields = new string[grid.Columns.Count];
+                for (int i = 0; i < grid.Columns.Count; i++) {
+                    var tag = grid.Columns[i].Tag as string;
+                    colPropFields[i] = (tag != null && tag.StartsWith(TagPropPrefix, StringComparison.Ordinal))
+                        ? tag.Substring(TagPropPrefix.Length) : "";
+                }
 
                 foreach (DataGridViewColumn col in grid.Columns) col.SortMode = DataGridViewColumnSortMode.NotSortable;
                 Ui.FitGrid(grid);
@@ -1149,15 +1182,11 @@ namespace TianGongCadSuite {
         }
 
         bool IsPropertyColumn(int colIndex) {
-            if (colIndex < 0 || colIndex >= grid.Columns.Count) return false;
-            var tag = grid.Columns[colIndex].Tag as string;
-            return tag != null && tag.StartsWith(TagPropPrefix, StringComparison.Ordinal);
+            return colIndex >= 0 && colIndex < colPropFields.Length && colPropFields[colIndex].Length > 0;
         }
 
         string PropFieldOfColumn(int colIndex) {
-            if (colIndex < 0 || colIndex >= grid.Columns.Count) return "";
-            var tag = grid.Columns[colIndex].Tag as string;
-            return tag != null && tag.StartsWith(TagPropPrefix, StringComparison.Ordinal) ? tag.Substring(TagPropPrefix.Length) : "";
+            return colIndex >= 0 && colIndex < colPropFields.Length ? colPropFields[colIndex] : "";
         }
 
         // ---- 载入来源 ----
@@ -1336,6 +1365,8 @@ namespace TianGongCadSuite {
             sortDir = 0;
             undoStack.Clear();
             redoStack.Clear();
+            acCache.Clear();
+            lastAcCol = -1;
             lastPreviewPath = "";
             foreach (var it in list) rows.Add(WorkbenchRules.CreateRow(it, File.Exists));
         }
@@ -1626,6 +1657,7 @@ namespace TianGongCadSuite {
 
         void RefreshRailAndMetrics() {
             cachedDnoCounts.Clear();
+            dupDnoRows.Clear();
             foreach (var r in rows) {
                 if (!r.Bom.Selected) continue;
                 string k = BomRules.SanitizeFileName(r.Bom.DrawingNo);
@@ -1640,6 +1672,7 @@ namespace TianGongCadSuite {
                 if (r.PropDirty) totalPropDirty++;
                 int cnt;
                 bool dup = it.Selected && cachedDnoCounts.TryGetValue(BomRules.SanitizeFileName(it.DrawingNo), out cnt) && cnt > 1;
+                if (dup) dupDnoRows.Add(r);
                 bool hasBomIssue = it.Selected && (!it.HasDraft || string.IsNullOrWhiteSpace(it.PartName) || string.IsNullOrWhiteSpace(it.DrawingNo) || string.IsNullOrWhiteSpace(it.Material) || it.Quantity <= 0 || dup);
                 if (hasBomIssue || r.RenameProblem.Length > 0 || r.Prop.Problem.Length > 0) totalAttention++;
             }
@@ -1837,9 +1870,7 @@ namespace TianGongCadSuite {
                     if (!it.HasDraft) { e.CellStyle.BackColor = Ui.WarnSoft; e.CellStyle.ForeColor = Ui.Warn; }
                     else { e.CellStyle.ForeColor = Ui.Ok; }
                 } else if (col == ColDno) {
-                    int cnt;
-                    bool dup = cachedDnoCounts.TryGetValue(BomRules.SanitizeFileName(it.DrawingNo), out cnt) && cnt > 1;
-                    if (string.IsNullOrWhiteSpace(it.DrawingNo) || dup) { e.CellStyle.BackColor = Ui.BadSoft; e.CellStyle.ForeColor = Ui.Bad; }
+                    if (string.IsNullOrWhiteSpace(it.DrawingNo) || dupDnoRows.Contains(r)) { e.CellStyle.BackColor = Ui.BadSoft; e.CellStyle.ForeColor = Ui.Bad; }
                 } else if (col == ColMat) {
                     if (string.IsNullOrWhiteSpace(it.Material)) e.CellStyle.BackColor = Ui.WarnSoft;
                 } else if (col == ColQty) {
@@ -1868,9 +1899,7 @@ namespace TianGongCadSuite {
                 return;
             }
             if (col == ColDno && it.Selected) {
-                int cnt;
-                bool dup = cachedDnoCounts.TryGetValue(BomRules.SanitizeFileName(it.DrawingNo), out cnt) && cnt > 1;
-                if (dup) { e.ToolTipText = "勾选行里存在重复图号，导出会互相覆盖"; return; }
+                if (dupDnoRows.Contains(r)) { e.ToolTipText = "勾选行里存在重复图号，导出会互相覆盖"; return; }
                 if (string.IsNullOrWhiteSpace(it.DrawingNo)) { e.ToolTipText = "图号为空"; return; }
             }
             string pf = PropFieldOfColumn(col);
@@ -1884,24 +1913,30 @@ namespace TianGongCadSuite {
             int renCount = rows.Count(r => r.RenameChanged);
             int propCount = rows.Count(r => r.PropDirty);
 
-            renameBtn.Text = renCount > 0 ? "执行改名 (" + renCount + ")" : "执行改名";
+            string renText = renCount > 0 ? "执行改名 (" + renCount + ")" : "执行改名";
+            bool renTextChanged = renameBtn.Text != renText;
+            if (renTextChanged) renameBtn.Text = renText;
             renameBtn.Enabled = !busy && renCount > 0 && lastRenameProblems == 0;
             renameBtn.SetFore(renCount > 0 ? (lastRenameProblems > 0 ? Ui.Bad : Ui.Accent) : Ui.Text);
-            Ui.FitButton(renameBtn);
+            if (renTextChanged) Ui.FitButton(renameBtn);
 
-            writePropsBtn.Text = propCount > 0 ? "写入属性 (" + propCount + ")" : "写入属性";
+            string propText = propCount > 0 ? "写入属性 (" + propCount + ")" : "写入属性";
+            bool propTextChanged = writePropsBtn.Text != propText;
+            if (propTextChanged) writePropsBtn.Text = propText;
             writePropsBtn.Enabled = !busy && propCount > 0;
             writePropsBtn.SetFore(propCount > 0 ? Ui.Accent : Ui.Text);
-            Ui.FitButton(writePropsBtn);
+            if (propTextChanged) Ui.FitButton(writePropsBtn);
 
-            shell.Footer.PerformLayout();
+            if (renTextChanged || propTextChanged) shell.Footer.PerformLayout();
         }
 
         void OnGridCellValueChanged(object sender, DataGridViewCellEventArgs e) {
             if (rebuilding || e.RowIndex < 0 || e.RowIndex >= grid.Rows.Count) return;
             var r = grid.Rows[e.RowIndex].Tag as WorkbenchRow;
             if (r == null) return;
-            PushUndo();
+            // 单格修改仅快照当前 1 行，彻底消除几百行整表深拷贝卡顿
+            PushUndoRow(r);
+            if (acCache.Remove(e.ColumnIndex) && lastAcCol == e.ColumnIndex) lastAcCol = -1;
             object raw = grid.Rows[e.RowIndex].Cells[e.ColumnIndex].Value;
             if (e.ColumnIndex == ColSel) {
                 r.Bom.Selected = !r.IsDraftOnly && raw is bool && (bool)raw;
@@ -2006,7 +2041,7 @@ namespace TianGongCadSuite {
             }
         }
 
-        // ---- 撤销 / 重做栈（Ctrl+Z / Ctrl+Y）----
+        // ---- 撤销 / 重做栈（Ctrl+Z / Ctrl+Y；单行编辑按行增量快照，批量操作全表快照）----
 
         Dictionary<WorkbenchRow, WorkbenchRowSnapshot> CaptureAllSnapshots() {
             var snap = new Dictionary<WorkbenchRow, WorkbenchRowSnapshot>(rows.Count);
@@ -2014,8 +2049,23 @@ namespace TianGongCadSuite {
             return snap;
         }
 
+        static Dictionary<WorkbenchRow, WorkbenchRowSnapshot> CaptureRowSnapshots(IEnumerable<WorkbenchRow> subset) {
+            var snap = new Dictionary<WorkbenchRow, WorkbenchRowSnapshot>();
+            foreach (var r in subset) if (r != null && !snap.ContainsKey(r)) snap[r] = r.CaptureSnapshot();
+            return snap;
+        }
+
         void PushUndo() {
             undoStack.Add(CaptureAllSnapshots());
+            if (undoStack.Count > MaxUndoSteps) undoStack.RemoveAt(0);
+            redoStack.Clear();
+        }
+
+        void PushUndoRow(WorkbenchRow r) {
+            if (r == null) return;
+            var snap = new Dictionary<WorkbenchRow, WorkbenchRowSnapshot>(1);
+            snap[r] = r.CaptureSnapshot();
+            undoStack.Add(snap);
             if (undoStack.Count > MaxUndoSteps) undoStack.RemoveAt(0);
             redoStack.Clear();
         }
@@ -2030,14 +2080,13 @@ namespace TianGongCadSuite {
                 return;
             }
             grid.EndEdit();
-            redoStack.Add(CaptureAllSnapshots());
-            if (redoStack.Count > MaxUndoSteps) redoStack.RemoveAt(0);
             var snap = undoStack[undoStack.Count - 1];
             undoStack.RemoveAt(undoStack.Count - 1);
-            foreach (var r in rows) {
-                WorkbenchRowSnapshot s;
-                if (snap.TryGetValue(r, out s)) r.RestoreSnapshot(s);
-            }
+            redoStack.Add(CaptureRowSnapshots(snap.Keys));
+            if (redoStack.Count > MaxUndoSteps) redoStack.RemoveAt(0);
+            foreach (var kv in snap) kv.Key.RestoreSnapshot(kv.Value);
+            acCache.Clear();
+            lastAcCol = -1;
             ValidateRenames();
             RefreshAllVisibleRowsInPlace();
             SetStatus("已撤销上一步修改（可撤销 " + undoStack.Count + " 步 · Ctrl+Y 可重做）。", Ui.Muted);
@@ -2049,14 +2098,13 @@ namespace TianGongCadSuite {
                 return;
             }
             grid.EndEdit();
-            undoStack.Add(CaptureAllSnapshots());
-            if (undoStack.Count > MaxUndoSteps) undoStack.RemoveAt(0);
             var snap = redoStack[redoStack.Count - 1];
             redoStack.RemoveAt(redoStack.Count - 1);
-            foreach (var r in rows) {
-                WorkbenchRowSnapshot s;
-                if (snap.TryGetValue(r, out s)) r.RestoreSnapshot(s);
-            }
+            undoStack.Add(CaptureRowSnapshots(snap.Keys));
+            if (undoStack.Count > MaxUndoSteps) undoStack.RemoveAt(0);
+            foreach (var kv in snap) kv.Key.RestoreSnapshot(kv.Value);
+            acCache.Clear();
+            lastAcCol = -1;
             ValidateRenames();
             RefreshAllVisibleRowsInPlace();
             SetStatus("已重做修改（剩余可重做 " + redoStack.Count + " 步）。", Ui.Muted);
@@ -2552,7 +2600,7 @@ namespace TianGongCadSuite {
             var pickedRows = CollectPickedRows();
             var missingPicked = pickedRows.Where(x => !x.IsDraftOnly && !x.Bom.HasDraft && File.Exists(x.Rename.Path)).ToList();
 
-            gridMenu.Items.Clear();
+            Ui.DisposeItems(gridMenu.Items);
             gridMenu.Items.Add("复制 (Ctrl+C)", null, (s, ev) => CopySelectedCells());
             gridMenu.Items.Add("剪切 (Ctrl+X)", null, (s, ev) => CutSelectedCells());
             gridMenu.Items.Add("粘贴 (Ctrl+V)", null, (s, ev) => PasteFromClipboard());

@@ -141,7 +141,7 @@ namespace TianGongCadSuite {
             shell.RailBottom = linkCard;
 
             // ---- 底部操作栏 ----
-            var more = new ContextMenuStrip { ShowImageMargin = false, Font = Ui.F9 };
+            var more = moreMenu = new ContextMenuStrip { ShowImageMargin = false, Font = Ui.F9 };
             var miEdit = more.Items.Add("改孔型…（刚打的这批孔整组换孔型）");
             var miUndo = more.Items.Add("撤销本次打孔");
             more.Items.Add(new ToolStripSeparator());
@@ -177,6 +177,8 @@ namespace TianGongCadSuite {
             body.Controls.Add(stack);
             var h = new Label { Text = hint, AutoSize = false, Height = Ui.S(48), ForeColor = Ui.Text2, BackColor = Ui.Bg, Font = Ui.F9 };
             var frame = new Panel { BackColor = Color.White, Padding = new Padding(0) };
+            Ui.EnableDoubleBuffer(frame);
+            Ui.EnableDoubleBuffer(list);
             list.Dock = DockStyle.Fill; list.Margin = new Padding(0);
             frame.Controls.Add(list);
             empty.Dock = DockStyle.Top; frame.Controls.Add(empty); empty.BringToFront();
@@ -236,13 +238,32 @@ namespace TianGongCadSuite {
         int lastTotal;
         void UpdatePrimary(){
             int cur = shell.Current;
-            backButton.Enabled = cur > 0 && !busy;
+            bool wantBack = cur > 0 && !busy;
+            if (backButton.Enabled != wantBack) backButton.Enabled = wantBack;
             bool canRun = run.Enabled;
             bool showRun = busy || canRun || cur >= PagePreview;
-            run.Visible = showRun; nextButton.Visible = !showRun;
-            if (!busy) { run.Text = canRun ? "开始打孔 " + lastTotal + " 个孔" : "开始打孔"; Ui.FitButton(run); }
-            if (!showRun) { nextButton.Text = "下一步：" + shell.Pages[Math.Min(cur + 1, shell.Pages.Count - 1)].Title; Ui.FitButton(nextButton); }
-            shell.Footer.PerformLayout();
+            bool layoutDirty = false;
+            if (run.Visible != showRun) { run.Visible = showRun; layoutDirty = true; }
+            if (nextButton.Visible != !showRun) { nextButton.Visible = !showRun; layoutDirty = true; }
+            if (!busy) {
+                string wantRunText = canRun ? "开始打孔 " + lastTotal + " 个孔" : "开始打孔";
+                if (run.Text != wantRunText) {
+                    int oldW = run.Width;
+                    run.Text = wantRunText;
+                    Ui.FitButton(run);
+                    if (run.Width != oldW) layoutDirty = true;
+                }
+            }
+            if (!showRun) {
+                string wantNextText = "下一步：" + shell.Pages[Math.Min(cur + 1, shell.Pages.Count - 1)].Title;
+                if (nextButton.Text != wantNextText) {
+                    int oldW = nextButton.Width;
+                    nextButton.Text = wantNextText;
+                    Ui.FitButton(nextButton);
+                    if (nextButton.Width != oldW) layoutDirty = true;
+                }
+            }
+            if (layoutDirty) shell.Footer.PerformLayout();
         }
 
         // 侧栏每一步的小字和勾（RefreshPreview 每次都调）
@@ -344,7 +365,7 @@ namespace TianGongCadSuite {
                 n.ValueChanged += (s, e) => { if (!loading) WriteBack(); };
             refList.SelectedIndexChanged += (s, e) => { groupTabs.Selected = refList.SelectedIndex; if (!loading) LoadEditor(); };
             // 两个勾选记住用户上次的选择（只在用户自己点的时候存：Click 不会被代码改 Checked 触发，测试脚本改它不会写进用户设置）
-            linkCheck.CheckedChanged += (s, e) => { RefreshPreview(); faceList.Invalidate(); };
+            linkCheck.CheckedChanged += (s, e) => { RefreshPreview(false); faceList.Invalidate(); };
             linkCheck.Click += (s, e) => SaveChoices();
             // 打孔重试期间 CAD 正忙，这里把重试进度写到状态栏并让界面刷一次，
             // 用户看到的就不是"卡死了"，而是"正在重试 2/6"。
@@ -360,7 +381,7 @@ namespace TianGongCadSuite {
         // 一组参考孔两行：上行「Φ6.6 ×4 → M6 螺纹孔（螺纹全长）」，下行灰字说明（规格是怎么来的 / 沉孔取下面的孔径）
         void DrawRefItem(object sender, DrawItemEventArgs e){
             var gr = e.Graphics;
-            using (var w = new SolidBrush(Color.White)) gr.FillRectangle(w, e.Bounds);
+            gr.FillRectangle(Ui.CachedBrush(Color.White), e.Bounds);
             if (e.Index < 0 || e.Index >= groups.Count) return;
             var g = groups[e.Index];
             bool sel = (e.State & DrawItemState.Selected) != 0;
@@ -383,7 +404,7 @@ namespace TianGongCadSuite {
 
         void DrawFaceItem(object sender, DrawItemEventArgs e){
             var gr = e.Graphics;
-            using (var w = new SolidBrush(Color.White)) gr.FillRectangle(w, e.Bounds);
+            gr.FillRectangle(Ui.CachedBrush(Color.White), e.Bounds);
             if (e.Index < 0 || e.Index >= targetLabels.Count) return;
             bool sel = (e.State & DrawItemState.Selected) != 0;
             var r = new Rectangle(e.Bounds.X, e.Bounds.Y + Ui.S(3), e.Bounds.Width - 1, e.Bounds.Height - Ui.S(7));
@@ -392,8 +413,7 @@ namespace TianGongCadSuite {
             // 小面片图标
             int ix = r.X + Ui.S(14), iy = r.Y + r.Height / 2;
             var sm = gr.SmoothingMode; gr.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            using (var pen = new Pen(Ui.Muted, 1.2f))
-                gr.DrawPolygon(pen, new[]{ new Point(ix, iy - Ui.S(2)), new Point(ix + Ui.S(8), iy - Ui.S(7)), new Point(ix + Ui.S(16), iy - Ui.S(2)), new Point(ix + Ui.S(8), iy + Ui.S(3)) });
+            gr.DrawPolygon(Ui.CachedPen(Ui.Muted, 1.2f), new[]{ new Point(ix, iy - Ui.S(2)), new Point(ix + Ui.S(8), iy - Ui.S(7)), new Point(ix + Ui.S(16), iy - Ui.S(2)), new Point(ix + Ui.S(8), iy + Ui.S(3)) });
             gr.SmoothingMode = sm;
             // 这张面所在零件的链接属于别的装配（挂不了天工关联）：标个 ⚠，悬停看原因
             var t = e.Index < resolved.Count ? resolved[e.Index] : null;

@@ -30,6 +30,7 @@ namespace TianGongCadSuite {
         readonly FlatButton run = (FlatButton)Ui.Primary("出图", 128, 40);
         readonly Button close = Ui.Secondary("关闭", 90, 36);
         readonly ToolTip tips = new ToolTip { AutoPopDelay = 15000, InitialDelay = 300 };
+        readonly Timer searchDebounce = new Timer { Interval = 140 };
         readonly CadKeyShield keyShield;
 
         readonly List<DrawingJob> jobs = new List<DrawingJob>();
@@ -98,16 +99,18 @@ namespace TianGongCadSuite {
             searchClearBtn.Height = Ui.S(26);
             searchClearBtn.Visible = false;
             tips.SetToolTip(searchClearBtn, "清空筛选 (Esc)");
-            searchClearBtn.Click += (s, e) => { searchBox.Text = ""; try { list.Focus(); } catch { } };
+            searchClearBtn.Click += (s, e) => { searchBox.Text = ""; searchDebounce.Stop(); RebuildList(); try { list.Focus(); } catch { } };
             searchBox.SetBounds(0, 0, searchWrap.Width, Ui.S(26));
             searchClearBtn.SetBounds(searchWrap.Width - searchClearBtn.Width, 0, searchClearBtn.Width, Ui.S(26));
+            searchDebounce.Tick += (s, e) => { searchDebounce.Stop(); if (!IsDisposed) RebuildList(); };
             searchBox.TextChanged += (s, e) => {
                 bool show = searchBox.Text.Length > 0;
                 if (searchClearBtn.Visible != show) {
                     searchClearBtn.Visible = show;
                     searchBox.Width = show ? searchWrap.Width - searchClearBtn.Width - Ui.S(2) : searchWrap.Width;
                 }
-                RebuildList();
+                searchDebounce.Stop();
+                searchDebounce.Start();
             };
             searchBox.KeyDown += (s, e) => {
                 if (e.KeyCode == Keys.Escape) {
@@ -173,7 +176,7 @@ namespace TianGongCadSuite {
             Controls.Add(body); Controls.Add(actions);
 
             FormClosing += (s, e) => { if (busy) { stop = true; e.Cancel = true; } };
-            FormClosed += (s, e) => { keyShield.Dispose(); tips.Dispose(); menu.Dispose(); };
+            FormClosed += (s, e) => { searchDebounce.Stop(); searchDebounce.Dispose(); keyShield.Dispose(); tips.Dispose(); menu.Dispose(); };
             UpdateSummaryAndButton();
         }
 
@@ -407,11 +410,12 @@ namespace TianGongCadSuite {
             try {
                 string kw = (searchBox.Text ?? "").Trim();
                 list.Items.Clear();
+                var batch = new List<ListViewItem>(jobs.Count);
                 foreach (var j in jobs) {
                     if (kw.Length > 0 && !MatchesSearch(j, kw)) continue;
-                    var it = MakeListItem(j);
-                    list.Items.Add(it);
+                    batch.Add(MakeListItem(j));
                 }
+                if (batch.Count > 0) list.Items.AddRange(batch.ToArray());
             } finally {
                 list.EndUpdate();
                 rebuilding = false;
@@ -483,16 +487,18 @@ namespace TianGongCadSuite {
         void SetVisibleChecked(Func<DrawingJob, bool> pred) {
             if (busy) return;
             rebuilding = true;
+            list.BeginUpdate();
             try {
                 foreach (ListViewItem it in list.Items) {
                     var j = it.Tag as DrawingJob;
                     if (j == null) continue;
                     bool on = pred(j);
                     j.Selected = on;
-                    it.Checked = on;
+                    if (it.Checked != on) it.Checked = on;
                     ApplyItemColor(it, j);
                 }
             } finally {
+                list.EndUpdate();
                 rebuilding = false;
             }
             UpdateSummaryAndButton();
@@ -500,13 +506,31 @@ namespace TianGongCadSuite {
 
         void RefreshHasDrawing() {
             if (busy) return;
+            // 按目录一次枚举 .dft，避免公司加密盘上逐文件 File.Exists 慢 I/O
+            var dirCache = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
             int foundNew = 0;
             foreach (var j in jobs) {
                 bool had = j.HasDrawing;
-                j.HasDrawing = DrawingBatch.HasDrawing(j.File);
+                string dir = Path.GetDirectoryName(j.File) ?? "";
+                HashSet<string> dfts;
+                if (!dirCache.TryGetValue(dir, out dfts)) {
+                    dfts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    try {
+                        if (Directory.Exists(dir))
+                            foreach (string f in Directory.GetFiles(dir, "*.dft")) dfts.Add(Path.GetFileName(f));
+                    } catch { }
+                    dirCache[dir] = dfts;
+                }
+                string stem = Path.GetFileNameWithoutExtension(j.File) ?? "";
+                j.HasDrawing = dfts.Contains(stem + ".dft") || dfts.Contains(stem + "(自动).dft");
                 if (!had && j.HasDrawing) foundNew++;
             }
-            foreach (ListViewItem it in list.Items) RefreshItemVisual(it);
+            list.BeginUpdate();
+            try {
+                foreach (ListViewItem it in list.Items) RefreshItemVisual(it);
+            } finally {
+                list.EndUpdate();
+            }
             UpdateSummaryAndButton();
             status.Text = foundNew > 0 ? ("已刷新：新发现 " + foundNew + " 张工程图。") : "已刷新全部工程图状态。";
             status.ForeColor = foundNew > 0 ? Ui.Ok : Ui.Muted;
@@ -559,7 +583,7 @@ namespace TianGongCadSuite {
             if (firstJob == null) return;
             string dftPath = ResolveDrawingPath(firstJob);
 
-            menu.Items.Clear();
+            Ui.DisposeItems(menu.Items);
             var mOpenDft = menu.Items.Add("打开工程图 (.dft)", null, (s, ev) => OpenPathInCad(dftPath));
             mOpenDft.Enabled = dftPath.Length > 0 && File.Exists(dftPath) && app != null;
 
@@ -592,12 +616,13 @@ namespace TianGongCadSuite {
 
         void SetItemsChecked(IList<ListViewItem> items, bool on) {
             rebuilding = true;
+            list.BeginUpdate();
             try {
                 foreach (var it in items) {
                     var j = it.Tag as DrawingJob;
-                    if (j != null) { j.Selected = on; it.Checked = on; ApplyItemColor(it, j); }
+                    if (j != null) { j.Selected = on; if (it.Checked != on) it.Checked = on; ApplyItemColor(it, j); }
                 }
-            } finally { rebuilding = false; }
+            } finally { list.EndUpdate(); rebuilding = false; }
             UpdateSummaryAndButton();
         }
 

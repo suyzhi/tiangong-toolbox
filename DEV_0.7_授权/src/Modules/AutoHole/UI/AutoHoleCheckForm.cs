@@ -43,11 +43,13 @@ namespace TianGongCadSuite {
         List<HoleIssue> allIssues = new List<HoleIssue>();
         int skippedPlaces;
         List<HoleIssue> shown = new List<HoleIssue>();
+        List<string> shownSubtitles = new List<string>();
+        readonly Timer selectDebounce = new Timer { Interval = 150 };
         int holeCount, groupCount, failedParts;
         bool busy, checkedOnce;          // 扫描中：RunCheck 里有 DoEvents，必须挡住重入
         readonly Label status = new Label();
         readonly Label summary = new Label();
-        readonly ListBox list = new ListBox();
+        readonly SmoothListBox list = new SmoothListBox();
         readonly TextBox detail = new TextBox();
         readonly Button run = Ui.Primary("开始检查", 200, 44);
         readonly Button copy = Ui.Ghost("复制结果");
@@ -159,9 +161,21 @@ namespace TianGongCadSuite {
             summary.TextChanged += (s, e) => tips.SetToolTip(summary, summary.Text);
             list.IntegralHeight = false; list.BorderStyle = BorderStyle.None;
             list.DrawMode = DrawMode.OwnerDrawFixed; list.ItemHeight = Ui.S(70); list.BackColor = Color.White;
+            Ui.EnableDoubleBuffer(list);
             list.DrawItem += DrawIssue;
-            list.SelectedIndexChanged += (s, e) => { HighlightSelected(); ShowDetail(); if (autoJump.Checked) JumpToSelected(false); };
-            list.DoubleClick += (s, e) => JumpToSelected(true);
+            selectDebounce.Tick += (s, e) => {
+                selectDebounce.Stop();
+                if (IsDisposed) return;
+                HighlightSelected();
+                if (autoJump.Checked) JumpToSelected(false);
+            };
+            list.SelectedIndexChanged += (s, e) => {
+                ShowDetail();
+                // 快速上下键浏览问题列表时 150ms 防抖再执行 CAD 高亮与 3D 镜头跳转
+                selectDebounce.Stop();
+                selectDebounce.Start();
+            };
+            list.DoubleClick += (s, e) => { selectDebounce.Stop(); HighlightSelected(); JumpToSelected(true); };
             var detailCard = Ui.Card("涉及的孔", 140, "");
             detailCard.Fill = true;
             detail.Dock = DockStyle.Fill; detail.Multiline = true; detail.ReadOnly = true; detail.BorderStyle = BorderStyle.None;
@@ -186,7 +200,7 @@ namespace TianGongCadSuite {
 
         void DrawIssue(object sender, DrawItemEventArgs e){
             var g = e.Graphics;
-            using (var b = new SolidBrush(Color.White)) g.FillRectangle(b, e.Bounds);
+            g.FillRectangle(Ui.CachedBrush(Color.White), e.Bounds);
             if (shown.Count == 0) {
                 // 空状态：一句居中的话，不是一条"假的结果"
                 string text = !checkedOnce ? "点左边「开始检查」扫一遍装配里的孔。"
@@ -209,8 +223,8 @@ namespace TianGongCadSuite {
             TextRenderer.DrawText(g, tagText, Ui.F8, tag, done ? Ui.Ok : c, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
             int x = tag.Right + Ui.S(12), w = Math.Max(10, r.Right - x - Ui.S(12));
             TextRenderer.DrawText(g, it.Message, Ui.F9, new Rectangle(x, r.Y + Ui.S(10), w, Ui.S(24)), Ui.Text, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
-            var parts = it.Holes.Select(h => HoleCheck.ShortPart(h.PartName)).Distinct().ToArray();
-            TextRenderer.DrawText(g, it.Holes.Count + " 个孔 · " + parts.Length + " 个零件：" + string.Join("、", parts), Ui.F8,
+            string sub = e.Index < shownSubtitles.Count ? shownSubtitles[e.Index] : "";
+            TextRenderer.DrawText(g, sub, Ui.F8,
                 new Rectangle(x, r.Y + Ui.S(36), w, Ui.S(20)), Ui.Muted, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
         }
 
@@ -322,6 +336,11 @@ namespace TianGongCadSuite {
                 (i.Kind == HoleIssueKind.Misaligned && cMis.Checked) ||
                 (i.Kind == HoleIssueKind.WrongSpec && cWrong.Checked) ||
                 (i.Kind == HoleIssueKind.Unpaired && cUnpaired.Checked)).ToList();
+            shownSubtitles = new List<string>(shown.Count);
+            foreach (var it in shown) {
+                var parts = it.Holes.Select(h => HoleCheck.ShortPart(h.PartName)).Distinct().ToArray();
+                shownSubtitles.Add(it.Holes.Count + " 个孔 · " + parts.Length + " 个零件：" + string.Join("、", parts));
+            }
             list.BeginUpdate();
             try {
                 list.Items.Clear();
@@ -474,6 +493,8 @@ namespace TianGongCadSuite {
         }
 
         void Cleanup(){
+            selectDebounce.Stop();
+            try { selectDebounce.Dispose(); } catch { }
             if (highlights != null) { try { highlights.Delete(); } catch { } highlights = null; }
             // 检查窗口关了（点了别的命令）：它开的「去配孔」窗口不归 ToolContext 管，没在打孔就一起关
             if (lastDrill != null && !lastDrill.IsDisposed && !lastDrill.Busy) { try { lastDrill.Close(); } catch { } }

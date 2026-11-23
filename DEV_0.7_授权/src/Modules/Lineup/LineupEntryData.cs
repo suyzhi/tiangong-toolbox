@@ -18,8 +18,7 @@ namespace TianGongCadSuite {
     }
     public static class LineupEntry {
         public static LineupProject Clone(LineupProject source){
-            var serializer=new XmlSerializer(typeof(LineupProject));
-            using(var stream=new MemoryStream()){serializer.Serialize(stream,source);stream.Position=0;return (LineupProject)serializer.Deserialize(stream);}
+            return source==null?new LineupProject():source.Copy();
         }
         public static LineupEntryResult Create(LineupProject source,LineupEntryPreset preset,int quantity,IEnumerable<LineupRecord> selections){
             if(!LineupTableData.Categories.Contains(preset.Category))throw new InvalidOperationException("请先选择具体录入类目。");

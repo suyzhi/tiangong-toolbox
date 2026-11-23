@@ -55,8 +55,36 @@ namespace TianGongCadSuite {
     public sealed class ToolContext : IDisposable {
         public readonly F.Application Application;
         Form active;
+        // OnCommandUpdateUI 在天工主消息循环每次空闲时会对功能区 9~10 个命令连发查询（<1ms 内全问一遍）。
+        // 缓存 250ms 内的上下文探测结果：一次空闲只做 1 次轻量 COM 检查，且无文档时先看 Documents.Count 避免抛捕 COMException。
+        int probeTick;
+        bool probeValid, probeHasAsm, probeHasEdit, probeHasStandalone;
         public ToolContext(F.Application application){Application=application;}
-        public bool HasAssembly(){try{return Application.ActiveDocument is A.AssemblyDocument;}catch{return false;}}
+        public void InvalidateProbeCache(){probeValid=false;}
+        void EnsureProbeFresh(){
+            int now=Environment.TickCount;
+            if(probeValid&&(now-probeTick)>=0&&(now-probeTick)<250)return;
+            probeTick=now;probeValid=true;probeHasAsm=false;probeHasEdit=false;probeHasStandalone=false;
+            if(Application==null)return;
+            try{
+                int docs=Application.Documents.Count;
+                if(docs<=0)return;
+                object doc=Application.ActiveDocument;
+                if(doc is A.AssemblyDocument){probeHasAsm=true;probeHasEdit=true;return;}
+                var part=doc as P.PartDocument;
+                if(part!=null){
+                    bool ipa=false;try{ipa=part.InPlaceActivated;}catch{}
+                    if(ipa){probeHasEdit=EditingAssembly()!=null;}
+                    else{
+                        var editAsm=EditingAssembly();
+                        if(editAsm!=null)probeHasEdit=true;
+                        else probeHasStandalone=true;
+                    }
+                }
+            }catch{}
+        }
+        public bool HasAssembly(){EnsureProbeFresh();return probeHasAsm;}
+        public bool HasStandalonePart(){EnsureProbeFresh();return probeHasStandalone;}
         public A.AssemblyDocument RequireAssembly(){var document=Application.ActiveDocument as A.AssemblyDocument;if(document==null)throw new InvalidOperationException("请先打开装配文件。");return document;}
         // 原位编辑（在装配里双击零件）时，活动文档是**零件**而不是装配。
         // 而天工CAD 只允许往"正在编辑的那个零件文档"里写模型，所以这个上下文恰恰是打孔唯一能成功的地方
@@ -109,11 +137,12 @@ namespace TianGongCadSuite {
         // 这行日志是唯一能自证"为什么灰"的地方。
         static string lastContextProbe;
         public bool HasEditableContext(){
-            bool hasAssembly=HasAssembly();
-            var editing=hasAssembly?null:EditingAssembly();
-            bool result=hasAssembly||editing!=null;
-            string summary="activeIsAssembly="+hasAssembly+" editingAssembly="+(editing==null?"null":SafeName(editing))+" => "+result;
-            if(summary!=lastContextProbe){lastContextProbe=summary;Log.Debug("ContextProbe",summary);}
+            EnsureProbeFresh();
+            bool result=probeHasEdit;
+            if(Log.DebugEnabled){
+                string summary="activeIsAssembly="+probeHasAsm+" editable="+probeHasEdit+" standalone="+probeHasStandalone;
+                if(summary!=lastContextProbe){lastContextProbe=summary;Log.Debug("ContextProbe",summary);}
+            }
             return result;
         }
         static string SafeName(object document){try{dynamic d=document;return Convert.ToString(d.Name);}catch(Exception e){return "读名字失败:"+e.Message;}}

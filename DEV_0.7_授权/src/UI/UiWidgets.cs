@@ -19,6 +19,13 @@ namespace TianGongCadSuite {
         }
         public int Count { get { return heads.Count; } }
         public void SetItems(IList<string> h, IList<string> sub, int sel){
+            if (selected == sel && heads.Count == h.Count && subs.Count == sub.Count) {
+                bool same = true;
+                for (int i = 0; i < h.Count; i++) {
+                    if (heads[i] != h[i] || subs[i] != sub[i]) { same = false; break; }
+                }
+                if (same) return;
+            }
             heads.Clear(); heads.AddRange(h); subs.Clear(); subs.AddRange(sub);
             var nh = new float[heads.Count];
             for (int i = 0; i < nh.Length; i++) nh[i] = i == sel ? 1 : 0;
@@ -77,6 +84,7 @@ namespace TianGongCadSuite {
 
     // 数字小方块（「要打的孔 6」「零件 2」）：浅灰底，上面一行小字，下面一个大数字。
     public sealed class StatTile : Control {
+        static readonly Font BigNumFont = new Font(Ui.Mono, 18F, FontStyle.Bold);
         public string Caption = "";
         public Color ValueColor = Ui.Text;
         public StatTile(string caption){
@@ -90,36 +98,27 @@ namespace TianGongCadSuite {
             g.Clear(Parent != null ? Parent.BackColor : Ui.Bg);
             Ui.FillRound(g, new Rectangle(0, 0, Width - 1, Height - 1), Ui.S(12), Ui.Rail);
             TextRenderer.DrawText(g, Caption, Ui.F8, new Point(Ui.S(16), Ui.S(12)), Ui.Muted);
-            using (var f = new Font(Ui.Mono, 18F, FontStyle.Bold))
-                TextRenderer.DrawText(g, Text, f, new Rectangle(Ui.S(14), Ui.S(32), Width - Ui.S(20), Height - Ui.S(36)), ValueColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            TextRenderer.DrawText(g, Text, BigNumFont, new Rectangle(Ui.S(14), Ui.S(32), Width - Ui.S(20), Height - Ui.S(36)), ValueColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
         }
     }
 
-    // 列表还空着时的提示：虚线圆角框 + 一个慢慢呼吸的小圆点（「正在等你在模型里点孔…」）。
+    // 列表还空着时的提示：虚线圆角框 + 静态靛蓝小圆点（不再常驻 40ms/25FPS 定时器反复唤醒天工主消息循环）。
     public sealed class EmptyHint : Control {
-        readonly Timer pulse = new Timer { Interval = 40 };
-        float phase;
+        static readonly Color HaloColor = Color.FromArgb(46, Ui.Accent);
         public EmptyHint(string text){
             Text = text; Height = Ui.S(60); Font = Ui.F9;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-            pulse.Tick += (s, e) => { phase += 0.04f; if (phase > 1) phase -= 1; Invalidate(new Rectangle(0, 0, Ui.S(42), Height)); };
         }
-        protected override void OnVisibleChanged(EventArgs e){
-            base.OnVisibleChanged(e);
-            if (Visible && Anim.On) pulse.Start(); else pulse.Stop();
-        }
-        protected override void Dispose(bool disposing){ if (disposing) pulse.Dispose(); base.Dispose(disposing); }
         protected override void OnPaint(PaintEventArgs e){
             var g = e.Graphics;
             g.Clear(Parent != null ? Parent.BackColor : Ui.Bg);
             var r = new Rectangle(0, Ui.S(3), Width - 1, Height - Ui.S(7));
             g.SmoothingMode = SmoothingMode.AntiAlias;
             using (var path = Ui.Rounded(r, Ui.S(10))) using (var pen = new Pen(Color.FromArgb(0xD4, 0xD4, 0xD8), 1.5f) { DashStyle = DashStyle.Dash }) g.DrawPath(pen, path);
-            double k = 0.5 + 0.5 * Math.Sin(phase * Math.PI * 2);
             int cy = r.Y + r.Height / 2;
             int hs = Ui.S(16), ds = Ui.S(8);
-            using (var halo = new SolidBrush(Color.FromArgb((int)(60 * k), Ui.Accent))) g.FillEllipse(halo, Ui.S(14), cy - hs / 2, hs, hs);
-            using (var dot = new SolidBrush(Ui.Accent)) g.FillEllipse(dot, Ui.S(18), cy - ds / 2, ds, ds);
+            g.FillEllipse(Ui.CachedBrush(HaloColor), Ui.S(14), cy - hs / 2, hs, hs);
+            g.FillEllipse(Ui.CachedBrush(Ui.Accent), Ui.S(18), cy - ds / 2, ds, ds);
             g.SmoothingMode = SmoothingMode.Default;
             TextRenderer.DrawText(g, Text, Font, new Rectangle(Ui.S(40), r.Y, Width - Ui.S(50), r.Height), Ui.Muted,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
@@ -148,9 +147,10 @@ namespace TianGongCadSuite {
         public int Maximum { get { return max; } set { max = Math.Max(1, value); Slide(); } }
         public int Value { get { return val; } set { val = Math.Max(0, Math.Min(max, value)); Slide(); } }
         void Slide(){
-            float to = (float)val / max, from = shownFrac;
-            if (Math.Abs(to - from) < 0.0001f) return;
-            Anim.Run(this, 300, t => { shownFrac = from + (to - from) * (float)t; Invalidate(); }, null, null, "bar");
+            float to = (float)val / max;
+            if (Math.Abs(to - shownFrac) < 0.0001f) return;
+            shownFrac = to;
+            Invalidate();
         }
         protected override void OnPaint(PaintEventArgs e){
             var g = e.Graphics;

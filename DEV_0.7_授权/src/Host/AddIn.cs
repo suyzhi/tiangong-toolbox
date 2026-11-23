@@ -26,7 +26,7 @@ namespace TianGongCadSuite {
                 events=new Connection(addin.AddInEvents,typeof(F.ISEAddInEvents),this);
                 // 按命令 ID 取（不要用下标：命令 1/4 已从功能区下线，下标会错位）
 diagnostics=new Diagnostics(context.Application,()=>Run(registry.Find(1)),()=>Run(registry.Find(2)),()=>Run(registry.Find(3)));addin.Object=diagnostics;
-                diagnostics.QueryCommand=id=>{int flags=0,bitmap=0;string text;OnCommandUpdateUI(id,ref flags,out text,ref bitmap);return flags;};
+                diagnostics.QueryCommand=id=>{if(context!=null)context.InvalidateProbeCache();int flags=0,bitmap=0;string text;OnCommandUpdateUI(id,ref flags,out text,ref bitmap);return flags;};
                 diagnostics.GetNativeId=id=>registry.NativeId(id);
             }catch(Exception e){Log.Write("Connect",e);OnDisconnection(default(F.SeDisconnectMode));throw;}
             // 自动更新：后台问一次有没有新版本（不挡 CAD 启动；查到了等用户点命令时再提示）
@@ -45,6 +45,7 @@ diagnostics=new Diagnostics(context.Application,()=>Run(registry.Find(1)),()=>Ru
         }
         static bool SupportedEnvironment(string category){foreach(string id in new[]{AssemblyCategory,TGSDK.CATID.TGPart,TGSDK.CATID.TGDraft,TGSDK.CATID.TGSheetMetal,TGSDK.CATID.TGDMPart,TGSDK.CATID.TGDMSheetMetal})if(string.Equals(category.Trim('{','}'),id.Trim('{','}'),StringComparison.OrdinalIgnoreCase))return true;return false;}
         void Run(ToolCommand c){if(c==null)return;try{
+            if(context!=null)context.InvalidateProbeCache();
             var owner=context==null?null:new CadOwner(context.Application.ActiveFramehWnd);
             // 有新版本：先提示一次（每次开天工最多一次；「稍后提醒」一天内不再提示）。提示完照常执行命令
             if(c.Id!=UpdateModule.CommandId){try{if(AutoUpdate.PromptIfDue(owner))return;/* 点了「立即更新」：天工马上关，不再打开命令 */}catch(Exception e){Log.Write("UpdatePrompt",e);}}
@@ -54,7 +55,7 @@ diagnostics=new Diagnostics(context.Application,()=>Run(registry.Find(1)),()=>Ru
         public void OnCommand(int id){if(diagnostics!=null)diagnostics.LastCommand=id;if(registry!=null)Run(registry.Find(id));}
         public void OnCommandHelp(int id,int frame,int help){var c=registry==null?null:registry.Find(id);if(c!=null)MessageBox.Show(c.Help,c.Title);}
         public void OnCommandUpdateUI(int id,ref int flags,out string text,ref int bitmap){var c=registry==null?null:registry.Find(id);text=c==null?"":c.Title;flags=0;try{if(c!=null&&c.CanExecute())flags=1;}catch{}}
-        public void OnDisconnection(F.SeDisconnectMode mode){Guard.Remove();try{if(context!=null)context.Dispose();}finally{if(registry!=null)registry.Dispose();if(diagnostics!=null)diagnostics.Dispose();if(events!=null)events.Dispose();context=null;registry=null;diagnostics=null;events=null;addin=null;}}
+        public void OnDisconnection(F.SeDisconnectMode mode){Guard.Remove();try{Choices.Flush();}catch{}try{if(context!=null)context.Dispose();}finally{if(registry!=null)registry.Dispose();if(diagnostics!=null)diagnostics.Dispose();if(events!=null)events.Dispose();context=null;registry=null;diagnostics=null;events=null;addin=null;}}
     }
     // 窗口事件（按钮、定时器、列表选择……）里漏网的异常：没人接的话 WinForms 弹自己的「未处理的异常」框，
     // 上面有「退出」—— 点了会把插件所有窗口一起关掉（处理中的打孔、原位编辑停在半截）。这里统一接住：记日志 + 提示一句。

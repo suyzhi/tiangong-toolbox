@@ -72,8 +72,8 @@ namespace TianGongCadSuite {
         //   ② 打孔面页及以后：点平面 = 打孔面。按住 Ctrl 点 = 反过来。点了以后不再自动翻页。
         string lastScanNote = "";   // 上一次面扫描的结论，显示在预览的说明行里
 
-        readonly ListBox refList = new ListBox();
-        readonly ListBox faceList = new ListBox();
+        readonly SmoothListBox refList = new SmoothListBox();
+        readonly SmoothListBox faceList = new SmoothListBox();
         readonly Chip chip = new Chip();
         readonly Label previewLine = new Label();
         readonly Label previewSub = new Label();
@@ -103,6 +103,7 @@ namespace TianGongCadSuite {
         readonly Label editWho = new Label();
         readonly Label editNote = new Label();
         readonly ToolTip tips = new ToolTip { AutoPopDelay = 15000, InitialDelay = 400 };
+        ContextMenuStrip moreMenu;
         Card refsCard;
 
         // 孔形状参考：左 2D 剖面（带尺寸），右 3D 半剖轴测
@@ -330,6 +331,7 @@ namespace TianGongCadSuite {
             StopCommand();
             groups.Clear(); targets.Clear(); targetLabels.Clear(); resolved.Clear(); scannedPicks.Clear();
             lastScanNote = "";
+            if (moreMenu != null) { try { moreMenu.Dispose(); } catch { } moreMenu = null; }
             try { tips.Dispose(); } catch { }
         }
 

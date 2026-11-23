@@ -42,18 +42,16 @@ namespace TianGongCadSuite {
                 int v = Math.Max(0, Math.Min(Items.Count - 1, value));
                 if (v == selected && hiY >= 0) return;
                 selected = v;
-                float to = v * Pitch, from = hiY < 0 ? to : hiY;
-                Anim.Run(this, Anim.Page, t => { hiY = from + (to - from) * (float)t; Invalidate(); }, null, null, "hi");
+                hiY = v * Pitch;
+                Invalidate();
             }
         }
-        // 改一项的状态；从"没做完"变成"做完"时勾弹一下
+        // 改一项的状态（即时切换，不启高频定时器干扰天工主消息循环）
         public void Set(int i, string sub, bool done, bool error){
             if (i < 0 || i >= Items.Count) return;
             var it = Items[i];
-            bool popNow = done && !it.Done;
             if (it.Sub == (sub ?? "") && it.Done == done && it.Error == error) return;
-            it.Sub = sub ?? ""; it.Done = done; it.Error = error;
-            if (popNow && IsHandleCreated) Anim.Run(this, Anim.Pop, t => { it.Pop = 0.6f + 0.4f * (float)t; Invalidate(); }, null, Anim.Back, "pop" + i);
+            it.Sub = sub ?? ""; it.Done = done; it.Error = error; it.Pop = 1f;
             Invalidate();
         }
         public void SetCount(int i, string count, bool dim){
@@ -154,13 +152,16 @@ namespace TianGongCadSuite {
             get { return status; }
             set {
                 if (value == null || value == status) return;
-                Controls.Remove(status); status = value;
+                var old = status;
+                Controls.Remove(old);
+                if (old != null && !old.IsDisposed) old.Dispose();
+                status = value;
                 Style(status); Controls.Add(status); PerformLayout();
             }
         }
         public int Gap = Ui.S(10);
         public ActionBar(){
-            SetStyle(ControlStyles.ResizeRedraw | ControlStyles.OptimizedDoubleBuffer, true);
+            SetStyle(ControlStyles.ResizeRedraw | ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
             BackColor = Ui.Bg; Height = Ui.S(72);
             Padding = Ui.SPad(28, 0, 20, 0);
             Style(status); status.ForeColor = Ui.Muted;
@@ -168,23 +169,31 @@ namespace TianGongCadSuite {
         }
         static void Style(Label l){
             l.AutoSize = false; l.AutoEllipsis = true; l.TextAlign = ContentAlignment.MiddleLeft;
-            l.BackColor = Color.Transparent; l.Font = Ui.F8; l.Padding = new Padding(0);
+            // 不透明纯底色：避免每次 SetStatus 更新文字时穿透父容器 ActionBar 引起整条底栏擦除重绘闪烁
+            l.BackColor = Ui.Bg; l.Font = Ui.F8; l.Padding = new Padding(0);
         }
         public void AddLeft(Control c){ Left.Add(c); Controls.Add(c); PerformLayout(); }
         public void AddRight(Control c){ Right.Add(c); Controls.Add(c); PerformLayout(); }
         protected override void OnLayout(LayoutEventArgs e){
             base.OnLayout(e);
             int x = Padding.Left;
-            foreach (var c in Left) { if (!c.Visible && IsHandleCreated) continue; c.Location = new Point(x, (Height - c.Height) / 2); x += c.Width + Gap; }
+            foreach (var c in Left) {
+                if (!c.Visible && IsHandleCreated) continue;
+                var pt = new Point(x, (Height - c.Height) / 2);
+                if (c.Location != pt) c.Location = pt;
+                x += c.Width + Gap;
+            }
             int rx = Width - Padding.Right;
             for (int i = Right.Count - 1; i >= 0; i--) {
                 var c = Right[i];
                 if (!c.Visible && IsHandleCreated) continue;
                 rx -= c.Width;
-                c.Location = new Point(rx, (Height - c.Height) / 2);
+                var pt = new Point(rx, (Height - c.Height) / 2);
+                if (c.Location != pt) c.Location = pt;
                 rx -= Gap;
             }
-            status.SetBounds(x + Ui.S(4), Ui.S(6), Math.Max(0, rx - x - Ui.S(8)), Height - Ui.S(12));
+            var sr = new Rectangle(x + Ui.S(4), Ui.S(6), Math.Max(0, rx - x - Ui.S(8)), Height - Ui.S(12));
+            if (status.Bounds != sr) status.Bounds = sr;
         }
         protected override void OnPaint(PaintEventArgs e){
             base.OnPaint(e);
@@ -290,6 +299,10 @@ namespace TianGongCadSuite {
 
         public WizardShell(){
             Dock = DockStyle.Fill; BackColor = Ui.Bg;
+            Ui.EnableDoubleBuffer(this);
+            Ui.EnableDoubleBuffer(content);
+            Ui.EnableDoubleBuffer(header);
+            Ui.EnableDoubleBuffer(host);
             railPanel.BackColor = Ui.Rail;
             railPanel.Controls.Add(Rail);
             content.BackColor = Ui.Bg;
@@ -314,7 +327,9 @@ namespace TianGongCadSuite {
         public Control RailBottom { get { return railBottom; } set { if (railBottom != null) railPanel.Controls.Remove(railBottom); railBottom = value; if (value != null) railPanel.Controls.Add(value); LayoutRail(); } }
 
         public Page AddPage(string railTitle, string title, string railSub){
-            var p = new Page { Title = title, Body = new Panel { BackColor = Ui.Bg, Visible = false } };
+            var body = new Panel { BackColor = Ui.Bg, Visible = false };
+            Ui.EnableDoubleBuffer(body);
+            var p = new Page { Title = title, Body = body };
             Pages.Add(p);
             host.Controls.Add(p.Body);
             if (StepCaption) Rail.Add(railTitle, railSub); else Rail.Visible = false;
@@ -340,17 +355,26 @@ namespace TianGongCadSuite {
             Rail.Selected = index;
             if (index == current) return;
             int old = current;
-            Bitmap before = null;
-            if (animate && old >= 0 && Anim.On && IsHandleCreated && host.Width > 0 && host.Height > 0) before = Snap(host);
-            if (old >= 0) { Pages[old].Body.Visible = false; foreach (var c in Pages[old].HeaderControls) c.Visible = false; }
-            current = index;
-            var p = Pages[index];
-            p.Body.Visible = true; p.Body.BringToFront();
-            foreach (var c in p.HeaderControls) c.Visible = true;
-            stepLabel.Text = StepCaption && Pages.Count > 1 ? "第 " + (index + 1) + " 步，共 " + Pages.Count + " 步" : "";
-            titleLabel.Text = p.Title; subLabel.Text = "";
-            LayoutHeader(); LayoutContent();
-            if (before != null) Transition(before, index > old);
+            // 不再做两次全树 DrawToBitmap + CPU ColorMatrix Alpha 混合（大页面会冻住 80~400ms）；
+            // 用 WM_SETREDRAW 合帧瞬时切换，且按需同步新页尺寸，彻底消除切步骤卡顿与白闪。
+            bool frozen = Ui.BeginRedrawFreeze(content);
+            try {
+                if (old >= 0) {
+                    Pages[old].Body.Visible = false;
+                    foreach (var c in Pages[old].HeaderControls) c.Visible = false;
+                }
+                current = index;
+                var p = Pages[index];
+                var bodyRect = new Rectangle(0, 0, host.Width, host.Height);
+                if (p.Body.Bounds != bodyRect) p.Body.Bounds = bodyRect;
+                p.Body.Visible = true; p.Body.BringToFront();
+                foreach (var c in p.HeaderControls) c.Visible = true;
+                stepLabel.Text = StepCaption && Pages.Count > 1 ? "第 " + (index + 1) + " 步，共 " + Pages.Count + " 步" : "";
+                titleLabel.Text = p.Title; subLabel.Text = "";
+                LayoutHeader(); LayoutContent();
+            } finally {
+                Ui.EndRedrawFreeze(content, frozen);
+            }
             var h = PageChanged; if (h != null) h(this, EventArgs.Empty);
         }
 
@@ -400,8 +424,13 @@ namespace TianGongCadSuite {
             header.SetBounds(0, 0, w, hh);
             Footer.SetBounds(0, Math.Max(hh, h - Footer.Height), w, Footer.Height);
             int lpad = Ui.S(28), rpad = Ui.S(24), topGap = Ui.S(12), botGap = Ui.S(10);
-            host.SetBounds(lpad, hh + topGap, Math.Max(0, w - lpad - rpad), Math.Max(0, Footer.Top - hh - topGap - botGap));
-            foreach (var p in Pages) p.Body.SetBounds(0, 0, host.Width, host.Height);
+            var hostRect = new Rectangle(lpad, hh + topGap, Math.Max(0, w - lpad - rpad), Math.Max(0, Footer.Top - hh - topGap - botGap));
+            if (host.Bounds != hostRect) host.Bounds = hostRect;
+            // 仅调整当前可见页尺寸，避免窗口拖动缩放时同步重排全部隐藏步骤页
+            if (current >= 0 && current < Pages.Count) {
+                var bodyRect = new Rectangle(0, 0, host.Width, host.Height);
+                if (Pages[current].Body.Bounds != bodyRect) Pages[current].Body.Bounds = bodyRect;
+            }
             if (overlay != null) overlay.Bounds = host.Bounds;
             Toast.Rest = Footer.Top - Ui.S(12);
             Toast.SetBounds(lpad, Toast.Top, Math.Max(0, w - lpad - rpad), Toast.Height);

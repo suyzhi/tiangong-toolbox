@@ -12,6 +12,11 @@ namespace TianGongCadSuite {
         public string IslandId="",ValveId="",CylinderId="",Position="";
         public string[] InstancePath=new string[0];
         public string SourceFile="",ReferenceKey="";
+        public LineupRecord Copy(){
+            var c=(LineupRecord)MemberwiseClone();
+            c.InstancePath=InstancePath==null?new string[0]:(string[])InstancePath.Clone();
+            return c;
+        }
         public override string ToString(){return Number+"  "+Description+"  "+Model;}
     }
     public sealed class LineupLocationPoint {
@@ -74,16 +79,31 @@ namespace TianGongCadSuite {
             if(string.IsNullOrWhiteSpace(LineCode))LineCode="L1";
             if(string.IsNullOrWhiteSpace(Revision))Revision="V1.0";
         }
+        static readonly XmlSerializer ProjectSerializer=new XmlSerializer(typeof(LineupProject));
+        // 纯内存深拷贝：比 XmlSerializer 序列化+反序列化快数十倍，消除编辑与 CAD 页同步卡顿
+        public LineupProject Copy(){
+            var p=new LineupProject{
+                Version=Version,AssemblyFile=AssemblyFile??"",NumberPrefix=NumberPrefix??"",ActiveIsland=ActiveIsland,
+                ProjectCode=ProjectCode??"",StationCode=StationCode??"",LineCode=LineCode??"L1",
+                Designer=Designer??"",Editor=Editor??"",Revision=Revision??"V1.0",Export11Columns=Export11Columns
+            };
+            if(Records!=null){p.Records=new List<LineupRecord>(Records.Count);for(int i=0;i<Records.Count;i++)p.Records.Add(Records[i].Copy());}
+            if(Sections!=null){p.Sections=new List<LineupSection>(Sections.Count);for(int i=0;i<Sections.Count;i++){var s=Sections[i];p.Sections.Add(new LineupSection{Category=s.Category??"",Cells=s.Cells==null?new string[0]:(string[])s.Cells.Clone()});}}
+            if(Islands!=null){p.Islands=new List<LineupIsland>(Islands.Count);for(int i=0;i<Islands.Count;i++)p.Islands.Add(Islands[i].Copy());}
+            if(EntryPresets!=null){p.EntryPresets=new List<LineupEntryPreset>(EntryPresets.Count);for(int i=0;i<EntryPresets.Count;i++)p.EntryPresets.Add(EntryPresets[i].Copy());}
+            if(CadPages!=null){p.CadPages=new List<LineupCadPage>(CadPages.Count);for(int i=0;i<CadPages.Count;i++)p.CadPages.Add(CadPages[i].Copy());}
+            return p;
+        }
         public void Save(string file) {
             var temporary=file+"."+Guid.NewGuid().ToString("N")+".tmp";
             try {
-                using(var stream=new FileStream(temporary,FileMode.CreateNew))new XmlSerializer(typeof(LineupProject)).Serialize(stream,this);
+                using(var stream=new FileStream(temporary,FileMode.CreateNew))ProjectSerializer.Serialize(stream,this);
                 if(File.Exists(file))File.Replace(temporary,file,file+".bak");else File.Move(temporary,file);
             } finally {if(File.Exists(temporary))File.Delete(temporary);}
         }
         public static LineupProject Load(string file,string assembly) {
             LineupProject p;
-            using(var stream=File.OpenRead(file))p=(LineupProject)new XmlSerializer(typeof(LineupProject)).Deserialize(stream);
+            using(var stream=File.OpenRead(file))p=(LineupProject)ProjectSerializer.Deserialize(stream);
             if(p.Version!=1)throw new InvalidDataException("不支持的 Lineup 文件版本。");
             if(p.Records==null)p.Records=new List<LineupRecord>();
             if(p.Sections==null)p.Sections=new List<LineupSection>();
