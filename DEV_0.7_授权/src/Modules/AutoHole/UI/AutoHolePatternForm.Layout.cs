@@ -154,13 +154,13 @@ namespace TianGongCadSuite {
             shell.RailBottom = presetCard;
 
             // ---- 底部操作栏 ----
-            var more = moreMenu = new ContextMenuStrip { ShowImageMargin = false, Font = Ui.F9 };
+            var more = moreMenu = Ui.Menu();
             var miEdit = more.Items.Add("改孔型…（刚排的这批孔整组换孔型）");
             var miUndo = more.Items.Add("撤销本次打孔");
             miEdit.Click += (s, e) => OpenEdit();
             miUndo.Click += (s, e) => UndoLastBatch();
             more.Opening += (s, e) => { miEdit.Enabled = editButton.Enabled && !busy; miUndo.Enabled = undoButton.Enabled && !busy; };
-            moreButton.Click += (s, e) => more.Show(moreButton, new Point(0, -more.PreferredSize.Height - 4));
+            Ui.BindDropDownMenu(moreButton, more, (b, m) => new Point(0, -m.PreferredSize.Height - 4));
             backButton.Click += (s, e) => shell.Go(shell.Current - 1);
             nextButton.Click += (s, e) => shell.Go(shell.Current + 1);
             run.Click += (s, e) => Run();

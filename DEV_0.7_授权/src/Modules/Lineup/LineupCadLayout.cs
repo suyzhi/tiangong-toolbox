@@ -39,25 +39,27 @@ namespace TianGongCadSuite {
         public List<LineupCadCallout> Callouts = new List<LineupCadCallout>();
     }
 
-    // 「LineUP第三版_CAD」14 列标准版式与无交叉箭头排布计算器（纯逻辑，Excel OpenXML 导出与 WinForms 实时预览共用同一套几何）
+    // 「LineUP第三版_CAD」12 列公司内部模板 V3.0 标准版式与无交叉箭头排布计算器
+    // （纯逻辑，Excel OpenXML 导出与 WinForms 实时预览共用同一套几何；箭头方向严格为从图指向单元格）
     public static class LineupCadLayout {
         public const long EmuPerPx = 9525L;
         public const long EmuPerPt = 12700L;
 
-        // 14 列（A..N）字符宽度：D/K 放宽到 21 避免长编号（如 OK270-Y10C05-1）折行截断；E..J 六列等宽 23 让中央三维图清晰饱满
+        // 12 列（A..L）字符宽度（严格对齐公司内部模板 V3.0「LineUP第三版_CAD」）：
+        // A:名称/描述  B:IO点位  C:SK编号 | D..I: 插图区域（6 列） | J:SK编号  K:IO点位  L:名称/描述
         public static readonly double[] ColWidths = {
-            26.0, 24.0, 9.0, 21.0,             // A:IO点位  B:名称/描述  C:备忘  D:SK编号
-            23.0, 23.0, 23.0, 23.0, 23.0, 23.0,// E..J: 插图区域（6 列等宽）
-            21.0, 9.0, 24.0, 26.0              // K:SK编号  L:备忘  M:名称/描述  N:IO点位
+            48.18, 34.64, 25.91,                      // A:名称/描述  B:IO点位  C:SK编号
+            20.83, 20.83, 20.83, 20.83, 20.83, 35.22, // D..I: 插图区域（6 列）
+            26.82, 33.03, 49.99                       // J:SK编号  K:IO点位  L:名称/描述
         };
 
-        public const int ImageFirstCol = 4;    // E (0-based)
-        public const int ImageLastColExcl = 10;// K (0-based, exclusive)
+        public const int ImageFirstCol = 3;    // D (0-based)
+        public const int ImageLastColExcl = 9; // J (0-based, exclusive)
         public const double HeaderRow0Pt = 20.0;
-        public const double HeaderRow1Pt = 18.0;
+        public const double HeaderRow1Pt = 20.0;
         public const double HeaderRow2Pt = 20.0;
-        public const double DataRowPt = 16.5;  // 22 px = 209550 EMU
-        public const int DefaultDataRows = 38; // 3 + 38 = 41 行/页，与公司 OK170/OK270 实表一致
+        public const double DataRowPt = 20.0;  // 宋体 14pt，与模板 LineUP第三版_CAD 一致
+        public const int DefaultDataRows = 38; // 3 + 38 = 41 行/页，单页清晰饱满
 
         public static long ColWidthEmu(int colIndex) {
             double w = colIndex >= 0 && colIndex < ColWidths.Length ? ColWidths[colIndex] : 9.0;
@@ -141,13 +143,13 @@ namespace TianGongCadSuite {
             int dataRows = Math.Max(DefaultDataRows, Math.Max(left.Count, right.Count) + 2);
             int totalRows = 3 + dataRows;
 
-            // 2. 计算图片在 E..J × DataRows 区域内等比居中矩形
+            // 2. 计算图片在 D..I × DataRows 区域内等比居中矩形
             long areaLeft = ColLeftEmu(ImageFirstCol);
             long areaRight = ColLeftEmu(ImageLastColExcl);
             long areaTop = RowTopEmu(3);
             long areaBot = RowTopEmu(totalRows);
-            long padX = 14 * EmuPerPx;
-            long padY = 12 * EmuPerPx;
+            long padX = 18 * EmuPerPx;
+            long padY = 14 * EmuPerPx;
             long availW = Math.Max(EmuPerPx * 40, (areaRight - areaLeft) - padX * 2);
             long availH = Math.Max(EmuPerPx * 40, (areaBot - areaTop) - padY * 2);
 
@@ -233,8 +235,8 @@ namespace TianGongCadSuite {
             // 单调无重叠行求解：保证 assigned[0] < assigned[1] < ... < assigned[n-1]，且尽量贴近 ideal[i]
             int[] assigned = SolveMonotonicRows(ideal, minRow, maxRow);
 
-            // 左栏箭头起点 = D 列右边界（col 4, colOff 0）；右栏箭头起点 = K 列左边界（col 10, colOff 0）
-            long startX = side == "left" ? ColLeftEmu(ImageFirstCol) : ColLeftEmu(ImageLastColExcl);
+            // 箭头方向：从三维图上的器件落点指向两侧编号单元格（左栏终点 = C 列右缘即 col 3；右栏终点 = J 列左缘即 col 9）
+            long cellEdgeX = side == "left" ? ColLeftEmu(ImageFirstCol) : ColLeftEmu(ImageLastColExcl);
 
             for (int i = 0; i < n; i++) {
                 var pt = ordered[i];
@@ -261,12 +263,13 @@ namespace TianGongCadSuite {
                 };
 
                 if (c.HasArrow) {
-                    long sy = RowTopEmu(rowOffset) + RowHeightEmu(rowOffset) / 2;
-                    long ex = plan.ImageLeftEmu + (long)Math.Round(Clamp01(pt.X) * plan.ImageWidthEmu);
-                    long ey = plan.ImageTopEmu + (long)Math.Round(Clamp01(pt.Y) * plan.ImageHeightEmu);
-                    c.StartX = startX; c.StartY = sy; c.EndX = ex; c.EndY = ey;
+                    long sx = plan.ImageLeftEmu + (long)Math.Round(Clamp01(pt.X) * plan.ImageWidthEmu);
+                    long sy = plan.ImageTopEmu + (long)Math.Round(Clamp01(pt.Y) * plan.ImageHeightEmu);
+                    long ex = cellEdgeX;
+                    long ey = RowTopEmu(rowOffset) + RowHeightEmu(rowOffset) / 2;
+                    c.StartX = sx; c.StartY = sy; c.EndX = ex; c.EndY = ey;
 
-                    long minX = Math.Min(startX, ex), maxX = Math.Max(startX, ex);
+                    long minX = Math.Min(sx, ex), maxX = Math.Max(sx, ex);
                     long minY = Math.Min(sy, ey), maxY = Math.Max(sy, ey);
                     // 防止完全水平/垂直退化导致 ext=0 某些查看器不渲染箭头
                     if (maxX == minX) maxX = minX + EmuPerPx;
@@ -274,7 +277,7 @@ namespace TianGongCadSuite {
 
                     c.FromAnchor = ToAnchor(minX, minY, plan.StartRow, plan.RowCount);
                     c.ToAnchor = ToAnchor(maxX, maxY, plan.StartRow, plan.RowCount);
-                    c.FlipH = ex < startX;
+                    c.FlipH = ex < sx;
                     c.FlipV = ey < sy;
                 }
                 plan.Callouts.Add(c);

@@ -31,7 +31,8 @@ namespace TianGongCadSuite {
         readonly string file, store;
         LineupProject project;
         readonly DataTable data = new DataTable();
-        readonly DataGridView grid = new DataGridView();
+        readonly SpreadsheetGrid grid = new SpreadsheetGrid();
+        ContextMenuStrip gridMenu;
         readonly ComboBox category = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = Ui.S(135) };
         readonly TextBox search = new TextBox { BorderStyle = BorderStyle.FixedSingle };
         readonly Label status = new Label();
@@ -77,6 +78,7 @@ namespace TianGongCadSuite {
         Button batchEntryToggleBtnSensor;
         Button batchEntryToggleBtnElec;
         Button previewToggleBtn;
+        Button modelLibraryBtn;
         Button stationPillBtn;
         Button btnUndoFooter;
         Panel zoomBar;
@@ -280,6 +282,7 @@ namespace TianGongCadSuite {
                 DisposeGridFonts();
                 ClearHighlight();
                 if (preview != null) preview.Dispose();
+                if (gridMenu != null) gridMenu.Dispose();
                 if (grid.ContextMenuStrip != null) grid.ContextMenuStrip.Dispose();
                 DisposeMenus();
             };
@@ -376,13 +379,13 @@ namespace TianGongCadSuite {
         void UpdateTableTipForMode() {
             if (tableTipLabel == null) return;
             if (activeViewMode == 0)
-                tableTipLabel.Text = "气动主线：左侧建/选阀岛 · 右侧「+ 添加气缸」自动配阀片与 H/W · 单击格子直接输入 · 双击型号选库 · Ctrl+滚轮缩放 · 右键一阀控多缸/换岛/删路";
+                tableTipLabel.Text = "气动主线：左侧建/选阀岛 · 右侧「+ 添加气缸」自动配阀片与 H/W · 选中格子直接打字输入（双击/F2 编辑） · 双击型号选库 · 右键进入 3D 点选/多行顺序绑定";
             else if (activeViewMode == 1)
-                tableTipLabel.Text = "普通传感器 (SE)：单击格子直接输入 · 双击「型号」选库自动填品牌和接口 · 只有常闭需在「常开/常闭」列填写 · Ctrl+滚轮缩放";
+                tableTipLabel.Text = "普通传感器 (SE)：选中格子直接打字输入（双击/F2 编辑） · 双击「型号」选库 · 只有常闭需填「常开/常闭」 · 右键进入 3D 点选/多行顺序绑定";
             else if (activeViewMode == 2)
-                tableTipLabel.Text = "其他电气件 (E)：三联件、伺服、相机、安全门锁、按钮盒等 · 可点「从阀岛同步本体到 E**」自动带入已建阀岛 · Ctrl+滚轮缩放";
+                tableTipLabel.Text = "其他电气件 (E)：三联件、伺服、相机、安全门锁、按钮盒等 · 选中格子直接打字输入 · 右键可进入 3D 点选/多行顺序绑定 · Ctrl+滚轮缩放";
             else
-                tableTipLabel.Text = "BOM 总表：类 Excel 全表视图 · 单击直接输入（自动保存） · 支持 Ctrl+C/V 粘贴、Ctrl+D 向下填充、Delete 清空、Ctrl+滚轮缩放";
+                tableTipLabel.Text = "BOM 总表：类 Excel 全表视图 · 单击选中、直接打字输入（双击/F2 编辑） · 支持 Ctrl+C/V 粘贴、Ctrl+D 向下填充、Delete 清空、右键 3D 顺序绑定";
         }
 
         void InitShellAndPages() {
@@ -421,6 +424,12 @@ namespace TianGongCadSuite {
             previewToggleBtn.Click += (s, e) => Try(TogglePreview);
             tips.SetToolTip(previewToggleBtn, "在表格右侧开关三维模型预览，选中已绑行即可旋转查看");
 
+            modelLibraryBtn = Ui.Secondary("型号库", 74, 30);
+            modelLibraryBtn.Font = Ui.F8;
+            modelLibraryBtn.Margin = Ui.SPad(0, 0, 8, 0);
+            modelLibraryBtn.Click += (s, e) => Try(OpenModelLibraryManager);
+            tips.SetToolTip(modelLibraryBtn, "打开型号库管理：按气缸 / 阀片 / 阀岛 / 传感器分类查看、新增、编辑、导入与导出");
+
             stationPillBtn = Ui.Secondary("设置抬头 / 阀岛 ▾", 148, 30);
             stationPillBtn.Font = Ui.F8;
             stationPillBtn.Margin = new Padding(0);
@@ -428,6 +437,7 @@ namespace TianGongCadSuite {
             tips.SetToolTip(stationPillBtn, "点击修改项目编号、工位前缀、当前阀岛 (Y*) 及阀岛型号");
 
             topRightFlow.Controls.Add(previewToggleBtn);
+            topRightFlow.Controls.Add(modelLibraryBtn);
             topRightFlow.Controls.Add(stationPillBtn);
             topStepBar.Controls.Add(stepFlow);
             topStepBar.Controls.Add(topRightFlow);
@@ -472,7 +482,7 @@ namespace TianGongCadSuite {
             listStack.Add(workAreaHost, true);
 
             tableTipLabel = new Label {
-                Text = "气动主线：左侧建/选阀岛 · 右侧「+ 添加气缸」自动配阀片与 H/W · 单击格子直接输入 · 双击型号选库 · Ctrl+滚轮缩放 · 右键一阀控多缸/换岛/删路",
+                Text = "气动主线：左侧建/选阀岛 · 右侧「+ 添加气缸」自动配阀片与 H/W · 选中格子直接打字输入（双击/F2 编辑） · 双击型号选库 · 右键进入 3D 点选/多行顺序绑定",
                 AutoSize = false, Height = Ui.S(20), Font = Ui.F8, ForeColor = Ui.Muted, BackColor = Ui.Bg,
                 TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true
             };
@@ -848,18 +858,31 @@ namespace TianGongCadSuite {
             grid.Columns[1].Frozen = true;
             grid.DataSource = data;
 
-            // 单击即可直接输入（拖拽多选仍保持多选框选，点下拉框一次直接展开）
+            grid.SuppressDoubleClickEdit = (rowIndex, colIndex) => colIndex == 5;
+
+            // 类 Excel 交互：左键单击只选中不强行进编辑；右键保留多行选区（含行头右键）并弹出与主题一致的上下文菜单
             grid.CellMouseUp += (s, e) => {
-                if (e.Button != MouseButtons.Left || e.RowIndex < 0 || e.ColumnIndex < 0) return;
-                if ((ModifierKeys & (Keys.Control | Keys.Shift)) != 0) return;
-                if (grid.SelectedCells.Count != 1 || grid.IsCurrentCellInEditMode) return;
-                var cell = grid.Rows[e.RowIndex].Cells[e.ColumnIndex];
-                if (cell.ReadOnly) return;
-                if (grid.CurrentCell != cell) grid.CurrentCell = cell;
-                if (grid.BeginEdit(true)) {
-                    var cb = grid.EditingControl as ComboBox;
-                    if (cb != null) { try { cb.DroppedDown = true; } catch { } }
+                if (e.Button != MouseButtons.Right || e.RowIndex < 0) return;
+                var selRows = grid.SelectedCells.Cast<DataGridViewCell>().Where(c => c.RowIndex >= 0).Select(c => c.RowIndex)
+                    .Concat(grid.SelectedRows.Cast<DataGridViewRow>().Where(r => r.Index >= 0).Select(r => r.Index))
+                    .Distinct().ToList();
+                bool clickedInSelectedRow = selRows.Contains(e.RowIndex);
+                if (e.ColumnIndex < 0) {
+                    if (!clickedInSelectedRow) {
+                        grid.ClearSelection();
+                        grid.Rows[e.RowIndex].Selected = true;
+                        var firstVis = grid.Columns.Cast<DataGridViewColumn>().FirstOrDefault(c => c.Visible);
+                        if (firstVis != null) grid.CurrentCell = grid.Rows[e.RowIndex].Cells[firstVis.Index];
+                    }
+                    ShowGridContextMenu(e.RowIndex);
+                    return;
                 }
+                if (!grid.Rows[e.RowIndex].Cells[e.ColumnIndex].Selected && !(selRows.Count > 1 && clickedInSelectedRow)) {
+                    grid.ClearSelection();
+                    grid.CurrentCell = grid.Rows[e.RowIndex].Cells[e.ColumnIndex];
+                    grid.Rows[e.RowIndex].Cells[e.ColumnIndex].Selected = true;
+                }
+                ShowGridContextMenu(e.RowIndex);
             };
 
             grid.MouseWheel += HandleGridMouseWheel;
@@ -966,7 +989,7 @@ namespace TianGongCadSuite {
             } else if (fieldMiss > 0) {
                 guideBanner.Fill = Ui.WarnSoft;
                 guideText.ForeColor = Ui.Warn;
-                guideText.Text = "下一步建议：还有 " + fieldMiss + " 处必填字段待补充（淡黄格子），单击直接输入，双击「型号」从库中挑。";
+                guideText.Text = "下一步建议：还有 " + fieldMiss + " 处必填字段待补充（淡黄格子），选中直接打字输入，双击「型号」从库中挑。";
                 guideActionBtn.Text = "查看缺漏明细 →";
                 guideAction = () => GoStep(2);
             } else if (unboundPrimary > 0 && app != null) {
@@ -978,7 +1001,7 @@ namespace TianGongCadSuite {
             } else {
                 guideBanner.Fill = Ui.OkSoft;
                 guideText.ForeColor = Ui.Ok;
-                guideText.Text = "✓ 清单已整理齐全！单击任意格子可随时修改，现在可以进入下一步标位置图或直接导出。";
+                guideText.Text = "✓ 清单已整理齐全！选中任意格子可直接打字修改，现在可以进入下一步标位置图或直接导出。";
                 guideActionBtn.Text = "去标位置图 →";
                 guideAction = () => GoStep(1);
             }
@@ -1040,7 +1063,7 @@ namespace TianGongCadSuite {
             });
             var c2 = makeCard("② 自动扫描装配", "一键识别三维里的气缸、阀岛与传感器", "扫描当前装配", false, ScanAssemblyDialog);
             var c3 = makeCard("③ 在 CAD 点选加入", "在三维里点哪个零件就录入哪个", "开始点选零件", false, () => StartContinuous("add"));
-            var c4 = makeCard("④ 导入已有清单", "打开现有 .xlsx 或粘贴表格继续改", "导入 Excel…", false, ImportXlsxDialog);
+            var c4 = makeCard("④ 导入已有清单", "打开明文/加密 Excel 或粘贴表格继续改", "导入 Excel…", false, ImportXlsxDialog);
             cardsRow.Controls.AddRange(new Control[] { c1, c2, c3, c4 });
 
             var linkRow = new FlowLayoutPanel { Dock = DockStyle.Top, Height = Ui.S(38), WrapContents = false, BackColor = Color.White };
@@ -1191,18 +1214,58 @@ namespace TianGongCadSuite {
         }
 
         void BuildGridContextMenu() {
-            var cm = new ContextMenuStrip { ShowImageMargin = false, Font = Ui.F9 };
-            Action<string, Action> add = (t, a) => { var mi = new ToolStripMenuItem(t); mi.Click += (s, e) => Try(a); cm.Items.Add(mi); };
-            add("在 CAD 中定位模型", Locate);
-            add("选择型号（F4）", () => PickModel(false));
-            add("套用型号到选中多行", () => PickModel(true));
-            cm.Items.Add(new ToolStripSeparator());
-            add("一键配齐配套阀片 + H/W", AutoCompleteValvesAndSensors);
-            add("批量设置备注 / 模块名…", BatchSetNotesDialog);
-            cm.Items.Add(new ToolStripSeparator());
-            add("复制选中行", DuplicateRows);
-            add("删除选中行", DeleteRows);
-            grid.ContextMenuStrip = cm;
+            gridMenu = Ui.Menu();
+        }
+
+        internal ContextMenuStrip GridMenu { get { return gridMenu; } }
+
+        internal void BuildGridContextMenuForRow(int rowIndex) {
+            if (gridMenu == null) gridMenu = Ui.Menu();
+            Ui.DisposeItems(gridMenu.Items);
+
+            var ids = SelectedIds();
+            if (ids.Count == 0 && rowIndex >= 0 && rowIndex < grid.Rows.Count && grid.Rows[rowIndex].DataBoundItem != null) {
+                string rid = Convert.ToString(((DataRowView)grid.Rows[rowIndex].DataBoundItem)["Id"]);
+                if (!string.IsNullOrEmpty(rid)) ids.Add(rid);
+            }
+            string focusId = ids.Count > 0 ? ids[0] : CurrentId();
+            var focusRec = string.IsNullOrEmpty(focusId) ? null : project.Records.FirstOrDefault(x => x.Id == focusId);
+            bool focusBound = focusRec != null && !string.IsNullOrEmpty(focusRec.ReferenceKey);
+
+            Action<string, Action, string, bool> add = (t, a, tone, enabled) => {
+                var mi = new ToolStripMenuItem(t);
+                if (!string.IsNullOrEmpty(tone)) mi.Tag = tone;
+                mi.Enabled = enabled;
+                mi.Click += (s, e) => Try(a);
+                gridMenu.Items.Add(mi);
+            };
+
+            if (ids.Count <= 1) {
+                add("进入 3D 点选模型绑定到此行", () => StartSequentialBindRecords(ids), "accent", ids.Count == 1);
+                add("绑定 CAD 当前选中件到此行", () => BindCurrentCadSelectionToRecords(ids), null, ids.Count == 1);
+                add("在 CAD 中定位模型", Locate, null, focusBound);
+            } else {
+                add("进入 3D 依次点选绑定选中 " + ids.Count + " 行", () => StartSequentialBindRecords(ids), "accent", true);
+                add("按顺序绑定 CAD 已选中件到选中 " + ids.Count + " 行", () => BindCurrentCadSelectionToRecords(ids), null, true);
+                add("在 CAD 中定位当前行模型", Locate, null, focusBound);
+            }
+
+            gridMenu.Items.Add(new ToolStripSeparator());
+            add("选择型号（F4）", () => PickModel(false), null, ids.Count > 0);
+            add(ids.Count > 1 ? ("套用型号到选中 " + ids.Count + " 行") : "套用型号到选中多行", () => PickModel(true), null, ids.Count > 0);
+            gridMenu.Items.Add(new ToolStripSeparator());
+            add("一键配齐配套阀片 + H/W", AutoCompleteValvesAndSensors, null, true);
+            add("批量设置备注 / 模块名…", BatchSetNotesDialog, null, ids.Count > 0);
+            gridMenu.Items.Add(new ToolStripSeparator());
+            add("复制选中行", DuplicateRows, null, ids.Count > 0);
+            add("删除选中行", DeleteRows, "danger", ids.Count > 0);
+            Ui.StyleMenu(gridMenu);
+        }
+
+        void ShowGridContextMenu(int rowIndex) {
+            if (rowIndex < 0 || rowIndex >= grid.Rows.Count) return;
+            BuildGridContextMenuForRow(rowIndex);
+            gridMenu.Show(Cursor.Position);
         }
 
         void ClearSelectedCells() {
@@ -1224,8 +1287,12 @@ namespace TianGongCadSuite {
             if (keyData == (Keys.Control | Keys.F)) return () => { if (search.Visible && search.CanFocus) { search.Focus(); search.SelectAll(); } };
             if (keyData == (Keys.Control | Keys.S)) return () => { Try(SaveDraft); };
             if (activeViewMode == 0 && pneumaticPanel != null && pneumaticPanel.Visible && pneumaticPanel.ContainsFocus) {
-                if (ActiveControl is TextBoxBase) return null;
+                if (pneumaticPanel.IsEditing || ActiveControl is TextBoxBase) return null;
+                if (keyData == (Keys.Control | Keys.C)) return () => pneumaticPanel.CopySelectedCells();
+                if (keyData == (Keys.Control | Keys.V)) return () => pneumaticPanel.PasteSelectedCells(Clipboard.GetText());
+                if (keyData == (Keys.Control | Keys.D)) return () => pneumaticPanel.FillDownSelectedCells();
                 if (keyData == (Keys.Control | Keys.Z)) return () => { Try(Undo); };
+                if (keyData == Keys.Delete) return () => pneumaticPanel.ClearSelectedCells();
                 return null;
             }
             if (grid.IsCurrentCellInEditMode) return null;
@@ -1294,6 +1361,8 @@ namespace TianGongCadSuite {
         internal LineupProject CurrentProject { get { SaveDraft(); return project; } }
         internal LineupPneumaticPanel PneumaticView { get { return pneumaticPanel; } }
         internal int ActiveViewMode { get { return activeViewMode; } }
+        internal Button ModelLibraryButton { get { return modelLibraryBtn; } }
+        internal LineupModelCatalog CatalogForTest { get { return catalog; } }
         internal void SetCategory(string value) {
             // 兼容既有测试与脚本：程序化切类目时确保切换到 BOM 总表并让底层总表可见可编辑
             if (activeViewMode != 3) activeViewMode = 3;
@@ -1321,7 +1390,11 @@ namespace TianGongCadSuite {
                 Editor = project.Editor ?? "",
                 Revision = project.Revision ?? "V1.0",
                 Export11Columns = project.Export11Columns,
-                CadPages = (project.CadPages ?? new List<LineupCadPage>()).Select(pg => pg.Copy()).ToList()
+                MarkBomChanges = project.MarkBomChanges,
+                CadPages = (project.CadPages ?? new List<LineupCadPage>()).Select(pg => pg.Copy()).ToList(),
+                ChangeLogs = (project.ChangeLogs ?? new List<LineupChangeLog>()).Select(lg => lg.Copy()).ToList(),
+                Baseline = project.Baseline == null ? null : project.Baseline.Copy(),
+                LatestExported = project.LatestExported == null ? null : project.LatestExported.Copy()
             };
             p.EntryPresets = project.EntryPresets.Select(x => x.Copy()).ToList();
             var previous = project.Records.ToDictionary(r => r.Id);
@@ -1576,6 +1649,7 @@ namespace TianGongCadSuite {
             Ensure();
             var batch = LineupXlsxReader.Read(xlsxPath);
             var next = Snapshot();
+            bool wasEmpty = next.Records.Count == 0;
             next.Records.AddRange(batch.Records);
             foreach (var section in batch.Sections) { next.Sections.RemoveAll(s => s.Category == section.Category); next.Sections.Add(section); }
             if (batch.Islands != null) foreach (var isl in batch.Islands) {
@@ -1586,8 +1660,35 @@ namespace TianGongCadSuite {
             if (string.IsNullOrWhiteSpace(next.ProjectCode) && !string.IsNullOrWhiteSpace(batch.ProjectCode)) next.ProjectCode = batch.ProjectCode;
             if (string.IsNullOrWhiteSpace(next.StationCode) && !string.IsNullOrWhiteSpace(batch.StationCode)) next.StationCode = batch.StationCode;
             if (!string.IsNullOrWhiteSpace(batch.LineCode)) next.LineCode = batch.LineCode;
+
+            // 合并导入的历史更新日志（保留历次版本记录，自动去重）
+            int importedLogs = 0;
+            if (batch.ChangeLogs != null && batch.ChangeLogs.Count > 0) {
+                if (next.ChangeLogs == null) next.ChangeLogs = new List<LineupChangeLog>();
+                foreach (var lg in batch.ChangeLogs) {
+                    bool dup = next.ChangeLogs.Any(x =>
+                        string.Equals((x.Version ?? "").Trim(), (lg.Version ?? "").Trim(), StringComparison.OrdinalIgnoreCase)
+                        && string.Equals((x.Date ?? "").Trim(), (lg.Date ?? "").Trim(), StringComparison.OrdinalIgnoreCase)
+                        && string.Equals((x.Content ?? "").Trim(), (lg.Content ?? "").Trim(), StringComparison.Ordinal));
+                    if (!dup) { next.ChangeLogs.Add(lg.Copy()); importedLogs++; }
+                }
+            }
+            if (!string.IsNullOrWhiteSpace(batch.LatestRevision)) next.Revision = batch.LatestRevision.Trim();
+            if (string.IsNullOrWhiteSpace(next.Designer) && !string.IsNullOrWhiteSpace(batch.LatestDesigner)) next.Designer = batch.LatestDesigner.Trim();
+            if (string.IsNullOrWhiteSpace(next.Editor) && !string.IsNullOrWhiteSpace(batch.LatestEditor)) next.Editor = batch.LatestEditor.Trim();
+
             LineupTableData.InferHierarchy(next);
-            Commit(next, null, "已从 Excel 导入 " + batch.Records.Count + " 条记录", true);
+            // 空项目首次导入已有 Excel 或尚未建立基准时，自动将导入版本设为对比基准（后续修改即可自动草拟日志并标红）
+            bool capturedBase = false;
+            if ((wasEmpty || next.Baseline == null || next.Baseline.Records == null || next.Baseline.Records.Count == 0) && batch.Records.Count > 0) {
+                next.Baseline = LineupRevision.CaptureSnapshot(next, LineupRevision.CurrentVersion(next));
+                next.LatestExported = next.Baseline.Copy();
+                capturedBase = true;
+            }
+            string status = "已从 Excel 导入 " + batch.Records.Count + " 条记录"
+                + (importedLogs > 0 ? "、" + importedLogs + " 条更新日志" : "")
+                + (capturedBase ? "（已设为对比基准 " + next.Baseline.Version + "）" : "");
+            Commit(next, null, status, true);
             if (entryPrefix != null && !string.IsNullOrWhiteSpace(project.NumberPrefix)) {
                 entryPrefix.Text = project.NumberPrefix;
                 entryIsland.Value = Math.Min(9999, Math.Max(1, project.ActiveIsland));
@@ -1597,7 +1698,39 @@ namespace TianGongCadSuite {
 
         internal LineupXlsxSummary ExportXlsx(string path, LineupXlsxOptions opts = null) {
             SaveDraft(false);
-            return LineupXlsxWriter.Write(path, project, opts ?? new LineupXlsxOptions { Export11Columns = project.Export11Columns, IncludeCadPages = true });
+            var effective = opts ?? new LineupXlsxOptions {
+                Export11Columns = project.Export11Columns,
+                IncludeCadPages = true,
+                MarkBomChanges = project.MarkBomChanges
+            };
+            var sum = LineupXlsxWriter.Write(path, project, effective);
+
+            // 导出成功后自动记录导出快照（首次导出顺带初始化第一条更新日志与基准快照，便于下一版直接追踪差异）
+            string ver = LineupRevision.CurrentVersion(project);
+            if (project.ChangeLogs == null) project.ChangeLogs = new List<LineupChangeLog>();
+            if (project.ChangeLogs.Count == 0) {
+                string today = DateTime.Today.ToString("yyyy/M/d", System.Globalization.CultureInfo.InvariantCulture);
+                string mDate = today;
+                try { if (!string.IsNullOrEmpty(project.AssemblyFile) && File.Exists(project.AssemblyFile)) mDate = File.GetLastWriteTime(project.AssemblyFile).ToString("yyyy/M/d", System.Globalization.CultureInfo.InvariantCulture); } catch { }
+                project.ChangeLogs.Add(new LineupChangeLog {
+                    Date = today,
+                    Version = ver,
+                    ModelDate = mDate,
+                    Content = !string.IsNullOrWhiteSpace(effective.VersionNote)
+                        ? effective.VersionNote.Trim()
+                        : ((project.CadPages != null && project.CadPages.Count > 0) ? "导出 LineUP第二版_BOM 及 LineUP第三版_CAD（共 " + project.CadPages.Count + " 页位置图）" : "导出 LineUP第二版_BOM"),
+                    Notes = "由天工工具箱自动导出",
+                    Designer = project.Designer ?? "",
+                    Editor = project.Editor ?? ""
+                });
+            }
+            project.LatestExported = LineupRevision.CaptureSnapshot(project, ver);
+            if (project.Baseline == null || project.Baseline.Records == null || project.Baseline.Records.Count == 0) {
+                project.Baseline = project.LatestExported.Copy();
+            }
+            try { if (!string.IsNullOrEmpty(store)) project.Save(store); } catch { }
+            if (exportPanel != null) exportPanel.RefreshFromProject();
+            return sum;
         }
 
         internal void AddEmpty() {
@@ -1669,8 +1802,11 @@ namespace TianGongCadSuite {
             var next = Snapshot();
             if (next.Records.Any(r => !ids.Contains(r.Id) && (ids.Contains(r.IslandId) || ids.Contains(r.ValveId) || ids.Contains(r.CylinderId))))
                 throw new InvalidOperationException("选中行仍被下级器件引用，请先删除或解除下级关系。");
-            next.Records.RemoveAll(r => ids.Contains(r.Id));
-            Commit(next, null, "已删除 " + ids.Count + " 行");
+            var removedIds = new HashSet<string>(ids, StringComparer.Ordinal);
+            var removed = next.Records.Where(r => removedIds.Contains(r.Id)).ToList();
+            next.Records.RemoveAll(r => removedIds.Contains(r.Id));
+            int renumbered = LineupNumbering.CompactAfterDelete(next, removed, removedIds);
+            Commit(next, null, "已删除 " + ids.Count + " 行" + (renumbered > 0 ? "，剩余编号已自动顺延重排" : ""));
         }
 
         internal void FillDown() {

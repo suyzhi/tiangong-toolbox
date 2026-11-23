@@ -403,8 +403,11 @@ namespace TianGongCadSuite {
             }
         }
 
-        // 3. 删除阀岛（支持带子件级联删除或先保护提示）
+        // 3. 删除阀岛（支持带子件级联删除或先保护提示；删掉中间阀岛后同前缀后续阀岛 Y* 自动顺延重排）
         public static int DeleteIsland(LineupProject p, string islandKey, bool deleteChildren) {
+            string delPre; int delNum;
+            ParseIslandKey(islandKey, out delPre, out delNum);
+
             var channels = BuildChannelRows(p, islandKey);
             var childIds = new HashSet<string>(StringComparer.Ordinal);
             foreach (var ch in channels) {
@@ -415,9 +418,15 @@ namespace TianGongCadSuite {
             if (childIds.Count > 0 && !deleteChildren)
                 throw new InvalidOperationException("阀岛 " + islandKey + " 下仍有 " + childIds.Count + " 条关联记录，请确认是否一并删除。");
 
-            if (childIds.Count > 0) p.Records.RemoveAll(r => childIds.Contains(r.Id));
-            p.Records.RemoveAll(r => r.Category == "阀岛" && string.Equals((r.Number ?? "").Trim(), islandKey, StringComparison.OrdinalIgnoreCase));
+            var removedIds = new HashSet<string>(childIds, StringComparer.Ordinal);
+            foreach (var r in p.Records.Where(r => r.Category == "阀岛" && string.Equals((r.Number ?? "").Trim(), islandKey, StringComparison.OrdinalIgnoreCase)))
+                removedIds.Add(r.Id);
+
+            if (removedIds.Count > 0) p.Records.RemoveAll(r => removedIds.Contains(r.Id));
             if (p.Islands != null) p.Islands.RemoveAll(i => string.Equals(i.Key, islandKey, StringComparison.OrdinalIgnoreCase));
+
+            if (delPre.Length > 0) LineupNumbering.CompactIslands(p, delPre);
+            LineupNumbering.SyncCadPageNumbers(p, removedIds);
 
             var remaining = ListIslands(p);
             if (remaining.Count > 0) {
@@ -648,37 +657,72 @@ namespace TianGongCadSuite {
             return added;
         }
 
-        // 9. 删除一条气缸（含其 H/W 磁开）；若是 1阀多缸中的一支则只删该缸并重编同阀余缸；若是单缸且 deleteValveWhenLast=true 则连同阀片一并删除
+        // 9. 删除一条气缸（含其 H/W 磁开）；若是 1阀多缸中的一支则只删该缸并重编同阀余缸；若是单缸且 deleteValveWhenLast=true 则连同阀片一并删除。
+        // 删掉中间阀路/阀片后，同阀岛内剩余编号自动从 01 起按顺序顺延重排，并同步更新 CAD 位置图编号。
         public static int DeleteChannelItem(LineupProject p, string valveId, string cylinderId, bool deleteValveWhenLast) {
-            var removeIds = new HashSet<string>(StringComparer.Ordinal);
-            LineupRecord valve = string.IsNullOrEmpty(valveId) ? null : p.Records.FirstOrDefault(r => r.Id == valveId);
-            LineupRecord cyl = string.IsNullOrEmpty(cylinderId) ? null : p.Records.FirstOrDefault(r => r.Id == cylinderId);
+            return DeleteChannelItems(p, new[] { new KeyValuePair<string, string>(valveId ?? "", cylinderId ?? "") }, deleteValveWhenLast);
+        }
 
-            if (cyl != null) {
-                removeIds.Add(cyl.Id);
-                foreach (var s in FindSensorsOfCylinder(p, cyl)) removeIds.Add(s.Id);
-                if (valve == null && !string.IsNullOrEmpty(cyl.ValveId))
-                    valve = p.Records.FirstOrDefault(r => r.Id == cyl.ValveId);
-            } else if (valve != null) {
-                removeIds.Add(valve.Id);
-                var boundCyls = p.Records.Where(r => LineupTableData.Category(r.Category) == "气缸" && r.ValveId == valve.Id).ToList();
-                foreach (var c in boundCyls) {
-                    removeIds.Add(c.Id);
-                    foreach (var s in FindSensorsOfCylinder(p, c)) removeIds.Add(s.Id);
+        // 批量删除多条阀路/气缸，并在最后一次性完成剩余编号顺延重排与位置图同步
+        public static int DeleteChannelItems(LineupProject p, IEnumerable<KeyValuePair<string, string>> targets, bool deleteValveWhenLast) {
+            if (p == null || targets == null) return 0;
+            var removeIds = new HashSet<string>(StringComparer.Ordinal);
+            var affectedIslands = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var affectedValves = new List<LineupRecord>();
+            var affectedValveIds = new HashSet<string>(StringComparer.Ordinal);
+
+            Action<LineupRecord> noteIsland = r => {
+                if (r == null) return;
+                string ik = LineupNumbering.IslandKey(r.Number);
+                if (ik.Length == 0 && !string.IsNullOrEmpty(r.IslandId)) {
+                    var ir = p.Records.FirstOrDefault(x => x.Id == r.IslandId && x.Category == "阀岛");
+                    if (ir != null) ik = (ir.Number ?? "").Trim();
+                }
+                if (ik.Length > 0) affectedIslands.Add(ik);
+            };
+
+            foreach (var pair in targets) {
+                string valveId = pair.Key ?? "";
+                string cylinderId = pair.Value ?? "";
+                LineupRecord valve = valveId.Length == 0 ? null : p.Records.FirstOrDefault(r => r.Id == valveId);
+                LineupRecord cyl = cylinderId.Length == 0 ? null : p.Records.FirstOrDefault(r => r.Id == cylinderId);
+
+                if (valve != null) LinkImplicitChildren(p, valve);
+                noteIsland(valve);
+                noteIsland(cyl);
+
+                if (cyl != null) {
+                    removeIds.Add(cyl.Id);
+                    foreach (var s in FindSensorsOfCylinder(p, cyl)) removeIds.Add(s.Id);
+                    if (valve == null && !string.IsNullOrEmpty(cyl.ValveId))
+                        valve = p.Records.FirstOrDefault(r => r.Id == cyl.ValveId);
+                    if (valve != null && affectedValveIds.Add(valve.Id)) affectedValves.Add(valve);
+                } else if (valve != null) {
+                    removeIds.Add(valve.Id);
+                    var boundCyls = p.Records.Where(r => LineupTableData.Category(r.Category) == "气缸" && r.ValveId == valve.Id).ToList();
+                    foreach (var c in boundCyls) {
+                        removeIds.Add(c.Id);
+                        foreach (var s in FindSensorsOfCylinder(p, c)) removeIds.Add(s.Id);
+                    }
                 }
             }
 
+            if (removeIds.Count == 0) return 0;
             p.Records.RemoveAll(r => removeIds.Contains(r.Id));
 
-            if (cyl != null && valve != null && !removeIds.Contains(valve.Id)) {
+            foreach (var valve in affectedValves) {
+                if (removeIds.Contains(valve.Id)) continue;
                 var leftCyls = p.Records.Where(r => LineupTableData.Category(r.Category) == "气缸" && r.ValveId == valve.Id).ToList();
                 if (leftCyls.Count == 0 && deleteValveWhenLast) {
                     p.Records.RemoveAll(r => r.Id == valve.Id);
                     removeIds.Add(valve.Id);
                 } else if (leftCyls.Count > 0) {
-                    LineupHierarchy.RenumberChildren(p, valve);
+                    try { LineupHierarchy.RenumberChildren(p, valve); } catch { }
                 }
             }
+
+            foreach (string ik in affectedIslands) LineupNumbering.CompactIslandSlots(p, ik);
+            LineupNumbering.SyncCadPageNumbers(p, removeIds);
             return removeIds.Count;
         }
 

@@ -27,7 +27,10 @@ namespace TianGongCadSuite {
         public Action<int> OnZoomDelta;
         public Action<string> OnLocateRecord;
         public Action<string> OnBindCurrentCadToRecord;
+        public Action<IList<string>> OnBindCurrentCadToRecords;
+        public Action<IList<string>> OnStartSequentialBindRecords;
         public Action<string> OnBindCurrentCadToIsland;
+        public Action<string> OnStartBindIslandIn3D;
         public Action<string> OnAddCadSelectedAsCylinder;
         public Action<string> OnStartContinuousAddCylinder;
         public Action<string> OnStartContinuousBindIsland;
@@ -45,7 +48,7 @@ namespace TianGongCadSuite {
         readonly Button btnEditIsland;
         readonly Button btnBindIsland3D;
         readonly Button btnDeleteIsland;
-        readonly ContextMenuStrip islandMenu = new ContextMenuStrip { ShowImageMargin = false, Font = Ui.F9 };
+        readonly ContextMenuStrip islandMenu = Ui.Menu();
 
         // 右侧主工作区
         readonly Panel rightHost = new Panel { Dock = DockStyle.Fill, BackColor = Ui.Bg };
@@ -63,8 +66,8 @@ namespace TianGongCadSuite {
         readonly Button btnAddCyl;
         readonly Button btnAddValve;
         readonly Button btnCadOps;
-        readonly ContextMenuStrip addValveMenu = new ContextMenuStrip { ShowImageMargin = false, Font = Ui.F9 };
-        readonly ContextMenuStrip cadOpsMenu = new ContextMenuStrip { ShowImageMargin = false, Font = Ui.F9 };
+        readonly ContextMenuStrip addValveMenu = Ui.Menu();
+        readonly ContextMenuStrip cadOpsMenu = Ui.Menu();
         bool subTabsCompact;
 
         // 子视图切换栏（按阀路对照 / 气缸明细 / 阀片明细 / 气缸传感器）
@@ -77,10 +80,10 @@ namespace TianGongCadSuite {
         readonly Label emptyIslandTitle = new Label();
 
         // 核心表格与孤立件表格
-        readonly DataGridView pGrid = new DataGridView();
+        readonly SpreadsheetGrid pGrid = new SpreadsheetGrid();
         readonly DataGridView orphanGrid = new DataGridView();
         readonly Label orphanTitleLbl = new Label();
-        readonly ContextMenuStrip rowMenu = new ContextMenuStrip { ShowImageMargin = false, Font = Ui.F9 };
+        readonly ContextMenuStrip rowMenu = Ui.Menu();
         readonly ToolTip tips = new ToolTip { AutoPopDelay = 12000, InitialDelay = 250 };
 
         // 状态
@@ -232,7 +235,14 @@ namespace TianGongCadSuite {
         public int ActiveSubTab { get { return activeSubTab; } }
         public bool HasLoadedOnce { get { return hasLoadedOnce; } }
         public bool IsEditing { get { return pGrid.IsCurrentCellInEditMode || orphanGrid.IsCurrentCellInEditMode; } }
+        internal DataGridView Grid { get { return pGrid; } }
+        internal ContextMenuStrip RowMenu { get { return rowMenu; } }
+        internal Button AddValveButton { get { return btnAddValve; } }
+        internal ContextMenuStrip AddValveMenu { get { return addValveMenu; } }
+        internal Button CadOpsButton { get { return btnCadOps; } }
+        internal ContextMenuStrip CadOpsMenu { get { return cadOpsMenu; } }
         public void InvalidateAutoCompleteCache() { acCache.Clear(); lastAcKey = ""; }
+        public void FocusRecord(string recordId) { if (!string.IsNullOrEmpty(recordId)) FocusRecordInPGrid(recordId); }
 
         public string SelectedRecordId {
             get {
@@ -500,7 +510,7 @@ namespace TianGongCadSuite {
             btnBindIsland3D.Click += (s, e) => Try(OnBindOrLocateIslandClick);
             btnDeleteIsland.Click += (s, e) => Try(DeleteSelectedIsland);
             tips.SetToolTip(btnEditIsland, "修改当前阀岛的形态（阀岛/汇流排/单片阀）与型号");
-            tips.SetToolTip(btnBindIsland3D, "把 CAD 当前选中的阀岛本体绑定到此阀岛；已绑时可定位");
+            tips.SetToolTip(btnBindIsland3D, "进入 3D 点选模型绑定到此阀岛；已绑时可定位");
             tips.SetToolTip(btnDeleteIsland, "删除当前选中的阀岛");
             foot.Controls.AddRange(new Control[] { btnEditIsland, btnBindIsland3D, btnDeleteIsland });
 
@@ -696,8 +706,8 @@ namespace TianGongCadSuite {
             btnAddValve.Margin = Ui.SPad(0, 0, 6, 0);
             btnCadOps.Margin = new Padding(0);
             btnAddCyl.Click += (s, e) => Try(() => AddCylinderQuick(false));
-            btnAddValve.Click += (s, e) => addValveMenu.Show(btnAddValve, new Point(0, btnAddValve.Height + Ui.S(2)));
-            btnCadOps.Click += (s, e) => cadOpsMenu.Show(btnCadOps, new Point(0, btnCadOps.Height + Ui.S(2)));
+            Ui.BindDropDownMenu(btnAddValve, addValveMenu);
+            Ui.BindDropDownMenu(btnCadOps, cadOpsMenu);
             tips.SetToolTip(btnAddCyl, "在当前阀岛新增气缸，自动生成配套阀片 (V**) 和 H/W 磁开");
             tips.SetToolTip(btnAddValve, "单独添加空阀片、预留盖板、吹气口，或批量铺设 N 片阀位");
             tips.SetToolTip(btnCadOps, "从 CAD 装配扫描、点选加入气缸，或绑定当前阀岛的 3D 模型");
@@ -794,39 +804,47 @@ namespace TianGongCadSuite {
         }
 
         void BuildMenus() {
-            Action<ContextMenuStrip, string, Action> add = (m, t, act) => {
+            Action<ContextMenuStrip, string, Action, string> add = (m, t, act, tone) => {
                 var mi = new ToolStripMenuItem(t);
+                if (!string.IsNullOrEmpty(tone)) mi.Tag = tone;
                 mi.Click += (s, e) => Try(act);
                 m.Items.Add(mi);
             };
 
-            add(islandMenu, "编辑阀岛型号 / 形态…", OpenEditIslandDialog);
-            add(islandMenu, "+ 添加气缸到此阀岛（配阀+H/W）", () => AddCylinderQuick(false));
-            add(islandMenu, "+ 批量添加阀片…", () => BatchAddValveSlicesDialog(false));
+            add(islandMenu, "编辑阀岛型号 / 形态…", OpenEditIslandDialog, null);
+            add(islandMenu, "+ 添加气缸到此阀岛（配阀+H/W）", () => AddCylinderQuick(false), null);
+            add(islandMenu, "+ 批量添加阀片…", () => BatchAddValveSlicesDialog(false), null);
             islandMenu.Items.Add(new ToolStripSeparator());
-            add(islandMenu, "绑定 CAD 当前选中件为本阀岛", () => { if (OnBindCurrentCadToIsland != null) OnBindCurrentCadToIsland(selectedIslandKey); });
-            add(islandMenu, "在 CAD 中定位本阀岛", LocateSelectedIsland);
-            add(islandMenu, "将本阀岛本体加入「其他电气件 E**」", SyncSelectedIslandToElectrical);
+            add(islandMenu, "进入 3D 点选模型绑定本阀岛", () => { if (OnStartBindIslandIn3D != null) OnStartBindIslandIn3D(selectedIslandKey); }, "accent");
+            add(islandMenu, "绑定 CAD 当前选中件为本阀岛", () => { if (OnBindCurrentCadToIsland != null) OnBindCurrentCadToIsland(selectedIslandKey); }, null);
+            add(islandMenu, "在 CAD 中定位本阀岛", LocateSelectedIsland, null);
+            add(islandMenu, "将本阀岛本体加入「其他电气件 E**」", SyncSelectedIslandToElectrical, null);
             islandMenu.Items.Add(new ToolStripSeparator());
-            add(islandMenu, "删除此阀岛…", DeleteSelectedIsland);
+            add(islandMenu, "删除此阀岛…", DeleteSelectedIsland, "danger");
 
-            add(addValveMenu, "+ 添加 1 片标准阀片 (V**)", () => AddValveSlicesQuick(false, 1));
-            add(addValveMenu, "+ 添加 1 个预留位 / 盖板 (V**)", () => AddValveSlicesQuick(true, 1));
-            add(addValveMenu, "+ 添加吹气 / 破真空阀路（无磁开）", () => AddCylinderQuick(true));
+            add(addValveMenu, "+ 添加 1 片标准阀片 (V**)", () => AddValveSlicesQuick(false, 1), null);
+            add(addValveMenu, "+ 添加 1 个预留位 / 盖板 (V**)", () => AddValveSlicesQuick(true, 1), null);
+            add(addValveMenu, "+ 添加吹气 / 破真空阀路（无磁开）", () => AddCylinderQuick(true), null);
             addValveMenu.Items.Add(new ToolStripSeparator());
-            add(addValveMenu, "批量铺设 N 片标准阀片…", () => BatchAddValveSlicesDialog(false));
-            add(addValveMenu, "批量铺设 N 个预留盖板…", () => BatchAddValveSlicesDialog(true));
+            add(addValveMenu, "批量铺设 N 片标准阀片…", () => BatchAddValveSlicesDialog(false), null);
+            add(addValveMenu, "批量铺设 N 个预留盖板…", () => BatchAddValveSlicesDialog(true), null);
 
-            add(cadOpsMenu, "加入 CAD 当前选中件为气缸（自动配阀+H/W）", () => { if (OnAddCadSelectedAsCylinder != null) OnAddCadSelectedAsCylinder(selectedIslandKey); });
-            add(cadOpsMenu, "在 CAD 连续点选加入气缸（到本阀岛）", () => { if (OnStartContinuousAddCylinder != null) OnStartContinuousAddCylinder(selectedIslandKey); });
-            add(cadOpsMenu, "自动扫描整机装配识别器件…", () => { if (OnScanAssembly != null) OnScanAssembly(); });
+            add(cadOpsMenu, "加入 CAD 当前选中件为气缸（自动配阀+H/W）", () => { if (OnAddCadSelectedAsCylinder != null) OnAddCadSelectedAsCylinder(selectedIslandKey); }, null);
+            add(cadOpsMenu, "在 CAD 连续点选加入气缸（到本阀岛）", () => { if (OnStartContinuousAddCylinder != null) OnStartContinuousAddCylinder(selectedIslandKey); }, null);
+            add(cadOpsMenu, "自动扫描整机装配识别器件…", () => { if (OnScanAssembly != null) OnScanAssembly(); }, null);
             cadOpsMenu.Items.Add(new ToolStripSeparator());
-            add(cadOpsMenu, "在 CAD 连续绑定本岛未绑气缸", () => { if (OnStartContinuousBindIsland != null) OnStartContinuousBindIsland(selectedIslandKey); });
-            add(cadOpsMenu, "绑定 CAD 当前选中件为本阀岛本体", () => { if (OnBindCurrentCadToIsland != null) OnBindCurrentCadToIsland(selectedIslandKey); });
+            add(cadOpsMenu, "在 CAD 连续绑定本岛未绑气缸", () => { if (OnStartContinuousBindIsland != null) OnStartContinuousBindIsland(selectedIslandKey); }, "accent");
+            add(cadOpsMenu, "进入 3D 点选模型绑定本阀岛", () => { if (OnStartBindIslandIn3D != null) OnStartBindIslandIn3D(selectedIslandKey); }, null);
+            add(cadOpsMenu, "绑定 CAD 当前选中件为本阀岛本体", () => { if (OnBindCurrentCadToIsland != null) OnBindCurrentCadToIsland(selectedIslandKey); }, null);
         }
 
         void SetupPGrid() {
             StyleGrid(pGrid);
+            pGrid.SuppressDoubleClickEdit = (rowIndex, colIndex) => {
+                if (colIndex < 0 || colIndex >= pGrid.Columns.Count) return false;
+                string cn = pGrid.Columns[colIndex].Name;
+                return cn == "型号" || cn == "气缸型号" || cn == "阀片型号";
+            };
             pGrid.CellBeginEdit += (s, e) => {
                 if (loadingGrid || e.RowIndex < 0 || e.ColumnIndex < 0) return;
                 editStartVal = Convert.ToString(pGrid.Rows[e.RowIndex].Cells[e.ColumnIndex].Value ?? "");
@@ -921,6 +939,12 @@ namespace TianGongCadSuite {
             } else if (e.Control && e.KeyCode == Keys.D) {
                 e.SuppressKeyPress = true;
                 Try(FillDownPGrid);
+            } else if (e.Control && e.KeyCode == Keys.C) {
+                e.SuppressKeyPress = true;
+                Try(CopySelectedPGridCells);
+            } else if (e.Control && e.KeyCode == Keys.V) {
+                e.SuppressKeyPress = true;
+                Try(() => PasteSelectedPGridCells(Clipboard.GetText()));
             }
         }
 
@@ -1294,19 +1318,51 @@ namespace TianGongCadSuite {
         }
 
         void FocusRecordInPGrid(string recordId) {
+            int hit = -1;
             for (int i = 0; i < rowMetas.Count && i < pGrid.Rows.Count; i++) {
                 var m = rowMetas[i];
-                if (m.Primary != null && (m.Primary.Id == recordId || m.CylinderId == recordId || m.ValveId == recordId || m.SensorId == recordId)) {
-                    int targetCol = activeSubTab == 0 ? (string.IsNullOrEmpty(m.CylinderId) ? 1 : 4) : 1;
-                    if (targetCol < pGrid.Columns.Count) {
-                        pGrid.ClearSelection();
-                        pGrid.CurrentCell = pGrid.Rows[i].Cells[targetCol];
-                        pGrid.Rows[i].Cells[targetCol].Selected = true;
-                        try { pGrid.FirstDisplayedScrollingRowIndex = Math.Max(0, i - 2); } catch { }
-                    }
-                    break;
+                if (m.Primary != null && m.Primary.Id == recordId) { hit = i; break; }
+            }
+            if (hit < 0) {
+                for (int i = 0; i < rowMetas.Count && i < pGrid.Rows.Count; i++) {
+                    var m = rowMetas[i];
+                    if (m.CylinderId == recordId || m.ValveId == recordId || m.SensorId == recordId) { hit = i; break; }
                 }
             }
+            if (hit >= 0) {
+                var m = rowMetas[hit];
+                int targetCol = activeSubTab == 0 ? (string.IsNullOrEmpty(m.CylinderId) ? 1 : 4) : 1;
+                if (targetCol < pGrid.Columns.Count) {
+                    pGrid.ClearSelection();
+                    pGrid.CurrentCell = pGrid.Rows[hit].Cells[targetCol];
+                    pGrid.Rows[hit].Cells[targetCol].Selected = true;
+                    try { pGrid.FirstDisplayedScrollingRowIndex = Math.Max(0, hit - 2); } catch { }
+                }
+            }
+        }
+
+        List<int> SelectedPGridRowIndices() {
+            var set = new SortedSet<int>();
+            foreach (DataGridViewCell cell in pGrid.SelectedCells)
+                if (cell.RowIndex >= 0 && cell.RowIndex < rowMetas.Count) set.Add(cell.RowIndex);
+            foreach (DataGridViewRow row in pGrid.SelectedRows)
+                if (row.Index >= 0 && row.Index < rowMetas.Count) set.Add(row.Index);
+            return set.ToList();
+        }
+
+        List<string> SelectedPrimaryRecordIds(int fallbackRowIndex) {
+            var ids = new List<string>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (int ri in SelectedPGridRowIndices()) {
+                var m = rowMetas[ri];
+                if (m.Primary != null && !string.IsNullOrEmpty(m.Primary.Id) && seen.Add(m.Primary.Id))
+                    ids.Add(m.Primary.Id);
+            }
+            if (ids.Count == 0 && fallbackRowIndex >= 0 && fallbackRowIndex < rowMetas.Count) {
+                var fm = rowMetas[fallbackRowIndex];
+                if (fm.Primary != null && !string.IsNullOrEmpty(fm.Primary.Id)) ids.Add(fm.Primary.Id);
+            }
+            return ids;
         }
 
         GridRowMeta CurrentRowMeta() {
@@ -1315,7 +1371,7 @@ namespace TianGongCadSuite {
             return idx >= 0 && idx < rowMetas.Count ? rowMetas[idx] : null;
         }
 
-        // ==================== 单元格样式、单击直接输入与自动补全 ====================
+        // ==================== 单元格样式、类 Excel 编辑与自动补全 ====================
         void OnPGridCellFormatting(object sender, DataGridViewCellFormattingEventArgs e) {
             if (e.RowIndex < 0 || e.RowIndex >= rowMetas.Count || e.ColumnIndex < 0) return;
             var meta = rowMetas[e.RowIndex];
@@ -1384,9 +1440,20 @@ namespace TianGongCadSuite {
         }
 
         void OnPGridCellMouseUp(object sender, DataGridViewCellMouseEventArgs e) {
-            if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
+            if (e.RowIndex < 0) return;
             if (e.Button == MouseButtons.Right) {
-                if (!pGrid.Rows[e.RowIndex].Cells[e.ColumnIndex].Selected) {
+                var selRows = SelectedPGridRowIndices();
+                bool clickedInSelectedRow = selRows.Contains(e.RowIndex);
+                if (e.ColumnIndex < 0) {
+                    if (!clickedInSelectedRow) {
+                        pGrid.ClearSelection();
+                        pGrid.Rows[e.RowIndex].Selected = true;
+                        if (pGrid.Columns.Count > 0) pGrid.CurrentCell = pGrid.Rows[e.RowIndex].Cells[0];
+                    }
+                    ShowRowContextMenu(e.RowIndex, 0);
+                    return;
+                }
+                if (!pGrid.Rows[e.RowIndex].Cells[e.ColumnIndex].Selected && !(selRows.Count > 1 && clickedInSelectedRow)) {
                     pGrid.ClearSelection();
                     pGrid.CurrentCell = pGrid.Rows[e.RowIndex].Cells[e.ColumnIndex];
                     pGrid.Rows[e.RowIndex].Cells[e.ColumnIndex].Selected = true;
@@ -1394,13 +1461,7 @@ namespace TianGongCadSuite {
                 ShowRowContextMenu(e.RowIndex, e.ColumnIndex);
                 return;
             }
-            if (e.Button != MouseButtons.Left) return;
-            if ((ModifierKeys & (Keys.Control | Keys.Shift)) != 0) return;
-            if (pGrid.SelectedCells.Count != 1 || pGrid.IsCurrentCellInEditMode) return;
-            var cell = pGrid.Rows[e.RowIndex].Cells[e.ColumnIndex];
-            if (cell.ReadOnly) return;
-            if (pGrid.CurrentCell != cell) pGrid.CurrentCell = cell;
-            pGrid.BeginEdit(true);
+            // 默认单击只选中单元格、不强制进入编辑态；直接打字（含中文输入法）、双击或按 F2 自动进入编辑
         }
 
         void OnPGridCellDoubleClick(object sender, DataGridViewCellEventArgs e) {
@@ -1418,8 +1479,13 @@ namespace TianGongCadSuite {
                 Try(() => CycleSensorModeForCylinder(meta));
             } else if (colName == "3D绑定" && meta.Primary != null) {
                 Try(() => {
-                    if (!string.IsNullOrEmpty(meta.Primary.ReferenceKey)) { if (OnLocateRecord != null) OnLocateRecord(meta.Primary.Id); }
-                    else { if (OnBindCurrentCadToRecord != null) OnBindCurrentCadToRecord(meta.Primary.Id); }
+                    if (!string.IsNullOrEmpty(meta.Primary.ReferenceKey)) {
+                        if (OnLocateRecord != null) OnLocateRecord(meta.Primary.Id);
+                    } else if (OnStartSequentialBindRecords != null) {
+                        OnStartSequentialBindRecords(new[] { meta.Primary.Id });
+                    } else if (OnBindCurrentCadToRecord != null) {
+                        OnBindCurrentCadToRecord(meta.Primary.Id);
+                    }
                 });
             }
         }
@@ -1542,6 +1608,45 @@ namespace TianGongCadSuite {
             } finally { loadingGrid = false; }
         }
 
+        public void CopySelectedCells() { Try(CopySelectedPGridCells); }
+        public void PasteSelectedCells(string text) { Try(() => PasteSelectedPGridCells(text)); }
+        public void FillDownSelectedCells() { Try(FillDownPGrid); }
+        public void ClearSelectedCells() { Try(ClearSelectedPGridCells); }
+
+        void CopySelectedPGridCells() {
+            var dataObj = pGrid.GetClipboardContent();
+            if (dataObj != null) {
+                string t = dataObj.GetText();
+                if (t != null) ClipboardUtil.SetText(t);
+            }
+        }
+
+        void PasteSelectedPGridCells(string text) {
+            if (string.IsNullOrEmpty(text) || pGrid.CurrentCell == null) return;
+            var block = LineupTableData.ReadDelimited(text, '\t');
+            if (block.Count == 0) return;
+            var editableTargets = pGrid.SelectedCells.Cast<DataGridViewCell>().Where(c => c.RowIndex >= 0 && !c.ReadOnly).ToList();
+            if (block.Count == 1 && block[0].Length == 1 && editableTargets.Count > 1) {
+                foreach (var c in editableTargets) {
+                    c.Value = block[0][0];
+                    CommitCellEdit(c.RowIndex, c.ColumnIndex, block[0][0]);
+                }
+                return;
+            }
+            var visCols = pGrid.Columns.Cast<DataGridViewColumn>().Where(c => c.Visible).OrderBy(c => c.DisplayIndex).ToList();
+            int top = pGrid.CurrentCell.RowIndex;
+            int start = visCols.IndexOf(pGrid.CurrentCell.OwningColumn);
+            if (start < 0) return;
+            for (int y = 0; y < block.Count && top + y < pGrid.Rows.Count; y++) {
+                for (int x = 0; x < block[y].Length && start + x < visCols.Count; x++) {
+                    var cell = pGrid.Rows[top + y].Cells[visCols[start + x].Index];
+                    if (cell.ReadOnly) continue;
+                    cell.Value = block[y][x];
+                    CommitCellEdit(cell.RowIndex, cell.ColumnIndex, block[y][x]);
+                }
+            }
+        }
+
         void ClearSelectedPGridCells() {
             var cells = pGrid.SelectedCells.Cast<DataGridViewCell>().Where(c => c.RowIndex >= 0 && !c.ReadOnly).ToList();
             if (cells.Count == 0) return;
@@ -1567,13 +1672,16 @@ namespace TianGongCadSuite {
         }
 
         // ==================== 右键上下文菜单 ====================
-        void ShowRowContextMenu(int rowIndex, int colIndex) {
+        internal void BuildRowContextMenu(int rowIndex, int colIndex) {
             if (rowIndex < 0 || rowIndex >= rowMetas.Count) return;
             var meta = rowMetas[rowIndex];
+            var bindIds = SelectedPrimaryRecordIds(rowIndex);
             Ui.DisposeItems(rowMenu.Items);
 
-            Action<string, Action> add = (t, act) => {
+            Action<string, Action, string, bool> add = (t, act, tone, enabled) => {
                 var mi = new ToolStripMenuItem(t);
+                if (!string.IsNullOrEmpty(tone)) mi.Tag = tone;
+                mi.Enabled = enabled;
                 mi.Click += (s, e) => Try(act);
                 rowMenu.Items.Add(mi);
             };
@@ -1582,9 +1690,9 @@ namespace TianGongCadSuite {
                 string label = string.IsNullOrEmpty(meta.CylinderId)
                     ? "+ 给此阀片挂载气缸（自动配 H/W）"
                     : "+ 追加同阀气缸（一阀控多缸 C**-1 / C**-2）";
-                add(label, () => AddCylinderToSelectedValve(meta.ValveId));
+                add(label, () => AddCylinderToSelectedValve(meta.ValveId), null, true);
             } else if (!string.IsNullOrEmpty(meta.CylinderId)) {
-                add("+ 为此气缸生成配套阀片 (V**)", () => GenerateValveForSingleCylinder(meta.CylinderId));
+                add("+ 为此气缸生成配套阀片 (V**)", () => GenerateValveForSingleCylinder(meta.CylinderId), null, true);
             }
 
             if (!string.IsNullOrEmpty(meta.CylinderId)) {
@@ -1599,38 +1707,69 @@ namespace TianGongCadSuite {
                 addSen("清除磁开（吹气 / 破真空无磁开）", 0);
                 rowMenu.Items.Add(senSub);
             } else if (!string.IsNullOrEmpty(meta.ValveId) && !meta.IsSpare) {
-                add("标记为预留位 / 盖板", () => MarkValveAsSpare(meta.ValveId));
+                add("标记为预留位 / 盖板", () => MarkValveAsSpare(meta.ValveId), null, true);
             }
 
             rowMenu.Items.Add(new ToolStripSeparator());
-            if (!string.IsNullOrEmpty(meta.CylinderId))
-                add("从型号库选气缸型号…", () => { if (OnPickModelForRecords != null) OnPickModelForRecords("气缸", new[] { meta.CylinderId }); });
-            if (!string.IsNullOrEmpty(meta.ValveId))
-                add("从型号库选阀片型号…", () => { if (OnPickModelForRecords != null) OnPickModelForRecords("阀片", new[] { meta.ValveId }); });
-            if (!string.IsNullOrEmpty(meta.SensorId))
-                add("从型号库选磁开型号…", () => { if (OnPickModelForRecords != null) OnPickModelForRecords("气缸传感器", new[] { meta.SensorId }); });
+            if (bindIds.Count > 1 && activeSubTab >= 1 && activeSubTab <= 3) {
+                string cat = activeSubTab == 1 ? "气缸" : activeSubTab == 2 ? "阀片" : "气缸传感器";
+                string catShort = activeSubTab == 1 ? "气缸" : activeSubTab == 2 ? "阀片" : "磁开";
+                add("从型号库批量选" + catShort + "型号（" + bindIds.Count + " 行）…",
+                    () => { if (OnPickModelForRecords != null) OnPickModelForRecords(cat, bindIds); }, null, true);
+            } else {
+                if (!string.IsNullOrEmpty(meta.CylinderId))
+                    add("从型号库选气缸型号…", () => { if (OnPickModelForRecords != null) OnPickModelForRecords("气缸", new[] { meta.CylinderId }); }, null, true);
+                if (!string.IsNullOrEmpty(meta.ValveId))
+                    add("从型号库选阀片型号…", () => { if (OnPickModelForRecords != null) OnPickModelForRecords("阀片", new[] { meta.ValveId }); }, null, true);
+                if (!string.IsNullOrEmpty(meta.SensorId))
+                    add("从型号库选磁开型号…", () => { if (OnPickModelForRecords != null) OnPickModelForRecords("气缸传感器", new[] { meta.SensorId }); }, null, true);
+            }
 
             if (!string.IsNullOrEmpty(meta.ValveId) && islands.Count > 1)
-                add("将此阀路移动到其他阀岛…", () => MoveValveDialog(meta.ValveId));
+                add("将此阀路移动到其他阀岛…", () => MoveValveDialog(meta.ValveId), null, true);
 
-            if (meta.Primary != null) {
+            if (bindIds.Count > 0) {
                 rowMenu.Items.Add(new ToolStripSeparator());
-                add("在 CAD 中定位模型", () => { if (OnLocateRecord != null) OnLocateRecord(meta.Primary.Id); });
-                add("绑定 CAD 当前选中件到此行", () => { if (OnBindCurrentCadToRecord != null) OnBindCurrentCadToRecord(meta.Primary.Id); });
+                if (bindIds.Count == 1) {
+                    add("进入 3D 点选模型绑定到此行", () => { if (OnStartSequentialBindRecords != null) OnStartSequentialBindRecords(bindIds); }, "accent", true);
+                    add("绑定 CAD 当前选中件到此行", () => {
+                        if (OnBindCurrentCadToRecords != null) OnBindCurrentCadToRecords(bindIds);
+                        else if (OnBindCurrentCadToRecord != null) OnBindCurrentCadToRecord(bindIds[0]);
+                    }, null, true);
+                    bool bound = meta.Primary != null && !string.IsNullOrEmpty(meta.Primary.ReferenceKey);
+                    add("在 CAD 中定位模型", () => { if (OnLocateRecord != null) OnLocateRecord(bindIds[0]); }, null, bound);
+                } else {
+                    add("进入 3D 依次点选绑定选中 " + bindIds.Count + " 行", () => { if (OnStartSequentialBindRecords != null) OnStartSequentialBindRecords(bindIds); }, "accent", true);
+                    add("按顺序绑定 CAD 已选中件到选中 " + bindIds.Count + " 行", () => {
+                        if (OnBindCurrentCadToRecords != null) OnBindCurrentCadToRecords(bindIds);
+                    }, null, true);
+                    bool bound = meta.Primary != null && !string.IsNullOrEmpty(meta.Primary.ReferenceKey);
+                    add("在 CAD 中定位当前行模型", () => { if (OnLocateRecord != null) OnLocateRecord(meta.Primary.Id); }, null, bound);
+                }
             }
 
             rowMenu.Items.Add(new ToolStripSeparator());
-            if (!string.IsNullOrEmpty(meta.CylinderId) && !string.IsNullOrEmpty(meta.ValveId) && !meta.IsContinuation) {
-                add("删除整条阀路（阀片 + 气缸 + 磁开）", () => DeleteRowChannel(meta, true));
-                add("仅删除气缸与磁开（保留空阀片）", () => DeleteRowChannel(meta, false));
+            var selRowIndices = SelectedPGridRowIndices();
+            if (selRowIndices.Count > 1) {
+                var selMetas = selRowIndices.Select(i => rowMetas[i]).ToList();
+                add("删除选中的 " + selMetas.Count + " 条阀路（阀片 + 气缸 + 磁开，自动重排）", () => DeleteRowChannels(selMetas, true), "danger", true);
+                if (selMetas.Any(m => !string.IsNullOrEmpty(m.CylinderId) && !string.IsNullOrEmpty(m.ValveId)))
+                    add("仅删除选中气缸与磁开（保留空阀片）", () => DeleteRowChannels(selMetas, false), "danger", true);
+            } else if (!string.IsNullOrEmpty(meta.CylinderId) && !string.IsNullOrEmpty(meta.ValveId) && !meta.IsContinuation) {
+                add("删除整条阀路（阀片 + 气缸 + 磁开）", () => DeleteRowChannel(meta, true), "danger", true);
+                add("仅删除气缸与磁开（保留空阀片）", () => DeleteRowChannel(meta, false), "danger", true);
             } else if (!string.IsNullOrEmpty(meta.CylinderId)) {
-                add("删除此气缸及关联磁开", () => DeleteRowChannel(meta, false));
+                add("删除此气缸及关联磁开", () => DeleteRowChannel(meta, false), "danger", true);
             } else if (!string.IsNullOrEmpty(meta.ValveId)) {
-                add("删除此阀片", () => DeleteRowChannel(meta, true));
+                add("删除此阀片", () => DeleteRowChannel(meta, true), "danger", true);
             }
+            Ui.StyleMenu(rowMenu);
+        }
 
-            var rect = pGrid.GetCellDisplayRectangle(colIndex, rowIndex, true);
-            rowMenu.Show(pGrid, new Point(rect.Left + Ui.S(20), rect.Bottom));
+        void ShowRowContextMenu(int rowIndex, int colIndex) {
+            if (rowIndex < 0 || rowIndex >= rowMetas.Count) return;
+            BuildRowContextMenu(rowIndex, colIndex);
+            rowMenu.Show(Cursor.Position);
         }
 
         // ==================== 业务交互动作 ====================
@@ -1665,7 +1804,6 @@ namespace TianGongCadSuite {
             }, null, isBlowOrVacuum ? "已添加吹气/破真空阀路" : "已添加气缸并自动配齐阀片与 H/W");
             if (!string.IsNullOrEmpty(addedCylId)) {
                 FocusRecordInPGrid(addedCylId);
-                if (activeSubTab == 0 && pGrid.CurrentCell != null && !pGrid.CurrentCell.ReadOnly) pGrid.BeginEdit(true);
             }
         }
 
@@ -1718,8 +1856,14 @@ namespace TianGongCadSuite {
         }
 
         void DeleteRowChannel(GridRowMeta meta, bool deleteValveWhenLast) {
-            RunProjectMutation(next => LineupPneumaticOps.DeleteChannelItem(next, meta.ValveId, meta.CylinderId, deleteValveWhenLast),
-                null, "已删除选中气动项（支持撤销）");
+            DeleteRowChannels(new[] { meta }, deleteValveWhenLast);
+        }
+
+        void DeleteRowChannels(IList<GridRowMeta> metas, bool deleteValveWhenLast) {
+            if (metas == null || metas.Count == 0) return;
+            var targets = metas.Select(m => new KeyValuePair<string, string>(m.ValveId ?? "", m.CylinderId ?? "")).ToList();
+            RunProjectMutation(next => LineupPneumaticOps.DeleteChannelItems(next, targets, deleteValveWhenLast),
+                null, "已删除选中气动项，剩余编号已自动顺延重排（支持撤销）");
         }
 
         void CompleteMissingForCurrentIsland() {
@@ -1747,6 +1891,7 @@ namespace TianGongCadSuite {
             var cur = islands.FirstOrDefault(x => string.Equals(x.Key, selectedIslandKey, StringComparison.OrdinalIgnoreCase));
             if (cur == null) return;
             if (cur.Has3DBind) LocateSelectedIsland();
+            else if (OnStartBindIslandIn3D != null) OnStartBindIslandIn3D(cur.Key);
             else if (OnBindCurrentCadToIsland != null) OnBindCurrentCadToIsland(cur.Key);
         }
 
@@ -1901,7 +2046,7 @@ namespace TianGongCadSuite {
                 string msg = "阀岛 " + cur.Key + " 下包含 " + cur.ValveCount + " 片阀、" + cur.CylinderCount + " 支气缸、" + cur.SensorCount + " 个磁开。\n\n确定将此阀岛及其下全部器件一并删除吗？（删除后可用底部「撤销」恢复）";
                 if (MessageBox.Show(FindForm(), msg, "删除阀岛", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
             }
-            RunProjectMutation(next => LineupPneumaticOps.DeleteIsland(next, cur.Key, true), null, "已删除阀岛 " + cur.Key);
+            RunProjectMutation(next => LineupPneumaticOps.DeleteIsland(next, cur.Key, true), null, "已删除阀岛 " + cur.Key + "，剩余阀岛编号已自动顺延重排");
         }
 
         void MoveValveDialog(string valveId) {

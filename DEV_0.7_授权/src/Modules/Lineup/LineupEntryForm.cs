@@ -15,11 +15,16 @@ namespace TianGongCadSuite {
         CheckBox entrySensors;
         Label entryHint;
         readonly Dictionary<string, LineupEntryPreset> entryDrafts = new Dictionary<string, LineupEntryPreset>();
-        readonly Timer entryWatcher = new Timer { Interval = 350 };
+        readonly Timer entryWatcher = new Timer { Interval = 220 };
         string entryKind, watchMode = "", watchFingerprint = "", watchHandled = "", entryAutoBrand = "", entryAutoConnector = "";
         bool entryLoading, watchBusy;
         LineupEntryPreset watchPreset;
         Button watchStop;
+        List<string> bindQueue;
+        readonly Stack<bool> bindQueueHistory = new Stack<bool>();
+        int bindQueueIndex, bindQueueBoundCount;
+        bool bindQueueAutoReturn;
+        string bindIslandKey = "";
 
         sealed class ParentChoice { public string Id, Text; public override string ToString() { return Text; } }
         static TextBox EntryText() { return new TextBox { Dock = DockStyle.Fill, BorderStyle = BorderStyle.FixedSingle }; }
@@ -116,7 +121,11 @@ namespace TianGongCadSuite {
             FormClosing += (s, e) => StopContinuous();
             FormClosed += (s, e) => entryWatcher.Dispose();
             KeyDown += (s, e) => {
-                if (e.KeyCode == Keys.Escape && watchMode.Length > 0) { e.SuppressKeyPress = true; StopContinuous(); }
+                if (e.KeyCode == Keys.Escape && watchMode.Length > 0) {
+                    e.SuppressKeyPress = true;
+                    if (watchMode == "bind-queue" || watchMode == "bind-island") SetPickingMode(false);
+                    else StopContinuous();
+                }
                 if (e.Control && e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; Try(() => QuickEntry(false)); }
                 if (e.Control && e.KeyCode == Keys.D && grid.ContainsFocus) { e.SuppressKeyPress = true; Try(FillDown); }
             };
@@ -217,33 +226,33 @@ namespace TianGongCadSuite {
             entryHint.Text = "已沿用当前行共用字段；新增将自动递增编号。";
         }
 
+        void RefreshEntryModelItems() {
+            if (entryModel == null || catalog == null) return;
+            string prev = entryModel.Text;
+            bool wasLoading = entryLoading;
+            entryLoading = true;
+            try {
+                entryModel.Items.Clear();
+                entryModel.Items.AddRange(catalog.Entries.Where(x => x.Category == entryKind).Select(x => x.Model).Distinct().OrderBy(x => x).Cast<object>().ToArray());
+                entryModel.Text = prev;
+            } finally { entryLoading = wasLoading; }
+        }
+
         void PickEntryModel() {
             if (catalogError.Length > 0) throw new InvalidOperationException(catalogError);
-            using (var dialog = new Form()) {
-                Ui.Shell(dialog, "选择本批录入型号 · " + entryKind, 620, 400, 460, 320);
-                var body = new Panel { Dock = DockStyle.Fill, Padding = Ui.SPad(16, 12, 16, 8), BackColor = Ui.Bg };
-                var query = new TextBox { Dock = DockStyle.Top, BorderStyle = BorderStyle.FixedSingle };
-                var gap = new Panel { Dock = DockStyle.Top, Height = Ui.S(8), BackColor = Ui.Bg };
-                var list = new ListBox { Dock = DockStyle.Fill, HorizontalScrollbar = true, BorderStyle = BorderStyle.FixedSingle };
-                Action refresh = () => {
-                    list.Items.Clear();
-                    list.Items.AddRange(catalog.Entries.Where(x => x.Category == entryKind && x.ToString().IndexOf(query.Text, StringComparison.OrdinalIgnoreCase) >= 0).Cast<object>().ToArray());
-                    if (list.Items.Count > 0) list.SelectedIndex = 0;
-                };
-                query.TextChanged += (s, e) => refresh();
-                refresh();
-                list.DoubleClick += (s, e) => { if (list.SelectedItem != null) dialog.DialogResult = DialogResult.OK; };
-                body.Controls.Add(list); body.Controls.Add(gap); body.Controls.Add(query);
-
-                var footer = new ActionBar { Dock = DockStyle.Bottom, Height = Ui.S(56), Padding = Ui.SPad(16, 0, 16, 0) };
-                var ok = Ui.Primary("用于后续录入", 122, 34); ok.DialogResult = DialogResult.OK;
-                var cancel = Ui.Secondary("取消", 76, 34); cancel.DialogResult = DialogResult.Cancel;
-                footer.AddRight(cancel); footer.AddRight(ok);
-                dialog.AcceptButton = ok; dialog.CancelButton = cancel;
-                dialog.Controls.Add(body); dialog.Controls.Add(footer);
-                if (dialog.ShowDialog(this) != DialogResult.OK || list.SelectedItem == null) return;
+            using (var dialog = new LineupModelLibraryForm(
+                catalog, catalogFile, true, entryKind, 1, "用于后续录入",
+                SaveCatalogDirect,
+                () => {
+                    SaveDraft(false);
+                    int n = catalog.Learn(project.Records);
+                    if (n > 0) SaveCatalogDirect(catalog);
+                    return n;
+                },
+                LoadBuiltInSeed)) {
+                if (dialog.ShowDialog(this) != DialogResult.OK || dialog.SelectedEntry == null) return;
                 var preset = ReadEntry();
-                var model = (LineupModelEntry)list.SelectedItem;
+                var model = dialog.SelectedEntry;
                 preset.Model = model.Model; preset.Brand = model.Brand; preset.Connector = model.Connector;
                 WriteEntry(preset);
             }
@@ -316,6 +325,162 @@ namespace TianGongCadSuite {
 
         internal bool ContinuousActive { get { return watchMode.Length > 0; } }
 
+        internal static List<string> NormalizeBindQueue(LineupProject p, IEnumerable<string> recordIds) {
+            var res = new List<string>();
+            if (p == null || recordIds == null) return res;
+            var valid = new HashSet<string>(p.Records.Select(r => r.Id), StringComparer.Ordinal);
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var raw in recordIds) {
+                if (string.IsNullOrEmpty(raw)) continue;
+                if (valid.Contains(raw) && seen.Add(raw)) res.Add(raw);
+            }
+            return res;
+        }
+
+        // 将已选中的多个 CAD 实例按顺序原子绑定到有序目标行（支持重绑与批内互换，批外冲突整体拒绝）
+        internal static int ApplySequentialCadBindings(LineupProject next, IList<string> targetIds, IList<LineupRecord> captured) {
+            if (next == null) throw new ArgumentNullException("next");
+            if (targetIds == null || targetIds.Count == 0) throw new InvalidOperationException("没有可绑定的目标行。");
+            if (captured == null || captured.Count == 0) throw new InvalidOperationException("请先在 CAD 中选择三维模型。");
+            int count = Math.Min(targetIds.Count, captured.Count);
+            var keySet = new HashSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < count; i++) {
+                if (captured[i] == null || string.IsNullOrEmpty(captured[i].ReferenceKey))
+                    throw new InvalidOperationException("第 " + (i + 1) + " 个模型缺少有效关联键，请重新选择。");
+                if (!keySet.Add(captured[i].ReferenceKey))
+                    throw new InvalidOperationException("选中的 CAD 模型包含重复实例，本次批量绑定未修改。");
+            }
+            var batchIdSet = new HashSet<string>(targetIds.Take(count), StringComparer.Ordinal);
+            var byId = next.Records.ToDictionary(r => r.Id, StringComparer.Ordinal);
+            for (int i = 0; i < count; i++) {
+                var conflict = next.Records.FirstOrDefault(r => !batchIdSet.Contains(r.Id) && r.ReferenceKey == captured[i].ReferenceKey);
+                if (conflict != null)
+                    throw new InvalidOperationException("第 " + (i + 1) + " 个选中模型已绑定到 " + conflict.Number + "；本次批量绑定未修改。");
+            }
+            for (int i = 0; i < count; i++) {
+                var rec = byId[targetIds[i]];
+                rec.ReferenceKey = captured[i].ReferenceKey;
+                rec.SourceFile = captured[i].SourceFile;
+                rec.InstancePath = captured[i].InstancePath;
+            }
+            return count;
+        }
+
+        void ClearAndSeedCadSelectionForPick() {
+            if (assembly != null) {
+                try { assembly.SelectSet.RemoveAll(); } catch { }
+            }
+            watchFingerprint = "";
+            watchHandled = "";
+            try {
+                var existing = CaptureEntrySelections();
+                if (existing.Count > 0) {
+                    watchHandled = string.Join("|", existing.Select(r => r.ReferenceKey).OrderBy(x => x));
+                    watchFingerprint = watchHandled;
+                }
+            } catch { }
+        }
+
+        // 进入 3D 点选模式，为单行或选中的多行按表格顺序依次绑定三维模型
+        internal void StartSequentialBindRecords(IList<string> recordIds, bool autoReturnWhenDone = true) {
+            Ensure();
+            if (assembly == null) throw new InvalidOperationException("当前未连接天工 CAD 装配。");
+            SaveDraft();
+            var queue = NormalizeBindQueue(project, recordIds);
+            if (queue.Count == 0) throw new InvalidOperationException("请先选择至少一行要绑定 3D 模型的记录。");
+
+            bindIslandKey = "";
+            bindQueue = queue;
+            bindQueueHistory.Clear();
+            bindQueueIndex = 0;
+            bindQueueBoundCount = 0;
+            bindQueueAutoReturn = autoReturnWhenDone;
+            pickingId = bindQueue[0];
+            watchMode = "bind-queue";
+            ClearAndSeedCadSelectionForPick();
+
+            SetPickingMode(true);
+            if (watchStop != null) watchStop.Visible = false;
+            if (pickSkipBtn != null) pickSkipBtn.Visible = bindQueue.Count > 1;
+            SetContinuousControls(true);
+            RefreshPickingLabel();
+            entryWatcher.Start();
+        }
+
+        // 进入 3D 点选模式，为指定阀岛本体绑定三维模型
+        internal void StartBindIslandIn3D(string islandKey) {
+            Ensure();
+            if (assembly == null) throw new InvalidOperationException("当前未连接天工 CAD 装配。");
+            if (string.IsNullOrWhiteSpace(islandKey)) throw new InvalidOperationException("请先选择一个阀岛。");
+            SaveDraft();
+
+            bindQueue = null;
+            bindQueueHistory.Clear();
+            bindQueueIndex = 0;
+            bindQueueBoundCount = 0;
+            bindQueueAutoReturn = true;
+            bindIslandKey = islandKey.Trim();
+            watchMode = "bind-island";
+            ClearAndSeedCadSelectionForPick();
+
+            SetPickingMode(true);
+            if (watchStop != null) watchStop.Visible = false;
+            if (pickSkipBtn != null) pickSkipBtn.Visible = false;
+            SetContinuousControls(true);
+            RefreshPickingLabel();
+            entryWatcher.Start();
+        }
+
+        internal void SkipCurrentBindTarget() {
+            if (watchMode != "bind-queue" || bindQueue == null || bindQueueIndex >= bindQueue.Count) return;
+            bindQueueHistory.Push(false);
+            bindQueueIndex++;
+            if (bindQueueIndex < bindQueue.Count) {
+                pickingId = bindQueue[bindQueueIndex];
+                RefreshPickingLabel();
+                return;
+            }
+            int done = bindQueueBoundCount;
+            int total = bindQueue.Count;
+            string lastId = bindQueue[bindQueue.Count - 1];
+            bool autoRet = bindQueueAutoReturn;
+            pickingId = lastId;
+            StopContinuous();
+            string msg = "顺序绑定已结束：共绑定 " + done + " / " + total + " 行";
+            if (autoRet) {
+                SetPickingMode(false);
+                ShowToast(msg, done > 0 ? Ui.Ok : Ui.Muted);
+            } else {
+                pickingLabel.Text = msg + "。可点「返回表格」查看。";
+            }
+        }
+
+        void OnPickingUndoClick() {
+            if (watchMode == "bind-queue" && bindQueue != null && bindQueueIndex > 0 && bindQueueHistory.Count > 0) {
+                bool wasBound = bindQueueHistory.Pop();
+                bindQueueIndex--;
+                if (wasBound && undo.Count > 0) {
+                    Ensure();
+                    var previous = undo.Peek();
+                    LineupTableData.RejectDuplicates(previous.Records);
+                    previous.Save(store);
+                    undo.Pop();
+                    project = previous;
+                    dirty = false;
+                    modelFieldEdited = false;
+                    Reload(null);
+                    RefreshEntryParents();
+                    bindQueueBoundCount = Math.Max(0, bindQueueBoundCount - 1);
+                }
+                pickingId = bindQueue[bindQueueIndex];
+                ClearAndSeedCadSelectionForPick();
+                RefreshPickingLabel();
+                if (pickingLabel != null) pickingLabel.Text = "已退回上一步 · " + pickingLabel.Text;
+                return;
+            }
+            Undo();
+        }
+
         internal void StartContinuous(string mode) {
             Ensure();
             if (assembly == null) throw new InvalidOperationException("当前未连接天工 CAD 装配。");
@@ -334,11 +499,17 @@ namespace TianGongCadSuite {
                     SelectId(current);
                 }
             }
+            bindQueue = null;
+            bindQueueHistory.Clear();
+            bindQueueIndex = 0;
+            bindQueueBoundCount = 0;
+            bindIslandKey = "";
             watchMode = mode;
             watchFingerprint = "";
             watchHandled = "";
             SetPickingMode(true);
             watchStop.Visible = true;
+            if (pickSkipBtn != null) pickSkipBtn.Visible = false;
             SetContinuousControls(true);
             if (pickingTitle != null) pickingTitle.Text = mode == "add" ? "● 连续新增中 · 在 CAD 里点一个就录一个" : "● 连续绑定中 · 逐个点选对应三维件";
             pickingLabel.Text = mode == "add"
@@ -362,7 +533,15 @@ namespace TianGongCadSuite {
             entryWatcher.Stop();
             watchFingerprint = "";
             watchHandled = "";
+            bindQueue = null;
+            bindQueueHistory.Clear();
+            bindQueueIndex = 0;
+            bindQueueBoundCount = 0;
+            bindQueueAutoReturn = false;
+            bindIslandKey = "";
             if (watchStop != null) watchStop.Visible = false;
+            if (pickSkipBtn != null) pickSkipBtn.Visible = false;
+            if (pickingProgress != null) pickingProgress.Visible = false;
             SetContinuousControls(false);
             RefreshPickingLabel();
         }
@@ -378,8 +557,67 @@ namespace TianGongCadSuite {
                 if (fingerprint != watchFingerprint) { watchFingerprint = fingerprint; return; }
                 if (fingerprint == watchHandled) return;
                 watchHandled = fingerprint;
-                if (watchMode == "add") CommitEntry(incoming, watchPreset, 1);
-                else {
+                if (watchMode == "add") {
+                    CommitEntry(incoming, watchPreset, 1);
+                } else if (watchMode == "bind-island") {
+                    if (incoming.Count != 1) throw new InvalidOperationException("请一次点选 1 个阀岛本体模型。");
+                    string key = bindIslandKey;
+                    var next = Snapshot();
+                    var cfg = LineupNumbering.IslandEntry(next, key);
+                    LineupPneumaticOps.UpdateIsland(next, key, cfg == null ? "阀岛" : cfg.Kind, cfg == null ? "" : cfg.Model, incoming[0]);
+                    string doneMsg = "已将 3D 模型绑定为阀岛 " + key;
+                    Commit(next, null, doneMsg);
+                    try { assembly.SelectSet.RemoveAll(); } catch { }
+                    StopContinuous();
+                    SetPickingMode(false);
+                    ShowToast("✓ " + doneMsg, Ui.Ok, "撤销", (s, e) => Try(Undo));
+                } else if (watchMode == "bind-queue") {
+                    if (bindQueue == null || bindQueueIndex >= bindQueue.Count) { StopContinuous(); return; }
+                    string id = bindQueue[bindQueueIndex];
+                    var next = Snapshot();
+                    var record = next.Records.FirstOrDefault(r => r.Id == id);
+                    if (record == null) { SkipCurrentBindTarget(); return; }
+                    if (incoming.Count != 1)
+                        throw new InvalidOperationException("请一次点选 1 个模型（当前选中 " + incoming.Count + " 个）；待绑定：" + FormatPickBrief(record));
+                    var conflict = next.Records.FirstOrDefault(r => r.Id != id && r.ReferenceKey == incoming[0].ReferenceKey);
+                    if (conflict != null)
+                        throw new InvalidOperationException("该模型已绑定到 " + conflict.Number + "，请改选其他模型；当前仍待绑定 " + record.Number + "。");
+
+                    record.ReferenceKey = incoming[0].ReferenceKey;
+                    record.SourceFile = incoming[0].SourceFile;
+                    record.InstancePath = incoming[0].InstancePath;
+                    bindQueueHistory.Push(true);
+                    bindQueueIndex++;
+                    bindQueueBoundCount++;
+
+                    bool cleared = false;
+                    try { assembly.SelectSet.RemoveAll(); cleared = true; } catch { }
+                    if (cleared) { watchFingerprint = ""; watchHandled = ""; }
+
+                    if (bindQueueIndex < bindQueue.Count) {
+                        string nextId = bindQueue[bindQueueIndex];
+                        pickingId = nextId;
+                        Commit(next, nextId, "已绑定 " + record.Number + "（" + bindQueueBoundCount + "/" + bindQueue.Count + "）");
+                        RefreshPickingLabel();
+                    } else {
+                        int done = bindQueueBoundCount;
+                        int total = bindQueue.Count;
+                        string lastId = record.Id;
+                        string doneMsg = total == 1
+                            ? ("已绑定 3D 模型到 " + record.Number)
+                            : ("已按顺序绑定 " + done + " / " + total + " 行 3D 模型");
+                        bool autoRet = bindQueueAutoReturn;
+                        pickingId = lastId;
+                        Commit(next, lastId, doneMsg);
+                        StopContinuous();
+                        if (autoRet) {
+                            SetPickingMode(false);
+                            ShowToast("✓ " + doneMsg, Ui.Ok, "撤销", (s, e) => Try(Undo));
+                        } else {
+                            pickingLabel.Text = "✓ " + doneMsg + "！可点「返回表格」查看。";
+                        }
+                    }
+                } else {
                     if (incoming.Count != 1) throw new InvalidOperationException("连续绑定每次只选一个模型；当前行保持不变。");
                     string id = CurrentId();
                     var next = Snapshot();

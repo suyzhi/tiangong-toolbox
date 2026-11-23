@@ -141,7 +141,7 @@ namespace TianGongCadSuite {
             shell.RailBottom = linkCard;
 
             // ---- 底部操作栏 ----
-            var more = moreMenu = new ContextMenuStrip { ShowImageMargin = false, Font = Ui.F9 };
+            var more = moreMenu = Ui.Menu();
             var miEdit = more.Items.Add("改孔型…（刚打的这批孔整组换孔型）");
             var miUndo = more.Items.Add("撤销本次打孔");
             more.Items.Add(new ToolStripSeparator());
@@ -150,7 +150,7 @@ namespace TianGongCadSuite {
             miUndo.Click += (s, e) => UndoLastBatch();
             miClear.Click += (s, e) => ClearAll();
             more.Opening += (s, e) => { miEdit.Enabled = editButton.Enabled && !busy; miUndo.Enabled = undoButton.Enabled && !busy; miClear.Enabled = !busy; };
-            moreButton.Click += (s, e) => more.Show(moreButton, new Point(0, -more.PreferredSize.Height - 4));
+            Ui.BindDropDownMenu(moreButton, more, (b, m) => new Point(0, -m.PreferredSize.Height - 4));
             backButton.Click += (s, e) => shell.Go(shell.Current - 1);
             nextButton.Click += (s, e) => shell.Go(shell.Current + 1);
             run.Click += (s, e) => RunDrill();

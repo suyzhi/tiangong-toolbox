@@ -20,7 +20,7 @@ namespace TianGongCadSuite {
         readonly F.Application app;
         readonly ListView list = new ListView();
         readonly PartPreview preview = new PartPreview();
-        readonly ContextMenuStrip menu = new ContextMenuStrip { ShowImageMargin = false, Font = Ui.F9 };
+        readonly ContextMenuStrip menu = Ui.Menu();
         readonly Label head = new Label(), status = new Label();
         readonly TextBox searchBox = new TextBox { BorderStyle = BorderStyle.FixedSingle, Font = Ui.F9 };
         readonly Button searchClearBtn = Ui.Small("×");

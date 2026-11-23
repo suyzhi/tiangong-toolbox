@@ -102,7 +102,7 @@ namespace TianGongCadSuite {
         readonly WizardShell shell = new WizardShell { StepCaption = false };
         readonly PartPreview preview = new PartPreview();
         readonly DataGridView grid = new DataGridView();
-        readonly ContextMenuStrip gridMenu = new ContextMenuStrip { ShowImageMargin = false, Font = Ui.F9 };
+        readonly ContextMenuStrip gridMenu = Ui.Menu();
         readonly TextBox filterBox = new TextBox();
         Button filterClearBtn;
         readonly TextBox fillBox = new TextBox();

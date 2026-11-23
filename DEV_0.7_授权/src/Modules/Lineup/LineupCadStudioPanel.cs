@@ -44,9 +44,9 @@ namespace TianGongCadSuite {
         readonly FlowLayoutPanel tabFlow = new FlowLayoutPanel();
         readonly Button btnNewPage;
         readonly Button btnManagePage;
-        readonly ContextMenuStrip newPageMenu = new ContextMenuStrip { ShowImageMargin = false, Font = Ui.F9 };
-        readonly ContextMenuStrip managePageMenu = new ContextMenuStrip { ShowImageMargin = false, Font = Ui.F9 };
-        readonly ContextMenuStrip pointMenu = new ContextMenuStrip { ShowImageMargin = false, Font = Ui.F9 };
+        readonly ContextMenuStrip newPageMenu = Ui.Menu();
+        readonly ContextMenuStrip managePageMenu = Ui.Menu();
+        readonly ContextMenuStrip pointMenu = Ui.Menu();
 
         // 空态引导
         readonly Panel emptyHost = new Panel();
@@ -217,9 +217,9 @@ namespace TianGongCadSuite {
                 BackColor = Ui.Bg, Padding = Ui.SPad(6, 1, 0, 0)
             };
             btnManagePage.Margin = Ui.SPad(0, 1, 6, 0);
-            btnManagePage.Click += (s, e) => managePageMenu.Show(btnManagePage, new Point(0, btnManagePage.Height + Ui.S(2)));
+            Ui.BindDropDownMenu(btnManagePage, managePageMenu);
             btnNewPage.Margin = Ui.SPad(0, 0, 0, 0);
-            btnNewPage.Click += (s, e) => newPageMenu.Show(btnNewPage, new Point(0, btnNewPage.Height + Ui.S(2)));
+            Ui.BindDropDownMenu(btnNewPage, newPageMenu);
             topRight.Controls.Add(btnManagePage);
             topRight.Controls.Add(btnNewPage);
 
@@ -238,7 +238,7 @@ namespace TianGongCadSuite {
                 Dock = DockStyle.Top, Height = Ui.S(34)
             };
             var eSub = new Label {
-                Text = "先把天工三维模型摆到合适角度，点击下方按钮抓图；\n随后在图上左键点哪儿，红色箭头就指向哪儿。",
+                Text = "先把天工三维模型摆到合适角度，点击下方按钮抓图；\n随后在图上左键点哪儿，红色箭头就从哪儿指向对应编号。",
                 Font = Ui.F9, ForeColor = Ui.Muted, BackColor = Ui.Rail,
                 AutoSize = false, TextAlign = ContentAlignment.MiddleCenter,
                 Dock = DockStyle.Top, Height = Ui.S(52)
@@ -650,9 +650,9 @@ namespace TianGongCadSuite {
             } else if (pt == null) {
                 canvasHint.Text = "本页还没有器件，点击右侧「选器件…」勾选要标注的 BOM 项。";
             } else if (pt.State == "ok") {
-                canvasHint.Text = "已定位「" + pt.Number + "」 · 左键点三维图可微调箭头落点 · 右键文字行可换左右栏或填备忘";
+                canvasHint.Text = "已定位「" + pt.Number + "」 · 左键点三维图可微调箭头起点 · 右键文字行可换左右栏或填备忘";
             } else {
-                canvasHint.Text = "待定位「" + pt.Number + "」 · 直接在下方三维图上左键点一下它所在的位置（点完自动跳下一条）";
+                canvasHint.Text = "待定位「" + pt.Number + "」 · 直接在下方三维图上左键点一下它所在的位置（箭头从图指向单元格，点完自动跳下一条）";
             }
         }
 
@@ -694,21 +694,26 @@ namespace TianGongCadSuite {
             g.FillRectangle(Brushes.White, canvasPageRect);
             g.DrawRectangle(Ui.CachedPen(Color.FromArgb(0xD4, 0xD4, 0xD8), 1f), ox, oy, drawW, drawH);
 
-            // 头部标题栏
+            // 头部标题栏（严格同步公司模板 V3.0：左右白底粗体列头 + 中央 D..I 亮黄底粗黑框插图标题块）
             float hdrH = LineupCadLayout.RowTopEmu(3) * canvasScale;
             float imgColL = ox + LineupCadLayout.ColLeftEmu(LineupCadLayout.ImageFirstCol) * canvasScale;
             float imgColR = ox + LineupCadLayout.ColLeftEmu(LineupCadLayout.ImageLastColExcl) * canvasScale;
-            g.FillRectangle(Ui.CachedBrush(Color.FromArgb(0xE8, 0xEE, 0xFA)), ox, oy, drawW, hdrH);
+            var hdrLinePen = Ui.CachedPen(Color.FromArgb(0x22, 0x22, 0x22), 1.5f);
+            g.FillRectangle(Brushes.White, ox, oy, drawW, hdrH);
+            g.FillRectangle(Ui.CachedBrush(Color.FromArgb(0xFF, 0xFF, 0x00)), imgColL, oy, imgColR - imgColL, hdrH);
+            g.DrawRectangle(Ui.CachedPen(Color.FromArgb(0x88, 0x88, 0x88), 1f), ox, oy, drawW, hdrH);
+            g.DrawRectangle(hdrLinePen, imgColL, oy, imgColR - imgColL, hdrH);
             string sta = !string.IsNullOrWhiteSpace(project.StationCode) ? project.StationCode : (project.NumberPrefix ?? "");
-            string titleInfo = (string.IsNullOrWhiteSpace(project.ProjectCode) ? "" : project.ProjectCode + " · ")
+            string titleInfo = "插图区域  |  "
+                + (string.IsNullOrWhiteSpace(project.ProjectCode) ? "" : project.ProjectCode + " · ")
                 + (string.IsNullOrWhiteSpace(sta) ? "" : sta + " · ")
-                + (string.IsNullOrWhiteSpace(project.LineCode) ? "L1" : project.LineCode)
-                + "  |  " + (currentPlan.Page.Name ?? "总图");
-            using (var fnt = new Font(Ui.Family, Math.Max(7f, Math.Min(10.5f, 9.5f * canvasScale * 12000f)), FontStyle.Bold)) {
-                var br = Ui.CachedBrush(Color.FromArgb(0x1E, 0x3A, 0x8A));
+                + (string.IsNullOrWhiteSpace(project.LineCode) ? "" : project.LineCode + " · ")
+                + (currentPlan.Page.Name ?? "总图");
+            using (var fnt = new Font(Ui.Family, Math.Max(7f, Math.Min(10.5f, 9.5f * canvasScale * 14000f)), FontStyle.Bold)) {
+                var br = Ui.CachedBrush(Color.Black);
                 g.DrawString(titleInfo, fnt, br, new RectangleF(imgColL, oy, imgColR - imgColL, hdrH), SfCenter);
-                g.DrawString("描述 / SK编号", fnt, br, new RectangleF(ox, oy, imgColL - ox, hdrH), SfCenter);
-                g.DrawString("SK编号 / 描述", fnt, br, new RectangleF(imgColR, oy, ox + drawW - imgColR, hdrH), SfCenter);
+                g.DrawString("名称/描述  |  IO点位  |  SK编号", fnt, br, new RectangleF(ox, oy, imgColL - ox, hdrH), SfCenter);
+                g.DrawString("SK编号  |  IO点位  |  名称/描述", fnt, br, new RectangleF(imgColR, oy, ox + drawW - imgColR, hdrH), SfCenter);
             }
 
             // 中央底图（缓存与当前视口等大的预缩放位图，避免每次点选箭头都 CPU 重采样大图）
@@ -734,16 +739,18 @@ namespace TianGongCadSuite {
                 g.FillRectangle(Ui.CachedBrush(Color.FromArgb(0xF8, 0xFA, 0xFC)), canvasImageRect);
                 g.DrawString("（底图文件缺失，可在右上角「管理本页 ▾ → 重拍底图」）", Ui.F9, Ui.CachedBrush(Ui.Muted), canvasImageRect, SfCenter);
             }
-            g.DrawRectangle(Ui.CachedPen(Color.FromArgb(0xCB, 0xD5, 0xE1), 1f), ix, iy, iw, ih);
+            // 中央 D..I 粗黑外框（与导出 Excel 一致）
+            g.DrawRectangle(hdrLinePen, imgColL, oy + hdrH, imgColR - imgColL, drawH - hdrH);
 
-            // 左右标注行 + 红色箭头（所有 GDI+ Pen / Cap 严格释放，StringFormat 静态复用零泄漏）
+            // 左右标注行 + 红色箭头（Start = 三维图落点，End = 单元格边缘，箭头指向单元格；所有 GDI+ Pen / Cap 严格释放）
             var selectedPt = CurrentPoint();
             float fontSize = Math.Max(6.5f, Math.Min(9.5f, LineupCadLayout.RowHeightEmu(3) * canvasScale * 0.56f));
-            var gridPen = Ui.CachedPen(Color.FromArgb(0xE5, 0xE7, 0xEB), 1f);
+            var gridPen = Ui.CachedPen(Color.FromArgb(0xD4, 0xD4, 0xD8), 1f);
             using (var rowFont = new Font(Ui.Family, fontSize, FontStyle.Regular))
             using (var numFont = new Font(Ui.Family, fontSize, FontStyle.Bold))
-            using (var arrowPen = new Pen(Color.FromArgb(0xDC, 0x26, 0x26), 1.6f))
+            using (var arrowPen = new Pen(Color.FromArgb(0xE0, 0x00, 0x00), 1.8f))
             using (var selArrowPen = new Pen(Ui.Accent, 2.4f))
+            using (var selRingPen = new Pen(Ui.Accent, 2.0f))
             using (var cap = new AdjustableArrowCap(4.5f, 5.5f, true)) {
                 arrowPen.CustomEndCap = cap;
                 selArrowPen.CustomEndCap = cap;
@@ -775,7 +782,8 @@ namespace TianGongCadSuite {
                         float ex = ox + co.EndX * canvasScale;
                         float ey = oy + co.EndY * canvasScale;
                         g.DrawLine(isSel ? selArrowPen : arrowPen, sx, sy, ex, ey);
-                        if (isSel) g.DrawEllipse(selArrowPen, ex - 6, ey - 6, 12, 12);
+                        g.FillEllipse(Ui.CachedBrush(isSel ? Ui.Accent : Color.FromArgb(0xE0, 0x00, 0x00)), sx - 2.5f, sy - 2.5f, 5f, 5f);
+                        if (isSel) g.DrawEllipse(selRingPen, sx - 6.5f, sy - 6.5f, 13f, 13f);
                     }
                 }
             }

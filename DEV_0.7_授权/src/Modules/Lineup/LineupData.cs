@@ -42,6 +42,21 @@ namespace TianGongCadSuite {
             };
         }
     }
+    // 「LineUP更新日志」单条版本记录（持久化在 .lineup.xml，与公司模板 9 列一一对应）
+    public sealed class LineupChangeLog {
+        public string Date="",Version="",ModelDate="",Content="",Notes="",Designer="",Editor="",Approver="";
+        public LineupChangeLog Copy(){return (LineupChangeLog)MemberwiseClone();}
+    }
+    // BOM 基准快照（记录上一发布/导入版本的 BOM，用于自动生成更新摘要与红底/删除线标记）
+    public sealed class LineupBaselineSnapshot {
+        public string Version="",CapturedAt="";
+        public List<LineupRecord> Records=new List<LineupRecord>();
+        public LineupBaselineSnapshot Copy(){
+            var c=new LineupBaselineSnapshot{Version=Version??"",CapturedAt=CapturedAt??""};
+            if(Records!=null){c.Records=new List<LineupRecord>(Records.Count);for(int i=0;i<Records.Count;i++)c.Records.Add(Records[i].Copy());}
+            return c;
+        }
+    }
     public sealed class LineupProject {
         public int Version=1;
         public string AssemblyFile="";
@@ -53,8 +68,12 @@ namespace TianGongCadSuite {
         public List<LineupEntryPreset> EntryPresets=new List<LineupEntryPreset>();
         // 项目抬头元数据与多页 CAD 位置图（兼容旧 .lineup.xml：缺省值均为空/空集合）
         public string ProjectCode="",StationCode="",LineCode="L1",Designer="",Editor="",Revision="V1.0";
-        public bool Export11Columns;
+        public bool Export11Columns=true;
+        public bool MarkBomChanges=true;
         public List<LineupCadPage> CadPages=new List<LineupCadPage>();
+        public List<LineupChangeLog> ChangeLogs=new List<LineupChangeLog>();
+        public LineupBaselineSnapshot Baseline;
+        public LineupBaselineSnapshot LatestExported;
         public static string CadAssetsDir(string assemblyFile){
             return string.IsNullOrEmpty(assemblyFile)?"":Path.ChangeExtension(Path.GetFullPath(assemblyFile),".lineup.cad");
         }
@@ -85,13 +104,17 @@ namespace TianGongCadSuite {
             var p=new LineupProject{
                 Version=Version,AssemblyFile=AssemblyFile??"",NumberPrefix=NumberPrefix??"",ActiveIsland=ActiveIsland,
                 ProjectCode=ProjectCode??"",StationCode=StationCode??"",LineCode=LineCode??"L1",
-                Designer=Designer??"",Editor=Editor??"",Revision=Revision??"V1.0",Export11Columns=Export11Columns
+                Designer=Designer??"",Editor=Editor??"",Revision=Revision??"V1.0",
+                Export11Columns=Export11Columns,MarkBomChanges=MarkBomChanges,
+                Baseline=Baseline==null?null:Baseline.Copy(),
+                LatestExported=LatestExported==null?null:LatestExported.Copy()
             };
             if(Records!=null){p.Records=new List<LineupRecord>(Records.Count);for(int i=0;i<Records.Count;i++)p.Records.Add(Records[i].Copy());}
             if(Sections!=null){p.Sections=new List<LineupSection>(Sections.Count);for(int i=0;i<Sections.Count;i++){var s=Sections[i];p.Sections.Add(new LineupSection{Category=s.Category??"",Cells=s.Cells==null?new string[0]:(string[])s.Cells.Clone()});}}
             if(Islands!=null){p.Islands=new List<LineupIsland>(Islands.Count);for(int i=0;i<Islands.Count;i++)p.Islands.Add(Islands[i].Copy());}
             if(EntryPresets!=null){p.EntryPresets=new List<LineupEntryPreset>(EntryPresets.Count);for(int i=0;i<EntryPresets.Count;i++)p.EntryPresets.Add(EntryPresets[i].Copy());}
             if(CadPages!=null){p.CadPages=new List<LineupCadPage>(CadPages.Count);for(int i=0;i<CadPages.Count;i++)p.CadPages.Add(CadPages[i].Copy());}
+            if(ChangeLogs!=null){p.ChangeLogs=new List<LineupChangeLog>(ChangeLogs.Count);for(int i=0;i<ChangeLogs.Count;i++)p.ChangeLogs.Add(ChangeLogs[i].Copy());}
             return p;
         }
         public void Save(string file) {
@@ -110,6 +133,7 @@ namespace TianGongCadSuite {
             if(p.Islands==null)p.Islands=new List<LineupIsland>();
             if(p.EntryPresets==null)p.EntryPresets=new List<LineupEntryPreset>();
             if(p.CadPages==null)p.CadPages=new List<LineupCadPage>();
+            if(p.ChangeLogs==null)p.ChangeLogs=new List<LineupChangeLog>();
             if(!string.Equals(Path.GetFullPath(p.AssemblyFile),Path.GetFullPath(assembly),StringComparison.OrdinalIgnoreCase)){
                 // 0.10.3：数据文件就是这个装配旁边、同名的那个 .lineup.xml → 装配连同文件夹被拷走 / 挪走 / 改过名（记的还是老路径）。
                 // 原来一律报"属于另一装配"、Lineup 打不开：H 盘上到处是「项目 - 副本」，拷一份接着做就再也打不开清单。

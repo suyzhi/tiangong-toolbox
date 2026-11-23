@@ -68,6 +68,7 @@ namespace TianGongCadSuite {
         static readonly PropertyInfo doubleBufferedProp = typeof(Control).GetProperty("DoubleBuffered", BindingFlags.Instance | BindingFlags.NonPublic);
         [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
         [DllImport("user32.dll")] static extern bool RedrawWindow(IntPtr hWnd, IntPtr lprcUpdate, IntPtr hrgnUpdate, uint flags);
+        [DllImport("user32.dll")] static extern int GetMessageTime();
         const int WM_SETREDRAW = 0x000B;
         const uint RDW_INVALIDATE = 0x0001, RDW_ERASE = 0x0004, RDW_ALLCHILDREN = 0x0080;
 
@@ -267,6 +268,78 @@ namespace TianGongCadSuite {
 
         // 手动对非 Ui.Shell 创建的弹出面板/子容器应用统一控件外观
         public static void StyleTree(Control root){ UiSkin.Attach(root); }
+
+        // 将右键/下拉菜单统一为插件的白底圆角靛蓝外观
+        public static void StyleMenu(ContextMenuStrip menu){ UiSkin.StyleMenu(menu); }
+
+        // 创建已应用统一主题外观的 ContextMenuStrip
+        public static ContextMenuStrip Menu(){
+            var m = new ContextMenuStrip { ShowImageMargin = false, Font = F9 };
+            UiSkin.StyleMenu(m);
+            return m;
+        }
+
+        // 将按钮与下拉菜单绑定为真正的开关：点开后再次点击同一个按钮会收起菜单，而不是先关再立刻重开。
+        // 根因：WinForms 在按钮 WM_LBUTTONDOWN 前先由 ModalMenuFilter 自动关闭菜单，紧接着 Button.Click 又触发 menu.Show。
+        public static void BindDropDownMenu(Button button, ContextMenuStrip menu, Func<Button, ContextMenuStrip, Point> offset = null){
+            if (button == null || menu == null) return;
+            bool closedByOutside = false;
+            bool closedHitButton = false;
+            int closedTick = 0;
+            int closedMsgTime = 0;
+            bool suppressNextClick = false;
+
+            menu.Closed += (s, e) => {
+                if (button.IsDisposed || !button.IsHandleCreated || !button.Visible) return;
+                if (e.CloseReason == ToolStripDropDownCloseReason.AppClicked || e.CloseReason == ToolStripDropDownCloseReason.AppFocusChange) {
+                    closedByOutside = true;
+                    closedHitButton = button.RectangleToScreen(button.ClientRectangle).Contains(Control.MousePosition);
+                    closedTick = Environment.TickCount;
+                    try { closedMsgTime = GetMessageTime(); } catch { closedMsgTime = closedTick; }
+                }
+            };
+            button.MouseDown += (s, e) => {
+                if (e.Button != MouseButtons.Left) return;
+                if (menu.Visible) {
+                    suppressNextClick = true;
+                    closedByOutside = false;
+                    menu.Close();
+                    return;
+                }
+                if (closedByOutside) {
+                    int elapsed = unchecked(Environment.TickCount - closedTick);
+                    int msgDelta = 1000;
+                    try { msgDelta = unchecked(GetMessageTime() - closedMsgTime); } catch { }
+                    bool sameClick = (closedHitButton && elapsed >= 0 && elapsed < 250)
+                        || (elapsed >= 0 && elapsed < 50)
+                        || (msgDelta == 0 && elapsed >= 0 && elapsed < 120);
+                    suppressNextClick = sameClick;
+                    closedByOutside = false;
+                } else {
+                    suppressNextClick = false;
+                }
+            };
+            button.KeyDown += (s, e) => {
+                if (e.KeyCode == Keys.Space || e.KeyCode == Keys.Enter) suppressNextClick = false;
+            };
+            button.Click += (s, e) => {
+                if (suppressNextClick) {
+                    suppressNextClick = false;
+                    return;
+                }
+                if (closedByOutside) {
+                    int elapsed = unchecked(Environment.TickCount - closedTick);
+                    closedByOutside = false;
+                    if ((closedHitButton && elapsed >= 0 && elapsed < 250) || (elapsed >= 0 && elapsed < 50)) return;
+                }
+                if (menu.Visible) {
+                    menu.Close();
+                    return;
+                }
+                Point pt = offset != null ? offset(button, menu) : new Point(0, button.Height + S(2));
+                menu.Show(button, pt);
+            };
+        }
 
         public static Card Card(string title, int height, string hint){
             var c = new Card();

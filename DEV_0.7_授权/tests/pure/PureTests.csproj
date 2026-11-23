@@ -66,6 +66,7 @@
     <Compile Include="../../src/Modules/Lineup/LineupHierarchy.cs" />
     <Compile Include="../../src/Modules/Lineup/LineupAudit.cs" />
     <Compile Include="../../src/Modules/Lineup/LineupCadLayout.cs" />
+    <Compile Include="../../src/Modules/Lineup/LineupRevision.cs" />
     <Compile Include="../../src/Modules/Lineup/LineupXlsxWriter.cs" />
     <Compile Include="../../src/Modules/Lineup/LineupXlsxReader.cs" />
 

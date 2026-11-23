@@ -15,6 +15,13 @@ namespace TianGongCadSuite {
         static readonly Color BorderDisabled = Ui.Line;                          // Zinc-200
         static readonly ConditionalWeakTable<Control, object> attached = new ConditionalWeakTable<Control, object>();
         static readonly ConditionalWeakTable<Control, object> hookedContainers = new ConditionalWeakTable<Control, object>();
+        static readonly ConditionalWeakTable<ToolStripDropDown, MenuSkin> styledMenus = new ConditionalWeakTable<ToolStripDropDown, MenuSkin>();
+        static readonly MenuRenderer sharedMenuRenderer = new MenuRenderer();
+
+        [DllImport("dwmapi.dll", PreserveSig = true)] static extern int DwmSetWindowAttribute(IntPtr hwnd, int dwAttribute, ref int pvAttribute, int cbAttribute);
+        const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+        const int DWMWA_BORDER_COLOR = 34;
+        const int DWMWCP_ROUND = 2;
 
         [DllImport("user32.dll", EntryPoint = "GetWindowLongPtr")] static extern IntPtr GetWindowLongPtr64(IntPtr hWnd, int nIndex);
         [DllImport("user32.dll", EntryPoint = "SetWindowLongPtr")] static extern IntPtr SetWindowLongPtr64(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
@@ -85,10 +92,32 @@ namespace TianGongCadSuite {
             StyleNode(root);
         }
 
+        // 将右键菜单 / 下拉菜单统一为全插件的现代白底圆角靛蓝外观（与下拉框/卡片/按钮保持一致）
+        public static void StyleMenu(ToolStripDropDown menu) {
+            if (menu == null || menu.IsDisposed) return;
+            MenuSkin existing;
+            if (styledMenus.TryGetValue(menu, out existing)) {
+                existing.RefreshItems();
+                return;
+            }
+            var skin = new MenuSkin(menu);
+            styledMenus.Add(menu, skin);
+            skin.RefreshItems();
+        }
+
         static void StyleNode(Control c) {
             if (c == null || c.IsDisposed) return;
+            if (c.ContextMenuStrip != null) StyleMenu(c.ContextMenuStrip);
             // 不碰 DataGridView 及其内部编辑控件，不碰 UpDownBase 的内部子控件（由 NumericUpDownSkin 接管）
-            if (c is DataGridView || c is IDataGridViewEditingControl) return;
+            if (c is DataGridView) {
+                object dgMarker;
+                if (!hookedContainers.TryGetValue(c, out dgMarker)) {
+                    hookedContainers.Add(c, new object());
+                    c.ContextMenuStripChanged += OnContextMenuChanged;
+                }
+                return;
+            }
+            if (c is IDataGridViewEditingControl) return;
 
             ApplyToControl(c);
 
@@ -98,12 +127,18 @@ namespace TianGongCadSuite {
             if (!hookedContainers.TryGetValue(c, out dummy)) {
                 hookedContainers.Add(c, new object());
                 c.ControlAdded += OnChildAdded;
+                c.ContextMenuStripChanged += OnContextMenuChanged;
             }
             foreach (Control child in c.Controls) StyleNode(child);
         }
 
         static void OnChildAdded(object sender, ControlEventArgs e) {
             if (e != null && e.Control != null) StyleNode(e.Control);
+        }
+
+        static void OnContextMenuChanged(object sender, EventArgs e) {
+            var c = sender as Control;
+            if (c != null && !c.IsDisposed && c.ContextMenuStrip != null) StyleMenu(c.ContextMenuStrip);
         }
 
         static void ApplyToControl(Control c) {
@@ -957,6 +992,221 @@ namespace TianGongCadSuite {
                     return;
                 }
                 base.WndProc(ref m);
+            }
+        }
+
+        // ==================== 6. 右键菜单 / 下拉菜单 ContextMenuStrip ====================
+        static void DrawRightChevron(Graphics g, float cx, float cy, float halfW, float halfH, Color color, float stroke) {
+            var sm = g.SmoothingMode;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var pen = new Pen(color, stroke) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round }) {
+                g.DrawLines(pen, new[] {
+                    new PointF(cx - halfW * 0.55f, cy - halfH),
+                    new PointF(cx + halfW * 0.65f, cy),
+                    new PointF(cx - halfW * 0.55f, cy + halfH)
+                });
+            }
+            g.SmoothingMode = sm;
+        }
+
+        static bool IsDangerMenuItem(ToolStripItem item) {
+            if (item == null) return false;
+            var tag = item.Tag as string;
+            if (string.Equals(tag, "danger", StringComparison.OrdinalIgnoreCase)) return true;
+            string t = (item.Text ?? "").TrimStart();
+            return t.StartsWith("删除", StringComparison.Ordinal)
+                || t.StartsWith("仅删除", StringComparison.Ordinal)
+                || t.StartsWith("移除", StringComparison.Ordinal)
+                || t.StartsWith("从本页移除", StringComparison.Ordinal)
+                || t.StartsWith("清空", StringComparison.Ordinal);
+        }
+
+        static bool IsAccentMenuItem(ToolStripItem item) {
+            if (item == null) return false;
+            return string.Equals(item.Tag as string, "accent", StringComparison.OrdinalIgnoreCase);
+        }
+
+        sealed class MenuSkin {
+            readonly ToolStripDropDown menu;
+            public bool DwmRounded;
+
+            public MenuSkin(ToolStripDropDown dropDown) {
+                menu = dropDown;
+                var ddm = menu as ToolStripDropDownMenu;
+                if (ddm != null) {
+                    ddm.ShowImageMargin = false;
+                    ddm.ShowCheckMargin = false;
+                }
+                menu.Renderer = sharedMenuRenderer;
+                menu.BackColor = Color.White;
+                menu.ForeColor = Ui.Text;
+                menu.Font = Ui.F9;
+                menu.DropShadowEnabled = true;
+                menu.Padding = Ui.SPad(5, 6, 5, 6);
+                Ui.EnableDoubleBuffer(menu);
+
+                menu.Opening += OnOpening;
+                menu.HandleCreated += OnHandleCreated;
+                menu.SizeChanged += OnSizeChanged;
+                menu.ItemAdded += OnItemAdded;
+                if (menu.IsHandleCreated) ApplyCornerClip();
+            }
+
+            void OnOpening(object s, System.ComponentModel.CancelEventArgs e) {
+                RefreshItems();
+                if (menu.IsHandleCreated) ApplyCornerClip();
+            }
+
+            void OnHandleCreated(object s, EventArgs e) { ApplyCornerClip(); }
+            void OnSizeChanged(object s, EventArgs e) { if (!DwmRounded) ApplyRegionClip(); }
+
+            void OnItemAdded(object s, ToolStripItemEventArgs e) {
+                if (e != null && e.Item != null) ConfigureItem(e.Item);
+            }
+
+            public void RefreshItems() {
+                if (menu == null || menu.IsDisposed) return;
+                menu.SuspendLayout();
+                try {
+                    foreach (ToolStripItem item in menu.Items) ConfigureItem(item);
+                } finally {
+                    menu.ResumeLayout(true);
+                }
+            }
+
+            static void ConfigureItem(ToolStripItem item) {
+                if (item == null || item.IsDisposed) return;
+                var sep = item as ToolStripSeparator;
+                if (sep != null) {
+                    sep.AutoSize = false;
+                    sep.Height = Ui.S(11);
+                    sep.Margin = new Padding(0);
+                    return;
+                }
+                var mi = item as ToolStripMenuItem;
+                if (mi != null) {
+                    Font wantFont = IsAccentMenuItem(mi) ? Ui.F9B : Ui.F9;
+                    if (mi.Font != wantFont) mi.Font = wantFont;
+                    int rightPad = (mi.HasDropDownItems || mi.CheckOnClick || mi.Checked) ? 24 : 16;
+                    mi.Padding = Ui.SPad(8, 5, rightPad, 5);
+                    mi.Margin = Ui.SPad(0, 1, 0, 1);
+                    if (mi.HasDropDownItems) StyleMenu(mi.DropDown);
+                }
+            }
+
+            void ApplyCornerClip() {
+                if (menu == null || menu.IsDisposed || !menu.IsHandleCreated) return;
+                DwmRounded = false;
+                try {
+                    int pref = DWMWCP_ROUND;
+                    int hr = DwmSetWindowAttribute(menu.Handle, DWMWA_WINDOW_CORNER_PREFERENCE, ref pref, sizeof(int));
+                    if (hr == 0) {
+                        DwmRounded = true;
+                        int borderBgr = (BorderNormal.B << 16) | (BorderNormal.G << 8) | BorderNormal.R;
+                        DwmSetWindowAttribute(menu.Handle, DWMWA_BORDER_COLOR, ref borderBgr, sizeof(int));
+                        var oldReg = menu.Region;
+                        if (oldReg != null) { menu.Region = null; try { oldReg.Dispose(); } catch { } }
+                        return;
+                    }
+                } catch { }
+                ApplyRegionClip();
+            }
+
+            void ApplyRegionClip() {
+                if (menu == null || menu.IsDisposed || menu.Width <= 4 || menu.Height <= 4) return;
+                try {
+                    using (var path = Ui.Rounded(new Rectangle(0, 0, menu.Width, menu.Height), Ui.S(8))) {
+                        var oldReg = menu.Region;
+                        menu.Region = new Region(path);
+                        if (oldReg != null) { try { oldReg.Dispose(); } catch { } }
+                    }
+                } catch { }
+            }
+        }
+
+        sealed class MenuRenderer : ToolStripRenderer {
+            protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e) {
+                e.Graphics.FillRectangle(Ui.CachedBrush(Color.White), e.AffectedBounds);
+            }
+
+            protected override void OnRenderImageMargin(ToolStripRenderEventArgs e) {
+                // 不画原生灰色图标栏，保持全白简洁卡片
+            }
+
+            protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e) {
+                var dd = e.ToolStrip as ToolStripDropDown;
+                MenuSkin skin = null;
+                if (dd != null) styledMenus.TryGetValue(dd, out skin);
+                // 始终绘制 1px 圆角细框：Win11 下与 DWM 圆角同色贴合不突兀，Win10 与离屏渲染下同样保持清晰卡片边界
+                Color borderCol = (skin != null && skin.DwmRounded) ? Ui.Line : BorderNormal;
+                var r = new Rectangle(0, 0, e.ToolStrip.Width - 1, e.ToolStrip.Height - 1);
+                Ui.DrawRound(e.Graphics, r, Ui.S(8), borderCol, 1f);
+            }
+
+            static int ItemContentRight(ToolStripItem item, ToolStrip strip) {
+                if (strip == null || item == null) return item == null ? 0 : item.Width;
+                int visibleW = strip.ClientSize.Width - item.Bounds.Left;
+                return Math.Min(item.Width, Math.Max(0, visibleW));
+            }
+
+            protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e) {
+                var item = e.Item;
+                if (!item.Enabled) return;
+                if (!item.Selected && !item.Pressed) return;
+                bool danger = IsDangerMenuItem(item);
+                Color fill = danger
+                    ? (item.Pressed ? Color.FromArgb(0xFE, 0xCA, 0xCA) : Ui.BadSoft)
+                    : (item.Pressed ? Ui.AccentRing : Ui.AccentSoft);
+                int padX = Ui.S(2);
+                int rightEdge = ItemContentRight(item, e.ToolStrip) - Ui.S(7);
+                var pill = new Rectangle(padX, 1, Math.Max(4, rightEdge - padX), Math.Max(4, item.Height - 2));
+                Ui.FillRound(e.Graphics, pill, Ui.S(6), fill);
+            }
+
+            protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e) {
+                var item = e.Item;
+                var mi = item as ToolStripMenuItem;
+                bool danger = IsDangerMenuItem(item);
+                bool accent = IsAccentMenuItem(item);
+                bool isChecked = mi != null && mi.Checked;
+                bool hasSub = mi != null && mi.HasDropDownItems;
+                bool active = item.Enabled && (item.Selected || item.Pressed);
+
+                Color fore = !item.Enabled ? Ui.Faint
+                           : (danger ? Ui.Bad
+                           : ((accent || isChecked || active) ? Ui.Accent : Ui.Text));
+
+                int rightEdge = ItemContentRight(item, e.ToolStrip);
+                int leftX = Ui.S(12);
+                int rightReserve = (hasSub || isChecked) ? Ui.S(30) : Ui.S(14);
+                var tr = new Rectangle(leftX, 0, Math.Max(10, rightEdge - leftX - rightReserve), item.Height);
+                TextRenderer.DrawText(e.Graphics, e.Text ?? "", e.TextFont ?? Ui.F9, tr, fore,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+
+                if (hasSub) {
+                    Color arrowCol = !item.Enabled ? Ui.Faint : (active ? Ui.Accent : Ui.Muted);
+                    DrawRightChevron(e.Graphics, rightEdge - Ui.S(16), item.Height / 2f, Ui.S(4), Ui.S(4), arrowCol, 1.5f);
+                } else if (isChecked) {
+                    int cs = Ui.S(11);
+                    Ui.DrawCheck(e.Graphics,
+                        new Rectangle(rightEdge - cs - Ui.S(12), (item.Height - cs) / 2, cs, cs),
+                        item.Enabled ? Ui.Accent : Ui.Faint, 1.7f);
+                }
+            }
+
+            protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e) {
+                // 勾选标记已由 OnRenderItemText 在右侧统一绘制，屏蔽原生复古方框
+            }
+
+            protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e) {
+                // 子菜单箭头已由 OnRenderItemText 使用与菜单右缘严格对称的矢量尖括号绘制，屏蔽原生实心三角
+            }
+
+            protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e) {
+                int y = e.Item.Height / 2;
+                int leftInset = Ui.S(10);
+                int right = Math.Max(leftInset, ItemContentRight(e.Item, e.ToolStrip) - Ui.S(15));
+                e.Graphics.DrawLine(Ui.CachedPen(Ui.Line, 1f), leftInset, y, right, y);
             }
         }
     }

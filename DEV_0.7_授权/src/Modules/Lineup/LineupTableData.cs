@@ -10,7 +10,9 @@ namespace TianGongCadSuite {
         public List<LineupRecord> Records=new List<LineupRecord>();
         public List<LineupSection> Sections=new List<LineupSection>();
         public List<LineupIsland> Islands=new List<LineupIsland>();
+        public List<LineupChangeLog> ChangeLogs=new List<LineupChangeLog>();
         public string ProjectCode="",StationCode="",LineCode="";
+        public string LatestRevision="",LatestDesigner="",LatestEditor="";
     }
     public static class LineupTableData {
         public static readonly string[] Headers={"编号","地址","功能参数","描述","型号","品牌","原位","安装方式","机构名称","传感器接口类型","备注"};
@@ -89,7 +91,7 @@ namespace TianGongCadSuite {
         public static void InferHierarchy(LineupProject project){
             if(project==null||project.Records==null)return;
             if(project.Islands==null)project.Islands=new List<LineupIsland>();
-            // 1. 提取阀片安装方式里的阀岛 / 汇流排 / 阀组 / 单片阀配置
+            // 1. 提取阀片安装方式（或公司模板中的 I 列传感器接口/阀岛合并格）里的阀岛 / 汇流排 / 阀组 / 单片阀配置
             foreach(var v in project.Records.Where(r=>Category(r.Category)=="阀片")){
                 string key=LineupNumbering.IslandKey(v.Number);
                 if(key.Length==0)continue;
@@ -97,12 +99,13 @@ namespace TianGongCadSuite {
                     var m=Regex.Match(key,@"^(.+)-Y([0-9]+)$",RegexOptions.IgnoreCase);
                     if(m.Success){project.NumberPrefix=m.Groups[1].Value;int n;if(int.TryParse(m.Groups[2].Value,out n)&&n>0)project.ActiveIsland=n;}
                 }
-                var im=Regex.Match(v.Mounting??"",@"(阀岛|汇流排|阀组)[：:]\s*([^\r\n]+)");
+                string islandSrc=!string.IsNullOrWhiteSpace(v.Mounting)?v.Mounting:(v.Connector??"");
+                var im=Regex.Match(islandSrc,@"(阀岛|汇流排|阀组)[0-9]*\s*(?:[：:]|\r?\n)\s*([^\r\n]+)");
                 if(im.Success){
                     var existing=LineupNumbering.IslandEntry(project,key);
                     if(existing==null)project.Islands.Add(new LineupIsland{Key=key,Kind=im.Groups[1].Value.Trim(),Model=im.Groups[2].Value.Trim()});
                     else if(string.IsNullOrWhiteSpace(existing.Model)){existing.Kind=im.Groups[1].Value.Trim();existing.Model=im.Groups[2].Value.Trim();}
-                }else if((v.Mounting??"").Trim()=="单片阀"){
+                }else if(islandSrc.Trim()=="单片阀"){
                     var existing=LineupNumbering.IslandEntry(project,key);
                     if(existing==null)project.Islands.Add(new LineupIsland{Key=key,Kind="单片阀",Model=""});
                 }
