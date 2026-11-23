@@ -1257,6 +1257,9 @@ namespace TianGongCadSuite {
             add("一键配齐配套阀片 + H/W", AutoCompleteValvesAndSensors, null, true);
             add("批量设置备注 / 模块名…", BatchSetNotesDialog, null, ids.Count > 0);
             gridMenu.Items.Add(new ToolStripSeparator());
+            add("上移选中行 (Alt+↑)", () => MoveRows(-1), null, ids.Count > 0 && grid.Rows.Count > 1);
+            add("下移选中行 (Alt+↓)", () => MoveRows(1), null, ids.Count > 0 && grid.Rows.Count > 1);
+            gridMenu.Items.Add(new ToolStripSeparator());
             add("复制选中行", DuplicateRows, null, ids.Count > 0);
             add("删除选中行", DeleteRows, "danger", ids.Count > 0);
             Ui.StyleMenu(gridMenu);
@@ -1286,20 +1289,26 @@ namespace TianGongCadSuite {
         Action ResolveLineupShortcut(Keys keyData) {
             if (keyData == (Keys.Control | Keys.F)) return () => { if (search.Visible && search.CanFocus) { search.Focus(); search.SelectAll(); } };
             if (keyData == (Keys.Control | Keys.S)) return () => { Try(SaveDraft); };
-            if (activeViewMode == 0 && pneumaticPanel != null && pneumaticPanel.Visible && pneumaticPanel.ContainsFocus) {
+            if (activeViewMode == 0 && pneumaticPanel != null && pneumaticPanel.Visible) {
                 if (pneumaticPanel.IsEditing || ActiveControl is TextBoxBase) return null;
-                if (keyData == (Keys.Control | Keys.C)) return () => pneumaticPanel.CopySelectedCells();
-                if (keyData == (Keys.Control | Keys.V)) return () => pneumaticPanel.PasteSelectedCells(Clipboard.GetText());
-                if (keyData == (Keys.Control | Keys.D)) return () => pneumaticPanel.FillDownSelectedCells();
-                if (keyData == (Keys.Control | Keys.Z)) return () => { Try(Undo); };
-                if (keyData == Keys.Delete) return () => pneumaticPanel.ClearSelectedCells();
+                if (keyData == (Keys.Alt | Keys.Up)) return () => { Try(() => MoveRows(-1)); };
+                if (keyData == (Keys.Alt | Keys.Down)) return () => { Try(() => MoveRows(1)); };
+                if (pneumaticPanel.ContainsFocus) {
+                    if (keyData == (Keys.Control | Keys.C)) return () => pneumaticPanel.CopySelectedCells();
+                    if (keyData == (Keys.Control | Keys.V)) return () => pneumaticPanel.PasteSelectedCells(Clipboard.GetText());
+                    if (keyData == (Keys.Control | Keys.D)) return () => pneumaticPanel.FillDownSelectedCells();
+                    if (keyData == (Keys.Control | Keys.Z)) return () => { Try(Undo); };
+                    if (keyData == Keys.Delete) return () => pneumaticPanel.ClearSelectedCells();
+                }
                 return null;
             }
-            if (grid.IsCurrentCellInEditMode) return null;
+            if (grid.IsCurrentCellInEditMode || ActiveControl is TextBoxBase) return null;
             if (keyData == (Keys.Control | Keys.C)) return () => { Try(() => { var dataObj = grid.GetClipboardContent(); if (dataObj != null) { string t = dataObj.GetText(); if (t != null) ClipboardUtil.SetText(t); } }); };
             if (keyData == (Keys.Control | Keys.V)) return () => { Try(() => PasteCells(ClipboardUtil.GetText())); };
             if (keyData == (Keys.Control | Keys.D)) return () => { Try(FillDown); };
             if (keyData == (Keys.Control | Keys.Z)) return () => { Try(Undo); };
+            if (keyData == (Keys.Alt | Keys.Up)) return () => { Try(() => MoveRows(-1)); };
+            if (keyData == (Keys.Alt | Keys.Down)) return () => { Try(() => MoveRows(1)); };
             if (keyData == Keys.Delete && grid.ContainsFocus) return () => { Try(ClearSelectedCells); };
             return null;
         }
@@ -1511,7 +1520,7 @@ namespace TianGongCadSuite {
 
         List<string> SelectedIds() {
             return grid.SelectedCells.Cast<DataGridViewCell>()
-                .Where(c => c.RowIndex >= 0)
+                .Where(c => c.RowIndex >= 0 && c.RowIndex < grid.Rows.Count && grid.Rows[c.RowIndex].DataBoundItem != null)
                 .OrderBy(c => c.RowIndex)
                 .Select(c => Convert.ToString(((DataRowView)grid.Rows[c.RowIndex].DataBoundItem)["Id"]))
                 .Distinct().ToList();

@@ -117,8 +117,8 @@ namespace TianGongCadSuite {
             editSub.DropDownItems.Add(new ToolStripSeparator());
             AddSubItem(editSub, "上方插入空行", () => InsertAt(false));
             AddSubItem(editSub, "下方插入空行", () => InsertAt(true));
-            AddSubItem(editSub, "上移选中行", () => MoveRows(-1));
-            AddSubItem(editSub, "下移选中行", () => MoveRows(1));
+            AddSubItem(editSub, "上移选中行 (Alt+↑)", () => MoveRows(-1));
+            AddSubItem(editSub, "下移选中行 (Alt+↓)", () => MoveRows(1));
             editSub.DropDownItems.Add(new ToolStripSeparator());
             AddSubItem(editSub, "重新顺排全部编号", CompactAllNumbers);
             moreMenu.Items.Add(editSub);
@@ -411,6 +411,7 @@ namespace TianGongCadSuite {
             panel.OnImportXlsx = ImportXlsxDialog;
             panel.OnPickModelForRecords = (cat, ids) => PickModelForCategory(cat, ids);
             panel.OnNotifyStatus = msg => { status.Text = msg; ShowToast(msg, Ui.Warn); };
+            panel.OnMoveSelectedRows = dir => MoveRows(dir);
             return panel;
         }
 

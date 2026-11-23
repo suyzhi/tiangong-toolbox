@@ -816,6 +816,279 @@ namespace TianGongCadSuite {
             return updated;
         }
 
+        sealed class SlotMoveUnit {
+            public LineupRecord Valve;
+            public readonly List<LineupRecord> Cylinders = new List<LineupRecord>();
+            public readonly Dictionary<string, List<LineupRecord>> SensorsByCyl = new Dictionary<string, List<LineupRecord>>(StringComparer.Ordinal);
+            public int OrigSlot = 999999;
+
+            public bool ContainsAny(HashSet<string> ids) {
+                if (Valve != null && ids.Contains(Valve.Id)) return true;
+                foreach (var c in Cylinders) {
+                    if (ids.Contains(c.Id)) return true;
+                    List<LineupRecord> sl;
+                    if (SensorsByCyl.TryGetValue(c.Id, out sl)) {
+                        foreach (var s in sl) if (ids.Contains(s.Id)) return true;
+                    }
+                }
+                return false;
+            }
+        }
+
+        static string ExtractCylinderSuffix(string cylNumber, string islandKey) {
+            var m = Regex.Match((cylNumber ?? "").Trim(), "^" + Regex.Escape(islandKey.Trim()) + @"C[0-9]+(-[0-9]+|[a-z])?$", RegexOptions.IgnoreCase);
+            return m.Success && m.Groups[1].Success ? m.Groups[1].Value : "";
+        }
+
+        static string ExtractSensorPosSuffix(LineupRecord s) {
+            if (s == null) return "";
+            if (!string.IsNullOrWhiteSpace(s.Position)) return s.Position.Trim().ToUpperInvariant();
+            var m = Regex.Match((s.Number ?? "").Trim(), @"([HWM][0-9]*)$", RegexOptions.IgnoreCase);
+            return m.Success ? m.Groups[1].Value.ToUpperInvariant() : "";
+        }
+
+        static void ReorderRecordsInPlace(LineupProject p, IList<string> orderedIds) {
+            if (p == null || p.Records == null || orderedIds == null || orderedIds.Count <= 1) return;
+            var idSet = new HashSet<string>(orderedIds, StringComparer.Ordinal);
+            var map = new Dictionary<string, LineupRecord>(StringComparer.Ordinal);
+            foreach (var r in p.Records) if (idSet.Contains(r.Id) && !map.ContainsKey(r.Id)) map[r.Id] = r;
+            var queue = new List<LineupRecord>(orderedIds.Count);
+            foreach (var id in orderedIds) {
+                LineupRecord rec;
+                if (map.TryGetValue(id, out rec)) queue.Add(rec);
+            }
+            if (queue.Count <= 1) return;
+            int idx = 0;
+            for (int i = 0; i < p.Records.Count && idx < queue.Count; i++) {
+                if (idSet.Contains(p.Records[i].Id)) p.Records[i] = queue[idx++];
+            }
+        }
+
+        static bool MoveIndices(int count, HashSet<int> selectedIndices, int direction, out List<int> newOrder) {
+            newOrder = Enumerable.Range(0, count).ToList();
+            bool moved = false;
+            if (direction < 0) {
+                for (int i = 1; i < newOrder.Count; i++) {
+                    if (selectedIndices.Contains(newOrder[i]) && !selectedIndices.Contains(newOrder[i - 1])) {
+                        int t = newOrder[i - 1]; newOrder[i - 1] = newOrder[i]; newOrder[i] = t;
+                        moved = true;
+                    }
+                }
+            } else {
+                for (int i = newOrder.Count - 2; i >= 0; i--) {
+                    if (selectedIndices.Contains(newOrder[i]) && !selectedIndices.Contains(newOrder[i + 1])) {
+                        int t = newOrder[i + 1]; newOrder[i + 1] = newOrder[i]; newOrder[i] = t;
+                        moved = true;
+                    }
+                }
+            }
+            return moved;
+        }
+
+        static bool MoveSlotUnitGroup(LineupProject p, string canonicalKey, List<SlotMoveUnit> units, HashSet<string> selSet, int direction, int fallbackBaseSlot) {
+            if (units.Count <= 1) return false;
+            var selIdx = new HashSet<int>();
+            for (int i = 0; i < units.Count; i++) if (units[i].ContainsAny(selSet)) selIdx.Add(i);
+            if (selIdx.Count == 0) return false;
+
+            List<int> newOrder;
+            if (!MoveIndices(units.Count, selIdx, direction, out newOrder)) return false;
+
+            // 先冻结原有槽位号、气缸后缀（-1/-2/a）与磁开后缀（H/W），避免改号途中互相覆盖
+            var cylSuffix = new Dictionary<string, string>(StringComparer.Ordinal);
+            var senSuffix = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var u in units) {
+                for (int ci = 0; ci < u.Cylinders.Count; ci++) {
+                    var c = u.Cylinders[ci];
+                    string suf = ExtractCylinderSuffix(c.Number, canonicalKey);
+                    if (suf.Length == 0 && u.Cylinders.Count > 1) suf = "-" + (ci + 1);
+                    cylSuffix[c.Id] = suf;
+                    List<LineupRecord> sl;
+                    if (u.SensorsByCyl.TryGetValue(c.Id, out sl)) {
+                        foreach (var s in sl) senSuffix[s.Id] = ExtractSensorPosSuffix(s);
+                    }
+                }
+            }
+
+            bool origSlotsClean = units.All(u => u.OrigSlot > 0 && u.OrigSlot < 999999)
+                && units.Select(u => u.OrigSlot).Distinct().Count() == units.Count;
+            int[] targetSlots = origSlotsClean
+                ? units.Select(u => u.OrigSlot).OrderBy(x => x).ToArray()
+                : Enumerable.Range(fallbackBaseSlot, units.Count).ToArray();
+
+            var orderedValves = new List<string>();
+            var orderedCyls = new List<string>();
+            var orderedSensors = new List<string>();
+
+            for (int pos = 0; pos < newOrder.Count; pos++) {
+                var u = units[newOrder[pos]];
+                string slotStr = targetSlots[pos].ToString("D2");
+                if (u.Valve != null) {
+                    u.Valve.Number = canonicalKey + "V" + slotStr;
+                    orderedValves.Add(u.Valve.Id);
+                }
+                for (int ci = 0; ci < u.Cylinders.Count; ci++) {
+                    var c = u.Cylinders[ci];
+                    string suf;
+                    if (!cylSuffix.TryGetValue(c.Id, out suf)) suf = "";
+                    c.Number = canonicalKey + "C" + slotStr + suf;
+                    orderedCyls.Add(c.Id);
+                    List<LineupRecord> sl;
+                    if (u.SensorsByCyl.TryGetValue(c.Id, out sl)) {
+                        foreach (var s in sl) {
+                            string ps;
+                            if (senSuffix.TryGetValue(s.Id, out ps) && ps.Length > 0) s.Number = c.Number + ps;
+                            orderedSensors.Add(s.Id);
+                        }
+                    }
+                }
+            }
+
+            ReorderRecordsInPlace(p, orderedValves);
+            ReorderRecordsInPlace(p, orderedCyls);
+            ReorderRecordsInPlace(p, orderedSensors);
+            return true;
+        }
+
+        // 12b. 在气动系统（阀路总览 / 气缸明细 / 阀片明细 / 磁开明细）中上移或下移选中行，
+        //      同步交换阀位序号 V**/C**/H/W、调整底层 Records 顺序并刷新 CAD 位置图标注号（支持多选与一阀控多缸）
+        public static bool MoveIslandRows(
+            LineupProject p,
+            string islandKey,
+            IList<string> selectedRecordIds,
+            int subTab,
+            int direction,
+            out string focusRecordId,
+            out string message) {
+
+            focusRecordId = selectedRecordIds != null && selectedRecordIds.Count > 0 ? selectedRecordIds[0] : "";
+            message = "";
+            int dir = direction < 0 ? -1 : 1;
+            if (p == null || p.Records == null || string.IsNullOrWhiteSpace(islandKey)) {
+                message = "请先选择具体阀岛后再上移 / 下移。";
+                return false;
+            }
+            var selList = (selectedRecordIds ?? new List<string>()).Where(id => !string.IsNullOrEmpty(id)).Distinct(StringComparer.Ordinal).ToList();
+            if (selList.Count == 0) {
+                message = "请先选中要移动的行。";
+                return false;
+            }
+            var selSet = new HashSet<string>(selList, StringComparer.Ordinal);
+            var channels = BuildChannelRows(p, islandKey);
+            if (channels.Count == 0) {
+                message = "当前阀岛暂无可移动的阀路。";
+                return false;
+            }
+
+            // 1. 磁开明细（subTab == 3）：若选中的是同一气缸下的部分传感器且未触顶/底，先在气缸内部调整传感器顺序
+            if (subTab == 3) {
+                var ownerChs = channels.Where(ch => ch.Sensors.Any(s => selSet.Contains(s.Id))).ToList();
+                if (ownerChs.Count == 1 && ownerChs[0].Sensors.Count > 1) {
+                    var sensors = ownerChs[0].Sensors;
+                    var selIdx = new HashSet<int>();
+                    for (int i = 0; i < sensors.Count; i++) if (selSet.Contains(sensors[i].Id)) selIdx.Add(i);
+                    if (selIdx.Count > 0 && selIdx.Count < sensors.Count) {
+                        List<int> newOrder;
+                        if (MoveIndices(sensors.Count, selIdx, dir, out newOrder)) {
+                            var reordered = newOrder.Select(i => sensors[i].Id).ToList();
+                            ReorderRecordsInPlace(p, reordered);
+                            focusRecordId = selList[0];
+                            message = dir < 0 ? "已上移选中磁开行" : "已下移选中磁开行";
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            // 2. 阀路总览 / 气缸明细（subTab == 0 或 1）：若选中的全是同一“一阀控多缸”下的部分气缸，先在同阀内部交换 -1/-2 顺序
+            if (subTab == 0 || subTab == 1) {
+                var byValve = channels
+                    .Where(ch => ch.Valve != null && ch.Cylinder != null)
+                    .GroupBy(ch => ch.Valve.Id, StringComparer.Ordinal)
+                    .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.Ordinal);
+                var matchedValves = new HashSet<string>(StringComparer.Ordinal);
+                bool allAreCylinders = true;
+                foreach (string id in selList) {
+                    var ch = channels.FirstOrDefault(x => x.Cylinder != null && x.Cylinder.Id == id);
+                    if (ch == null || ch.Valve == null) { allAreCylinders = false; break; }
+                    matchedValves.Add(ch.Valve.Id);
+                }
+                if (allAreCylinders && matchedValves.Count == 1) {
+                    var group = byValve[matchedValves.First()];
+                    if (group.Count > 1) {
+                        var selIdx = new HashSet<int>();
+                        for (int i = 0; i < group.Count; i++) if (selSet.Contains(group[i].Cylinder.Id)) selIdx.Add(i);
+                        if (selIdx.Count > 0 && selIdx.Count < group.Count) {
+                            List<int> newOrder;
+                            if (MoveIndices(group.Count, selIdx, dir, out newOrder)) {
+                                var valve = group[0].Valve;
+                                LinkImplicitChildren(p, valve);
+                                var orderedCyls = newOrder.Select(i => group[i].Cylinder.Id).ToList();
+                                var orderedSens = new List<string>();
+                                foreach (int idx in newOrder) foreach (var s in group[idx].Sensors) orderedSens.Add(s.Id);
+                                ReorderRecordsInPlace(p, orderedCyls);
+                                ReorderRecordsInPlace(p, orderedSens);
+                                try { LineupHierarchy.RenumberChildren(p, valve); } catch { }
+                                LineupTableData.RejectDuplicates(p.Records);
+                                LineupNumbering.SyncCadPageNumbers(p, null);
+                                focusRecordId = selList[0];
+                                message = dir < 0 ? "已上移同阀气缸并更新 -1/-2 编号" : "已下移同阀气缸并更新 -1/-2 编号";
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3. 槽位级移动：把阀片单元（含所控全部气缸及 H/W）与无阀气缸单元分别按槽位整体交换顺序并级联重编
+            string canonicalKey = islandKey.Trim();
+            foreach (var ch in channels) {
+                string probe = ch.Valve != null ? LineupNumbering.IslandKey(ch.Valve.Number)
+                    : (ch.Cylinder != null ? LineupNumbering.IslandKey(ch.Cylinder.Number) : "");
+                if (probe.Length > 0) { canonicalKey = probe; break; }
+            }
+
+            var valveUnits = new List<SlotMoveUnit>();
+            var valveUnitById = new Dictionary<string, SlotMoveUnit>(StringComparer.Ordinal);
+            var unattachedUnits = new List<SlotMoveUnit>();
+            int maxValveSlot = 0;
+
+            foreach (var ch in channels) {
+                if (ch.Valve != null) {
+                    SlotMoveUnit u;
+                    if (!valveUnitById.TryGetValue(ch.Valve.Id, out u)) {
+                        int s = ExtractSlotSortKey(ch.Valve.Number);
+                        if (s < 999999 && s > maxValveSlot) maxValveSlot = s;
+                        u = new SlotMoveUnit { Valve = ch.Valve, OrigSlot = s };
+                        valveUnitById[ch.Valve.Id] = u;
+                        valveUnits.Add(u);
+                    }
+                    if (ch.Cylinder != null) {
+                        u.Cylinders.Add(ch.Cylinder);
+                        u.SensorsByCyl[ch.Cylinder.Id] = ch.Sensors ?? new List<LineupRecord>();
+                    }
+                } else if (ch.Cylinder != null) {
+                    var u = new SlotMoveUnit { OrigSlot = ExtractSlotSortKey(ch.Cylinder.Number) };
+                    u.Cylinders.Add(ch.Cylinder);
+                    u.SensorsByCyl[ch.Cylinder.Id] = ch.Sensors ?? new List<LineupRecord>();
+                    unattachedUnits.Add(u);
+                }
+            }
+
+            bool movedValves = MoveSlotUnitGroup(p, canonicalKey, valveUnits, selSet, dir, 1);
+            bool movedUnattached = MoveSlotUnitGroup(p, canonicalKey, unattachedUnits, selSet, dir, Math.Max(1, maxValveSlot + 1));
+            if (!movedValves && !movedUnattached) {
+                message = dir < 0 ? "选中行已到最顶部" : "选中行已到最底部";
+                return false;
+            }
+
+            LineupTableData.RejectDuplicates(p.Records);
+            LineupNumbering.SyncCadPageNumbers(p, null);
+            focusRecordId = selList[0];
+            message = dir < 0 ? "已上移选中阀路并同步更新编号" : "已下移选中阀路并同步更新编号";
+            return true;
+        }
+
         // 13. 将配置好的阀岛本体一键同步到「其他电气件 (E**)」（幂等不重复）
         public static int SyncIslandsToElectrical(LineupProject p, string singleIslandKey = null) {
             var summaries = ListIslands(p);

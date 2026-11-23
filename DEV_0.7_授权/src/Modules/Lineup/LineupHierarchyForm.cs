@@ -24,19 +24,82 @@ namespace TianGongCadSuite {
         }
 
         internal void MoveRows(int direction) {
+            // 1. 气动系统（阀岛树）视图：按阀路 / 同阀多缸 / 磁开同步上移下移并级联更新 V**/C**/H/W 编号
+            if (activeViewMode == 0 && pneumaticPanel != null && pneumaticPanel.Visible) {
+                string islandKey = pneumaticPanel.CurrentIslandKey;
+                if (string.IsNullOrEmpty(islandKey)) {
+                    ShowToast("请先在左侧选择具体阀岛后再上移 / 下移。", Ui.Muted);
+                    return;
+                }
+                int activeCol;
+                var pIds = pneumaticPanel.SelectedPrimaryIdsForMove(out activeCol);
+                if (pIds.Count == 0) {
+                    ShowToast("请先选中要移动的行。", Ui.Muted);
+                    return;
+                }
+                var pNext = Snapshot();
+                string focusId, msg;
+                bool pMoved = LineupPneumaticOps.MoveIslandRows(pNext, islandKey, pIds, pneumaticPanel.CurrentSubTab, direction, out focusId, out msg);
+                if (!pMoved) {
+                    ShowToast(string.IsNullOrEmpty(msg) ? (direction < 0 ? "选中行已到最顶部" : "选中行已到最底部") : msg, Ui.Muted);
+                    return;
+                }
+                Commit(pNext, focusId, msg);
+                pneumaticPanel.RestoreMoveSelection(pIds, activeCol);
+                ShowToast(msg, Ui.Ok, "撤销", (s, e) => Try(Undo));
+                return;
+            }
+
+            // 2. 普通传感器 / 其他电气件 / BOM 总表视图
+            grid.EndEdit();
             if (data.DefaultView.Sort.Length > 0) {
                 data.DefaultView.Sort = "";
-                throw new InvalidOperationException("已取消列排序并恢复清单原顺序，请再点一次上移 / 下移。");
+                foreach (DataGridViewColumn col in grid.Columns) col.HeaderCell.SortGlyphDirection = SortOrder.None;
+                ShowToast("已取消列排序并恢复清单原顺序，请再点一次上移 / 下移。", Ui.Warn);
+                return;
             }
             var ids = SelectedIds();
-            if (ids.Count == 0) return;
-            var visible = grid.Rows.Cast<DataGridViewRow>().Select(r => Convert.ToString(((DataRowView)r.DataBoundItem)["Id"])).ToList();
+            if (ids.Count == 0 && grid.CurrentRow != null && grid.CurrentRow.DataBoundItem != null) {
+                string cur = Convert.ToString(((DataRowView)grid.CurrentRow.DataBoundItem)["Id"]);
+                if (!string.IsNullOrEmpty(cur)) ids.Add(cur);
+            }
+            if (ids.Count == 0) {
+                ShowToast("请先选中要移动的行。", Ui.Muted);
+                return;
+            }
+            int keepCol = grid.CurrentCell != null ? grid.CurrentCell.ColumnIndex : 1;
+            var visible = grid.Rows.Cast<DataGridViewRow>()
+                .Where(r => r.DataBoundItem != null)
+                .Select(r => Convert.ToString(((DataRowView)r.DataBoundItem)["Id"]))
+                .ToList();
             var next = Snapshot();
+            var beforeOrder = next.Records.Select(r => r.Id).ToList();
             LineupHierarchy.Move(next, visible, ids, direction);
-            Commit(next, ids[0], "行顺序已更新");
-            grid.ClearSelection();
+            if (beforeOrder.SequenceEqual(next.Records.Select(r => r.Id))) {
+                ShowToast(direction < 0 ? "选中行已到最顶部" : "选中行已到最底部", Ui.Muted);
+                return;
+            }
+            string moveMsg = direction < 0 ? "已上移选中行" : "已下移选中行";
+            Commit(next, ids[0], moveMsg);
+            int targetCol = (keepCol >= 0 && keepCol < grid.Columns.Count && grid.Columns[keepCol].Visible) ? keepCol : 1;
+            if (targetCol >= grid.Columns.Count || !grid.Columns[targetCol].Visible) {
+                var firstVis = grid.Columns.Cast<DataGridViewColumn>().FirstOrDefault(c => c.Visible);
+                targetCol = firstVis != null ? firstVis.Index : 0;
+            }
+            var idSet = new System.Collections.Generic.HashSet<string>(ids, StringComparer.Ordinal);
+            var matched = new System.Collections.Generic.List<DataGridViewRow>();
             foreach (DataGridViewRow r in grid.Rows)
-                if (ids.Contains(Convert.ToString(((DataRowView)r.DataBoundItem)["Id"]))) r.Cells[1].Selected = true;
+                if (r.DataBoundItem != null && idSet.Contains(Convert.ToString(((DataRowView)r.DataBoundItem)["Id"]))) matched.Add(r);
+            if (matched.Count > 0 && targetCol < grid.Columns.Count) {
+                grid.ClearSelection();
+                grid.CurrentCell = matched[0].Cells[targetCol];
+                foreach (var r in matched) r.Cells[targetCol].Selected = true;
+                try {
+                    int fi = matched[0].Index;
+                    if (fi < grid.FirstDisplayedScrollingRowIndex || fi >= grid.FirstDisplayedScrollingRowIndex + Math.Max(1, grid.DisplayedRowCount(false)))
+                        grid.FirstDisplayedScrollingRowIndex = Math.Max(0, fi - 2);
+                } catch { }
+            }
         }
 
         void AssignCylinderDialog() {

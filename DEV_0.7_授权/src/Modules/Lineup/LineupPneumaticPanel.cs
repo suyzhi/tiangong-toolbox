@@ -38,6 +38,7 @@ namespace TianGongCadSuite {
         public Action OnImportXlsx;
         public Action<string, IEnumerable<string>> OnPickModelForRecords; // (category, recordIds)
         public Action<string> OnNotifyStatus;
+        public Action<int> OnMoveSelectedRows; // direction: -1 上移, +1 下移
 
         // 左侧阀岛栏
         readonly Card sidebarCard;
@@ -1150,40 +1151,40 @@ namespace TianGongCadSuite {
         }
 
         void BuildCylinderColumns(Func<string, int, int> w) {
-            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "编号", HeaderText = "气缸编号", Width = w("编号", 136) });
-            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "描述", HeaderText = "描述", Width = w("描述", 180) });
-            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "型号", HeaderText = "气缸型号", Width = w("型号", 190) });
-            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "品牌", HeaderText = "品牌", Width = w("品牌", 86) });
-            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "原位", HeaderText = "原位", Width = w("原位", 76) });
-            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "安装方式", HeaderText = "安装方式", Width = w("安装方式", 104) });
-            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "所属阀片", HeaderText = "所属阀片", Width = w("所属阀片", 126), ReadOnly = true });
-            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "备注", HeaderText = "备注 / 模块", Width = w("备注", 132) });
-            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "3D绑定", HeaderText = "3D 绑定", Width = w("3D绑定", 120), ReadOnly = true });
+            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "编号", HeaderText = "气缸编号", Width = w("编号", 136), SortMode = DataGridViewColumnSortMode.NotSortable });
+            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "描述", HeaderText = "描述", Width = w("描述", 180), SortMode = DataGridViewColumnSortMode.NotSortable });
+            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "型号", HeaderText = "气缸型号", Width = w("型号", 190), SortMode = DataGridViewColumnSortMode.NotSortable });
+            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "品牌", HeaderText = "品牌", Width = w("品牌", 86), SortMode = DataGridViewColumnSortMode.NotSortable });
+            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "原位", HeaderText = "原位", Width = w("原位", 76), SortMode = DataGridViewColumnSortMode.NotSortable });
+            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "安装方式", HeaderText = "安装方式", Width = w("安装方式", 104), SortMode = DataGridViewColumnSortMode.NotSortable });
+            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "所属阀片", HeaderText = "所属阀片", Width = w("所属阀片", 126), ReadOnly = true, SortMode = DataGridViewColumnSortMode.NotSortable });
+            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "备注", HeaderText = "备注 / 模块", Width = w("备注", 132), SortMode = DataGridViewColumnSortMode.NotSortable });
+            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "3D绑定", HeaderText = "3D 绑定", Width = w("3D绑定", 120), ReadOnly = true, SortMode = DataGridViewColumnSortMode.NotSortable });
             pGrid.Columns[0].Frozen = true;
         }
 
         void BuildValveColumns(Func<string, int, int> w) {
-            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "编号", HeaderText = "阀片编号", Width = w("编号", 136) });
-            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "功能参数", HeaderText = "功能参数（控制对象）", Width = w("功能参数", 170) });
-            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "描述", HeaderText = "阀片类型描述", Width = w("描述", 160) });
-            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "型号", HeaderText = "阀片型号", Width = w("型号", 180) });
-            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "品牌", HeaderText = "品牌", Width = w("品牌", 86) });
-            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "所属阀岛", HeaderText = "所属阀岛配置", Width = w("所属阀岛", 170), ReadOnly = true });
-            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "备注", HeaderText = "备注", Width = w("备注", 124) });
-            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "3D绑定", HeaderText = "3D 绑定", Width = w("3D绑定", 114), ReadOnly = true });
+            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "编号", HeaderText = "阀片编号", Width = w("编号", 136), SortMode = DataGridViewColumnSortMode.NotSortable });
+            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "功能参数", HeaderText = "功能参数（控制对象）", Width = w("功能参数", 170), SortMode = DataGridViewColumnSortMode.NotSortable });
+            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "描述", HeaderText = "阀片类型描述", Width = w("描述", 160), SortMode = DataGridViewColumnSortMode.NotSortable });
+            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "型号", HeaderText = "阀片型号", Width = w("型号", 180), SortMode = DataGridViewColumnSortMode.NotSortable });
+            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "品牌", HeaderText = "品牌", Width = w("品牌", 86), SortMode = DataGridViewColumnSortMode.NotSortable });
+            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "所属阀岛", HeaderText = "所属阀岛配置", Width = w("所属阀岛", 170), ReadOnly = true, SortMode = DataGridViewColumnSortMode.NotSortable });
+            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "备注", HeaderText = "备注", Width = w("备注", 124), SortMode = DataGridViewColumnSortMode.NotSortable });
+            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "3D绑定", HeaderText = "3D 绑定", Width = w("3D绑定", 114), ReadOnly = true, SortMode = DataGridViewColumnSortMode.NotSortable });
             pGrid.Columns[0].Frozen = true;
         }
 
         void BuildSensorColumns(Func<string, int, int> w) {
-            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "编号", HeaderText = "传感器编号", Width = w("编号", 148) });
-            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "位置", HeaderText = "位置", Width = w("位置", 60), ReadOnly = true });
-            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "描述", HeaderText = "描述", Width = w("描述", 175) });
-            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "型号", HeaderText = "磁开型号", Width = w("型号", 170) });
-            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "品牌", HeaderText = "品牌", Width = w("品牌", 82) });
-            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "接口类型", HeaderText = "传感器接口类型", Width = w("接口类型", 136) });
-            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "所属气缸", HeaderText = "所属气缸", Width = w("所属气缸", 126), ReadOnly = true });
-            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "备注", HeaderText = "备注", Width = w("备注", 120) });
-            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "3D绑定", HeaderText = "3D 绑定", Width = w("3D绑定", 110), ReadOnly = true });
+            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "编号", HeaderText = "传感器编号", Width = w("编号", 148), SortMode = DataGridViewColumnSortMode.NotSortable });
+            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "位置", HeaderText = "位置", Width = w("位置", 60), ReadOnly = true, SortMode = DataGridViewColumnSortMode.NotSortable });
+            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "描述", HeaderText = "描述", Width = w("描述", 175), SortMode = DataGridViewColumnSortMode.NotSortable });
+            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "型号", HeaderText = "磁开型号", Width = w("型号", 170), SortMode = DataGridViewColumnSortMode.NotSortable });
+            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "品牌", HeaderText = "品牌", Width = w("品牌", 82), SortMode = DataGridViewColumnSortMode.NotSortable });
+            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "接口类型", HeaderText = "传感器接口类型", Width = w("接口类型", 136), SortMode = DataGridViewColumnSortMode.NotSortable });
+            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "所属气缸", HeaderText = "所属气缸", Width = w("所属气缸", 126), ReadOnly = true, SortMode = DataGridViewColumnSortMode.NotSortable });
+            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "备注", HeaderText = "备注", Width = w("备注", 120), SortMode = DataGridViewColumnSortMode.NotSortable });
+            pGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "3D绑定", HeaderText = "3D 绑定", Width = w("3D绑定", 110), ReadOnly = true, SortMode = DataGridViewColumnSortMode.NotSortable });
             pGrid.Columns[0].Frozen = true;
         }
 
@@ -1363,6 +1364,42 @@ namespace TianGongCadSuite {
                 if (fm.Primary != null && !string.IsNullOrEmpty(fm.Primary.Id)) ids.Add(fm.Primary.Id);
             }
             return ids;
+        }
+
+        internal string CurrentIslandKey {
+            get { return (orphanHost.Visible || noIslandHost.Visible) ? "" : selectedIslandKey; }
+        }
+
+        internal int CurrentSubTab { get { return activeSubTab; } }
+
+        internal List<string> SelectedPrimaryIdsForMove(out int activeCol) {
+            EndEdit();
+            activeCol = pGrid.CurrentCell != null ? pGrid.CurrentCell.ColumnIndex : -1;
+            int fallback = pGrid.CurrentRow != null ? pGrid.CurrentRow.Index : -1;
+            return SelectedPrimaryRecordIds(fallback);
+        }
+
+        internal void RestoreMoveSelection(IList<string> recordIds, int preferredCol) {
+            if (recordIds == null || recordIds.Count == 0 || pGrid.Rows.Count == 0 || pGrid.Columns.Count == 0) return;
+            var idSet = new HashSet<string>(recordIds, StringComparer.Ordinal);
+            var matched = new List<int>();
+            for (int i = 0; i < rowMetas.Count && i < pGrid.Rows.Count; i++) {
+                var m = rowMetas[i];
+                if (m.Primary != null && idSet.Contains(m.Primary.Id)) matched.Add(i);
+            }
+            if (matched.Count == 0) return;
+            int col = (preferredCol >= 0 && preferredCol < pGrid.Columns.Count && pGrid.Columns[preferredCol].Visible)
+                ? preferredCol
+                : (activeSubTab == 0 ? (string.IsNullOrEmpty(rowMetas[matched[0]].CylinderId) ? 1 : 4) : 1);
+            if (col >= pGrid.Columns.Count) col = 0;
+            pGrid.ClearSelection();
+            pGrid.CurrentCell = pGrid.Rows[matched[0]].Cells[col];
+            foreach (int ri in matched) pGrid.Rows[ri].Cells[col].Selected = true;
+            try {
+                int first = matched[0];
+                if (first < pGrid.FirstDisplayedScrollingRowIndex || first >= pGrid.FirstDisplayedScrollingRowIndex + Math.Max(1, pGrid.DisplayedRowCount(false)))
+                    pGrid.FirstDisplayedScrollingRowIndex = Math.Max(0, first - 2);
+            } catch { }
         }
 
         GridRowMeta CurrentRowMeta() {
@@ -1727,6 +1764,12 @@ namespace TianGongCadSuite {
 
             if (!string.IsNullOrEmpty(meta.ValveId) && islands.Count > 1)
                 add("将此阀路移动到其他阀岛…", () => MoveValveDialog(meta.ValveId), null, true);
+
+            if (pGrid.Rows.Count > 1 && OnMoveSelectedRows != null) {
+                rowMenu.Items.Add(new ToolStripSeparator());
+                add("上移选中行 (Alt+↑)", () => OnMoveSelectedRows(-1), null, true);
+                add("下移选中行 (Alt+↓)", () => OnMoveSelectedRows(1), null, true);
+            }
 
             if (bindIds.Count > 0) {
                 rowMenu.Items.Add(new ToolStripSeparator());

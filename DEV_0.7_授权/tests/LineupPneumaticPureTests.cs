@@ -314,6 +314,12 @@ static class LineupPneumaticPureTests {
 
             // 18. 气动槽位与阀岛中间删除自动重排纯逻辑（含 1阀多缸、空阀片保留、CAD位置图同步、阀岛Y*顺排）
             TestDeleteMiddleAutoRenumbering();
+
+            // 19. Lineup 3D→2D 投影映射、实体三角面积质心与 ROI 抗悬停差分纯逻辑
+            TestLocation3DProjectionMath();
+
+            // 20. 气动系统（阀岛树）与常规表格视图上移/下移选中行（单选/多选/一阀多缸/边界/撤销/右键菜单）
+            TestPneumaticAndGridRowMove(tmpDir);
         } finally {
             try { Directory.Delete(tmpDir, true); } catch { }
         }
@@ -448,5 +454,231 @@ static class LineupPneumaticPureTests {
         Check(p.Records.Any(r => r.Category == "其他电气件" && r.Notes == "OK170-Y2"),
             "deleting middle island Y2 updates synced E** island note to Y2");
         Check(p.Validate().Count == 0, "all links remain valid after island compaction");
+    }
+
+    static void TestLocation3DProjectionMath() {
+        double nx, ny;
+        // 宽屏窗口（winAspect=1284/715≈1.7958 > imgAspect=1.6）：X 直接映射，Y 按 imgAspect/winAspect 缩放
+        Check(LineupLocation.MapGlProjectionToImage(0.4, -0.5, -5.0, false, 1284.0 / 715.0, 1.6, out nx, out ny), "wide ortho projection succeeds");
+        Check(Math.Abs(nx - 0.7) < 1e-6 && Math.Abs(ny - (0.5 - 0.5 * (-0.5) * (1.6 / (1284.0 / 715.0)))) < 1e-6, "wide ortho fit-contain math exact");
+
+        // 窄屏窗口（winAspect=682/820≈0.8317 < imgAspect=1.6）：X 按 winAspect/imgAspect 缩放，Y 直接映射
+        Check(LineupLocation.MapGlProjectionToImage(-0.6, 0.2, -3.0, true, 682.0 / 820.0, 1.6, out nx, out ny), "narrow persp projection succeeds");
+        Check(Math.Abs(nx - (0.5 + 0.5 * (-0.6) * ((682.0 / 820.0) / 1.6))) < 1e-6 && Math.Abs(ny - 0.4) < 1e-6, "narrow persp fit-contain math exact");
+
+        // 透视模式下相机背面点（vz >= 0）必须剔除；正交模式下允许任意 vz
+        Check(!LineupLocation.MapGlProjectionToImage(0.1, 0.1, 0.2, true, 1.6, 1.6, out nx, out ny), "persp rejects point behind camera");
+        Check(LineupLocation.MapGlProjectionToImage(0.1, 0.1, 0.2, false, 1.6, 1.6, out nx, out ny), "ortho allows positive vz");
+        Check(!LineupLocation.MapGlProjectionToImage(double.NaN, 0, -1, false, 1.6, 1.6, out nx, out ny), "rejects NaN coordinates");
+
+        // 空心矩形框（4 条边组成中空环，几何质心在 (0.5,0.5) 空白处）：SelectProjectedTriangleAnchor 必须落回真实实体三角面上
+        var hollowTris = new List<PointF> {
+            // 顶边实体条 (y=0.20..0.24)
+            new PointF(0.20f, 0.20f), new PointF(0.80f, 0.20f), new PointF(0.80f, 0.24f),
+            new PointF(0.20f, 0.20f), new PointF(0.80f, 0.24f), new PointF(0.20f, 0.24f),
+            // 底边实体条 (y=0.76..0.80)
+            new PointF(0.20f, 0.76f), new PointF(0.80f, 0.76f), new PointF(0.80f, 0.80f),
+            new PointF(0.20f, 0.76f), new PointF(0.80f, 0.80f), new PointF(0.20f, 0.80f),
+            // 左边实体条 (x=0.20..0.24)
+            new PointF(0.20f, 0.24f), new PointF(0.24f, 0.24f), new PointF(0.24f, 0.76f),
+            new PointF(0.20f, 0.24f), new PointF(0.24f, 0.76f), new PointF(0.20f, 0.76f),
+            // 右边实体条 (x=0.76..0.80)
+            new PointF(0.76f, 0.24f), new PointF(0.80f, 0.24f), new PointF(0.80f, 0.76f),
+            new PointF(0.76f, 0.24f), new PointF(0.80f, 0.76f), new PointF(0.76f, 0.76f)
+        };
+        Check(LineupLocation.SelectProjectedTriangleAnchor(hollowTris, out nx, out ny), "hollow frame selects valid solid anchor");
+        bool insideHollowHole = nx > 0.30 && nx < 0.70 && ny > 0.30 && ny < 0.70;
+        Check(!insideHollowHole, "hollow frame anchor snaps to solid rim instead of empty center");
+
+        // 面积加权抗网格密度偏移：一端 40 个微小倒角三角 vs 另一端 1 个大缸体三角 → 质心必须留在缸体大面上
+        var weightedTris = new List<PointF> {
+            new PointF(0.30f, 0.40f), new PointF(0.50f, 0.40f), new PointF(0.40f, 0.60f) // 大面中心 (0.40, 0.467)，面积 0.02
+        };
+        for (int i = 0; i < 40; i++) {
+            weightedTris.Add(new PointF(0.80f, 0.50f));
+            weightedTris.Add(new PointF(0.802f, 0.50f));
+            weightedTris.Add(new PointF(0.801f, 0.502f)); // 极小面积 2e-6
+        }
+        Check(LineupLocation.SelectProjectedTriangleAnchor(weightedTris, out nx, out ny), "area-weighted anchor succeeds");
+        Check(nx < 0.45, "area weighting prevents tiny dense triangles from pulling centroid off main body");
+
+        // 画面外包围盒拒识，部分入画裁切保留
+        Check(!LineupLocation.SelectProjectedBoxAnchor(new[] { new PointF(1.2f, 0.4f), new PointF(1.5f, 0.6f) }, out nx, out ny), "off-screen box rejected");
+        Check(LineupLocation.SelectProjectedBoxAnchor(new[] { new PointF(-0.4f, 0.2f), new PointF(0.3f, 0.8f), new PointF(-0.05f, 0.5f) }, out nx, out ny)
+            && nx > 0.05 && nx < 0.25 && Math.Abs(ny - 0.5) < 0.05, "partially clipped box anchors inside visible portion");
+
+        // ROI 差分免疫鼠标悬停预高亮（背景外有一大片假悬停像素，ROI 内只有目标气缸像素）
+        using (var bg = new Bitmap(200, 120))
+        using (var hl = new Bitmap(200, 120)) {
+            using (var g = Graphics.FromImage(bg)) g.Clear(Color.White);
+            using (var g = Graphics.FromImage(hl)) {
+                g.Clear(Color.White);
+                g.FillRectangle(Brushes.Orange, 10, 10, 40, 100); // 4000 px 模拟鼠标悬停八角立柱
+                g.FillRectangle(Brushes.Cyan, 140, 45, 16, 16);   // 256 px 真实目标气缸
+            }
+            var roiPt = LineupLocation.DetectDifferenceInRoi(bg, hl, hl, new Rectangle(130, 35, 36, 36), new PointF(0.74f, 0.44f));
+            Check(roiPt.State == "ok" && roiPt.X > 0.68 && roiPt.X < 0.80 && roiPt.Y > 0.35 && roiPt.Y < 0.55,
+                "ROI highlight diff ignores massive hover highlight outside ROI");
+        }
+    }
+
+    static void TestPneumaticAndGridRowMove(string tmpDir) {
+        // A. 纯逻辑：气动阀路移动（单选、多选、一阀多缸、预留位、吹气后缀、磁开明细、边界）
+        var p = new LineupProject { ProjectCode = "SK26.01" };
+        string y1 = LineupPneumaticOps.CreateIsland(p, "OK170", 1, "阀岛", "SS5Y5-20-08");
+        var b1 = LineupPneumaticOps.AddCylinderBundle(p, y1, true, 1, false); // V01 / C01
+        var b2 = LineupPneumaticOps.AddCylinderBundle(p, y1, true, 1, false); // V02 / C02
+        var b2Extra = LineupPneumaticOps.AddCylinderToValve(p, b2.ValveId, 1); // V02 / C02-1, C02-2
+        var b3Spare = LineupPneumaticOps.AddValveSlices(p, y1, true, 1);      // V03 预留位
+        var b4Blow = LineupPneumaticOps.AddCylinderBundle(p, y1, true, 0, true); // V04 / C04 吹气
+        p.Records.Single(r => r.Id == b4Blow.CylinderId).Number = "OK170-Y1C04a"; // 验证字母后缀保留
+
+        LineupPneumaticOps.SyncCylinderDescription(p, p.Records.Single(r => r.Id == b1.CylinderId), "", "定位缸");
+        LineupPneumaticOps.SyncCylinderDescription(p, p.Records.Single(r => r.Id == b2.CylinderId), "", "左夹紧");
+        LineupPneumaticOps.SyncCylinderDescription(p, p.Records.Single(r => r.Id == b2Extra.CylinderId), "", "右夹紧");
+        LineupPneumaticOps.SyncCylinderDescription(p, p.Records.Single(r => r.Id == b4Blow.CylinderId), "", "吹气嘴");
+
+        var pg = new LineupCadPage { Name = "总图" };
+        pg.Points.Add(new LineupLocationPoint { Id = b1.CylinderId, Number = "OK170-Y1C01", State = "ok", X = 0.2, Y = 0.2 });
+        pg.Points.Add(new LineupLocationPoint { Id = b2.CylinderId, Number = "OK170-Y1C02-1", State = "ok", X = 0.4, Y = 0.4 });
+        pg.Points.Add(new LineupLocationPoint { Id = b2Extra.CylinderId, Number = "OK170-Y1C02-2", State = "ok", X = 0.6, Y = 0.6 });
+        p.CadPages.Add(pg);
+
+        string focusId, msg;
+        // 1. 顶部上移应返回 false（不触发无意义改动）
+        Check(!LineupPneumaticOps.MoveIslandRows(p, y1, new[] { b1.CylinderId }, 0, -1, out focusId, out msg),
+            "moving top pneumatic channel up is a clean no-op");
+
+        // 2. 一阀多缸内上移 C02-2 → 与 C02-1 交换 -1/-2 并级联磁开与 CAD 页
+        Check(LineupPneumaticOps.MoveIslandRows(p, y1, new[] { b2Extra.CylinderId }, 0, -1, out focusId, out msg),
+            "moving second cylinder of shared valve up succeeds");
+        Check(p.Records.Single(r => r.Id == b2Extra.CylinderId).Number == "OK170-Y1C02-1"
+            && p.Records.Single(r => r.Id == b2.CylinderId).Number == "OK170-Y1C02-2"
+            && pg.Points.Single(pt => pt.Id == b2Extra.CylinderId).Number == "OK170-Y1C02-1"
+            && p.Records.Any(r => r.CylinderId == b2Extra.CylinderId && r.Number == "OK170-Y1C02-1H"),
+            "shared valve intra-move swaps -1/-2 numbers, H/W sensors, and CAD page numbers");
+
+        // 3. 再次上移现位于第一条的 C02-1 → 触碰同阀上边界，自动将整个 V02 阀位整体上移到 V01
+        Check(LineupPneumaticOps.MoveIslandRows(p, y1, new[] { b2Extra.CylinderId }, 0, -1, out focusId, out msg),
+            "moving first cylinder of shared valve up moves entire valve slot V02 above V01");
+        Check(p.Records.Single(r => r.Id == b2.ValveId).Number == "OK170-Y1V01"
+            && p.Records.Single(r => r.Id == b2Extra.CylinderId).Number == "OK170-Y1C01-1"
+            && p.Records.Single(r => r.Id == b2.CylinderId).Number == "OK170-Y1C01-2"
+            && p.Records.Single(r => r.Id == b1.ValveId).Number == "OK170-Y1V02"
+            && p.Records.Single(r => r.Id == b1.CylinderId).Number == "OK170-Y1C02"
+            && p.Records.Any(r => r.CylinderId == b1.CylinderId && r.Number == "OK170-Y1C02W")
+            && pg.Points.Single(pt => pt.Id == b1.CylinderId).Number == "OK170-Y1C02",
+            "swapping valve slot 02 above 01 cascades V**/C**/H/W and CAD points cleanly");
+
+        // 4. 上移吹气阀路 V04(C04a) 越过预留盖板 V03 → 保留 'a' 后缀，预留位变 V04
+        Check(LineupPneumaticOps.MoveIslandRows(p, y1, new[] { b4Blow.CylinderId }, 0, -1, out focusId, out msg),
+            "moving blow cylinder slot up past spare valve succeeds");
+        Check(p.Records.Single(r => r.Id == b4Blow.ValveId).Number == "OK170-Y1V03"
+            && p.Records.Single(r => r.Id == b4Blow.CylinderId).Number == "OK170-Y1C03a"
+            && p.Records.Single(r => r.Id == b3Spare[0]).Number == "OK170-Y1V04",
+            "blow suffix 'a' and spare valve slot swap cleanly");
+
+        // 5. 多选两行（V03 吹气 + V04 预留位）同时上移
+        Check(LineupPneumaticOps.MoveIslandRows(p, y1, new[] { b4Blow.ValveId, b3Spare[0] }, 2, -1, out focusId, out msg),
+            "multi-selecting two valve rows and moving up succeeds");
+        var vOrder = LineupPneumaticOps.BuildChannelRows(p, y1).Select(ch => ch.Valve.Id).Distinct().ToList();
+        Check(vOrder.SequenceEqual(new[] { b2.ValveId, b4Blow.ValveId, b3Spare[0], b1.ValveId }),
+            "multi-select move up shifts both slots past V02 preserving relative order");
+        Check(p.Validate().Count == 0, "all hierarchy links remain valid after all pneumatic moves");
+
+        // 6. 磁开明细子页：同气缸内把 W 上移到 H 前面
+        var b1SensBefore = LineupPneumaticOps.BuildChannelRows(p, y1).Single(ch => ch.Cylinder != null && ch.Cylinder.Id == b1.CylinderId).Sensors;
+        Check(b1SensBefore.Count == 2, "b1 has 2 H/W sensors");
+        string secondSensId = b1SensBefore[1].Id;
+        Check(LineupPneumaticOps.MoveIslandRows(p, y1, new[] { secondSensId }, 3, -1, out focusId, out msg),
+            "subTab 3 moves second sensor above first sensor within cylinder");
+        var b1SensAfter = LineupPneumaticOps.BuildChannelRows(p, y1).Single(ch => ch.Cylinder != null && ch.Cylinder.Id == b1.CylinderId).Sensors;
+        Check(b1SensAfter[0].Id == secondSensId, "sensor order updated in subTab 3");
+
+        // B. 真实 WinForms 窗口验证：气动系统默认视图 + 普通传感器视图 + 右键菜单 + 撤销
+        string asm = Path.Combine(tmpDir, "move-ui.asm");
+        File.WriteAllText(asm, "dummy");
+        var uiProj = new LineupProject { AssemblyFile = asm, ProjectCode = "SK26.01" };
+        string iy = LineupPneumaticOps.CreateIsland(uiProj, "OK170", 1, "阀岛", "SS5Y5-20-08");
+        var c1 = LineupPneumaticOps.AddCylinderBundle(uiProj, iy, true, 1, false);
+        var c2 = LineupPneumaticOps.AddCylinderBundle(uiProj, iy, true, 1, false);
+        LineupPneumaticOps.SyncCylinderDescription(uiProj, uiProj.Records.Single(r => r.Id == c1.CylinderId), "", "一缸");
+        LineupPneumaticOps.SyncCylinderDescription(uiProj, uiProj.Records.Single(r => r.Id == c2.CylinderId), "", "二缸");
+        uiProj.Records.Add(new LineupRecord { Category = "普通传感器", Number = "SE01", Description = "检测1" });
+        uiProj.Records.Add(new LineupRecord { Category = "普通传感器", Number = "SE02", Description = "检测2" });
+        uiProj.Records.Add(new LineupRecord { Category = "普通传感器", Number = "SE03", Description = "检测3" });
+        uiProj.Save(Path.ChangeExtension(asm, ".lineup.xml"));
+
+        using (var form = new LineupTableForm(asm, Path.Combine(tmpDir, "move-lib.xml"))) {
+            form.Show();
+            Application.DoEvents();
+            Check(form.ActiveViewMode == 0, "form opens in pneumatic mode (0)");
+            var pgGrid = form.PneumaticView.Grid;
+            Check(pgGrid.Rows.Count == 2, "pneumatic grid shows 2 channels");
+            Check(Convert.ToString(pgGrid.Rows[0].Cells["气缸描述"].Value) == "一缸"
+                && Convert.ToString(pgGrid.Rows[1].Cells["气缸描述"].Value) == "二缸",
+                "initial pneumatic order is 一缸 then 二缸");
+
+            // 选中第 2 行（二缸）并上移
+            pgGrid.ClearSelection();
+            pgGrid.CurrentCell = pgGrid.Rows[1].Cells["气缸描述"];
+            pgGrid.Rows[1].Cells["气缸描述"].Selected = true;
+            Application.DoEvents();
+
+            form.PneumaticView.BuildRowContextMenu(1, 4);
+            var pMenuTexts = form.PneumaticView.RowMenu.Items.OfType<ToolStripMenuItem>().Select(x => x.Text).ToList();
+            Check(pMenuTexts.Any(t => t.Contains("上移选中行")) && pMenuTexts.Any(t => t.Contains("下移选中行")),
+                "pneumatic context menu exposes Move Up / Move Down");
+
+            form.MoveRows(-1);
+            Application.DoEvents();
+            Check(Convert.ToString(pgGrid.Rows[0].Cells["气缸描述"].Value) == "二缸"
+                && Convert.ToString(pgGrid.Rows[0].Cells["气缸号"].Value) == "OK170-Y1C01"
+                && Convert.ToString(pgGrid.Rows[1].Cells["气缸描述"].Value) == "一缸"
+                && Convert.ToString(pgGrid.Rows[1].Cells["气缸号"].Value) == "OK170-Y1C02",
+                "MoveRows(-1) in pneumatic view visibly swaps rows and updates slot numbers");
+            Check(pgGrid.CurrentCell != null && pgGrid.CurrentCell.RowIndex == 0,
+                "selection follows moved row to index 0 for repeated moving");
+
+            // 再下移一次恢复
+            form.MoveRows(1);
+            Application.DoEvents();
+            Check(Convert.ToString(pgGrid.Rows[0].Cells["气缸描述"].Value) == "一缸"
+                && Convert.ToString(pgGrid.Rows[1].Cells["气缸描述"].Value) == "二缸",
+                "MoveRows(1) in pneumatic view moves selected row back down");
+
+            // 撤销一次应回到 二缸在前
+            form.Undo();
+            Application.DoEvents();
+            Check(Convert.ToString(pgGrid.Rows[0].Cells["气缸描述"].Value) == "二缸",
+                "Undo restores pneumatic row order");
+
+            // 切换到普通传感器视图（Mode 1）测试上移/下移与右键菜单
+            form.SetViewMode(1);
+            Application.DoEvents();
+            Check(form.Grid.Rows.Count == 3, "SE view shows 3 rows");
+            form.Grid.ClearSelection();
+            form.Grid.CurrentCell = form.Grid.Rows[2].Cells["描述"];
+            form.Grid.Rows[2].Cells["描述"].Selected = true;
+            Application.DoEvents();
+
+            form.BuildGridContextMenuForRow(2);
+            var gMenuTexts = form.GridMenu.Items.OfType<ToolStripMenuItem>().Select(x => x.Text).ToList();
+            Check(gMenuTexts.Any(t => t.Contains("上移选中行")) && gMenuTexts.Any(t => t.Contains("下移选中行")),
+                "main grid context menu exposes Move Up / Move Down");
+
+            form.MoveRows(-1);
+            Application.DoEvents();
+            Check(Convert.ToString(form.Grid.Rows[1].Cells["编号"].Value) == "SE03"
+                && Convert.ToString(form.Grid.Rows[2].Cells["编号"].Value) == "SE02"
+                && form.Grid.CurrentCell != null && form.Grid.CurrentCell.RowIndex == 1,
+                "MoveRows(-1) in SE view moves SE03 above SE02 and keeps selection on moved row");
+
+            form.MoveRows(-1);
+            Application.DoEvents();
+            Check(Convert.ToString(form.Grid.Rows[0].Cells["编号"].Value) == "SE03",
+                "repeated MoveRows(-1) moves SE03 to top cleanly");
+            form.Close();
+        }
     }
 }
