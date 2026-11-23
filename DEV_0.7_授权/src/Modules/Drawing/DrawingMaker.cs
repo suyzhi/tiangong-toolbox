@@ -115,7 +115,12 @@ namespace TianGongCadSuite {
                 // 4. 尺寸
                 var w = new DwgWriter(sheet, dft, dimStyle);
                 w.Space = new DwgSpace(lay.Zones);
-                foreach (var kv in views) { var b = DwgWriter.SheetBox(kv.Value); w.Space.Add(b[0] - 0.001, b[1] - 0.001, b[2] + 0.001, b[3] + 0.001); }
+                // 轴测图先登记带 4mm 缓冲的障碍框，确保引线标注和位置度框绝不撞上轴测图；
+                // 正投影视图由 Annotate 按真实轮廓框（而非带十余毫米留白的 SheetBox）精准登记，使引线紧凑贴近零件。
+                if (iso != null) {
+                    var ib = DwgWriter.SheetBox(iso);
+                    w.Space.AddView(new[] { ib[0] - 0.004, ib[1] - 0.004, ib[2] + 0.004, ib[3] + 0.004 });
+                }
                 // 刻字引线的文字最后才挂，位置照模板那条：先把那块占上，孔标注别压在它上面（视图多了整组右移时 02-007 压上过）
                 var eb = EngraveBox(sheet, Path.GetFileNameWithoutExtension(modelPath));
                 if (eb != null) w.Space.Add(eb);
@@ -285,7 +290,8 @@ namespace TianGongCadSuite {
                 var box = DrawingPlan.Box(edges);
                 var a = DwgWriter.ToSheet(main, box[0], best.Cy); var b = DwgWriter.ToSheet(main, box[2], best.Cy);
                 var cut = main.CuttingPlanes.Add();
-                cut.Profile.Lines2d.AddBy2Points(a[0] - 0.006, a[1], b[0] + 0.006, b[1]);
+                // 剖切线两端出头收紧到 3.5mm，避免左侧箭头 A 压到主视图左侧的竖直坐标尺寸基线（7.5mm）
+                cut.Profile.Lines2d.AddBy2Points(a[0] - 0.0035, a[1], b[0] + 0.0035, b[1]);
                 var sec = cut.CreateView();
                 Idle(app); try { sec.Update(); } catch { } Idle(app);
                 return sec;

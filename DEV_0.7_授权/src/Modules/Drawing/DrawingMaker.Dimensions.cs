@@ -23,20 +23,40 @@ namespace TianGongCadSuite {
                     return facts.EdgeTol[i];
                 } catch { return 0; }
             };
-            const double off = 0.009;   // 坐标串 / 单跨线性尺寸文字线离视图轮廓（纸面，配 2.75~3mm 字体）
+            const double off = 0.0075;   // 坐标串 / 单跨线性尺寸文字线离视图轮廓（纸面 7.5mm，与公司人图 6.5~8mm 一致，紧凑美观）
+            var rawEdges = new Dictionary<DwgViewRole, List<DwgEdge>>();
             var edges = new Dictionary<DwgViewRole, List<DwgEdge>>();
+            var viewCboxes = new Dictionary<DwgViewRole, double[]>();
+            var viewObs = new Dictionary<DwgViewRole, double[]>();
             foreach (var kv in views) if (kv.Key != DwgViewRole.Iso) {
                 bool isSection = false; try { isSection = kv.Value.DrawingViewType == D.DrawingViewTypeConstants.igXSectionView; } catch { }
+                var raw = DrawingViewRead.Edges(kv.Value);
+                rawEdges[kv.Key] = raw;
                 // 剖视里台阶孔的孔壁就是要标的台阶，不当"孔带"去掉；顺带剖开的普通孔（法兰上的螺栓孔，OK310-02-002）照样去掉，
                 // 不然一圈螺栓孔的孔壁会把坐标尺寸挤成一团 —— 它们的位置在孔是圆的那个视图里标
-                edges[kv.Key] = HoleInternal(kv.Value, DrawingViewRead.Edges(kv.Value), isSection ? holes.Where(h => !ModelFacts.IsStepped(h)).ToList() : holes, range);
+                var filt = HoleInternal(kv.Value, raw, isSection ? holes.Where(h => !ModelFacts.IsStepped(h)).ToList() : holes, range);
+                edges[kv.Key] = filt;
+                var vBox = DrawingPlan.Box(raw.Count > 0 ? raw : filt);
+                var p0 = DwgWriter.ToSheet(kv.Value, vBox[0], vBox[1]);
+                var p1 = DwgWriter.ToSheet(kv.Value, vBox[2], vBox[3]);
+                var cb = new[] { Math.Min(p0[0], p1[0]), Math.Min(p0[1], p1[1]), Math.Max(p0[0], p1[0]), Math.Max(p0[1], p1[1]) };
+                var ob = new[] { cb[0] - 0.002, cb[1] - 0.002, cb[2] + 0.002, cb[3] + 0.002 };
+                viewCboxes[kv.Key] = cb;
+                viewObs[kv.Key] = ob;
+                if (w.Space != null) {
+                    w.Space.AddView(ob);
+                    // 剖视图上方留出「剖面 A-A 1:1」标题区，避免引线文字压住剖面标题
+                    if (isSection) w.Space.Add(cb[0] + 0.002, cb[3] + 0.001, cb[2] - 0.002, cb[3] + 0.014);
+                }
             }
             var main = views[DwgViewRole.Main];
             var em = edges[DwgViewRole.Main];
             var boxM = DrawingPlan.Box(em);
-            // 主视图两串
+            // 主视图两串（纯同心圆端面如销子顶视，圆直径已直接标 Ø12，跳过冗余的 6-0-6 坐标串）
             var runH = DrawingPlan.Ordinate(em, true, lay.Scale, boxM, false, off, ctOf(main, true));
             var runV = DrawingPlan.Ordinate(em, false, lay.Scale, boxM, true, off, ctOf(main, false));
+            if (DrawingPlan.IsRedundantCircleSpan(runH)) runH = null;
+            if (DrawingPlan.IsRedundantCircleSpan(runV)) runV = null;
             Count(o, runH); Count(o, runV);
             o.Covered += Covered(w.Ordinate(main, runH, lay.Scale, boxM)) + Covered(w.Ordinate(main, runV, lay.Scale, boxM));
             var sheetXs = Sheet(main, runH, true); var sheetYs = Sheet(main, runV, false);
@@ -45,15 +65,22 @@ namespace TianGongCadSuite {
             if (views.TryGetValue(DwgViewRole.Below, out vb)) {
                 var eb = edges[DwgViewRole.Below]; var boxB = DrawingPlan.Box(eb);
                 var rv = DrawingPlan.Ordinate(eb, false, lay.Scale, boxB, true, off, ctOf(vb, false));
+                if (DrawingPlan.IsRedundantCircleSpan(rv)) rv = null;
                 Count(o, rv); o.Covered += Covered(w.Ordinate(vb, rv, lay.Scale, boxB)); depthDone = rv != null;
                 var rh = Only(DrawingPlan.Ordinate(eb, true, lay.Scale, boxB, true, off, ctOf(vb, true)), vb, sheetXs, true, main, boxM, boxB);
+                if (DrawingPlan.IsRedundantCircleSpan(rh)) rh = null;
                 Count(o, rh); o.Covered += Covered(w.Ordinate(vb, rh, lay.Scale, boxB));
             }
             D.DrawingView vr;
             if (views.TryGetValue(DwgViewRole.Right, out vr)) {
                 var er = edges[DwgViewRole.Right]; var boxR = DrawingPlan.Box(er);
-                if (!depthDone) { var rh = DrawingPlan.Ordinate(er, true, lay.Scale, boxR, true, off, ctOf(vr, true)); Count(o, rh); o.Covered += Covered(w.Ordinate(vr, rh, lay.Scale, boxR)); }
+                if (!depthDone) {
+                    var rh = DrawingPlan.Ordinate(er, true, lay.Scale, boxR, true, off, ctOf(vr, true));
+                    if (DrawingPlan.IsRedundantCircleSpan(rh)) rh = null;
+                    Count(o, rh); o.Covered += Covered(w.Ordinate(vr, rh, lay.Scale, boxR));
+                }
                 var rv = Only(DrawingPlan.Ordinate(er, false, lay.Scale, boxR, false, off, ctOf(vr, false)), vr, sheetYs, false, main, boxM, boxR);
+                if (DrawingPlan.IsRedundantCircleSpan(rv)) rv = null;
                 Count(o, rv); o.Covered += Covered(w.Ordinate(vr, rv, lay.Scale, boxR));
             }
             // 补的反方向视图（右视图 / 后视图）：只标主视图里没标过的坐标（背面盲孔的位置）
@@ -63,22 +90,52 @@ namespace TianGongCadSuite {
                 if (role != DwgViewRole.Left) { var rh = Only(DrawingPlan.Ordinate(ee, true, lay.Scale, boxE, true, off, ctOf(ve, true)), ve, sheetXs, true, main, boxM, boxE); Count(o, rh); o.Covered += Covered(w.Ordinate(ve, rh, lay.Scale, boxE)); }
                 { var rv = Only(DrawingPlan.Ordinate(ee, false, lay.Scale, boxE, role == DwgViewRole.Left, off, ctOf(ve, false)), ve, sheetYs, false, main, boxM, boxE); Count(o, rv); o.Covered += Covered(w.Ordinate(ve, rv, lay.Scale, boxE)); }
             }
-            // 孔、圆角
+            // 孔、外圆、圆角、倒角：先统一收集每视图全部引线标注，挑出就近不打架的代表实例，按锚点 Y 从上到下排序后再紧凑落位，
+            // 从源头消除引线乱交叉、跨整张视图拉 100mm 长线、以及 2 行沉孔标注叠字。
             int pinGroups = 0, pinCount = 0; var pins = new List<ModelHole>();
+            bool hasRightView = views.ContainsKey(DwgViewRole.Right);
             foreach (var kv in views) {
                 if (kv.Key == DwgViewRole.Iso) continue;
                 var v = kv.Value; var e = edges[kv.Key];
+                var allRaw = rawEdges[kv.Key];
                 var box = DrawingPlan.Box(e);
-                var sbox = DwgWriter.SheetBox(v);
+                var rawBox = DrawingPlan.Box(allRaw.Count > 0 ? allRaw : e);
+                var cbox = viewCboxes[kv.Key];
+                var ownObs = viewObs[kv.Key];
                 var map = HoleMap(v, e, holes, range);
                 var threads = DrawingViewRead.Threads(v);
                 // 圆形零件的外圆（法兰 Ø64）也要标直径：上限放到视图外框
                 double maxD = Math.Min(box[2] - box[0], box[3] - box[1]) * 1.01;
-                double fallY = sbox[3] - 0.004;
+                double fallY = cbox[3] - 0.002;
+                // 主视图左侧和上方已有坐标尺寸（0 基准在左上角），即使右侧有左视图也绝不往左上 0 角挑孔/倒角，
+                // 统一优先靠右挑代表实例（均衡布局已为 Main↔Right 留出通道，避免像 02-003 那样撞到 0）
+                bool preferRight = true;
+                var usedLeaderY = new List<double>();
+                Func<DwgEdge, double[]> toAnchorSheet = ed => { var a = DrawingPlan.AnchorOf(ed); return DwgWriter.ToSheet(v, a[0], a[1]); };
+
+                // 把图纸坐标候选框反向映回视图坐标，用全量可见边（含孔壁）检验空腔净空（留 2.5mm 纸面安全边）
+                var sp0 = DwgWriter.ToSheet(v, rawBox[0], rawBox[1]);
+                var sp1 = DwgWriter.ToSheet(v, rawBox[2], rawBox[3]);
+                Func<double[], bool> geomClear = null;
+                if (Math.Abs(sp1[0] - sp0[0]) > 1e-6 && Math.Abs(sp1[1] - sp0[1]) > 1e-6) {
+                    double marginView = 0.0025 / Math.Max(lay.Scale, 1e-6);
+                    geomClear = sr => {
+                        double vx0 = rawBox[0] + (sr[0] - sp0[0]) / (sp1[0] - sp0[0]) * (rawBox[2] - rawBox[0]);
+                        double vx1 = rawBox[0] + (sr[2] - sp0[0]) / (sp1[0] - sp0[0]) * (rawBox[2] - rawBox[0]);
+                        double vy0 = rawBox[1] + (sr[1] - sp0[1]) / (sp1[1] - sp0[1]) * (rawBox[3] - rawBox[1]);
+                        double vy1 = rawBox[1] + (sr[3] - sp0[1]) / (sp1[1] - sp0[1]) * (rawBox[3] - rawBox[1]);
+                        var vrRect = new[] { Math.Min(vx0, vx1), Math.Min(vy0, vy1), Math.Max(vx0, vx1), Math.Max(vy0, vy1) };
+                        return DrawingPlan.RectClearsViewEdges(vrRect, allRaw, marginView);
+                    };
+                }
+
+                var callouts = new List<PlannedCallout>();
                 var hgs = DrawingPlan.Holes(e, maxD).OrderByDescending(g => g.Count).ToList();
                 if (hgs.Count > 12) { o.Notes.Add("孔的规格太多（" + hgs.Count + " 种），只标了 12 种，请人工补"); hgs = hgs.Take(12).ToList(); }
                 bool extra = kv.Key == DwgViewRole.Left || kv.Key == DwgViewRole.Back;
                 foreach (var g in hgs) {
+                    var picked = DrawingPlan.PickSeparatedLeader(g.Circles, box, preferRight, usedLeaderY, toAnchorSheet, 0.008);
+                    if (picked != null) g.Leader = picked;
                     ModelHole mh; map.TryGetValue(g.Leader, out mh);
                     // 同组孔里引线落在阵列 / 镜像副本上、恰好没挂上孔特征规格时，从同组其它圆借用已挂上的规格
                     if (mh == null || mh.Spec == null) {
@@ -92,8 +149,6 @@ namespace TianGongCadSuite {
                     }
                     // 补的反方向视图只标盲孔（通孔在对面那个视图里已经是圆、已经标过）
                     if (extra && (mh == null || mh.Through)) continue;
-                    // 不是孔（凸台外圆、轴）就不当孔标
-                    if (mh == null && holes.Count > 0 && !map.Keys.Any(c => Math.Abs(c.R - g.Leader.R) < 1e-6)) { }
                     o.Required++;
                     string pre, val, suf, sub;
                     // 这个视图里孔能对上三维孔（map 非空）而这组对不上 → 凸台 / 外圆；零件根本没有孔 → 也都是外圆
@@ -106,7 +161,6 @@ namespace TianGongCadSuite {
                         if (m.Length > 0) { val = m; DrawingText.ThreadOnly(m, mh, out suf, out sub); }
                     }
                     // 定位销孔（没螺纹、没沉孔的 Ø4/5/6/8 光孔，DrawingTolerance）：加 H7 + 位置度框，文字下面多留一格放框
-                    // 视图里的圆没对上三维孔（HoleMap 偶尔整个视图对不上，02-010）时按直径在三维孔里找：同直径的孔全是光孔才算
                     var pinHole = mh;
                     if (pinHole == null && isHole) {
                         var same = holes.Where(h => Math.Abs(h.Radius * 2000 - g.DiameterMm) < 0.02).ToList();
@@ -115,54 +169,112 @@ namespace TianGongCadSuite {
                     bool cbore = pinHole != null && (pinHole.CbRadius > 0 || (pinHole.Spec != null && pinHole.Spec.Kind == HoleKind.Counterbore));
                     bool pin = DrawingTolerance.IsPinHole(g.DiameterMm, isHole && pinHole != null, val.Length > 0, cbore || sub.Length > 0);
                     var ls = DwgWriter.ToSheet(v, g.Leader.Cx, g.Leader.Cy);
-                    string shown = pre + (val.Length > 0 ? val : "Ø" + g.DiameterMm.ToString("0.##")) + suf + (pin ? " H7(+0.012)" : "");
-                    var text = Spot(w, sbox, ls[1], shown, sub.Length > 0 ? 2 : 1, ref fallY, pin ? 0.006 : 0);
-                    if (w.HoleCallout(v, g, pre, val, suf, sub, text)) {
-                        o.Covered++; o.HoleCallouts++;
-                        if (pin && w.Fit(w.LastCallout, g.DiameterMm)) {
-                            pinGroups++; pinCount += g.Count; pins.Add(pinHole);
-                            w.Position(w.LastCallout);
-                        }
-                    }
+                    usedLeaderY.Add(ls[1]);
+                    string shown = pre + (val.Length > 0 ? val : "Ø" + g.DiameterMm.ToString("0.##")) + (pin ? " H7(+0.015/0)" : "") + suf;
+                    callouts.Add(new PlannedCallout {
+                        Kind = CalloutKind.Hole, Hole = g, Pre = pre, Val = val, Suf = suf, Sub = sub,
+                        Pin = pin, PinHole = pinHole, Line1 = shown, Line2 = sub,
+                        Lines = sub.Length > 0 ? 2 : 1, BelowH = pin ? 0.0065 : 0.0,
+                        Fx = ls[0], Fy = ls[1], AllowVoid = false
+                    });
                 }
                 bool sectionView = false; try { sectionView = v.DrawingViewType == D.DrawingViewTypeConstants.igXSectionView; } catch { }
-                if (extra) continue;   // 外圆、圆角、倒角在主视图那一侧已经标了
-                // 同心圆的外圈：不是沉孔那圈（已写在孔标注的第二行）、且不是本视图已标过的同直径孔（如背/正面同心投影）才单独标直径
-                foreach (var g in DrawingPlan.OuterRings(e, maxD)) {
-                    if (hgs.Any(h => Math.Abs(h.DiameterMm - g.DiameterMm) < 0.05)) continue;
-                    bool cb = map.Any(mp => Math.Abs(mp.Value.CbRadius * 2000 - g.DiameterMm) < 0.02 && Math.Abs(mp.Key.Cx - g.Leader.Cx) < 1e-5 && Math.Abs(mp.Key.Cy - g.Leader.Cy) < 1e-5)
-                        || holes.Any(h => Math.Abs(h.CbRadius * 2000 - g.DiameterMm) < 0.02);
-                    if (cb || DrawingPlan.ThreadFromEdges(new DwgEdge { Kind = DwgKind.Circle, Cx = g.Leader.Cx, Cy = g.Leader.Cy, R = 0 }, threads) == "M" + g.DiameterMm) continue;
-                    o.Required++;
-                    var ls2 = DwgWriter.ToSheet(v, g.Leader.Cx, g.Leader.Cy);
-                    var t2 = Spot(w, sbox, ls2[1], (g.Count > 1 ? g.Count + "×" : "") + "Ø" + g.DiameterMm.ToString("0.##"), 1, ref fallY);
-                    if (w.HoleCallout(v, g, g.Count > 1 ? g.Count + "×" : "", "", "", "", t2)) o.Covered++;
+                if (!extra) {
+                    // 同心圆的外圈：不是沉孔那圈、且不是本视图已标过的同直径孔才单独标直径
+                    foreach (var g in DrawingPlan.OuterRings(e, maxD)) {
+                        if (hgs.Any(h => Math.Abs(h.DiameterMm - g.DiameterMm) < 0.05)) continue;
+                        bool cb = map.Any(mp => Math.Abs(mp.Value.CbRadius * 2000 - g.DiameterMm) < 0.02 && Math.Abs(mp.Key.Cx - g.Leader.Cx) < 1e-5 && Math.Abs(mp.Key.Cy - g.Leader.Cy) < 1e-5)
+                            || holes.Any(h => Math.Abs(h.CbRadius * 2000 - g.DiameterMm) < 0.02);
+                        if (cb || DrawingPlan.ThreadFromEdges(new DwgEdge { Kind = DwgKind.Circle, Cx = g.Leader.Cx, Cy = g.Leader.Cy, R = 0 }, threads) == "M" + g.DiameterMm) continue;
+                        var picked = DrawingPlan.PickSeparatedLeader(g.Circles, box, preferRight, usedLeaderY, toAnchorSheet, 0.008);
+                        if (picked != null) g.Leader = picked;
+                        o.Required++;
+                        var ls2 = DwgWriter.ToSheet(v, g.Leader.Cx, g.Leader.Cy);
+                        usedLeaderY.Add(ls2[1]);
+                        string p2 = g.Count > 1 ? g.Count + "×" : "";
+                        callouts.Add(new PlannedCallout {
+                            Kind = CalloutKind.OuterRing, Hole = g, Pre = p2, Val = "", Suf = "", Sub = "",
+                            Line1 = p2 + "Ø" + g.DiameterMm.ToString("0.##"), Line2 = "",
+                            Lines = 1, BelowH = 0, Fx = ls2[0], Fy = ls2[1], AllowVoid = false
+                        });
+                    }
+                    // 圆角：用圆弧真实中点作为锚点（不再用圆心），允许大窗口/槽口内无边空腔就近放
+                    var radii = sectionView ? new List<RadiusGroup>() : DrawingPlan.Radii(e).Where(g => g.RadiusMm >= 0.3).OrderByDescending(g => g.Count).ThenByDescending(g => g.RadiusMm).ToList();
+                    if (radii.Count > 10) { o.Notes.Add("圆弧太多（" + radii.Count + " 种半径，多半是刻字 / 花纹），只标了 10 种，请人工看一眼"); radii = radii.Take(10).ToList(); }
+                    foreach (var g in radii) {
+                        var picked = DrawingPlan.PickSeparatedLeader(g.Arcs, box, preferRight, usedLeaderY, toAnchorSheet, 0.007);
+                        if (picked != null) g.Leader = picked;
+                        o.Required++; o.Radii++;
+                        var mid = DrawingPlan.ArcMidpoint(g.Leader);
+                        var ls = DwgWriter.ToSheet(v, mid[0], mid[1]);
+                        usedLeaderY.Add(ls[1]);
+                        callouts.Add(new PlannedCallout {
+                            Kind = CalloutKind.Radius, Rad = g,
+                            Line1 = DrawingPlan.RadiusPrefix(g.Count) + "R" + g.RadiusMm.ToString("0.##"), Line2 = "",
+                            Lines = 1, BelowH = 0, Fx = ls[0], Fy = ls[1], AllowVoid = DrawingPlan.AllowRadiusInVoid(g.RadiusMm, ls, cbox)
+                        });
+                    }
+                    // 倒角：等于模板「未注倒角」那个值的不标（A3 模板写 C1，A4 写 C0.5）
+                    double dflt = lay.Zones.Name == "A4" ? 0.5 : 1.0;
+                    foreach (var g in sectionView ? new List<RadiusGroup>() : DrawingPlan.Chamfers(e)) {
+                        if (Math.Abs(g.RadiusMm - dflt) < 0.01) continue;
+                        var picked = DrawingPlan.PickSeparatedLeader(g.Arcs, box, preferRight, usedLeaderY, toAnchorSheet, 0.007);
+                        if (picked != null) g.Leader = picked;
+                        o.Required++;
+                        var l = g.Leader;
+                        var sp = DwgWriter.ToSheet(v, (l.X1 + l.X2) / 2, (l.Y1 + l.Y2) / 2);
+                        usedLeaderY.Add(sp[1]);
+                        callouts.Add(new PlannedCallout {
+                            Kind = CalloutKind.Chamfer, Rad = g,
+                            Line1 = DrawingPlan.ChamferText(g.Count, g.RadiusMm), Line2 = "",
+                            Lines = 1, BelowH = 0, Fx = sp[0], Fy = sp[1], AllowVoid = false
+                        });
+                    }
                 }
-                // 刻字、花纹会带来几百个小圆弧：只标前 10 组（个数多的、半径大的在前），其余提示人工
-                var radii = sectionView ? new List<RadiusGroup>() : DrawingPlan.Radii(e).Where(g => g.RadiusMm >= 0.3).OrderByDescending(g => g.Count).ThenByDescending(g => g.RadiusMm).ToList();
-                if (radii.Count > 10) { o.Notes.Add("圆弧太多（" + radii.Count + " 种半径，多半是刻字 / 花纹），只标了 10 种，请人工看一眼"); radii = radii.Take(10).ToList(); }
-                foreach (var g in radii) {
-                    o.Required++; o.Radii++;
-                    var ls = DwgWriter.ToSheet(v, g.Leader.Cx, g.Leader.Cy);
-                    var text = Spot(w, sbox, ls[1], DrawingPlan.RadiusPrefix(g.Count) + "R" + g.RadiusMm.ToString("0.##"), 1, ref fallY);
-                    if (w.Radius(v, g, text)) o.Covered++;
-                }
-                // 倒角：等于模板「未注倒角」那个值的不标（A3 模板写 C1，A4 写 C0.5）
-                double dflt = lay.Zones.Name == "A4" ? 0.5 : 1.0;
-                foreach (var g in sectionView ? new List<RadiusGroup>() : DrawingPlan.Chamfers(e)) {
-                    if (Math.Abs(g.RadiusMm - dflt) < 0.01) continue;
-                    o.Required++;
-                    var l = g.Leader;
-                    double mx = (l.X1 + l.X2) / 2, my = (l.Y1 + l.Y2) / 2;
-                    var sp = DwgWriter.ToSheet(v, mx, my);
-                    var text = Spot(w, sbox, sp[1], DrawingPlan.ChamferText(g.Count, g.RadiusMm), 1, ref fallY);
-                    if (w.Chamfer(v, g, e, text)) o.Covered++;
+
+                // 按锚点 Y 从上到下统一排序落位（细长水平条视图所有孔几乎同 Y 时，按 X 从左到右排，杜绝 02-023 上方引线互相交叉）
+                bool thinHoriz = (cbox[3] - cbox[1]) < 0.014 && (cbox[2] - cbox[0]) > 0.060;
+                var orderedCallouts = thinHoriz
+                    ? callouts.OrderBy(c => c.Fx).ThenByDescending(c => c.Fy).ToList()
+                    : callouts.OrderByDescending(c => c.Fy).ThenByDescending(c => c.Fx).ToList();
+                foreach (var item in orderedCallouts) {
+                    double[] placedBox;
+                    var text = SpotCompact(w, item.Fx, item.Fy, cbox, ownObs, item.Line1, item.Line2, item.Lines, item.BelowH, preferRight, item.AllowVoid, geomClear, ref fallY, out placedBox);
+                    if (item.Kind == CalloutKind.Hole) {
+                        if (w.HoleCallout(v, item.Hole, item.Pre, item.Val, item.Suf, item.Sub, text)) {
+                            o.Covered++; o.HoleCallouts++;
+                            if (item.Pin && w.Fit(w.LastCallout, item.Hole.DiameterMm)) {
+                                pinGroups++; pinCount += item.Hole.Count; pins.Add(item.PinHole);
+                                w.Position(w.LastCallout);
+                            }
+                        }
+                    } else if (item.Kind == CalloutKind.OuterRing) {
+                        if (w.HoleCallout(v, item.Hole, item.Pre, "", "", "", text)) o.Covered++;
+                    } else if (item.Kind == CalloutKind.Radius) {
+                        if (w.Radius(v, item.Rad, text)) o.Covered++;
+                    } else if (item.Kind == CalloutKind.Chamfer) {
+                        // AddChamfer(Perpendicular) 的末关键点 KP[2] 是文字中心而非引线折点，传入放置框中心可彻底避免文字回缩蹭到零件角点
+                        double[] chTarget = placedBox != null ? new[] { (placedBox[0] + placedBox[2]) / 2, placedBox[1] + 0.0038 } : text;
+                        if (w.Chamfer(v, item.Rad, e, chTarget)) o.Covered++;
+                    }
                 }
             }
             // 销孔所在的面（装配时贴着别的零件、靠销定位的安装面）标 Ra3.2：在孔是侧面的那个视图里找过孔口的那条面线
             bool rough = pins.Count > 0 && MatingFaces(w, views, edges, pins, range) > 0;
             string tn = DrawingTolerance.Note(pinGroups, pinCount, rough);
             if (tn.Length > 0) o.Notes.Insert(0, tn);
+        }
+
+        enum CalloutKind { Hole, OuterRing, Radius, Chamfer }
+        sealed class PlannedCallout {
+            public CalloutKind Kind;
+            public HoleGroup Hole;
+            public RadiusGroup Rad;
+            public string Pre, Val, Suf, Sub, Line1, Line2;
+            public bool Pin, AllowVoid;
+            public ModelHole PinHole;
+            public int Lines;
+            public double BelowH, Fx, Fy;
         }
 
         static int MatingFaces(DwgWriter w, Dictionary<DwgViewRole, D.DrawingView> views, Dictionary<DwgViewRole, List<DwgEdge>> edges, List<ModelHole> pins, double[] range){
@@ -205,20 +317,24 @@ namespace TianGongCadSuite {
             ou = box[0] - pu; ov = box[1] - pv;
             return edges.Count > 0;
         }
-        // 引线文字放哪：在视图旁边找一块空地（DwgSpace）；实在没有就按行高累计往下排（防止两行沉孔 / H7 位置度框叠字）
-        // 天工把 SubfixString（第二行沉孔 / 底孔）画在引线下方、主行画在引线上方，因此返回引线 y 时要给第二行和位置度框预留高度。
-        static double[] Spot(DwgWriter w, double[] sbox, double y, string text, int lines, ref double fallY, double below = 0){
-            double subH = 0.0052 * Math.Max(0, lines - 1) + below;
-            double tw = DwgSpace.TextWidth(text) + 0.002, th = 0.0052 + subH;
-            var r = w.Space == null ? null : w.Space.Place(sbox, y, tw, th);
-            if (r != null) {
-                // 同步压低右侧兜底游标：若后续某条超宽标注（如 H7+偏差）放不进右侧走廊走兜底，不再回弹压到已排好的标注上
-                if (r[0] >= sbox[2] - 1e-6) fallY = Math.Min(fallY, r[1] - 0.003);
-                return new[] { r[0], r[1] + 0.001 + subH };
+        // 引线文字紧凑落位：使用实测校准宽度 CalloutWidth、主行+Subfix 均在横线上方的正确高度、视图实际轮廓框 cbox，
+        // 经 DwgSpace.PlaceCompact 就近避让（含大空腔圆角净空检验与引线防交叉）；实在放不下才按行高累计向下排。
+        static double[] SpotCompact(DwgWriter w, double fx, double fy, double[] cbox, double[] ownObs, string line1, string line2, int lines, double belowH, bool preferRight, bool allowVoid, Func<double[], bool> geomClear, ref double fallY, out double[] placedBox){
+            placedBox = null;
+            double tw = DwgSpace.CalloutWidth(line1, line2);
+            double th = 0.0052 * Math.Max(1, lines) + belowH + 0.0014;
+            if (w.Space != null) {
+                double[] placed, elbow;
+                if (w.Space.PlaceCompact(fx, fy, cbox, ownObs, tw, th, belowH, preferRight, allowVoid, geomClear, out placed, out elbow)) {
+                    if (placed[0] >= cbox[2] - 1e-6) fallY = Math.Min(fallY, placed[1] - 0.0025);
+                    placedBox = placed;
+                    return elbow;
+                }
             }
-            double py = fallY - 0.0052;
-            fallY -= th + 0.003;
-            return new[] { sbox[2] + 0.006, py };
+            double boxY0 = fallY - th;
+            fallY -= th + 0.0025;
+            placedBox = new[] { cbox[2] + 0.006, boxY0, cbox[2] + 0.006 + tw, boxY0 + th };
+            return new[] { cbox[2] + 0.006, DrawingStyleRules.CalloutShelfY(boxY0, belowH) };
         }
 
         static void Count(DrawingOutcome o, OrdinateRun r){
@@ -349,7 +465,6 @@ namespace TianGongCadSuite {
                 for (int i = 1; i <= bs.Count; i++) { var b = bs.Item(i); string t = ""; try { t = b.BalloonText ?? ""; } catch { } if (t.Contains("刻字")) { tpl = b; break; } }
                 var edges = DrawingViewRead.Edges(iso).Where(x => x.Kind == DwgKind.Line).OrderByDescending(x => x.Length).ToList();
                 if (edges.Count == 0) return;
-                var best = edges[0];
                 double[] at = null;
                 string text = "刻字：%{文件名（无扩展名）|R1}";
                 if (tpl != null) {
@@ -357,6 +472,17 @@ namespace TianGongCadSuite {
                     try { double a, b, c, d; tpl.Range(out a, out b, out c, out d); at = new[] { a, (b + d) / 2 }; } catch { }
                 }
                 if (at == null) { var ib = DwgWriter.SheetBox(iso); at = new[] { ib[0] - 0.06, 0.050 }; }
+                // 在轴测图够长的边（≥ 最长边 25%）里挑中点离刻字文字位置最近的那条，让刻字引线短而干净、不斜穿整个轴测图和孔标注
+                double minLen = edges[0].Length * 0.25;
+                var cands = edges.Where(x => x.Length >= minLen).ToList();
+                var best = cands[0];
+                double bestD2 = double.MaxValue;
+                foreach (var ed in cands) {
+                    var mp = DwgWriter.ToSheet(iso, (ed.X1 + ed.X2) / 2, (ed.Y1 + ed.Y2) / 2);
+                    double dx = mp[0] - at[0], dy = mp[1] - at[1];
+                    double d2 = dx * dx + dy * dy;
+                    if (d2 < bestD2) { bestD2 = d2; best = ed; }
+                }
                 var w = new DwgWriter(sheet, dft, engraveStyle);
                 var nb = w.Note(iso, best, (best.X1 + best.X2) / 2, (best.Y1 + best.Y2) / 2, text, at);
                 if (nb != null && tpl != null) { try { tpl.Delete(); } catch { } }

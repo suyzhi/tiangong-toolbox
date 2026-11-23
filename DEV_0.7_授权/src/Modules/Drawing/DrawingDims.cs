@@ -19,6 +19,7 @@ namespace TianGongCadSuite {
         public readonly List<string> Notes = new List<string>();
         public DwgSpace Space;   // 建好的尺寸占的地方登记进去，后面的引线文字避开
         public string StyleName = "";
+        readonly List<double[]> calloutBoxes = new List<double[]>();   // 已放置的引线标注文字框（实测碰撞兜底防重叠）
 
         public DwgWriter(D.Sheet s){ sheet = s; dims = (S.Dimensions)s.Dimensions; }
         public DwgWriter(D.Sheet s, D.DraftDocument doc, string styleName) : this(s){
@@ -143,14 +144,14 @@ namespace TianGongCadSuite {
         void Occupy(object o){ if (Space == null || o == null) return; try { double a, b, c, d; ((dynamic)o).Range(out a, out b, out c, out d); Space.Add(a, b, c, d); } catch { } }
 
         // 一串坐标尺寸。run 的坐标都是视图坐标；文字线、文字位置换成图纸坐标再交给天工。
-        // 只有 2 个落点（例如板厚 1 / 4 / 20）时改用干净的线性尺寸，避免「0」「1」叠成蓝块。
+        // 只有 2 个落点（例如板厚 1 / 4 / 20）时改用干净的线性尺寸（并按跨度自动翻转端符），避免「0」「1」叠成蓝块。
         public int Ordinate(D.DrawingView v, OrdinateRun run, double scale){
             return Ordinate(v, run, scale, null);
         }
         public int Ordinate(D.DrawingView v, OrdinateRun run, double scale, double[] contourBox){
             if (run == null) return 0;
             var cbox = ContourSheetBox(v, contourBox);
-            if (DrawingStyleRules.ShouldUseLinearSpan(run) && LinearSpan(v, run, cbox)) return 2;
+            if (DrawingStyleRules.ShouldUseLinearSpan(run) && LinearSpan(v, run, scale, cbox)) return 2;
 
             S.Dimension origin;
             var o = run.Origin;
@@ -158,32 +159,48 @@ namespace TianGongCadSuite {
             // 文字线：Horizontal 时是一条水平线（y = run.Line），文字竖排；否则是竖线（x = run.Line）
             Func<double, double[]> textAt = c => run.Horizontal ? ToSheet(v, c, run.Line) : ToSheet(v, run.Line, c);
             try {
-                var tp = textAt(o.TextAt);
+                // 基准固定落在自身真实坐标上（AddCoordinateOriginEx 无法被折走）
+                var tp = textAt(o.Coord);
                 origin = dims.AddCoordinateOriginEx(Ref(v, o.Edge.Tag), op[0], op[1], 0, o.KeyPoint, tp[0], tp[1], 0);
                 EnsureStyle(origin, StyleName);
                 try { if (Math.Abs(origin.TrackDistance) > 1e-6) origin.TrackDistance = 0; } catch { }
-                Created++; Occupy(origin);
+                Created++; Occupy(origin); RecordCoordText(origin);
             } catch (Exception e) { Failed++; Notes.Add("坐标尺寸基准建不出来：" + e.Message); return 0; }
             int n = 1;
-            foreach (var t in run.Targets) {
+            // 按到基准的距离由近及远依次添加，交给天工原生坐标串自动避让折线（2026-11-23 DrawJogProbe 实测：
+            // 天工 AddCoordinateEx 已按字高自动做 3.49/3.81mm 等距无重叠折线；此前手工调用 SetJogPoint2 会把
+            // 已自动折线的末尾尺寸甩飞 -205mm 触发 flung 复位 Jogged=false，反把 290/300、16/21、12/15 砸在一起）。
+            foreach (var t in run.Targets.OrderBy(x => Math.Abs(x.Coord - o.Coord))) {
                 try {
                     var p = ToSheet(v, t.X, t.Y);
                     var tp = textAt(t.Coord);
                     var d = dims.AddCoordinateEx(origin, Ref(v, t.Edge.Tag), p[0], p[1], 0, t.KeyPoint, tp[0], tp[1], 0);
                     EnsureStyle(d, StyleName);
-                    // 关键修复（2026-11-21 实测 02-015）：落点在零件深处时，天工新建的坐标尺寸会带负的 TrackDistance
-                    // （例如 -44mm / -105mm），把文字压进零件轮廓里，并使后续打折线把文字甩出图框；归零即与基准严格齐平。
+                    // 落点在零件深处时天工新建的坐标尺寸会带负的 TrackDistance，归零即与基准齐平
                     try { if (Math.Abs(d.TrackDistance) > 1e-6) d.TrackDistance = 0; } catch { }
-                    // 挤在一起的文字错开：坐标尺寸打折线（探针 5：Jogged + SetJogPoint2 = 折过去的那条腿的位置，图纸坐标）
-                    if (Math.Abs(t.TextAt - t.Coord) * scale > 0.0005) Jog(d, run, v, t, cbox);
-                    Created++; n++; Occupy(d);
+                    Created++; n++; Occupy(d); RecordCoordText(d);
                 } catch (Exception e) { Failed++; Log.Write("DrawingOrdinate", e); }
             }
             return n;
         }
 
+        // 把坐标尺寸文字/基准圈区域登记进 DwgSpace.dimTexts，使后续孔/圆弧引线自动绕开「0」圈和坐标数字
+        void RecordCoordText(S.Dimension d){
+            if (Space == null || d == null) return;
+            try {
+                int kc = d.KeyPointCount;
+                int idx = kc > 5 ? 5 : (kc >= 3 ? 2 : kc - 1);
+                if (idx < 0) return;
+                double tx, ty, kz; F.KeyPointType kt; int hh;
+                d.GetKeyPoint(idx, out tx, out ty, out kz, out kt, out hh);
+                if (Math.Abs(tx) < 1e-9 && Math.Abs(ty) < 1e-9) return;
+                Space.AddDimText(new[] { tx - 0.0028, ty - 0.0028, tx + 0.0028, ty + 0.0028 });
+            } catch { }
+        }
+
         // 2 落点单跨度（板厚、单台阶、侧视总宽）用线性尺寸代替 2 点坐标串，摆在 run 指定的 LowSide 一侧。
-        bool LinearSpan(D.DrawingView v, OrdinateRun run, double[] cbox){
+        // 窄跨度自动翻转端符（外箭头朝里指 -->|<--），极窄跨度将数字引到箭头外侧防止压线。
+        bool LinearSpan(D.DrawingView v, OrdinateRun run, double scale, double[] cbox){
             var a = run.Origin;
             var b = run.Targets[0];
             S.Dimension d = null;
@@ -205,7 +222,7 @@ namespace TianGongCadSuite {
                 double want;
                 if (run.Horizontal) want = run.LowSide ? Math.Min(pa[1], pb[1]) - targetCoord : targetCoord - Math.Max(pa[1], pb[1]);
                 else want = run.LowSide ? Math.Min(pa[0], pb[0]) - targetCoord : targetCoord - Math.Max(pa[0], pb[0]);
-                if (want < 0.005) want = 0.008;
+                if (want < 0.005) want = 0.0075;
                 d.TrackDistance = want;
                 double x0, y0, x1, y1; d.Range(out x0, out y0, out x1, out y1);
                 double err1 = LinearSideError(x0, y0, x1, y1, cbox, targetCoord, run.Horizontal, run.LowSide);
@@ -215,6 +232,7 @@ namespace TianGongCadSuite {
                     double err2 = LinearSideError(ax0, ay0, ax1, ay1, cbox, targetCoord, run.Horizontal, run.LowSide);
                     if (err2 > err1) d.TrackDistance = want;
                 }
+                ApplyLinearTerminator(d, scale);
                 Created++; Occupy(d);
                 return true;
             } catch (Exception e) {
@@ -222,6 +240,23 @@ namespace TianGongCadSuite {
                 Log.Write("DrawingLinearSpan", e);
                 return false;
             }
+        }
+
+        // 线性尺寸端符优化：窄跨度翻转端符让两个箭头从外朝里指（-->| 4 |<--），极窄跨度顺带把数字移到单侧箭头外
+        static void ApplyLinearTerminator(S.Dimension d, double scale){
+            if (d == null) return;
+            try {
+                string valText = Math.Round(d.Value * 1000.0, 2).ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+                if (DrawingStyleRules.ShouldFlipLinearTerminator(d.Value, scale, valText)) {
+                    d.TerminatorPosition = true;
+                    if (DrawingStyleRules.ShouldBreakNarrowLinearText(d.Value, scale, valText)) {
+                        try {
+                            d.BreakPosition = S.DimBreakPositionConstants.igDimBreakRight;
+                            d.BreakDistance = DrawingStyleRules.NarrowLinearBreakDistance(valText);
+                        } catch { }
+                    }
+                }
+            } catch (Exception e) { Log.Write("DrawingLinearTerminator", e); }
         }
 
         static double LinearSideError(double x0, double y0, double x1, double y1, double[] cbox, double targetCoord, bool horizontal, bool lowSide){
@@ -235,42 +270,8 @@ namespace TianGongCadSuite {
             if (x1 < cbox[2] - 0.001) pen += 1.0; return pen + Math.Abs(x1 - targetCoord);
         }
 
-        // 文字被排开的那几个：打折线，折过去的腿落在排开后的位置；两段直腿各 2.5mm。
-        // 同时防两种天工异常：1) 折线把尺寸框甩飞到图框外（>18mm）；2) 折线把文字折进视图轮廓内部。
-        static void Jog(S.Dimension d, OrdinateRun run, D.DrawingView v, DwgTarget t, double[] cbox){
-            try {
-                var want = run.Horizontal ? ToSheet(v, t.TextAt, run.Line) : ToSheet(v, run.Line, t.TextAt);
-                double a0, b0, c0, e0; d.Range(out a0, out b0, out c0, out e0);
-                d.Jogged = true;
-                try { d.SetJogPoint1Distance(0.0025); d.SetJogPoint3Distance(0.0025); } catch { }
-                d.SetJogPoint2(want[0], want[1]);
-                double a1, b1, c1, e1; d.Range(out a1, out b1, out c1, out e1);
-                bool flung = a1 < a0 - 0.018 || b1 < b0 - 0.018 || c1 > c0 + 0.018 || e1 > e0 + 0.018;
-                bool inside = false;
-                double tx, ty;
-                if (TryReadCoordTextPoint(d, out tx, out ty))
-                    inside = DrawingStyleRules.IsTextInsideView(tx, ty, cbox, run.Horizontal, run.LowSide, 0.0005);
-                if (flung || inside) {
-                    d.Jogged = false;
-                    try { if (Math.Abs(d.TrackDistance) > 1e-6) d.TrackDistance = 0; } catch { }
-                }
-            } catch (Exception e) { Log.Write("DrawingJog", e); }
-        }
-
-        static bool TryReadCoordTextPoint(S.Dimension d, out double tx, out double ty){
-            tx = 0; ty = 0;
-            try {
-                int kc = d.KeyPointCount;
-                // 实测（2026-11-21 MicroProbe）：A3-国标-水平 下坐标尺寸无论是否打折线，KP[5] 都是真实文字点
-                int idx = kc > 5 ? 5 : kc - 1;
-                if (idx < 0) return false;
-                double kz; F.KeyPointType kt; int hh;
-                d.GetKeyPoint(idx, out tx, out ty, out kz, out kt, out hh);
-                return !(Math.Abs(tx) < 1e-9 && Math.Abs(ty) < 1e-9);
-            } catch { return false; }
-        }
-
         // 孔：引线式直径，文字按 DrawingText.Hole 拼好的四段写（"4×" + 值/螺纹 + 贯通/深度 + 沉孔）。
+        // 统一翻转 TerminatorPosition=true 让两端箭头均落于圆外朝圆心指（-->○<--），杜绝小孔箭头缩在孔内从内朝外挤成一团。
         public bool HoleCallout(D.DrawingView v, HoleGroup g, string prefix, string valueOverride, string suffix, string subfix, double[] textPos){
             var c = g.Leader;
             S.Dimension d = null;
@@ -285,7 +286,18 @@ namespace TianGongCadSuite {
             } else { try { if (prefix.Length > 0) d.PrefixString = prefix; } catch { } }
             try { if (suffix.Length > 0) d.SuffixString = suffix; } catch { }
             try { if (subfix.Length > 0) d.SubfixString = subfix; } catch { }
-            MoveText(d, textPos); Occupy(d);
+            var hs = ToSheet(v, c.Cx, c.Cy);
+            PlaceAndGuardCallout(d, textPos, () => {
+                try { d.TerminatorPosition = true; } catch { }
+                // 实测（02-023 D33 / 02-029 D8）：引线往下拉时天工偶尔会把 LeaderDistance 塌缩成 0（水平横线消失、文字回缩压线）；
+                // 检测到塌缩时强制恢复 ±4.5mm 水平引线肩部，保持干净的水平下划线引出。
+                try {
+                    if (Math.Abs(d.LeaderDistance) < 0.001) {
+                        double sign = (textPos != null && textPos[0] < hs[0] - 0.0005) ? -1.0 : 1.0;
+                        d.LeaderDistance = sign * 0.0045;
+                    }
+                } catch { }
+            });
             LastCallout = d;
             return true;
         }
@@ -308,26 +320,37 @@ namespace TianGongCadSuite {
                     d.PrimaryUpperTolerance = "+" + DrawingTolerance.H7Upper(diameterMm).ToString("0.000", System.Globalization.CultureInfo.InvariantCulture);
                     d.PrimaryLowerTolerance = "0";
                 }
-                Occupy(d);
+                try { d.TerminatorPosition = true; } catch { }
+                RecordCalloutShelf(d);
                 return true;
             } catch (Exception e) { Notes.Add("Ø" + diameterMm + " 的 H7 没设上：" + e.Message); return false; }
         }
 
-        // 位置度框：不带引线，紧贴在孔标注文字正下方（人图就这么放，普查 76% 的 H7 孔都有）。
-        // 天工 FeatureControlFrames.Add(x, y) 的 (x, y) 是框的中心（探针 7）；标注文字从文字点往右（或往左）排，所以按尺寸框在文字点哪边决定往哪边对齐
+        // 位置度框：不带引线，紧贴在孔标注文字正下方居中（人图就这么放，普查 76% 的 H7 孔都有）。
+        // 实测（DrawApiProbe2）：AddRadialDiameter 的 KP[3] 是文字中心、KP[4] 是横线最外端，以前拿 KP[4] 对齐会把框甩到文字最右端撞轴测图。
         public bool Position(S.Dimension d){
             if (d == null) return false;
             try {
-                double kx, ky, kz; F.KeyPointType kt; int hh; d.GetKeyPoint(d.KeyPointCount - 1, out kx, out ky, out kz, out kt, out hh);
-                double a, b, c, e; d.Range(out a, out b, out c, out e);
-                const double fw = 0.0105, fh = 0.003;
-                bool right = c - kx >= kx - a;
-                double cx = right ? kx + 0.0005 + fw / 2 : kx - 0.0005 - fw / 2, cy = ky - 0.0045;
+                int kc = d.KeyPointCount;
+                double cx, cy;
+                if (kc >= 5) {
+                    double k3x, k3y, k4x, k4y, kz; F.KeyPointType kt; int hh;
+                    d.GetKeyPoint(3, out k3x, out k3y, out kz, out kt, out hh);
+                    d.GetKeyPoint(4, out k4x, out k4y, out kz, out kt, out hh);
+                    cx = k3x; cy = k4y - 0.0036;
+                } else {
+                    double kx, ky, kz; F.KeyPointType kt; int hh; d.GetKeyPoint(kc - 1, out kx, out ky, out kz, out kt, out hh);
+                    double a, b, c, e; d.Range(out a, out b, out c, out e);
+                    cx = (a + c) / 2; cy = ky - 0.0040;
+                }
+                const double fw = 0.014, fh = 0.0045;
                 var f = ((S.FeatureControlFrames)sheet.FeatureControlFrames).Add(cx, cy, 0);
                 EnsureStyle(f, StyleName);
                 f.PrimaryFrame = DrawingTolerance.PositionFrame;
                 Created++;
-                if (Space != null) Space.Add(cx - fw / 2, cy - fh / 2, cx + fw / 2, cy + fh / 2);
+                var fb = new[] { cx - fw / 2, cy - fh / 2, cx + fw / 2, cy + fh / 2 };
+                if (Space != null) Space.Add(fb[0] - 0.001, fb[1] - 0.001, fb[2] + 0.001, fb[3] + 0.001);
+                calloutBoxes.Add(fb);
                 Occupy(f);
                 return true;
             } catch (Exception ex) { Failed++; Notes.Add("位置度框没加上：" + ex.Message); return false; }
@@ -352,19 +375,101 @@ namespace TianGongCadSuite {
                 EnsureStyle(d, StyleName);
                 Created++;
                 try { if (g.Count > 1) d.PrefixString = DrawingPlan.RadiusPrefix(g.Count); } catch { }
-                MoveText(d, textPos); Occupy(d);
+                PlaceAndGuardCallout(d, textPos, () => EnsureInwardRadiusTerminator(d));
                 return true;
             } catch (Exception e) { Failed++; Notes.Add("圆角 R" + g.RadiusMm + " 标不上：" + e.Message); return false; }
         }
 
-        // 引线式尺寸的文字挪到 textPos（图纸坐标）：最后一个关键点是文字点（探针 2：E5 挪后文字跟着走、引线自动拉长）
-        static void MoveText(S.Dimension d, double[] textPos){
-            if (textPos == null) return;
-            try { int k = d.KeyPointCount - 1; if (k >= 0) d.SetKeyPoint(k, textPos[0], textPos[1], 0); } catch (Exception e) { Log.Write("DrawingMoveText", e); }
+        // 半径标注确保箭头落在弧外侧朝圆心指（朝里指），而不是缩在圆角内部从内朝外指
+        static void EnsureInwardRadiusTerminator(S.Dimension d){
+            if (d == null) return;
+            try {
+                if (d.KeyPointCount < 3) return;
+                double x0, y0, x1, y1, x2, y2, z; F.KeyPointType kt; int h;
+                d.GetKeyPoint(0, out x0, out y0, out z, out kt, out h);
+                d.GetKeyPoint(1, out x1, out y1, out z, out kt, out h);
+                d.GetKeyPoint(2, out x2, out y2, out z, out kt, out h);
+                if (DrawingStyleRules.ShouldFlipRadiusTerminator(x0, y0, x1, y1, x2, y2)) {
+                    d.TerminatorPosition = !d.TerminatorPosition;
+                }
+            } catch (Exception e) { Log.Write("DrawingRadiusTerminator", e); }
         }
 
-        // 倒角标注：优先用天工原生倒角尺寸 AddChamfer（和公司人画图的 igDimTypeChamfer 一致，带水平折线引出），
-        // 找不到邻边或原生接口失败时平滑回退到带引线文字（同样继承 A3-国标-水平 样式）。
+        // 引线式尺寸的文字挪到 textPos（图纸坐标）：直径/半径固定改 KP[4]（防 6 关键点延长弧误改 KP[5]），倒角改 KP[2]
+        static void MoveText(S.Dimension d, double[] textPos){
+            if (textPos == null) return;
+            try { int k = DrawingStyleRules.CalloutTextKeyPointIndex(d.KeyPointCount); if (k >= 0) d.SetKeyPoint(k, textPos[0], textPos[1], 0); } catch (Exception e) { Log.Write("DrawingMoveText", e); }
+        }
+
+        // 放置引线标注、校准端符朝向，并按天工实际渲染出的文字架范围复核是否与已放文字重叠；
+        // 若实测字体比预估宽/高导致撞到前一条文字，沿竖直方向微调避开后再登记。
+        void PlaceAndGuardCallout(S.Dimension d, double[] textPos, Action fixTerminator){
+            MoveText(d, textPos);
+            if (fixTerminator != null) fixTerminator();
+            if (textPos != null && calloutBoxes.Count > 0) {
+                for (int attempt = 0; attempt < 6; attempt++) {
+                    var tb = ReadCalloutShelfBox(d);
+                    if (tb == null) break;
+                    double[] hit = FindOverlap(tb, calloutBoxes);
+                    if (hit == null) break;
+                    // 优先往下错开（或根据碰撞框相对位置往外退），步长足够彻底脱离碰撞框
+                    double shiftDown = hit[1] - tb[3] - 0.0018;
+                    double shiftUp = hit[3] - tb[1] + 0.0018;
+                    double dy = Math.Abs(shiftDown) <= Math.Abs(shiftUp) ? shiftDown : shiftUp;
+                    textPos = new[] { textPos[0], textPos[1] + dy };
+                    MoveText(d, textPos);
+                    if (fixTerminator != null) fixTerminator();
+                }
+            }
+            RecordCalloutShelf(d);
+        }
+
+        void RecordCalloutShelf(S.Dimension d){
+            var tb = ReadCalloutShelfBox(d);
+            if (tb != null) {
+                calloutBoxes.Add(tb);
+                if (Space != null) Space.Add(tb[0] - 0.0008, tb[1] - 0.001, tb[2] + 0.0008, tb[3] + 0.001);
+            } else {
+                Occupy(d);
+            }
+        }
+
+        // 读取引线标注的真实文字架矩形（不含斜引线本身，避免向下斜引线导致 Range.y1 虚高产生假碰撞或挡死整片空白）：
+        //   · AddRadialDiameter / AddRadius (kps=5 或 6)：KP[3]=文字中心，KP[4]=横线外端；
+        //   · AddChamfer Perpendicular (kps=3)：KP[1]=横线外端，KP[2]=文字中心。
+        static double[] ReadCalloutShelfBox(S.Dimension d){
+            if (d == null) return null;
+            try {
+                int kc = d.KeyPointCount;
+                double cx, cy, ex, ey, z; F.KeyPointType kt; int h;
+                if (kc >= 5) {
+                    d.GetKeyPoint(3, out cx, out cy, out z, out kt, out h);
+                    d.GetKeyPoint(4, out ex, out ey, out z, out kt, out h);
+                } else if (kc == 3) {
+                    d.GetKeyPoint(2, out cx, out cy, out z, out kt, out h);
+                    d.GetKeyPoint(1, out ex, out ey, out z, out kt, out h);
+                } else {
+                    double a, b, c, e; d.Range(out a, out b, out c, out e);
+                    return new[] { a, b, c, e };
+                }
+                var tb = DrawingStyleRules.CalloutShelfBox(cx, cy, ex, ey);
+                if (tb[2] <= tb[0] + 0.002 || tb[3] <= tb[1] + 0.002) {
+                    double a, b, c, e; d.Range(out a, out b, out c, out e);
+                    return new[] { a, b, c, e };
+                }
+                return tb;
+            } catch { return null; }
+        }
+
+        static double[] FindOverlap(double[] r, List<double[]> boxes){
+            foreach (var u in boxes) {
+                if (r[0] < u[2] && u[0] < r[2] && r[1] < u[3] && u[1] < r[3]) return u;
+            }
+            return null;
+        }
+
+        // 倒角标注：采用公司人图一致的 igDimChamferModePerpendicular（垂直于倒角斜边的单箭头引出「4-C4 / C2」），
+        // 彻底替代此前 AlongAxis 生成的窄双箭头挤块与 90° 竖排歪字；失败时平滑回退到带引线文字。
         public bool Chamfer(D.DrawingView v, RadiusGroup g, IList<DwgEdge> allEdges, double[] textPos){
             var l = g.Leader;
             double mx = (l.X1 + l.X2) / 2, my = (l.Y1 + l.Y2) / 2;
@@ -374,17 +479,17 @@ namespace TianGongCadSuite {
                 try {
                     var p1 = ToSheet(v, mx, my);
                     var p2 = ToSheet(v, (adj.X1 + adj.X2) / 2, (adj.Y1 + adj.Y2) / 2);
-                    // 实测（2026-11-21 MicroProbe）：AddChamfer 第 1 参数是正交参考边，第 2 参数才是倒角斜边
-                    // （传反会把参考边当倒角斜边，量出 参考边长/√2 = 75.66mm）。
+                    // 实测（2026-11-21 / 2026-11-23）：第 1 参数是正交参考边，第 2 参数是倒角斜边；
+                    // Perpendicular 模式与公司 100% 人图一致，输出干净的 45° 单箭头「4-C4 / C2」。
                     d = dims.AddChamfer(
                         Ref(v, adj.Tag), p2[0], p2[1], 0, false,
                         Ref(v, l.Tag), p1[0], p1[1], 0, false,
-                        S.DimChamferModeConstants.igDimChamferModeAlongAxis);
+                        S.DimChamferModeConstants.igDimChamferModePerpendicular);
                     EnsureStyle(d, StyleName);
                     if (Math.Abs(d.Value * 1000.0 - g.RadiusMm) <= 0.08) {
                         if (g.Count > 1) try { d.PrefixString = g.Count + "-"; } catch { }
-                        MoveText(d, textPos);
-                        Created++; Occupy(d);
+                        PlaceAndGuardCallout(d, textPos, () => { try { d.TerminatorPosition = true; } catch { } });
+                        Created++;
                         return true;
                     }
                     try { d.Delete(); } catch { }
@@ -426,6 +531,8 @@ namespace TianGongCadSuite {
                 double x0, y0, x1, y1; d.Range(out x0, out y0, out x1, out y1);
                 bool inside = horizontal ? y0 < box[3] - 1e-4 : x1 > box[0] + 1e-4;
                 if (inside) { d.TrackDistance = -want; d.Range(out x0, out y0, out x1, out y1); }
+                double sc = 1.0; try { sc = v.ScaleFactor; } catch { }
+                ApplyLinearTerminator(d, sc);
                 Created++; Occupy(d); return true;
             } catch (Exception e) { Failed++; Log.Write("DrawingDistance", e); return false; }
         }

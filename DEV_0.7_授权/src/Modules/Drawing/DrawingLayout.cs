@@ -185,32 +185,57 @@ namespace TianGongCadSuite {
             if (get(DwgViewRole.Back) != null) row.Add(get(DwgViewRole.Back));
             col.Add(main);
             if (below != null) col.Add(below);
+            // 剖视图上方自带「剖面 A-A 1:1」文字（约 12mm），额外留 10mm 避免贴着主视图底边
+            double secExtra = (below != null && below.Section) ? 0.010 : 0.0;
             // 需要的宽高 = 模型尺寸 × 比例 + 固定留白（每个视图前一条尺寸带、最后再一条，视图之间再空一格）
             double modelW = row.Sum(v => v.W), modelH = col.Sum(v => v.H);
-            double fixedW = (row.Count + 1) * DimBand + (row.Count - 1) * Gap, fixedH = (col.Count + 1) * DimBand + (col.Count - 1) * Gap;
+            double fixedW = (row.Count + 1) * DimBand + (row.Count - 1) * Gap;
+            double fixedH = (col.Count + 1) * DimBand + (col.Count - 1) * Gap + secExtra;
             double scale = DrawingPlan.PickScale(modelW, modelH, Math.Max(1e-6, z.MainW - fixedW), Math.Max(1e-6, z.MainH - fixedH));
             var lay = new DwgLayout { Zones = z, Scale = scale };
-            // 整组在主区里居中偏左上
+            // 比例定好后，把主区富余留白做均衡分配：
+            //   1) 多视图时适度拉开视图间距（最多多加 16mm），既给孔标注 / 剖视标题留通道，又不至于视图散太远；
+            //   2) 水平剩余留白偏左（左侧约占 30%、右侧占 70%），给主视图右侧引线标注留足走廊，避免撞到轴测图；
+            //   3) 竖直剩余留白上下均衡，不再上下空 80mm 中间挤成一团。
             double groupW = modelW * scale + fixedW, groupH = modelH * scale + fixedH;
-            double left = z.Main[0] + Math.Max(0, (z.MainW - groupW) / 2), top = z.Main[3] - Math.Max(0, (z.MainH - groupH) / 2);
+            double surplusW = Math.Max(0, z.MainW - groupW);
+            double surplusH = Math.Max(0, z.MainH - groupH);
+            double hGapExtra = row.Count > 1 ? Math.Min(0.016, surplusW * 0.45 / (row.Count - 1)) : 0.0;
+            double vGapExtra = col.Count > 1 ? Math.Min(0.016, surplusH * 0.34 / (col.Count - 1)) : 0.0;
+            double remW = Math.Max(0, surplusW - hGapExtra * Math.Max(0, row.Count - 1));
+            double remH = Math.Max(0, surplusH - vGapExtra * Math.Max(0, col.Count - 1));
+            double leftPad = Math.Min(remW * 0.30, 0.028);
+            double topPad = remH * 0.48;
+            double left = z.Main[0] + leftPad, top = z.Main[3] - topPad;
             var xs = new Dictionary<DwgViewSpec, double>(); double cx = left;
-            for (int i = 0; i < row.Count; i++) { cx += DimBand + (i > 0 ? Gap : 0); xs[row[i]] = cx + row[i].W * scale / 2; cx += row[i].W * scale; }
+            for (int i = 0; i < row.Count; i++) {
+                cx += DimBand + (i > 0 ? Gap + hGapExtra : 0);
+                xs[row[i]] = cx + row[i].W * scale / 2;
+                cx += row[i].W * scale;
+            }
             var ys = new Dictionary<DwgViewSpec, double>(); double cy = top;
-            for (int i = 0; i < col.Count; i++) { cy -= DimBand + (i > 0 ? Gap : 0); ys[col[i]] = cy - col[i].H * scale / 2; cy -= col[i].H * scale; }
+            for (int i = 0; i < col.Count; i++) {
+                cy -= DimBand + (i > 0 ? Gap + secExtra + vGapExtra : 0);
+                ys[col[i]] = cy - col[i].H * scale / 2;
+                cy -= col[i].H * scale;
+            }
             double mx = xs[main], my = ys[main];
             Put(lay, main, mx, my, scale);
             foreach (var v in col) if (v != main) Put(lay, v, mx, ys[v], scale);
             foreach (var v in row) if (v != main) Put(lay, v, xs[v], my, scale);
             var iso = views.FirstOrDefault(v => v.Role == DwgViewRole.Iso);
             if (iso != null) {
-                double isoAvailW = z.Iso[2] - z.Iso[0] - 0.006, isoAvailH = z.Iso[3] - z.Iso[1] - 0.006;
-                // 轴测图只是看形状，比例不写在图上：按区域放满（两位有效数字），不超过主视图比例
-                double s = Math.Min(isoAvailW / Math.Max(isoW, 1e-6), isoAvailH / Math.Max(isoH, 1e-6)) * 0.92;
+                // 轴测图左侧留出 8mm(A3)/5mm(A4) 与主区标注走廊隔离，比例适度收敛到 0.86 防止细长件轴测图侵入标注区
+                double isoLeftPad = z.Name == "A3" ? 0.008 : 0.005;
+                double isoX0 = z.Iso[0] + isoLeftPad, isoX1 = z.Iso[2] - 0.004;
+                double isoY0 = z.Iso[1] + 0.004, isoY1 = z.Iso[3] - 0.004;
+                double isoAvailW = Math.Max(0.02, isoX1 - isoX0), isoAvailH = Math.Max(0.02, isoY1 - isoY0);
+                double s = Math.Min(isoAvailW / Math.Max(isoW, 1e-6), isoAvailH / Math.Max(isoH, 1e-6)) * 0.86;
                 double mag = Math.Pow(10, Math.Floor(Math.Log10(s)) - 1); s = Math.Floor(s / mag) * mag;
                 if (s > scale) s = scale;
                 lay.IsoScale = s;
                 iso.W = isoW; iso.H = isoH;
-                Put(lay, iso, (z.Iso[0] + z.Iso[2]) / 2, (z.Iso[1] + z.Iso[3]) / 2, s);
+                Put(lay, iso, (isoX0 + isoX1) / 2, (isoY0 + isoY1) / 2, s);
             }
             return lay;
         }
@@ -227,6 +252,10 @@ namespace TianGongCadSuite {
     // 图纸上已经占用的地方（视图、尺寸、标注文字），给引线文字找空地。全部图纸坐标（米），矩形 {x0,y0,x1,y1}。
     public sealed class DwgSpace {
         readonly List<double[]> used = new List<double[]>();
+        readonly List<double[]> viewBoxes = new List<double[]>();
+        readonly List<double[]> leaders = new List<double[]>();
+        readonly List<double[]> calloutTexts = new List<double[]>();
+        readonly List<double[]> dimTexts = new List<double[]>();
         readonly List<double[]> allowed = new List<double[]>();
         public DwgSpace(SheetZones z){
             allowed.Add(z.Main); allowed.Add(z.Iso);
@@ -235,9 +264,24 @@ namespace TianGongCadSuite {
         }
         public void Add(double[] r){ if (r != null && r[2] > r[0] && r[3] > r[1]) used.Add(r); }
         public void Add(double x0, double y0, double x1, double y1){ Add(new[] { Math.Min(x0, x1), Math.Min(y0, y1), Math.Max(x0, x1), Math.Max(y0, y1) }); }
+        public void AddView(double[] r){ if (r != null && r[2] > r[0] && r[3] > r[1]) { used.Add(r); viewBoxes.Add(r); } }
+        public void AddDimText(double[] r){ if (r != null && r[2] > r[0] && r[3] > r[1]) dimTexts.Add(r); }
+        public void AddLeader(double x1, double y1, double x2, double y2){ leaders.Add(new[] { x1, y1, x2, y2 }); }
         static bool Overlap(double[] a, double[] b){ return a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]; }
+        static bool SameBox(double[] a, double[] b){
+            if (a == null || b == null || a.Length < 4 || b.Length < 4) return false;
+            return Math.Abs(a[0] - b[0]) < 1e-6 && Math.Abs(a[1] - b[1]) < 1e-6 && Math.Abs(a[2] - b[2]) < 1e-6 && Math.Abs(a[3] - b[3]) < 1e-6;
+        }
         bool Inside(double[] r){ foreach (var z in allowed) if (r[0] >= z[0] - 1e-9 && r[2] <= z[2] + 1e-9 && r[1] >= z[1] - 1e-9 && r[3] <= z[3] + 1e-9) return true; return false; }
         public bool Free(double[] r){ if (!Inside(r)) return false; foreach (var u in used) if (Overlap(u, r)) return false; return true; }
+        bool FreeExcept(double[] r, double[] ignore){
+            if (!Inside(r)) return false;
+            foreach (var u in used) {
+                if (ignore != null && SameBox(u, ignore)) continue;
+                if (Overlap(u, r)) return false;
+            }
+            return true;
+        }
         // 文字大小估计（字高 3.5 的公司尺寸样式）：汉字 3.6mm、其它 2.1mm 宽，一行 4.5mm 高
         public static double TextWidth(string t){
             double w = 0; foreach (char c in t ?? "") w += c > 0x2E80 ? 0.0036 : 0.0021;
@@ -245,7 +289,26 @@ namespace TianGongCadSuite {
             int codes = 0; for (int i = 0; i + 2 < (t ?? "").Length; i++) if (t[i] == '%' && char.IsLetter(t[i + 1]) && char.IsLetter(t[i + 2])) codes++;
             return Math.Max(0.006, w - codes * 0.0021 * 2);
         }
-        // 从 (x, y) 附近找一块 w×h 的空地：先在右边从 y 开始上下错开，再试左边、上面、下面。找不到给 null
+        // 实测校准的引线标注文字框宽度（A3-国标-水平 3mm 仿宋/SHX 字体 + 天工 4.5mm 水平引线肩部）：
+        // 2026-11-23 实测 5 种真实孔/圆角标注，旧 TextWidth 低估约 10~15mm 导致标注伸进轴测图。
+        public static double CalloutWidth(string line1, string line2){
+            Func<string, double> measure = s => {
+                if (string.IsNullOrEmpty(s)) return 0;
+                double w = 0;
+                for (int i = 0; i < s.Length; i++) {
+                    if (s[i] == '%' && i + 2 < s.Length && char.IsLetter(s[i + 1]) && char.IsLetter(s[i + 2])) {
+                        w += 0.0044; i += 2; continue;
+                    }
+                    char c = s[i];
+                    if (c > 0x2E80 || c == 'Ø' || c == '×' || c == '↧' || c == '⌴') w += 0.0045;
+                    else if (c == ' ') w += 0.0018;
+                    else w += 0.0028;
+                }
+                return w;
+            };
+            return Math.Max(0.012, Math.Max(measure(line1), measure(line2)) + 0.0052);
+        }
+        // 兼容旧入口：从 (x, y) 附近找一块 w×h 的空地（先右后左再上下）
         public double[] Place(double[] box, double y, double w, double h){
             var tries = new List<double[]>();
             for (int i = 0; i < 18; i++) {
@@ -260,5 +323,148 @@ namespace TianGongCadSuite {
             }
             return null;
         }
+
+        // 紧凑就近放置引线标注（0.13.6）：
+        // 以特征真实锚点 (fx, fy) 与视图实际轮廓框 cbox 为中心，在四侧 + 可选内部空腔（大窗口圆角、U 槽圆角）搜索候选框，
+        // 按「引线最短 + 严禁跨其它视图 + 避免横穿本视图 + 避免与已有引线交叉」打分择优；
+        // 返回放置框 placedBox 与精准折点 elbowPos（右侧放置折点在框左沿，左侧放置折点在框右沿，Y 按主行+Subfix 均在横线上方计算）。
+        public bool PlaceCompact(double fx, double fy, double[] cbox, double[] ownObstacle, double w, double h, double belowH, bool preferRight, bool allowVoid, Func<double[], bool> geomClear, out double[] placedBox, out double[] elbowPos){
+            placedBox = null; elbowPos = null;
+            double bestCost = double.MaxValue;
+            double[] bestRect = null, bestElbow = null;
+            double vx0 = cbox[0], vy0 = cbox[1], vx1 = cbox[2], vy1 = cbox[3];
+            double vw = Math.Max(vx1 - vx0, 1e-6), vh = Math.Max(vy1 - vy0, 1e-6);
+
+            Action<double[], bool, double> eval = (r, isVoid, bonus) => {
+                if (isVoid) {
+                    if (!FreeExcept(r, ownObstacle)) return;
+                    if (geomClear == null || !geomClear(r)) return;
+                } else {
+                    if (!Free(r)) return;
+                }
+                double ey = DrawingStyleRules.CalloutShelfY(r[1], belowH);
+                double ex;
+                if (r[0] >= fx - 0.0005) ex = r[0];
+                else if (r[2] <= fx + 0.0005) ex = r[2];
+                else ex = (fx <= (vx0 + vx1) / 2) ? r[2] : r[0];
+                double dx = ex - fx, dy = ey - fy;
+                double len = Math.Sqrt(dx * dx + dy * dy);
+                if (isVoid && len > 0.024) return;
+                double cost = len + bonus;
+                // 严禁引线横穿其它视图（02-003 孔标注越过右视图）
+                foreach (var vb in viewBoxes) {
+                    if (ownObstacle != null && SameBox(vb, ownObstacle)) continue;
+                    if (DrawingPlan.SegmentIntersectsRect(fx, fy, ex, ey, vb[0], vb[1], vb[2], vb[3])) cost += 0.250;
+                }
+                // 避免与已有引线形成 X 交叉
+                foreach (var ld in leaders) {
+                    if (SegmentsCross(fx, fy, ex, ey, ld[0], ld[1], ld[2], ld[3])) cost += 0.032;
+                }
+                // 避免引线直接穿过已放置的标注文字框或坐标数字（起点外移 2.5mm 后检测，避免误伤同孔坐标延伸线）
+                if (len > 0.004) {
+                    double tTrim = Math.Min(0.25, 0.0025 / len);
+                    double sx = fx + dx * tTrim, sy = fy + dy * tTrim;
+                    foreach (var ct in calloutTexts) {
+                        if (DrawingPlan.SegmentIntersectsRect(sx, sy, ex, ey, ct[0], ct[1], ct[2], ct[3])) cost += 0.120;
+                    }
+                    foreach (var dt in dimTexts) {
+                        if (DrawingPlan.SegmentIntersectsRect(sx, sy, ex, ey, dt[0], dt[1], dt[2], dt[3])) cost += 0.045;
+                    }
+                }
+                // 避免引线横穿本视图大半个身位（02-010 左侧 R35 拉到最右边、02-015 中间 4-R10 拉 110mm）
+                if (!isVoid && len > 0.018) {
+                    double frac = InteriorFraction(fx, fy, ex, ey, vx0, vy0, vx1, vy1);
+                    if (frac > 0.35 && len * frac > 0.015) cost += 0.035 * frac + 0.35 * len * frac;
+                }
+                // 优先让斜引线角度自然（约 15°~65°），稍微避开过长的纯水平长线
+                if (Math.Abs(dy) < 0.0015 && len > 0.025) cost += 0.004;
+                if (cost < bestCost) { bestCost = cost; bestRect = r; bestElbow = new[] { ex, ey }; }
+            };
+
+            double baseY = fy - belowH - 0.001;
+            // 1. 可选内部大空腔 / 台阶空位就近放置（仅对圆角等小型短标注开启，需几何边全净空）
+            if (allowVoid && geomClear != null) {
+                double[] dists = { 0.007, 0.011, 0.016 };
+                double[,] dirs = { { -1, -1 }, { 1, 1 }, { -1, 1 }, { 1, -1 }, { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
+                foreach (double dist in dists) {
+                    for (int k = 0; k < 8; k++) {
+                        double sx = dirs[k, 0], sy = dirs[k, 1];
+                        double norm = Math.Sqrt(sx * sx + sy * sy);
+                        double ox = fx + sx / norm * dist, oy = fy + sy / norm * dist;
+                        double x0 = sx < 0 ? ox - w : ox;
+                        double y0 = oy - belowH - 0.001;
+                        eval(new[] { x0, y0, x0 + w, y0 + h }, true, -0.004);
+                    }
+                }
+            }
+
+            // 2. 右侧外沿候选（紧凑距轮廓 6 / 10 / 15mm，Y 沿特征上下密集扫）
+            foreach (double gap in new[] { 0.006, 0.010, 0.015 }) {
+                double x0 = vx1 + gap;
+                double bonus = preferRight ? -0.003 : 0.0;
+                for (int i = 0; i < 32; i++) {
+                    double dy = (i % 2 == 0 ? 1 : -1) * ((i + 1) / 2) * 0.0034;
+                    if (i == 0) dy = 0;
+                    eval(new[] { x0, baseY + dy, x0 + w, baseY + dy + h }, false, bonus);
+                }
+            }
+            // 3. 左侧外沿候选（近边 6mm、越过左侧坐标尺寸 14 / 22mm）
+            foreach (double gap in new[] { 0.006, 0.014, 0.022 }) {
+                double x0 = vx0 - gap - w;
+                for (int i = 0; i < 28; i++) {
+                    double dy = (i % 2 == 0 ? 1 : -1) * ((i + 1) / 2) * 0.0038;
+                    if (i == 0) dy = 0;
+                    eval(new[] { x0, baseY + dy, x0 + w, baseY + dy + h }, false, 0.0);
+                }
+            }
+            // 4. 上方与下方外沿候选（近边 6mm、越过上方/下方坐标尺寸 16 / 24mm）
+            foreach (double gap in new[] { 0.006, 0.016, 0.024 }) {
+                double yTop = vy1 + gap;
+                double yBot = vy0 - gap - h;
+                foreach (double dx in new[] { 0.004, 0.010, 0.018, 0.028, 0.042 }) {
+                    eval(new[] { fx + dx, yTop, fx + dx + w, yTop + h }, false, 0.001);
+                    eval(new[] { fx - dx - w, yTop, fx - dx, yTop + h }, false, 0.001);
+                    eval(new[] { fx + dx, yBot, fx + dx + w, yBot + h }, false, 0.001);
+                    eval(new[] { fx - dx - w, yBot, fx - dx, yBot + h }, false, 0.001);
+                }
+            }
+
+            if (bestRect == null) return false;
+            Add(bestRect[0] - 0.001, bestRect[1] - 0.0012, bestRect[2] + 0.001, bestRect[3] + 0.0012);
+            calloutTexts.Add(bestRect);
+            AddLeader(fx, fy, bestElbow[0], bestElbow[1]);
+            placedBox = bestRect;
+            elbowPos = bestElbow;
+            return true;
+        }
+
+        // 计算线段落在轴对齐矩形内的比例（0..1）
+        static double InteriorFraction(double ax, double ay, double bx, double by, double x0, double y0, double x1, double y1){
+            double dx = bx - ax, dy = by - ay;
+            double t0 = 0, t1 = 1;
+            double[] p = { -dx, dx, -dy, dy };
+            double[] q = { ax - x0, x1 - ax, ay - y0, y1 - ay };
+            for (int i = 0; i < 4; i++) {
+                if (Math.Abs(p[i]) < 1e-12) { if (q[i] < 0) return 0; }
+                else {
+                    double r = q[i] / p[i];
+                    if (p[i] < 0) { if (r > t1) return 0; if (r > t0) t0 = r; }
+                    else { if (r < t0) return 0; if (r < t1) t1 = r; }
+                }
+            }
+            return t1 > t0 ? t1 - t0 : 0;
+        }
+
+        // 两条线段是否严格内部相交（不含共享端点）
+        static bool SegmentsCross(double ax, double ay, double bx, double by, double cx, double cy, double dx, double dy){
+            if ((Math.Abs(ax - cx) < 1e-5 && Math.Abs(ay - cy) < 1e-5) || (Math.Abs(bx - dx) < 1e-5 && Math.Abs(by - dy) < 1e-5)) return false;
+            double d1 = Cross(cx - ax, cy - ay, bx - ax, by - ay);
+            double d2 = Cross(dx - ax, dy - ay, bx - ax, by - ay);
+            double d3 = Cross(ax - cx, ay - cy, dx - cx, dy - cy);
+            double d4 = Cross(bx - cx, by - cy, dx - cx, dy - cy);
+            return ((d1 > 1e-10 && d2 < -1e-10) || (d1 < -1e-10 && d2 > 1e-10))
+                && ((d3 > 1e-10 && d4 < -1e-10) || (d3 < -1e-10 && d4 > 1e-10));
+        }
+        static double Cross(double ax, double ay, double bx, double by){ return ax * by - ay * bx; }
     }
 }

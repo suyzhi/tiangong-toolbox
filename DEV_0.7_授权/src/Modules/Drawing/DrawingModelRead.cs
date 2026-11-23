@@ -44,11 +44,32 @@ namespace TianGongCadSuite {
                         bool seen = false;
                         foreach (var h in holeAxes[a]) if (Math.Abs(h[0] - u) < 1e-5 && Math.Abs(h[1] - v) < 1e-5) { seen = true; break; }
                         if (!seen) holeAxes[a].Add(new[] { u, v });
+                        continue;
+                    }
+                    var cone = geom as G.Cone;
+                    if (cone != null) {
+                        bool hole; try { hole = face.IsParamReversed; } catch { continue; }
+                        if (!hole) ConeChamfer(face, cone, f);
                     }
                 }
             }
             for (int a = 0; a < 3; a++) { f.Holes[a] = holeAxes[a].Count; f.Steps[a] = DrawingPlan.Distinct(offsets[a], 1e-5).Count; }
             return f;
+        }
+
+        // 回转体 / 销子端部的 45° 锥面外倒角（如 02-029 销底 C1）：记录倒角边长供 DropNearOutline 过滤掉紧贴 0 的 1mm 坐标线
+        static void ConeChamfer(G.Face face, G.Cone cone, ModelFacts f){
+            try {
+                Array bp = new double[3], ax = new double[3]; double rr, ang; bool exp;
+                cone.GetConeData(ref bp, ref ax, out rr, out ang, out exp);
+                int a = AxisOf(ax); if (a < 0) return;
+                if (Math.Abs(Math.Abs(ang) - Math.PI / 4) > 0.05) return;
+                Array lo = new double[3], hi = new double[3]; face.GetExactRange(ref lo, ref hi);
+                double leg = Math.Abs(Convert.ToDouble(hi.GetValue(a)) - Convert.ToDouble(lo.GetValue(a)));
+                if (leg > 0.006 || leg < 1e-5) return;
+                f.Chamfers.Add(Math.Round(leg * 1000, 2));
+                for (int i = 0; i < 3; i++) f.EdgeTol[i] = Math.Max(f.EdgeTol[i], leg);
+            } catch { }
         }
 
         // 倒角面：法向在两个轴之间 45°、窄（两个方向的宽度都不超过 6mm）。记下边长（C 几）

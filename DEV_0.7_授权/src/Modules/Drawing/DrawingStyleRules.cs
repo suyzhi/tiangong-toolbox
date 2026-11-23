@@ -174,5 +174,71 @@ namespace TianGongCadSuite {
             if (horizontal) return lowSide ? ty > viewBox[1] - clearance : ty < viewBox[3] + clearance;
             return lowSide ? tx > viewBox[0] - clearance : tx < viewBox[2] + clearance;
         }
+
+        // ---- 端符翻转与窄跨度排版（0.13.6）----
+        // 公司 A3-国标-水平 / A3-国标 箭头长约 3mm，单字符宽约 2.1mm。
+        // 线性尺寸（板厚 4mm、小台阶、小比例细长件宽 20mm@1:6=3.3mm）纸面跨度不足以从容容纳两个内箭头 + 文字时，
+        // 两个箭头会从内朝外挤成一团（缩在一块）并压住数字；翻转端符（TerminatorPosition=true）改为外箭头朝里指（-->| 4 |<--）。
+        public static double EstimateValueWidth(string valueText){
+            if (string.IsNullOrEmpty(valueText)) return 0.0024;
+            return Math.Max(0.0022, valueText.Length * 0.0021);
+        }
+
+        public static bool ShouldFlipLinearTerminator(double valueM, double scale, string valueText){
+            double paperSpan = Math.Abs(valueM) * Math.Max(scale, 1e-9);
+            double textW = EstimateValueWidth(valueText);
+            // 两个箭头 6mm + 文字宽 + 两侧留白 ≥ 4mm，且纸面跨度 < 14mm 一律翻转成外箭头朝里指
+            return paperSpan < Math.Max(0.014, 0.0085 + textW);
+        }
+
+        // 纸面跨度连文字本身都塞不下（例如 1mm/2mm 板厚，或 20mm@1:6 = 3.3mm 塞不下 "20"）时，
+        // 除翻转端符外，还将数字引出到单侧箭头外（-->| |<-- 20），避免尺寸界线压字。
+        public static bool ShouldBreakNarrowLinearText(double valueM, double scale, string valueText){
+            double paperSpan = Math.Abs(valueM) * Math.Max(scale, 1e-9);
+            double textW = EstimateValueWidth(valueText);
+            return paperSpan < textW + 0.0022;
+        }
+
+        public static double NarrowLinearBreakDistance(string valueText){
+            return Math.Max(0.0055, 0.0035 + EstimateValueWidth(valueText) * 0.65);
+        }
+
+        // 半径标注箭头方向判定（AddRadius）：
+        // kp0 = 弧上箭尖，kp1 = 圆弧中心，kp2 = 箭尾。
+        // 当箭尾比箭尖更靠近圆心（|kp2-kp1| < |kp0-kp1|）时，箭头是从圆弧内侧朝外指的；
+        // 翻转 TerminatorPosition 让箭头落到圆弧外侧朝圆心指（朝里指），避免箭头缩在圆角内部。
+        public static bool ShouldFlipRadiusTerminator(double tipX, double tipY, double centerX, double centerY, double tailX, double tailY){
+            double dTip2 = (tipX - centerX) * (tipX - centerX) + (tipY - centerY) * (tipY - centerY);
+            double dTail2 = (tailX - centerX) * (tailX - centerX) + (tailY - centerY) * (tailY - centerY);
+            return dTail2 < dTip2 - 1e-12;
+        }
+
+        // 引线标注水平横线（文字基准线）的 Y 坐标：
+        // 实测天工 A3-国标-水平 下，主行和 SubfixString（沉孔 / 攻丝底孔第二行）全部画在水平横线【上方】，
+        // 只有紧贴下方的形位公差框（⌖ Ø0.03）占 horizontal shelf 下方的 belowH 高度。
+        public static double CalloutShelfY(double boxY0, double belowH){
+            return boxY0 + 0.001 + Math.Max(0, belowH);
+        }
+
+        // 引线标注移动文字时对应的关键点索引：
+        // AddRadialDiameter / AddRadius 的文字肩部关键点固定在 KP[4]（当半径引线越过圆弧角度范围时，天工会追加 KP[5]
+        // 作为圆弧延长点，此时仍应移动 KP[4] 而非 KP[kc-1]）；AddChamfer(Perpendicular) 为 3 个关键点，文字点是 KP[2]。
+        public static int CalloutTextKeyPointIndex(int keyPointCount){
+            if (keyPointCount <= 0) return -1;
+            return Math.Min(keyPointCount - 1, 4);
+        }
+
+        // 依据文字中心 (cx,cy) 与水平横线外端 (ex,ey) 计算真实文字架矩形（不含斜引线本身）：
+        // 实测（A3/A4 单行与 2 行沉孔标注）：(cx,cy) 恰好是水平横线上方整个文字块的几何中心，
+        // 故文字顶边约在 cy + |cy - ey| = 2*cy - ey（±0.7mm），完全不受向下斜引线导致的 Range.y1 虚高干扰。
+        public static double[] CalloutShelfBox(double cx, double cy, double ex, double ey){
+            double otherX = 2 * cx - ex;
+            double x0 = Math.Min(otherX, ex) - 0.0006;
+            double x1 = Math.Max(otherX, ex) + 0.0006;
+            double halfH = Math.Max(0.0022, Math.Abs(cy - ey));
+            double y0 = Math.Min(ey, cy) - 0.0006;
+            double y1 = Math.Max(ey, cy) + halfH;
+            return new[] { x0, y0, x1, y1 };
+        }
     }
 }

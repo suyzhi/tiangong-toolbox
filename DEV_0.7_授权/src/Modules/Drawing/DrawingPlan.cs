@@ -202,6 +202,121 @@ namespace TianGongCadSuite {
         // 点 (x,y)（已在圆上）是不是落在这段弧扫过的范围里
         static bool OnArc(DwgEdge a, double x, double y){ return OnArcAngle(a, Math.Atan2(y - a.Cy, x - a.Cx)); }
 
+        // 圆弧真正的中点（弧曲线上，而非圆心）：给 R 标注找最近空地与测引线长度用。
+        // 以前拿圆心当锚点，大半径圆弧（02-010 的 R35/R34）会被误以为在零件正中间，把引线横穿整张视图拉到对侧。
+        public static double[] ArcMidpoint(DwgEdge a){
+            if (a == null) return new[] { 0.0, 0.0 };
+            if (a.Kind == DwgKind.Line) return new[] { (a.X1 + a.X2) / 2, (a.Y1 + a.Y2) / 2 };
+            if (a.Kind == DwgKind.Circle) return new[] { a.Cx, a.Cy };
+            double start, extent; ArcSpan(a, out start, out extent);
+            double mid = start + extent / 2;
+            return new[] { a.Cx + a.R * Math.Cos(mid), a.Cy + a.R * Math.Sin(mid) };
+        }
+
+        // 判定一串坐标尺寸是不是"纯同心圆端面的 6-0-6 冗余串"（只有圆心 + 两个对称象限点，如销子 02-029 顶视）。
+        // 这种端面的外圆已经由 Ø12 直接标出直径，再在上下左右画两套 6-0-6 坐标串既冗余又把视图挤乱。
+        public static bool IsRedundantCircleSpan(OrdinateRun run){
+            if (run == null || run.Origin == null || run.Targets.Count != 2) return false;
+            if (!run.Origin.KeyPoint || run.Origin.Edge == null || run.Origin.Edge.Kind != DwgKind.Circle) return false;
+            return run.Targets.All(t => t.Quadrant && t.Edge != null && t.Edge.Kind == DwgKind.Circle);
+        }
+
+        // 在一组同类孔 / 圆弧 / 倒角中挑选最合适的引线代表：
+        // 优先靠向开放标注侧（通常为右侧外沿）以缩短引线、避免引线穿零件内部；
+        // 当视图里有多组孔同时竞争同一侧时，尽量选 Y 坐标与已选组错开的实例，从源头杜绝引线交叉成麻花（02-031）。
+        public static DwgEdge PickSeparatedLeader(IList<DwgEdge> candidates, double[] viewBox, bool preferRight, IList<double> usedSheetY, Func<DwgEdge, double[]> toAnchorSheet, double minSepSheet){
+            if (candidates == null || candidates.Count == 0) return null;
+            if (candidates.Count == 1) return candidates[0];
+            double vx0 = viewBox != null && viewBox.Length >= 4 ? viewBox[0] : 0;
+            double vy0 = viewBox != null && viewBox.Length >= 4 ? viewBox[1] : 0;
+            double vx1 = viewBox != null && viewBox.Length >= 4 ? viewBox[2] : 0;
+            double vy1 = viewBox != null && viewBox.Length >= 4 ? viewBox[3] : 0;
+            double spanX = Math.Max(vx1 - vx0, 1e-6), spanY = Math.Max(vy1 - vy0, 1e-6);
+            DwgEdge best = candidates[0];
+            double bestScore = double.MaxValue;
+            foreach (var c in candidates) {
+                var a = AnchorOf(c);
+                // 到偏好侧边缘的归一化距离（越小越靠近外沿，引线越短）
+                double distPref = preferRight ? (vx1 - a[0]) / spanX : (a[0] - vx0) / spanX;
+                double distTop = (vy1 - a[1]) / spanY;
+                double score = distPref * 1.6 + distTop * 0.15;
+                if (usedSheetY != null && usedSheetY.Count > 0 && toAnchorSheet != null) {
+                    var s = toAnchorSheet(c);
+                    double minDy = double.MaxValue;
+                    foreach (double uy in usedSheetY) minDy = Math.Min(minDy, Math.Abs(s[1] - uy));
+                    if (minDy < minSepSheet) score += (minSepSheet - minDy) / Math.Max(minSepSheet, 1e-6) * 0.85;
+                }
+                if (score < bestScore) { bestScore = score; best = c; }
+            }
+            return best;
+        }
+
+        public static double[] AnchorOf(DwgEdge e){
+            if (e == null) return new[] { 0.0, 0.0 };
+            if (e.Kind == DwgKind.Line) return new[] { (e.X1 + e.X2) / 2, (e.Y1 + e.Y2) / 2 };
+            if (e.Kind == DwgKind.Arc) return ArcMidpoint(e);
+            return new[] { e.Cx, e.Cy };
+        }
+
+        // 判断某个圆角（纸面弧中点 anchorSheet，视图轮廓框 cbox）是否允许在内部无边空腔就近放置：
+        //   · 仅对小圆角（≤R12）开启，外轮廓大弧（02-010 R34/R35）一律放视图外侧；
+        //   · 完全在轮廓内部（01-004 内窗口 4-R2、02-010 内凸台 4-R2）或深居开口槽/U 槽内（02-015 底部 U 槽 4-R10，
+        //     水平距两侧轮廓均 >15mm、竖向离底边约 1.95mm）允许进空腔；外角圆角（02-001 4-R5）和外侧耳边圆角（02-015 10-R10）保持放外侧。
+        public static bool AllowRadiusInVoid(double radiusMm, double[] anchorSheet, double[] cbox){
+            if (radiusMm > 12.0 || anchorSheet == null || anchorSheet.Length < 2 || cbox == null || cbox.Length < 4) return false;
+            double distX = Math.Min(anchorSheet[0] - cbox[0], cbox[2] - anchorSheet[0]);
+            double distY = Math.Min(anchorSheet[1] - cbox[1], cbox[3] - anchorSheet[1]);
+            if (distX > 0.003 && distY > 0.003) return true;
+            if (distX > 0.015 && distY > 0.001) return true;
+            if (distY > 0.015 && distX > 0.001) return true;
+            return false;
+        }
+
+        // 视图坐标下的候选文字框 rect={x0,y0,x1,y1} 是否完全避开视图里的所有模型边线/圆/弧（保留 margin 间隙）。
+        // 用于凹圆角（01-004 居中大窗口里的 4-R2、02-015 U 型槽里的 4-R10）或台阶缺口旁就近放文字，不拉 100mm 长引线。
+        public static bool RectClearsViewEdges(double[] rect, IList<DwgEdge> edges, double margin){
+            if (rect == null || rect.Length < 4 || edges == null) return false;
+            double x0 = rect[0] - margin, y0 = rect[1] - margin, x1 = rect[2] + margin, y1 = rect[3] + margin;
+            foreach (var e in edges) {
+                if (e.Kind == DwgKind.Line) {
+                    if (SegmentIntersectsRect(e.X1, e.Y1, e.X2, e.Y2, x0, y0, x1, y1)) return false;
+                } else if (e.Kind == DwgKind.Circle) {
+                    double cx = Math.Max(x0, Math.Min(e.Cx, x1)), cy = Math.Max(y0, Math.Min(e.Cy, y1));
+                    double dx = e.Cx - cx, dy = e.Cy - cy;
+                    if (dx * dx + dy * dy <= e.R * e.R + 1e-12) return false;
+                } else {
+                    // 圆弧用若干采样点 + 端点近似，够快且对小/大弧都保守安全
+                    double start, extent; ArcSpan(e, out start, out extent);
+                    int steps = Math.Max(4, (int)Math.Ceiling(extent / (Math.PI / 12)));
+                    double px = e.Cx + e.R * Math.Cos(start), py = e.Cy + e.R * Math.Sin(start);
+                    for (int i = 1; i <= steps; i++) {
+                        double ang = start + extent * i / steps;
+                        double nx = e.Cx + e.R * Math.Cos(ang), ny = e.Cy + e.R * Math.Sin(ang);
+                        if (SegmentIntersectsRect(px, py, nx, ny, x0, y0, x1, y1)) return false;
+                        px = nx; py = ny;
+                    }
+                }
+            }
+            return true;
+        }
+
+        // 线段 (ax,ay)-(bx,by) 是否与轴对齐矩形 [x0,y0,x1,y1] 相交或包含于其内（Liang-Barsky）
+        public static bool SegmentIntersectsRect(double ax, double ay, double bx, double by, double x0, double y0, double x1, double y1){
+            double dx = bx - ax, dy = by - ay;
+            double t0 = 0, t1 = 1;
+            double[] p = { -dx, dx, -dy, dy };
+            double[] q = { ax - x0, x1 - ax, ay - y0, y1 - ay };
+            for (int i = 0; i < 4; i++) {
+                if (Math.Abs(p[i]) < 1e-12) { if (q[i] < 0) return false; }
+                else {
+                    double r = q[i] / p[i];
+                    if (p[i] < 0) { if (r > t1) return false; if (r > t0) t0 = r; }
+                    else { if (r < t0) return false; if (r < t1) t1 = r; }
+                }
+            }
+            return t0 <= t1;
+        }
+
         // 一串超过 MaxRun 个落点（刻度尺的刻线、刻字、花纹）：标出来没人看得清，天工建几百个尺寸也要好几分钟。
         // 只留孔心和够长的边（≥ 视图另一方向 15%），还多就只留外形两头和孔心
         public const int MaxRun = 40;

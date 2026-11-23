@@ -296,6 +296,72 @@ namespace TianGongCadSuite {
             var spA3 = new DwgSpace(SheetZones.A3());
             var rSeam = spA3.Place(new[] { 0.031, 0.131, 0.267, 0.149 }, 0.140, 0.023, 0.010);
             Check(rSeam != null && rSeam[2] <= SheetZones.A3().Iso[0] + 1e-9, "宽 23mm 的孔标注跨过 Main[2] 到 Iso[0] 仍能找到不重叠空位");
+
+            // ---- 0.13.6 端符翻转、圆弧真实中点、冗余圆坐标串、空腔净空、引线就近防交叉、均衡视图布局 ----
+            // 1. 窄线性尺寸端符翻转（4mm 板厚、20mm@1:6=3.3mm）与宽跨度（69mm@1:1）保持默认
+            Check(DrawingStyleRules.ShouldFlipLinearTerminator(0.004, 1.0, "4"), "4mm@1:1 板厚翻转端符为外箭头朝里指");
+            Check(DrawingStyleRules.ShouldFlipLinearTerminator(0.020, 1.0 / 6.0, "20"), "20mm@1:6(3.3mm) 翻转端符为外箭头朝里指");
+            Check(DrawingStyleRules.ShouldBreakNarrowLinearText(0.020, 1.0 / 6.0, "20"), "20mm@1:6 纸面 3.3mm 塞不下文字，移到单侧箭头外");
+            Check(!DrawingStyleRules.ShouldFlipLinearTerminator(0.069, 1.0, "69"), "69mm@1:1 足够宽不翻转");
+            // 2. 半径标注箭头方向：箭尾比箭尖更靠近圆心 → 箭头从内朝外，必须翻转
+            Check(DrawingStyleRules.ShouldFlipRadiusTerminator(0.1354, 0.2414, 0.134, 0.240, 0.1333, 0.2393), "圆角箭尾在圆心侧（从内朝外）判为需翻转");
+            Check(!DrawingStyleRules.ShouldFlipRadiusTerminator(0.2465, 0.1101, 0.280, 0.100, 0.2436, 0.1109), "圆弧箭尾在弧外侧（朝圆心指）不翻转");
+            // 3. 2 行沉孔引线横线 Y 高度：Subfix 在横线上方，仅 belowH 在下方
+            Check(Math.Abs(DrawingStyleRules.CalloutShelfY(0.100, 0) - 0.101) < 1e-9, "普通/2行沉孔横线 Y = boxY0 + 1mm");
+            Check(Math.Abs(DrawingStyleRules.CalloutShelfY(0.100, 0.0065) - 0.1075) < 1e-9, "带 H7 位置度框预留下方 6.5mm");
+            // 4. 圆弧真实中点：左半弧（圆心 35,0，左端 0,0）中点在弧左边而非圆心
+            var leftArc = DwgEdge.Arc(35 * mm, 0, 35 * mm, Math.PI / 3, 35 * mm - 35 * mm * Math.Cos(Math.PI / 6), -35 * mm * Math.Sin(Math.PI / 6), 35 * mm - 35 * mm * Math.Cos(Math.PI / 6), 35 * mm * Math.Sin(Math.PI / 6));
+            var arcMid = DrawingPlan.ArcMidpoint(leftArc);
+            Check(Math.Abs(arcMid[0] - 0) < 1e-5 && Math.Abs(arcMid[1] - 0) < 1e-5, "圆弧中点落在弧线最左端 (0,0) 而非圆心 (35,0)");
+            // 5. 纯同心圆端面（销子 Ø12/Ø10/M6）的 6-0-6 识别为冗余圆坐标串；带直边的矩形板不是冗余串
+            var pinTop = new List<DwgEdge> { DwgEdge.Circle(0, 0, 6 * mm), DwgEdge.Circle(0, 0, 5 * mm), DwgEdge.Circle(0, 0, 2.46 * mm) };
+            var pinRun = DrawingPlan.Ordinate(pinTop, true, 2.0, DrawingPlan.Box(pinTop), false, 0.0075);
+            Check(DrawingPlan.IsRedundantCircleSpan(pinRun), "纯同心圆端面 6-0-6 识别为冗余坐标串");
+            Check(!DrawingPlan.IsRedundantCircleSpan(run), "带直边和孔的板件坐标串不误判为冗余");
+            // 6. 空腔净空检验：大矩形窗口内部空区域返回 true，压到边线返回 false
+            var pocketEdges = Rect(0, 0, 115 * mm, 69 * mm);
+            pocketEdges.AddRange(Rect(31.5 * mm, 5 * mm, 83.5 * mm, 64 * mm));
+            Check(DrawingPlan.RectClearsViewEdges(new[] { 45 * mm, 40 * mm, 65 * mm, 48 * mm }, pocketEdges, 2 * mm), "大窗口内部净空区通过边线碰撞检查");
+            Check(!DrawingPlan.RectClearsViewEdges(new[] { 25 * mm, 40 * mm, 45 * mm, 48 * mm }, pocketEdges, 2 * mm), "跨窗口边线的框被边线碰撞拦截");
+            // 7. 紧凑落位 PlaceCompact：左侧特征（如 02-010 的 R35）优先放左侧短引线，绝不跨过整个视图拉到最右边；且严禁跨越相邻右视图
+            var spCompact = new DwgSpace(SheetZones.A4());
+            var mainCbox = new[] { 0.060, 0.110, 0.130, 0.160 };
+            var mainObs = new[] { 0.058, 0.108, 0.132, 0.162 };
+            var rightObs = new[] { 0.150, 0.108, 0.185, 0.162 };
+            spCompact.AddView(mainObs); spCompact.AddView(rightObs);
+            double[] pBox, pElbow;
+            bool okLeft = spCompact.PlaceCompact(0.062, 0.135, mainCbox, mainObs, 0.018, 0.006, 0, true, false, null, out pBox, out pElbow);
+            Check(okLeft && pBox[2] <= mainCbox[0] && Math.Abs(pElbow[0] - pBox[2]) < 1e-9, "左侧特征就近放视图左侧，且折点在框右沿（文字向左伸展不撞视图）");
+            // 8. 均衡视图布局：50×50×21 带剖视时，主视图与剖视图间距比普通视图多出剖面标题空间；宽细长件右侧留足标注走廊
+            var fSec = new ModelFacts(); fSec.Size = new[] { 0.050, 0.050, 0.021 }; fSec.Holes = new[] { 1, 1, 5 }; fSec.Steps = new[] { 2, 2, 4 }; fSec.FaceArea = new[] { 0.001, 0.001, 0.004 }; fSec.Stepped[2] = true;
+            DrawingLayout.IsoBox(fSec.Size, out iw, out ih);
+            var laySec = DrawingLayout.Arrange(DrawingLayout.Choose(fSec), iw, ih);
+            var mSec = laySec.Get(DwgViewRole.Main); var bSec = laySec.Get(DwgViewRole.Below);
+            double secGap = (mSec.Y - mSec.H * laySec.Scale / 2) - (bSec.Y + bSec.H * laySec.Scale / 2);
+            Check(secGap >= DrawingLayout.DimBand + DrawingLayout.Gap + 0.009, "带剖视 A-A 时主/剖视图轮廓间距留足剖面标题空位（实际 " + Math.Round(secGap * 1000, 1) + "mm）");
+            var longMain = longLay.Get(DwgViewRole.Main);
+            double longRightRoom = longLay.Zones.Iso[0] - (longMain.X + longMain.W * longLay.Scale / 2);
+            Check(longRightRoom >= 0.036, "1325 细长件主视图适度左偏，右侧留足 ≥36mm 标注走廊（实际 " + Math.Round(longRightRoom * 1000, 1) + "mm）");
+            // 9. 引线自动绕开坐标基准「0」圈与已放文字框（02-010 左侧 R35 不横穿 0 圈）
+            var spAvoid = new DwgSpace(SheetZones.A4());
+            var acbox = new[] { 0.060, 0.110, 0.130, 0.160 };
+            var aobs = new[] { 0.058, 0.108, 0.132, 0.162 };
+            spAvoid.AddView(aobs);
+            spAvoid.AddDimText(new[] { 0.049, 0.132, 0.055, 0.138 });   // 左侧中点 y=135 处有坐标「0」圈
+            double[] abox, aelbow;
+            bool okAvoid = spAvoid.PlaceCompact(0.060, 0.135, acbox, aobs, 0.014, 0.006, 0, true, false, null, out abox, out aelbow);
+            Check(okAvoid && Math.Abs(aelbow[1] - 0.135) > 0.002, "左侧有坐标 0 圈时，引线自动上下错开绕避（不直穿 0 圈）");
+            // 10. 空腔圆角准入（U 槽内圆角准入、外角/耳边/大弧外放）与 6 关键点/真实文字架框计算
+            var notchBox = new[] { 0.0454, 0.06985, 0.22873, 0.12252 };
+            Check(DrawingPlan.AllowRadiusInVoid(10.0, new[] { 0.1590, 0.0718 }, notchBox), "02-015 U 槽底圆角 4-R10（深居左右轮廓内、离底 1.95mm）准入内部空腔");
+            Check(!DrawingPlan.AllowRadiusInVoid(10.0, new[] { 0.2283, 0.0950 }, notchBox), "贴外轮廓右缘的耳边圆角 10-R10 保持外放");
+            Check(!DrawingPlan.AllowRadiusInVoid(5.0, new[] { 0.2268, 0.1206 }, notchBox), "板件外角圆角 4-R5 保持外放");
+            Check(!DrawingPlan.AllowRadiusInVoid(35.0, new[] { 0.1200, 0.0950 }, notchBox), "大弧 R35 保持外放");
+            Check(DrawingStyleRules.CalloutTextKeyPointIndex(5) == 4 && DrawingStyleRules.CalloutTextKeyPointIndex(6) == 4 && DrawingStyleRules.CalloutTextKeyPointIndex(3) == 2, "引线文字关键点索引：5/6 关键点半径均取 KP[4]、3 关键点倒角取 KP[2]");
+            var sb1 = DrawingStyleRules.CalloutShelfBox(0.24753, 0.06778, 0.25584, 0.06501);
+            Check(Math.Abs(sb1[0] - 0.23862) < 1e-4 && Math.Abs(sb1[2] - 0.25644) < 1e-4 && sb1[3] < 0.0715 && sb1[1] > 0.064, "向下斜引线的单行文字架框只包住真实文字行，不被上方特征拉高");
+            var sb2 = DrawingStyleRules.CalloutShelfBox(0.26838, 0.18486, 0.28587, 0.17984);
+            Check(sb2[3] - sb2[1] > 0.0095 && sb2[3] - sb2[1] < 0.012, "2 行沉孔标注的真实文字架框高度覆盖两行文字（约 10.6mm）");
         }
     }
 }
