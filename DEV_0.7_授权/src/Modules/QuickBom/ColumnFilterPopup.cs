@@ -38,6 +38,7 @@ namespace TianGongCadSuite {
 
             int w = Ui.S(316), h = Ui.S(376);
             var root = new Panel { Size = new Size(w, h), BackColor = Ui.Bg, Padding = Ui.SPad(10, 8, 10, 10) };
+            Ui.StyleTree(root);
             root.Paint += (s, e) => {
                 using (var p = new Pen(Ui.Line)) e.Graphics.DrawRectangle(p, 0, 0, root.Width - 1, root.Height - 1);
             };

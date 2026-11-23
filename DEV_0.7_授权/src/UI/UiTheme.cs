@@ -262,7 +262,11 @@ namespace TianGongCadSuite {
             f.StartPosition = FormStartPosition.CenterParent;
             f.ShowInTaskbar = false;
             f.KeyPreview = true;
+            UiSkin.Attach(f);
         }
+
+        // 手动对非 Ui.Shell 创建的弹出面板/子容器应用统一控件外观
+        public static void StyleTree(Control root){ UiSkin.Attach(root); }
 
         public static Card Card(string title, int height, string hint){
             var c = new Card();
@@ -292,7 +296,6 @@ namespace TianGongCadSuite {
         public static ComboBox Combo(int width, params string[] items){
             var c = new ComboBox();
             c.DropDownStyle = ComboBoxStyle.DropDownList;
-            c.FlatStyle = FlatStyle.Flat;
             c.Width = S(width + 8);
             c.Items.AddRange(items);
             if (c.Items.Count > 0) c.SelectedIndex = 0;
