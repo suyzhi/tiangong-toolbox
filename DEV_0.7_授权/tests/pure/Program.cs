@@ -10,6 +10,7 @@ static class PureProgram {
         failed += Run("FormatConvert.ResumeMarker", FormatConvertTests.ResumeMarker);
         failed += Run("FormatConvert.SameNameTargets", FormatConvertTests.SameNameTargets);
         failed += Run("FormatConvert.CommandLineQuoting", FormatConvertTests.CommandLineQuoting);
+        failed += Run("FormatConvert.DynamicQueueAndFilter", FormatConvertTests.DynamicQueueAndFilter);
         failed += Run("PanelNaming", TianGongCadSuite.PanelNamingPureTests.Run);
         failed += Run("PanelPlates", TianGongCadSuite.PanelPlatesPureTests.Run);
         failed += Run("RulesPattern", TianGongCadSuite.RulesPatternPureTests.Run);

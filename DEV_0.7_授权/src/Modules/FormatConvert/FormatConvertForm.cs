@@ -24,13 +24,16 @@ namespace TianGongCadSuite {
         readonly CheckBox verify=new CheckBox();
         readonly CheckBox autoWorkers=new CheckBox();
         readonly NumericUpDown workers=new NumericUpDown();
+        readonly CheckBox keepPool=new CheckBox();
         readonly FlatButton start=(FlatButton)Ui.Primary("开始转换",220,44);
         readonly Button stop=Ui.Secondary("停止",72,38);
         readonly Button saveReport=Ui.Secondary("导出报告",96,38);
+        readonly Button releasePool=Ui.Secondary("释放驻留",104,38);
         readonly SlimProgress progress=new SlimProgress();
         readonly Label status=new Label();
         readonly TextBox logBox=new TextBox();
         readonly Timer timer=new Timer();
+        readonly Timer poolWatch=new Timer();
         readonly Label estimate=new Label();
         readonly StringBuilder pendingLog=new StringBuilder();
         bool deferLog;
@@ -44,15 +47,14 @@ namespace TianGongCadSuite {
         readonly Dictionary<int,ConvertRow> rows=new Dictionary<int,ConvertRow>();
         readonly List<Process> processes=new List<Process>();
         readonly List<string> statusFiles=new List<string>();
+        readonly HashSet<string> finishedStatusFiles=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         readonly Dictionary<string,long> offsets=new Dictionary<string,long>();
+        readonly WarmConvertPool warmPool=new WarmConvertPool();
         string workRoot;
         string reportPath;
         DateTime startedAt;
-        // 本次转换的 worker 报上来的隐藏 CAD 进程号（READY 行第 3 列），和开始前就在跑的天工进程（用户的，绝不能杀）
-        readonly HashSet<int> workerCads=new HashSet<int>();
-        HashSet<int> cadsBefore=new HashSet<int>();
         int totalPlanned;
-        IntPtr jobHandle=IntPtr.Zero;
+        int preSkippedCount;
 
         // 0.9.0「D · 侧栏向导」：① 输入（文件/文件夹 + 转哪几类）→ ② 输出设置 → ③ 转换（数字块 + 细进度条 + 日志）。
         // 「开始转换」在最后一步；转换中主按钮自己变成进度条（转换中 23 / 64）。
@@ -130,13 +132,18 @@ namespace TianGongCadSuite {
             opts.Add("目录结构",mirror);
             opts.Add("已存在",force);
             opts.Add("校验",verify);
-            workers.Minimum=1;workers.Maximum=8;workers.Value=2;workers.Width=Ui.S(72);workers.BorderStyle=BorderStyle.FixedSingle;workers.TextAlign=HorizontalAlignment.Right;
-            autoWorkers.Text="自动（推荐：单进程）";autoWorkers.Checked=true;autoWorkers.AutoSize=true;
-            autoWorkers.CheckedChanged+=delegate{ workers.Enabled=!autoWorkers.Checked; };workers.Enabled=false;
+            workers.Minimum=1;workers.Maximum=8;workers.Value=Math.Max(1,Math.Min(8,ConvertPlanner.SuggestedWorkers(8,Environment.ProcessorCount,(long)AvailableMemoryMb())));workers.Width=Ui.S(72);workers.BorderStyle=BorderStyle.FixedSingle;workers.TextAlign=HorizontalAlignment.Right;
+            autoWorkers.Text="自动（智能并发，推荐）";autoWorkers.Checked=true;autoWorkers.AutoSize=true;
+            autoWorkers.CheckedChanged+=delegate{ workers.Enabled=!autoWorkers.Checked; UpdateEstimate(); };
+            workers.ValueChanged+=delegate{ UpdateEstimate(); };
+            workers.Enabled=false;
             opts.Add("并行进程",autoWorkers,workers);
+            keepPool.Text="热驻留进程池（连续转换秒启动，空闲 5 分钟自动释放）";keepPool.Checked=true;keepPool.AutoSize=true;
+            keepPool.CheckedChanged+=delegate{ if(!keepPool.Checked&&!timer.Enabled&&warmPool.AliveCount>0){ ReleaseWarmPool(); } UpdateEstimate(); };
+            opts.Add("热池驻留",keepPool);
             opts.Height=opts.PreferredHeight;
-            estimate.AutoSize=false;estimate.ForeColor=Ui.Muted;estimate.Font=Ui.F8;estimate.BackColor=Ui.Bg;estimate.Height=Ui.S(72);
-            estimate.Text="并行>1 为实验特性：实测仅快约 1.2 倍，且个别零件可能保存失败。\r\n输出格式：装配 .asm、零件 .par、钣金 .psm、工程图 .dft；转换由天工CAD自带的 SolidWorks / STEP 转换器完成。";
+            estimate.AutoSize=false;estimate.ForeColor=Ui.Muted;estimate.Font=Ui.F8;estimate.BackColor=Ui.Bg;estimate.Height=Ui.S(84);
+            UpdateEstimate();
             outStack.Add(outRow);outStack.Add(opts);outStack.Add(estimate);
 
             // ---- ③ 转换 ----
@@ -156,21 +163,28 @@ namespace TianGongCadSuite {
             start.Text="开始转换";start.Click+=delegate{ StartConversion(); };
             stop.Text="停止";stop.Enabled=false;stop.Click+=delegate{ StopConversion(); };((FlatButton)stop).SetFore(Ui.Bad);
             saveReport.Text="导出报告";saveReport.Enabled=false;saveReport.Click+=delegate{ SaveReportAs(); };
+            releasePool.Text="释放驻留";releasePool.Visible=false;releasePool.Click+=delegate{ ReleaseWarmPool(); };
             back.Click+=delegate{ shell.Go(shell.Current-1); };
             next.Click+=delegate{ shell.Go(shell.Current+1); };
-            shell.Footer.AddLeft(back);shell.Footer.AddLeft(stop);shell.Footer.AddLeft(saveReport);
+            shell.Footer.AddLeft(back);shell.Footer.AddLeft(stop);shell.Footer.AddLeft(saveReport);shell.Footer.AddLeft(releasePool);
             shell.Footer.AddRight(start);shell.Footer.AddRight(next);
             shell.Footer.Status=status;status.ForeColor=Ui.Muted;
             status.Text="就绪。";
             shell.PageChanged+=delegate{ UpdatePrimary(); };
 
             timer.Interval=500;timer.Tick+=delegate{ Poll(); };
+            poolWatch.Interval=5000;poolWatch.Tick+=delegate{ if(!timer.Enabled)RefreshPoolUi(); };
+            poolWatch.Start();
             AcceptButton=null;
             // 记住上次的勾选（0.10.2）：原来每次打开都回到默认，转工程图、不镜像的人每次重新勾
             Choices.Bind(parts,"convert.parts");Choices.Bind(assemblies,"convert.assemblies");Choices.Bind(drawings,"convert.drawings");Choices.Bind(step,"convert.step");
             Choices.Bind(recursive,"convert.recursive");Choices.Bind(mirror,"convert.mirror");Choices.Bind(verify,"convert.verify");
             // 「覆盖已存在的转换结果」不记（0.10.3）：转出来的 .par / .asm 常常接着在天工里改（打孔、改属性）。
-            // 记住的话，哪天往同一个输出文件夹补转几个新文件，前面改过的全被重新转换覆盖掉、一声不响。每次要覆盖就当场勾Choices.Bind(autoWorkers,"convert.autoWorkers");
+            // 记住的话，哪天往同一个输出文件夹补转几个新文件，前面改过的全被重新转换覆盖掉、一声不响。每次要覆盖就当场勾。
+            Choices.Bind(autoWorkers,"convert.autoWorkers");
+            Choices.Bind(keepPool,"convert.keepPool");
+            UpdateEstimate();
+            RefreshPoolUi();
             RefreshRail();
         }
         public void GoPageForTest(int i){ shell.Go(i,false); }
@@ -336,9 +350,21 @@ namespace TianGongCadSuite {
         }
         int EffectiveWorkers(ConvertOptions options){
             if(!autoWorkers.Checked)return (int)workers.Value;
-            return ConvertPlanner.SuggestedWorkers(Math.Max(1,items.Count>0?items.Count:sources.Count),Environment.ProcessorCount,(long)AvailableMemoryMb());
+            if(items.Count>0)return ConvertPlanner.SuggestedWorkers(items,Environment.ProcessorCount,(long)AvailableMemoryMb());
+            return ConvertPlanner.SuggestedWorkers(Math.Max(1,sources.Count),Environment.ProcessorCount,(long)AvailableMemoryMb());
         }
-        int RequestedWorkers(){ return autoWorkers.Checked?1:(int)workers.Value; }
+        void UpdateEstimate(){
+            int cores=Environment.ProcessorCount;
+            long mem=(long)AvailableMemoryMb();
+            int suggested=items.Count>0
+                ?ConvertPlanner.SuggestedWorkers(items,cores,mem)
+                :ConvertPlanner.SuggestedWorkers(8,cores,mem);
+            string mode=autoWorkers.Checked
+                ?("当前模式：自动并发（按本机 "+cores+" 核 / 可用内存 "+mem+" MB，多模型自动建议 "+suggested+" 进程；单文件或小批次自动降为 1 进程）。")
+                :("当前模式：手动指定 "+(int)workers.Value+" 个并行进程（并行预拉起 + 动态任务队列均衡，自动不超过实际待转文件数）。");
+            string poolNote=keepPool.Checked?"热驻留已开（连续批次 0 秒启动，空闲 5 分钟自动释放）":"热驻留已关（每批结束立即释放隐藏 CAD）";
+            estimate.Text=mode+"\r\n并行引擎：大型装配同目录总装优先串行防碰撞、内存感知调度、源目录零残留自动清理；"+poolNote+"。\r\n输出格式：装配 .asm、零件 .par、钣金 .psm、工程图 .dft；由天工CAD自带转换器完成。";
+        }
         static ulong AvailableMemoryMb(){
             try{
                 var status=new MEMORYSTATUSEX();status.dwLength=(uint)Marshal.SizeOf(typeof(MEMORYSTATUSEX));
@@ -371,6 +397,7 @@ namespace TianGongCadSuite {
             for(int i=0;i<items.Count;i++)items[i].Index=i;
             scanned=true;
             RefreshList();
+            UpdateEstimate();
             long bytes=0;foreach(ConvertItem item in items)bytes+=item.Size;
             status.Text="已发现 "+items.Count+" 个要转换的文件（SolidWorks / STEP），合计 "+(bytes/1048576.0).ToString("F1")+" MB。";
             AppendLog(status.Text);
@@ -410,62 +437,89 @@ namespace TianGongCadSuite {
             if(problem!=null){ MessageBox.Show(this,problem,"天工格式转换"); return; }
             if(items.Count==0||force.Checked||verify.Checked)ScanInputs(true);
             if(items.Count==0)return;
-            int count=EffectiveWorkers(options);
-            options.Workers=count;
-            var plan=ConvertPlanner.Plan(items,count);
-            if(count>1)AppendLog("警告：并行进程 >1 属于实验特性，同一批里共用零件的装配可能出现保存失败（会自动重试一次）。");
-            workRoot=Path.Combine(Path.GetTempPath(),"TianGongConverter",DateTime.Now.ToString("yyyyMMdd-HHmmss"));
-            Directory.CreateDirectory(workRoot);
-            processes.Clear();statusFiles.Clear();offsets.Clear();rows.Clear();
+
+            processes.Clear();statusFiles.Clear();finishedStatusFiles.Clear();offsets.Clear();rows.Clear();
             totalPlanned=items.Count;
             reportPath=Path.Combine(options.OutputRoot,"转换报告-"+DateTime.Now.ToString("yyyyMMdd-HHmmss")+".csv");
             startedAt=DateTime.Now;
-            workerCads.Clear();cadsBefore=WorkerChildren.Running();
+
+            // 启动任何隐藏 CAD 前先过滤已存在有效输出的文件：全部已转过时毫秒级结束，不白等十几秒启 CAD。
+            List<ConvertRow> preSkipped;
+            var pending=ConvertPlanner.FilterPending(items,options,out preSkipped);
+            preSkippedCount=preSkipped.Count;
+            foreach(ConvertRow sr in preSkipped)rows[sr.Index]=sr;
+            if(pending.Count==0){
+                AppendLog("全部 "+items.Count+" 个文件已存在有效转换结果，已直接跳过（无需启动 CAD）。");
+                progress.Maximum=Math.Max(1,totalPlanned);progress.Value=progress.Maximum;
+                statDone.Set(rows.Count+" / "+totalPlanned,Ui.Text);statOk.Set("0",Ui.Ok);statFail.Set("0",Ui.Text);statSkip.Set(preSkipped.Count.ToString(),Ui.Text);
+                shell.Go(2);
+                Finish();
+                return;
+            }
+
+            int cores=Environment.ProcessorCount;
+            long availMb=(long)AvailableMemoryMb();
+            int count=autoWorkers.Checked
+                ?ConvertPlanner.SuggestedWorkers(pending,cores,availMb)
+                :Math.Max(1,Math.Min((int)workers.Value,pending.Count));
+            count=Math.Max(1,Math.Min(count,pending.Count));
+            options.Workers=count;
+
+            workRoot=Path.Combine(Path.GetTempPath(),"TianGongConverter",DateTime.Now.ToString("yyyyMMdd-HHmmss"));
+            Directory.CreateDirectory(workRoot);
+            string queueDir=Path.Combine(workRoot,"queue");
+            ConvertQueue.Write(queueDir,pending,options);
+
             // 插件模式下当前进程是 TianGong.exe，Application.ExecutablePath 指向 CAD 本体，
             // 用它当 worker 会再拉起一个天工CAD（"找不到文件 --worker"）。必须解析转换器自身。
             string self=ConverterHost.Resolve();
             if(self==null)self=Application.ExecutablePath;
-            jobHandle=NativeJob.Create();
-            int started=0;
-            for(int i=0;i<plan.Count;i++){
-                if(plan[i].Count==0)continue;
-                var builder=new StringBuilder();
-                foreach(ConvertItem item in plan[i])builder.Append(item.Index).Append('\t').Append(item.Source).Append('\t').Append(item.Root).Append('\t').Append(i).AppendLine();
-                string jobFile=Path.Combine(workRoot,"job-"+i+".txt");File.WriteAllText(jobFile,builder.ToString(),new UTF8Encoding(false));
-                string statusFile=Path.Combine(workRoot,"status-"+i+".txt");File.WriteAllText(statusFile,"",new UTF8Encoding(false));
-                var info=new ProcessStartInfo(self,CommandLine.Join("--worker",jobFile,statusFile,options.OutputRoot,options.FlatOutput?"1":"0",options.VerifyReopen?"1":"0",options.Force?"1":"0",workRoot));
-                info.UseShellExecute=false;info.CreateNoWindow=true;info.WindowStyle=ProcessWindowStyle.Hidden;
-                Process process;
-                try{
-                    process=Process.Start(info);
-                }catch(Exception e){
-                    // 以前这里异常会直接冒泡成"未处理的异常"，界面什么都不显示、看起来像点了没反应。
-                    Log.Write("Convert","启动 worker 失败 self="+self+"："+e);
-                    ConvertLog.Append(statusFile,ConvertProtocol.Line("FATAL","启动 worker 失败："+e.Message));
-                    AppendLog("启动转换进程失败："+e.Message+"（转换器路径："+self+"）。");
-                    continue;
-                }
-                NativeJob.Add(jobHandle,process);
-                processes.Add(process);statusFiles.Add(statusFile);offsets[statusFile]=0;started++;
+
+            List<string> activeStatus;
+            List<Process> activeProcs;
+            int reused,newlyBooted;
+            warmPool.Dispatch(count,self,queueDir,options,workRoot,AppendLog,out activeStatus,out activeProcs,out reused,out newlyBooted);
+            for(int i=0;i<activeStatus.Count;i++){
+                statusFiles.Add(activeStatus[i]);
+                offsets[activeStatus[i]]=0;
+                processes.Add(activeProcs[i]);
             }
-            AppendLog("开始转换："+items.Count+" 个文件，"+started+" 个并行进程。输出目录 "+options.OutputRoot);
-            AppendLog("并行进程数按 CPU "+(Environment.ProcessorCount)+" 核、可用内存 "+AvailableMemoryMb()+" MB 选择。");
-            start.Enabled=false;stop.Enabled=true;saveReport.Enabled=false;
-            progress.Maximum=totalPlanned;progress.Value=0;
+            string poolSummary=reused>0
+                ?(newlyBooted>0?("复用热池 "+reused+" 个 + 同步预拉起 "+newlyBooted+" 个"):("热池秒复用 "+reused+" 个隐藏 CAD"))
+                :("同步预拉起 "+newlyBooted+" 个隐藏 CAD");
+            AppendLog("开始转换：共 "+items.Count+" 个文件"+(preSkippedCount>0?"（预跳过已存在 "+preSkippedCount+" 个，实际待转 "+pending.Count+" 个）":"")
+                +"，启用 "+processes.Count+" 个并发进程（"+poolSummary+"）。输出目录 "+options.OutputRoot);
+            AppendLog("硬件评估：CPU "+cores+" 逻辑核、可用内存 "+availMb+" MB，采用动态抢占队列（装配优先 + 源主干跨进程去重）。");
+            start.Enabled=false;stop.Enabled=true;saveReport.Enabled=false;releasePool.Enabled=false;
+            progress.Maximum=Math.Max(1,totalPlanned);progress.Value=Math.Min(progress.Maximum,rows.Count);
+            statDone.Set(rows.Count+" / "+totalPlanned,Ui.Text);statOk.Set("0",Ui.Ok);statFail.Set("0",Ui.Text);statSkip.Set(preSkippedCount.ToString(),Ui.Text);
             timer.Start();
-            start.Text="转换中 0 / "+totalPlanned;start.Progress=0;
+            start.Text="转换中 "+rows.Count+" / "+totalPlanned;start.Progress=totalPlanned>0?(float)rows.Count/totalPlanned:0;
             shell.Go(2);UpdatePrimary();
         }
         void StopConversion(){
             AppendLog("正在停止……");
             foreach(string statusFile in statusFiles)ReadStatus(statusFile);   // 先把 worker 报上来的 CAD 进程号读全
-            NativeJob.Terminate(jobHandle);
-            foreach(Process process in processes){ try{ if(!process.HasExited)process.Kill(); }catch{} }
-            WorkerChildren.Kill(startedAt,workerCads,cadsBefore,AppendLog);
+            timer.Stop();
+            warmPool.Shutdown(true,AppendLog);
+            Finish();
+        }
+        void ReleaseWarmPool(){
+            if(timer.Enabled)return;
+            int n=warmPool.AliveCount;
+            if(n<=0){ RefreshPoolUi(); return; }
+            warmPool.Shutdown(false,AppendLog);
+            AppendLog("已释放 "+n+" 个热驻留隐藏 CAD 进程。");
+            RefreshPoolUi();
+        }
+        void RefreshPoolUi(){
+            int alive=warmPool.AliveCount;
+            releasePool.Visible=alive>0&&!timer.Enabled;
+            releasePool.Enabled=alive>0&&!timer.Enabled;
+            if(alive>0)releasePool.Text="释放驻留 ("+alive+")";
+            shell.Footer.PerformLayout();
         }
         void Poll(){
-            bool running=false;
-            foreach(Process process in processes){ try{ if(!process.HasExited)running=true; }catch{} }
             deferLog=true;
             try{
                 foreach(string statusFile in statusFiles)ReadStatus(statusFile);
@@ -473,17 +527,40 @@ namespace TianGongCadSuite {
                 deferLog=false;
                 FlushPendingLog();
             }
-            int done=0,failed=0;double seconds=0;
-            foreach(ConvertRow row in rows.Values){ if(row.Status=="ok"){done++;seconds+=row.TotalSeconds;} else if(row.Status=="fail")failed++; }
+            bool running=false;
+            for(int i=0;i<processes.Count;i++){
+                if(i<statusFiles.Count&&finishedStatusFiles.Contains(statusFiles[i]))continue;
+                try{ if(!processes[i].HasExited)running=true; }catch{}
+            }
+            int done=0,failed=0,skipped=0;double seconds=0;
+            foreach(ConvertRow row in rows.Values){
+                if(row.Status=="ok"){done++;seconds+=row.TotalSeconds;}
+                else if(row.Status=="fail")failed++;
+                else if(row.Status=="skip")skipped++;
+            }
             progress.Value=Math.Min(progress.Maximum,rows.Count);
-            int skipped=0;foreach(ConvertRow row in rows.Values)if(row.Status=="skip")skipped++;
             statDone.Set(rows.Count+" / "+totalPlanned,Ui.Text);statOk.Set(done.ToString(),Ui.Ok);statFail.Set(failed.ToString(),failed>0?Ui.Bad:Ui.Text);statSkip.Set(skipped.ToString(),Ui.Text);
             if(timer.Enabled){ start.Text="转换中 "+rows.Count+" / "+totalPlanned;start.Progress=totalPlanned>0?(float)rows.Count/totalPlanned:0; }
-            status.Text="进度 "+rows.Count+" / "+totalPlanned+"　成功 "+done+"　失败 "+failed+"　累计单件 "+seconds.ToString("F1")+" 秒　已用 "+(DateTime.Now-startedAt).TotalSeconds.ToString("F1")+" 秒";
+            double elapsed=(DateTime.Now-startedAt).TotalSeconds;
+            int activeDone=Math.Max(0,rows.Count-preSkippedCount);
+            int remaining=Math.Max(0,totalPlanned-rows.Count);
+            string rateText="";
+            if(activeDone>0&&elapsed>1.0){
+                double perMin=activeDone*60.0/elapsed;
+                double eta=remaining>0?(elapsed*remaining/activeDone):0;
+                rateText="　速率 "+perMin.ToString("F1")+" 个/分"+(remaining>0?"　预计剩余 "+FormatEta(eta):"");
+            }
+            status.Text="进度 "+rows.Count+" / "+totalPlanned+"　成功 "+done+"　失败 "+failed+"　累计单件 "+seconds.ToString("F1")+" 秒　已用 "+elapsed.ToString("F1")+" 秒"+rateText;
             if(!running){
                 timer.Stop();
                 Finish();
             }
+        }
+        static string FormatEta(double seconds){
+            if(seconds<60)return Math.Ceiling(seconds).ToString("F0")+" 秒";
+            int mins=(int)(seconds/60);int secs=(int)(seconds%60);
+            if(mins<60)return mins+" 分 "+secs+" 秒";
+            return (mins/60)+" 小时 "+(mins%60)+" 分";
         }
         void ReadStatus(string statusFile){
             try{
@@ -499,25 +576,28 @@ namespace TianGongCadSuite {
                     int end=Array.LastIndexOf(buffer,(byte)'\n',Math.Max(0,got-1));
                     if(got==0||end<0)return;
                     string text=new UTF8Encoding(false).GetString(buffer,0,end+1);
-                    foreach(string line in text.Split('\n')){ string l=line.TrimEnd('\r'); if(l.Length>0)HandleLine(l); }
+                    foreach(string line in text.Split('\n')){ string l=line.TrimEnd('\r'); if(l.Length>0)HandleLine(statusFile,l); }
                     offsets[statusFile]=offset+end+1;
                 }
             }catch{}
         }
-        void HandleLine(string line){
+        void HandleLine(string statusFile,string line){
             string[] parts=ConvertProtocol.Split(line);
             if(parts.Length==0)return;
             if(parts[0]==ConvertProtocol.End){
                 ConvertRow row;
                 if(ConvertProtocol.TryParseEnd(parts,out row)){
                     rows[row.Index]=row;
-                    if(row.Status=="ok")AppendLog("完成 "+(row.TotalSeconds).ToString("F1")+" 秒（打开 "+row.OpenSeconds.ToString("F1")+" / 保存 "+row.SaveSeconds.ToString("F1")+"，"+row.Documents+" 个文档） "+Path.GetFileName(row.Source));
+                    if(row.Status=="ok")AppendLog("完成 "+(row.TotalSeconds).ToString("F1")+" 秒（打开 "+row.OpenSeconds.ToString("F1")+" / 保存 "+row.SaveSeconds.ToString("F1")+"，"+row.Documents+" 个文档）[P"+row.Worker+"] "+Path.GetFileName(row.Source));
                     else if(row.Status=="skip")AppendLog("跳过（"+(string.IsNullOrEmpty(row.Error)?"输出已存在":row.Error)+"） "+Path.GetFileName(row.Source));
                     else AppendLog("失败 "+Path.GetFileName(row.Source)+"："+row.Error);
                 }
             }else if(parts[0]==ConvertProtocol.Ready){
-                int pid;if(parts.Length>2&&int.TryParse(parts[2],out pid)&&pid>0)workerCads.Add(pid);
-                AppendLog("工作进程就绪（CAD 启动 "+(parts.Length>1?parts[1]:"?")+" 秒）。");
+                int pid;if(parts.Length>2&&int.TryParse(parts[2],out pid)&&pid>0)warmPool.RecordCadPid(pid);
+                bool warm=parts.Length>3&&parts[3]=="warm";
+                AppendLog(warm?"工作进程就绪（热池复用，0.00 秒）。":"工作进程就绪（CAD 启动 "+(parts.Length>1?parts[1]:"?")+" 秒）。");
+            }else if(parts[0]==ConvertProtocol.Exit){
+                finishedStatusFiles.Add(statusFile);
             }else if(parts[0]=="FATAL"){
                 AppendLog("工作进程异常："+(parts.Length>1?parts[1]:""));
             }else if(parts[0]=="LOG"){
@@ -536,7 +616,7 @@ namespace TianGongCadSuite {
                 }
             }
             double wall=(DateTime.Now-startedAt).TotalSeconds;
-            var summary=ConvertSummary.From(list,wall);summary.Workers=processes.Count;
+            var summary=ConvertSummary.From(list,wall);summary.Workers=Math.Max(1,processes.Count);
             try{
                 File.WriteAllText(reportPath,summary.ToCsv(list),new UTF8Encoding(true));
                 AppendLog("报告已写入 "+reportPath);
@@ -546,8 +626,14 @@ namespace TianGongCadSuite {
             start.Enabled=true;stop.Enabled=false;saveReport.Enabled=true;
             progress.Value=progress.Maximum;
             start.Text="开始转换";start.Progress=-1;UpdatePrimary();
+            if(!keepPool.Checked){
+                warmPool.Shutdown(false,AppendLog);
+            } else {
+                int alive=warmPool.AliveCount;
+                if(alive>0)AppendLog("热驻留进程池保持 "+alive+" 个已预热 CAD（连续下一批秒启动，空闲 5 分钟或关窗自动释放）。");
+            }
+            RefreshPoolUi();
             shell.ShowToast(summary.Describe(),summary.Failed>0?Ui.Warn:Ui.Ok,"打开输出目录",delegate{ OpenOutputFolder(); });
-            if(jobHandle!=IntPtr.Zero){ NativeJob.Close(jobHandle);jobHandle=IntPtr.Zero; }
         }
         void SaveReportAs(){
             using(var dialog=new SaveFileDialog()){
@@ -586,18 +672,20 @@ namespace TianGongCadSuite {
             if(timer.Enabled){
                 if(MessageBox.Show(this,"转换仍在进行，确定要停止并退出吗？","天工格式转换",MessageBoxButtons.YesNo,MessageBoxIcon.Warning)!=DialogResult.Yes){ e.Cancel=true; return; }
                 foreach(string statusFile in statusFiles)ReadStatus(statusFile);
-                NativeJob.Terminate(jobHandle);
-                foreach(Process process in processes){ try{ if(!process.HasExited)process.Kill(); }catch{} }
-                WorkerChildren.Kill(startedAt,workerCads,cadsBefore,AppendLog);
+                timer.Stop();
+                warmPool.Shutdown(true,AppendLog);
+            } else if(warmPool.AliveCount>0){
+                warmPool.Shutdown(false,null);
             }
-            if(jobHandle!=IntPtr.Zero){ NativeJob.Close(jobHandle); jobHandle=IntPtr.Zero; }
             base.OnFormClosing(e);
         }
         protected override void OnFormClosed(FormClosedEventArgs e){
             timer.Stop();
             timer.Dispose();
-            foreach(Process process in processes){ try{ process.Dispose(); }catch{} }
+            poolWatch.Stop();
+            poolWatch.Dispose();
             processes.Clear();
+            warmPool.Dispose();
             base.OnFormClosed(e);
         }
 

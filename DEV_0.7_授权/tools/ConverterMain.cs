@@ -7,6 +7,7 @@ static class ConverterMain {
     [STAThread]
     static int Main(string[] args){
         if(args.Length>2&&args[0]=="--worker")return ConvertWorker.Run(args);
+        if(args.Length>2&&args[0]=="--pool-worker")return ConvertWorker.RunPool(args);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         var form=new FormatConvertForm();

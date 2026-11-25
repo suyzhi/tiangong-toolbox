@@ -118,7 +118,13 @@ static class FormatConvertTests {
             for(int i=0;i<6;i++){ var ci=new ConvertItem();ci.Index=100+i;ci.Size=500;ci.Source=@"C:\one\"+i+".SLDASM";ci.Root=@"C:\one";sharedRoot.Add(ci); }
             var sharedPlan=ConvertPlanner.Plan(sharedRoot,4);
             int occupied=0;foreach(List<ConvertItem> bucket in sharedPlan)if(bucket.Count>0)occupied++;
-            Assert(occupied==1,"files from one input folder never run in two workers at once: "+occupied);
+            Assert(occupied==1,"same-folder assemblies stay grouped in static Plan: "+occupied);
+            // 同一根目录下不同子文件夹的装配体、以及同目录的多个 STEP / 独立零件，静态分桶也应分散到多进程
+            var sameRootSteps=new List<ConvertItem>();
+            for(int i=0;i<8;i++){ var ci=new ConvertItem();ci.Index=300+i;ci.Size=1000*(i+1);ci.Source=@"C:\one\"+i+".step";ci.Root=@"C:\one";sameRootSteps.Add(ci); }
+            var stepPlan=ConvertPlanner.Plan(sameRootSteps,4);
+            int stepOccupied=0;foreach(List<ConvertItem> bucket in stepPlan)if(bucket.Count>0)stepOccupied++;
+            Assert(stepOccupied==4,"STEP files in one root spread across all 4 workers: "+stepOccupied);
             // 装配先转（它会把零件一起存出来，轮到零件时直接跳过），哪怕零件文件更大
             var mixed=new List<ConvertItem>();
             string[] names={"big.SLDPRT","small.SLDASM","mid.sldprt","b.sldasm"};long[] msz={9000,100,5000,300};
@@ -126,7 +132,19 @@ static class FormatConvertTests {
             var mixedPlan=ConvertPlanner.Plan(mixed,1)[0];
             Assert(mixedPlan[0].Source.EndsWith("b.sldasm")&&mixedPlan[1].Source.EndsWith("small.SLDASM")&&mixedPlan[2].Source.EndsWith("big.SLDPRT"),"assemblies are converted before (larger) parts: "+string.Join(",",mixedPlan.ConvertAll(x=>System.IO.Path.GetFileName(x.Source)).ToArray()));
             Assert(ConvertPlanner.SuggestedWorkers(0,16,8192)==1,"no files means one worker");
-            Assert(ConvertPlanner.SuggestedWorkers(1000,64,65536)==1,"sequential is the measured default");
+            Assert(ConvertPlanner.SuggestedWorkers(1,16,8192)==1,"single file means one worker");
+            Assert(ConvertPlanner.SuggestedWorkers(2,16,16384,200*1024)==1,"2 tiny files (<1MB) stay on 1 worker");
+            Assert(ConvertPlanner.SuggestedWorkers(20,16,16384)==3,"20 files on 16-thread/16GB recommends 3 workers (empirical sweet spot)");
+            Assert(ConvertPlanner.SuggestedWorkers(20,32,24576)==4,"20 files on 32-thread/24GB workstation recommends 4 workers");
+            Assert(ConvertPlanner.SuggestedWorkers(20,16,4000)==1,"low free RAM (<5GB) caps workers to 1");
+            Assert(ConvertPlanner.SuggestedWorkers(20,8,16384)==2,"8-core caps auto workers to 2");
+            // 单装配+同目录零件批次：自动并发保持 1，避免多起 CAD 却只剩零件可跳过
+            var singleAsmBatch=new List<ConvertItem>();
+            singleAsmBatch.Add(new ConvertItem{Index=0,Source=@"C:\p\top.sldasm",Root=@"C:\p",Size=2000000});
+            for(int i=1;i<=10;i++)singleAsmBatch.Add(new ConvertItem{Index=i,Source=@"C:\p\part"+i+".sldprt",Root=@"C:\p",Size=500000});
+            Assert(ConvertPlanner.SuggestedWorkers(singleAsmBatch,16,16384)==1,"1 assembly + 10 co-located parts stays 1 worker");
+            singleAsmBatch.Add(new ConvertItem{Index=11,Source=@"C:\p\top2.sldasm",Root=@"C:\p",Size=2000000});
+            Assert(ConvertPlanner.SuggestedWorkers(singleAsmBatch,16,16384)==2,"2 assemblies + parts scales to 2 workers");
 
             string line=ConvertProtocol.Line(ConvertProtocol.End,"7","ok","C:\\a\\b.SLDASM","1.50","2.25","3.75","12","C:\\o\\b.asm","1","");
             ConvertRow row;
@@ -160,6 +178,205 @@ static class FormatConvertTests {
         } finally { try{ Directory.Delete(root,true); }catch{} }
         ResumeMarker();
         CommandLineQuoting();
+        DynamicQueueAndFilter();
+    }
+
+    // 动态抢占队列（优先级 + LPT + 多线程无重复抢占 + 装配体相位屏障）、预跳过过滤与跨进程已写索引测试
+    public static void DynamicQueueAndFilter(){
+        string root=Path.Combine(Path.GetTempPath(),"fmtqueue-"+Guid.NewGuid().ToString("N"));
+        string input=Path.Combine(root,"in"),output=Path.Combine(root,"out"),qDir=Path.Combine(root,"queue"),work=Path.Combine(root,"work");
+        Directory.CreateDirectory(input);Directory.CreateDirectory(output);
+        try{
+            var opts=new ConvertOptions();opts.Inputs.Add(input);opts.OutputRoot=output;
+            var items=new List<ConvertItem>{
+                new ConvertItem{Index=0,Source=Path.Combine(input,"p_big.sldprt"),Root=input,Size=9000},
+                new ConvertItem{Index=1,Source=Path.Combine(input,"s_mid.step"),Root=input,Size=4000},
+                new ConvertItem{Index=2,Source=Path.Combine(input,"a_small.sldasm"),Root=input,Size=100},
+                new ConvertItem{Index=3,Source=Path.Combine(input,"a_big.sldasm"),Root=input,Size=500},
+                new ConvertItem{Index=4,Source=Path.Combine(input,"s_big.stp"),Root=input,Size=8000},
+            };
+            for(int i=0;i<items.Count;i++)items[i].Target=ConvertPlanner.TopTarget(items[i],opts);
+            // 1. FilterPending：预跳过已存在输出（不含 pending marker 的），Force=true 时不过滤
+            File.WriteAllText(items[1].Target,"ok");
+            File.WriteAllText(items[4].Target,"half");
+            ConvertPlanner.MarkPending(items[4],opts);
+            List<ConvertRow> skipped;
+            var pending=ConvertPlanner.FilterPending(items,opts,out skipped);
+            Assert(skipped.Count==1&&skipped[0].Index==1&&skipped[0].Status=="skip","FilterPending pre-skips completed item 1");
+            Assert(pending.Count==4,"FilterPending keeps pending-marker item 4 and unconverted items");
+            opts.Force=true;
+            List<ConvertRow> forceSkipped;
+            var forcePending=ConvertPlanner.FilterPending(items,opts,out forceSkipped);
+            Assert(forceSkipped.Count==0&&forcePending.Count==5,"FilterPending skips nothing when Force=true");
+            opts.Force=false;
+
+            // 2. ConvertQueue 优先级顺序：a_big.sldasm -> a_small.sldasm -> s_big.stp -> s_mid.step -> p_big.sldprt
+            int written=ConvertQueue.Write(qDir,items);
+            Assert(written==5&&ConvertQueue.HasPending(qDir),"queue wrote 5 items");
+            ConvertItem c0;string p0;
+            Assert(ConvertQueue.TryClaimNext(qDir,0,out c0,out p0)&&c0.Index==3,"queue claims largest assembly first: got "+c0.Index);
+            ConvertItem c1;string p1;
+            Assert(ConvertQueue.TryClaimNext(qDir,1,out c1,out p1)&&c1.Index==2,"queue claims second assembly next: got "+c1.Index);
+            // 装配体仍在进行中（p0/p1 未 Complete），STEP 任务仍可立即并行领取！
+            ConvertItem c2;string p2;
+            Assert(ConvertQueue.TryClaimNext(qDir,2,out c2,out p2)&&c2.Index==4,"STEP claims in parallel while assemblies active: got "+c2.Index);
+            ConvertItem c3;string p3;
+            Assert(ConvertQueue.TryClaimNext(qDir,3,out c3,out p3)&&c3.Index==1,"second STEP claims in parallel: got "+c3.Index);
+            // 验证死掉的 PID 不会阻塞相位屏障：释放 p0/p1 后写一个伪造的已退出 PID 锁，p_big.sldprt 应立即放行
+            ConvertQueue.Complete(p0);ConvertQueue.Complete(p1);ConvertQueue.Complete(p2);ConvertQueue.Complete(p3);
+            File.WriteAllText(Path.Combine(qDir,"0_999999.task.w9.p999999"),"stale");
+            ConvertItem c4;string p4;
+            Assert(ConvertQueue.TryClaimNext(qDir,0,out c4,out p4)&&c4.Index==0,"part claims immediately once active assemblies finish (stale dead-PID ignored)");
+            ConvertQueue.Complete(p4);
+            Assert(!ConvertQueue.HasPending(qDir),"queue is empty after all claimed");
+
+            // 3. 多线程并发原子抢占：24 个任务 4 线程争抢，确保每项恰好领到 1 次
+            string qMulti=Path.Combine(root,"qmulti");
+            var batch=new List<ConvertItem>();
+            for(int i=0;i<24;i++)batch.Add(new ConvertItem{Index=i,Source=Path.Combine(input,"m"+i+".step"),Root=input,Size=100+i});
+            ConvertQueue.Write(qMulti,batch);
+            var claimedIds=new List<int>();
+            object gate=new object();
+            var threads=new System.Threading.Thread[4];
+            for(int t=0;t<4;t++){
+                int wid=t;
+                threads[t]=new System.Threading.Thread(delegate(){
+                    ConvertItem ci;string cp;
+                    while(ConvertQueue.TryClaimNext(qMulti,wid,out ci,out cp)){
+                        lock(gate){ claimedIds.Add(ci.Index); }
+                        ConvertQueue.Complete(cp);
+                    }
+                });
+                threads[t].Start();
+            }
+            foreach(var th in threads)th.Join();
+            Assert(claimedIds.Count==24&&new HashSet<int>(claimedIds).Count==24,"concurrent 4-thread claim yields 24 distinct items");
+
+            // 4. 跨进程共享已落盘索引 ConvertWrittenIndex（含源路径索引与目标路径隔离）
+            string partOut=Path.Combine(output,"SharedPart.par");
+            string partSrc=Path.Combine(input,"SharedPart.sldprt");
+            Assert(!ConvertWrittenIndex.Contains(work,partOut),"written index initially empty");
+            ConvertWrittenIndex.Mark(work,partOut);
+            Assert(ConvertWrittenIndex.Contains(work,partOut.ToUpperInvariant()),"written index matches case-insensitively");
+            Assert(ConvertWrittenIndex.ContainsAny(work,new[]{Path.Combine(output,"nope.par"),partOut}),"ContainsAny hits marked target");
+            Assert(!ConvertWrittenIndex.ContainsSource(work,partSrc),"source index initially empty");
+            ConvertWrittenIndex.MarkSource(work,partSrc);
+            Assert(ConvertWrittenIndex.ContainsSource(work,partSrc.ToUpperInvariant()),"source index matches case-insensitively");
+            Assert(!ConvertWrittenIndex.Contains(work,partSrc),"source index and target index namespaces stay isolated");
+
+            // 5. SolidWorks 源主干解析：区分天工追加的 _5 后缀与真实存在的 _2 文件名
+            string bolt=Path.Combine(input,"Bolt.sldprt");
+            string bolt2=Path.Combine(input,"Bolt_2.sldprt");
+            string subAsm=Path.Combine(input,"Sub.sldasm");
+            File.WriteAllText(bolt,"x");File.WriteAllText(bolt2,"x");File.WriteAllText(subAsm,"x");
+            bool suf;
+            string rExact=ConvertPlanner.ResolveSolidWorksSource(Path.Combine(input,"Bolt.par"),out suf);
+            Assert(string.Equals(rExact,bolt,StringComparison.OrdinalIgnoreCase)&&!suf,"exact SW source resolved without suffix");
+            string rSuff=ConvertPlanner.ResolveSolidWorksSource(Path.Combine(input,"Bolt_5.par"),out suf);
+            Assert(string.Equals(rSuff,bolt,StringComparison.OrdinalIgnoreCase)&&suf,"MRU-suffixed Bolt_5.par maps back to Bolt.sldprt");
+            string rReal2=ConvertPlanner.ResolveSolidWorksSource(Path.Combine(input,"Bolt_2.par"),out suf);
+            Assert(string.Equals(rReal2,bolt2,StringComparison.OrdinalIgnoreCase)&&!suf,"genuine Bolt_2.sldprt is never stripped to Bolt.sldprt");
+            string rAsmSuff=ConvertPlanner.ResolveSolidWorksSource(Path.Combine(input,"Sub_12.asm"),out suf);
+            Assert(string.Equals(rAsmSuff,subAsm,StringComparison.OrdinalIgnoreCase)&&suf,"suffixed sub-assembly Sub_12.asm maps back to Sub.sldasm");
+            string rNonNum=ConvertPlanner.ResolveSolidWorksSource(Path.Combine(input,"Bolt_A.par"),out suf);
+            Assert(rNonNum==null&&!suf,"non-numeric suffix is not stripped");
+            string rVirt=ConvertPlanner.ResolveSolidWorksSource(Path.Combine(input,"Virt^Asm.par"),out suf);
+            Assert(rVirt==null&&!suf,"virtual component with no disk file returns null");
+
+            // 6. 同名 .sldasm 与 .sldprt 共存同一目录时，ResolveSolidWorksSource 必须按扩展名精确匹配（不把 .asm 错归给 .sldprt）
+            string dualAsm=Path.Combine(input,"Relay.sldasm");
+            string dualPrt=Path.Combine(input,"Relay.sldprt");
+            File.WriteAllText(dualAsm,"x");File.WriteAllText(dualPrt,"x");
+            string rDualAsm=ConvertPlanner.ResolveSolidWorksSource(Path.Combine(input,"Relay.asm"),out suf);
+            Assert(string.Equals(rDualAsm,dualAsm,StringComparison.OrdinalIgnoreCase)&&!suf,"same-stem .asm resolves to .sldasm");
+            string rDualAsmSuf=ConvertPlanner.ResolveSolidWorksSource(Path.Combine(input,"Relay_0.asm"),out suf);
+            Assert(string.Equals(rDualAsmSuf,dualAsm,StringComparison.OrdinalIgnoreCase)&&suf,"suffixed same-stem _0.asm resolves to .sldasm");
+            string rDualPrt=ConvertPlanner.ResolveSolidWorksSource(Path.Combine(input,"Relay.par"),out suf);
+            Assert(string.Equals(rDualPrt,dualPrt,StringComparison.OrdinalIgnoreCase)&&!suf,"same-stem .par resolves to .sldprt");
+
+            // 7. 大型站位目录智能并发 + 同目录大装配串行化 + 重型装配实时内存门控
+            var ok160Items=new List<ConvertItem>();
+            ok160Items.Add(new ConvertItem{Index=0,Source=Path.Combine(input,"OK160-00.SLDASM"),Root=input,Size=120L*1024*1024});
+            for(int i=1;i<=135;i++)ok160Items.Add(new ConvertItem{Index=i,Source=Path.Combine(input,"sub"+i+".SLDASM"),Root=input,Size=1024*1024});
+            for(int i=136;i<200;i++)ok160Items.Add(new ConvertItem{Index=i,Source=Path.Combine(input,"p"+i+".SLDPRT"),Root=input,Size=512*1024});
+            Assert(ConvertPlanner.SuggestedWorkers(ok160Items,22,8500)==1,"single giant station folder (136 sldasm, 0 step) stays 1 worker");
+            ok160Items.Add(new ConvertItem{Index=300,Source=Path.Combine(input,"bom","a.step"),Root=input,Size=500*1024});
+            ok160Items.Add(new ConvertItem{Index=301,Source=Path.Combine(input,"bom","b.step"),Root=input,Size=500*1024});
+            Assert(ConvertPlanner.SuggestedWorkers(ok160Items,22,8500)==2,"giant station + independent STEP scales to 2 workers on 8.5GB free RAM");
+            var multiStation=new List<ConvertItem>{
+                new ConvertItem{Index=0,Source=Path.Combine(root,"st1","top1.SLDASM"),Root=root,Size=100L*1024*1024},
+                new ConvertItem{Index=1,Source=Path.Combine(root,"st2","top2.SLDASM"),Root=root,Size=100L*1024*1024},
+                new ConvertItem{Index=2,Source=Path.Combine(root,"st3","top3.SLDASM"),Root=root,Size=100L*1024*1024},
+            };
+            Assert(ConvertPlanner.SuggestedWorkers(multiStation,22,8500)==1,"3 giant stations on 8.5GB free RAM cap to 1 worker to avoid swap thrashing");
+            Assert(ConvertPlanner.SuggestedWorkers(multiStation,22,16000)==3,"3 giant stations on 16GB free RAM allow 3 workers");
+
+            // 8. 队列同目录大装配串行 + 跳过忙碌目录直接领 STEP / 另一目录 + 重型内存门控
+            string qSer=Path.Combine(root,"qser");
+            string dirA=Path.Combine(root,"dirA"),dirB=Path.Combine(root,"dirB");
+            Directory.CreateDirectory(dirA);Directory.CreateDirectory(dirB);
+            var serItems=new List<ConvertItem>{
+                new ConvertItem{Index=0,Source=Path.Combine(dirA,"topA.SLDASM"),Root=root,Size=80L*1024*1024},
+                new ConvertItem{Index=1,Source=Path.Combine(dirA,"subA.SLDASM"),Root=root,Size=10L*1024*1024},
+                new ConvertItem{Index=2,Source=Path.Combine(dirB,"topB.SLDASM"),Root=root,Size=60L*1024*1024},
+                new ConvertItem{Index=3,Source=Path.Combine(dirA,"part.STEP"),Root=root,Size=1024*1024},
+            };
+            ConvertQueue.Write(qSer,serItems,opts);
+            ConvertItem s0,s1,s2,s3;string sp0,sp1,sp2,sp3;
+            Assert(ConvertQueue.TryClaimNext(qSer,0,out s0,out sp0)&&s0.Index==0,"claims largest heavy assembly topA first");
+            // 内存不足 5500 MB 时：dirA 的 subA 因同目录串行跳过，dirB 的重型 topB 因内存门控跳过，立即领取独立 STEP（#3）！
+            ConvertQueue.FreeMemoryProvider=delegate(){ return 3000L; };
+            try{
+                Assert(ConvertQueue.TryClaimNext(qSer,1,out s1,out sp1)&&s1.Index==3,"skips busy dirA & heavy topB under low RAM, immediately claims STEP");
+                ConvertQueue.Complete(sp1);
+                // 内存充足时：dirA 仍忙（跳过 subA），但 dirB 的重型 topB 立即放行！
+                ConvertQueue.FreeMemoryProvider=delegate(){ return 12000L; };
+                Assert(ConvertQueue.TryClaimNext(qSer,1,out s2,out sp2)&&s2.Index==2,"allows heavy topB in another dir when free RAM >= 5500MB (still skipping busy dirA subA)");
+                ConvertQueue.Complete(sp0);
+                ConvertQueue.Complete(sp2);
+                Assert(ConvertQueue.TryClaimNext(qSer,0,out s3,out sp3)&&s3.Index==1,"claims dirA subA once topA finishes");
+                ConvertQueue.Complete(sp3);
+            } finally { ConvertQueue.FreeMemoryProvider=null; }
+
+            // 9. StageFolder 不越界爬出含零件的站位目录 + ParseMissingFromTranslatorLog + StageCanSupplyMissing
+            string stRoot=Path.Combine(root,"lineup");
+            string stSelf=Path.Combine(stRoot,"OK160"),stOther=Path.Combine(stRoot,"OK070");
+            Directory.CreateDirectory(stSelf);Directory.CreateDirectory(stOther);
+            string selfAsm=Path.Combine(stSelf,"OK160-00.SLDASM");
+            File.WriteAllText(selfAsm,"x");
+            File.WriteAllText(Path.Combine(stSelf,"p1.sldprt"),"x");
+            File.WriteAllText(Path.Combine(stOther,"other.sldprt"),"x");
+            Assert(ConvertPlanner.StageFolder(selfAsm,stSelf)==null,"self-contained station folder with .sldprt does not climb to parent");
+            string logPath=Path.Combine(stSelf,"OK160-00.log");
+            File.WriteAllText(logPath,"Warn: The body C:\\x\\missing_a.SLDPRT miss file\r\nWarn: The body C:\\x\\other.sldprt miss file\r\n",Encoding.UTF8);
+            var parsedMiss=ConvertPlanner.ParseMissingFromTranslatorLog(selfAsm);
+            Assert(parsedMiss.Count==2&&parsedMiss[0]=="missing_a.SLDPRT"&&parsedMiss[1]=="other.sldprt","translator log missing files parsed");
+            Assert(!ConvertPlanner.StageCanSupplyMissing(selfAsm,stRoot,new[]{"missing_a.SLDPRT"}),"StageCanSupplyMissing=false when missing file does not exist anywhere in root");
+            Assert(ConvertPlanner.StageCanSupplyMissing(selfAsm,stRoot,parsedMiss),"StageCanSupplyMissing=true when a missing file exists in another subfolder of root");
+
+            // 10. 无会话跨进程跳过校验（ContainsAnyOrSource）+ 等待重型装配回调触发（用于释放空闲 CAD 内存）
+            string idxRoot=Path.Combine(root,"idxtest");
+            string idxOut=Path.Combine(idxRoot,"out.par"),idxSrc=Path.Combine(idxRoot,"src.sldprt");
+            Assert(!ConvertWrittenIndex.ContainsAnyOrSource(idxRoot,new[]{idxOut},idxSrc),"ContainsAnyOrSource initially false");
+            ConvertWrittenIndex.MarkSource(idxRoot,idxSrc);
+            Assert(ConvertWrittenIndex.ContainsAnyOrSource(idxRoot,new[]{idxOut},idxSrc),"ContainsAnyOrSource hits source index without live CAD session");
+            string qHeavy=Path.Combine(root,"qheavy");
+            var hItems=new List<ConvertItem>{
+                new ConvertItem{Index=0,Source=Path.Combine(dirA,"giant.SLDASM"),Root=root,Size=90L*1024*1024},
+                new ConvertItem{Index=1,Source=Path.Combine(dirA,"child.SLDPRT"),Root=root,Size=512*1024},
+            };
+            ConvertQueue.Write(qHeavy,hItems,opts);
+            ConvertItem h0;string hp0;
+            Assert(ConvertQueue.TryClaimNext(qHeavy,0,out h0,out hp0)&&h0.Index==0,"heavy assembly claimed first");
+            int heavyCallbacks=0;
+            ConvertItem h1;string hp1;
+            var releaser=new System.Threading.Thread(delegate(){ System.Threading.Thread.Sleep(450); ConvertQueue.Complete(hp0); });
+            releaser.Start();
+            Assert(ConvertQueue.TryClaimNext(qHeavy,1,out h1,out hp1,delegate(int sec){ heavyCallbacks++; })&&h1.Index==1,"part claimed after heavy assembly finishes");
+            releaser.Join();
+            ConvertQueue.Complete(hp1);
+            Assert(heavyCallbacks>0,"onDeferredBehindHeavy callback fires while waiting behind active heavy assembly");
+        } finally { try{ Directory.Delete(root,true); }catch{} }
     }
 
     // A pending marker left by a failed or interrupted run must force a re-conversion even though

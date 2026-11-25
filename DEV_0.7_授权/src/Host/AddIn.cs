@@ -29,8 +29,14 @@ diagnostics=new Diagnostics(context.Application,()=>Run(registry.Find(1)),()=>Ru
                 diagnostics.QueryCommand=id=>{if(context!=null)context.InvalidateProbeCache();int flags=0,bitmap=0;string text;OnCommandUpdateUI(id,ref flags,out text,ref bitmap);return flags;};
                 diagnostics.GetNativeId=id=>registry.NativeId(id);
             }catch(Exception e){Log.Write("Connect",e);OnDisconnection(default(F.SeDisconnectMode));throw;}
-            // 自动更新：后台问一次有没有新版本（不挡 CAD 启动；查到了等用户点命令时再提示）
-            try{AutoUpdate.StartBackgroundCheck();}catch(Exception e){Log.Write("UpdateStart",e);}
+            // 自动更新：后台问一次有没有新版本（不挡 CAD 启动；查到了等用户点命令时再提示）。
+            // 批量格式转换等 /automation 隐藏进程不需要在每个并发实例里发网络更新请求。
+            string cmdLine=Environment.CommandLine??"";
+            bool isAutomation=cmdLine.IndexOf("/automation",StringComparison.OrdinalIgnoreCase)>=0
+                ||cmdLine.IndexOf("-Embedding",StringComparison.OrdinalIgnoreCase)>=0;
+            if(!isAutomation){
+                try{AutoUpdate.StartBackgroundCheck();}catch(Exception e){Log.Write("UpdateStart",e);}
+            }
         }
         public void OnConnectToEnvironment(string category,object environment,bool firstTime){
             if(!SupportedEnvironment(category))return;
