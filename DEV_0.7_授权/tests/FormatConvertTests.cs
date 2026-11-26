@@ -179,6 +179,132 @@ static class FormatConvertTests {
         ResumeMarker();
         CommandLineQuoting();
         DynamicQueueAndFilter();
+        MultiStationOutputModes();
+    }
+
+    // 0.13.10 多站位输出模式测试：原地输出（方案 B 默认）、各自建子文件夹、统一总目录多站位自动分目录与同名消歧、
+    // 原地模式同目录串行 / 站间并行、STEP 子件不落入 Temp、防递归扫入输出子目录与队列第 5 列透传。
+    public static void MultiStationOutputModes(){
+        string root=Path.Combine(Path.GetTempPath(),"fmtmulti-"+Guid.NewGuid().ToString("N").Substring(0,8));
+        string st1=Path.Combine(root,"ST01");
+        string st1Sub=Path.Combine(st1,"子部件");
+        string st1Parts=Path.Combine(root,"ST01_零件");
+        string st2=Path.Combine(root,"ST02");
+        string lineA3d=Path.Combine(root,"线体A","3D");
+        string lineB3d=Path.Combine(root,"线体B","3D");
+        string sharedOut=Path.Combine(root,"统一输出");
+        Directory.CreateDirectory(st1Sub);
+        Directory.CreateDirectory(st1Parts);
+        Directory.CreateDirectory(st2);
+        Directory.CreateDirectory(lineA3d);
+        Directory.CreateDirectory(lineB3d);
+        Directory.CreateDirectory(sharedOut);
+        try{
+            string s1Asm1=Path.Combine(st1,"ST01_Top.SLDASM");
+            string s1Asm2=Path.Combine(st1,"ST01_Sub.SLDASM");
+            string s1Prt=Path.Combine(st1Sub,"Bracket.SLDPRT");
+            string s1Step=Path.Combine(st1,"Cylinder.step");
+            string s2Asm=Path.Combine(st2,"ST02_Top.SLDASM");
+            string s2Prt=Path.Combine(st2,"Bracket.SLDPRT");
+            File.WriteAllText(s1Asm1,"x");
+            File.WriteAllText(s1Asm2,"x");
+            File.WriteAllText(s1Prt,"x");
+            File.WriteAllText(s1Step,"x");
+            File.WriteAllText(s2Asm,"x");
+            File.WriteAllText(s2Prt,"x");
+            File.WriteAllText(Path.Combine(lineA3d,"A.SLDASM"),"x");
+            File.WriteAllText(Path.Combine(lineB3d,"B.SLDASM"),"x");
+
+            // 1. 原地模式（InPlace）：两个站位各自转换在各自源文件夹内，无需填全局 OutputRoot
+            var inPlace=new ConvertOptions{ OutputMode=ConvertOutputMode.InPlace };
+            inPlace.Inputs.Add(st1);
+            inPlace.Inputs.Add(st2);
+            Assert(inPlace.Validate()==null,"InPlace validates with empty global OutputRoot");
+            var ipItems=ConvertPlanner.Scan(inPlace);
+            Assert(ipItems.Count==6,"InPlace scans all 6 files across ST01 and ST02: "+ipItems.Count);
+            ConvertItem itS1Asm=ipItems.Find(x=>string.Equals(x.Source,s1Asm1,StringComparison.OrdinalIgnoreCase));
+            ConvertItem itS1Prt=ipItems.Find(x=>string.Equals(x.Source,s1Prt,StringComparison.OrdinalIgnoreCase));
+            ConvertItem itS1Step=ipItems.Find(x=>string.Equals(x.Source,s1Step,StringComparison.OrdinalIgnoreCase));
+            ConvertItem itS2Asm=ipItems.Find(x=>string.Equals(x.Source,s2Asm,StringComparison.OrdinalIgnoreCase));
+            ConvertItem itS2Prt=ipItems.Find(x=>string.Equals(x.Source,s2Prt,StringComparison.OrdinalIgnoreCase));
+            Assert(string.Equals(itS1Asm.Target,Path.Combine(st1,"ST01_Top.asm"),StringComparison.OrdinalIgnoreCase),"InPlace ST01 top asm lands in ST01: "+itS1Asm.Target);
+            Assert(string.Equals(itS1Prt.Target,Path.Combine(st1Sub,"Bracket.par"),StringComparison.OrdinalIgnoreCase),"InPlace ST01 subfolder part lands in its own subfolder: "+itS1Prt.Target);
+            Assert(string.Equals(itS2Asm.Target,Path.Combine(st2,"ST02_Top.asm"),StringComparison.OrdinalIgnoreCase),"InPlace ST02 top asm lands in ST02: "+itS2Asm.Target);
+            Assert(string.Equals(itS2Prt.Target,Path.Combine(st2,"Bracket.par"),StringComparison.OrdinalIgnoreCase),"InPlace ST02 same-name part stays isolated in ST02: "+itS2Prt.Target);
+            string swComp=ConvertPlanner.ComponentTarget(Path.Combine(st1Parts,"Plate.par"),"Plate.par",itS1Asm,inPlace);
+            Assert(string.Equals(swComp,Path.Combine(st1Parts,"Plate.par"),StringComparison.OrdinalIgnoreCase),"InPlace SW component keeps its own source dir: "+swComp);
+            string stepCompTemp=ConvertPlanner.ComponentTarget(Path.Combine(Path.GetTempPath(),"tg_step_tmp","Body1.par"),"Body1.par",itS1Step,inPlace);
+            Assert(string.Equals(stepCompTemp,Path.Combine(st1,"Body1.par"),StringComparison.OrdinalIgnoreCase),"InPlace STEP component never leaks into system Temp: "+stepCompTemp);
+
+            // 原地模式下：同一站位里的 2 个小装配强制串行（sameOut=true 写入 .d<hash>），但两个站位之间仍可并行！
+            var singleStationInPlace=new List<ConvertItem>{
+                new ConvertItem{Index=0,Source=s1Asm1,Root=st1,OutputRoot=st1,Size=1024*1024},
+                new ConvertItem{Index=1,Source=s1Asm2,Root=st1,OutputRoot=st1,Size=1024*1024},
+            };
+            Assert(ConvertPlanner.SuggestedWorkers(singleStationInPlace,16,16384,inPlace)==1,"InPlace serializes 2 small assemblies in same station dir");
+            var twoStationsInPlace=new List<ConvertItem>{
+                new ConvertItem{Index=0,Source=s1Asm1,Root=st1,OutputRoot=st1,Size=1024*1024},
+                new ConvertItem{Index=1,Source=s1Asm2,Root=st1,OutputRoot=st1,Size=1024*1024},
+                new ConvertItem{Index=2,Source=s2Asm,Root=st2,OutputRoot=st2,Size=1024*1024},
+            };
+            Assert(ConvertPlanner.SuggestedWorkers(twoStationsInPlace,16,16384,inPlace)==2,"InPlace scales to 2 workers across 2 stations");
+            string qIp=Path.Combine(root,"qip");
+            ConvertQueue.Write(qIp,twoStationsInPlace,inPlace);
+            ConvertItem ipC0,ipC1;string ipP0,ipP1;
+            Assert(ConvertQueue.TryClaimNext(qIp,0,out ipC0,out ipP0)&&ipC0.Index==0&&ConvertPlanner.SameDir(ipC0.OutputRoot,st1),"InPlace queue round-trips item.OutputRoot for ST01");
+            // ST01 的 #1 因同目录 .d<hash> 忙碌跳过，Worker 1 立刻并行领取 ST02 的 #2！
+            Assert(ConvertQueue.TryClaimNext(qIp,1,out ipC1,out ipP1)&&ipC1.Index==2&&ConvertPlanner.SameDir(ipC1.OutputRoot,st2),"InPlace queue serializes ST01 internally while letting worker 1 run ST02 in parallel");
+            ConvertQueue.Complete(ipP0);ConvertQueue.Complete(ipP1);
+            // 原地模式不采集源目录清理基线
+            string workIp=Path.Combine(root,"work-ip");
+            ConvertSourceBaseline.CaptureForBatch(workIp,ipItems,inPlace);
+            Assert(!Directory.Exists(Path.Combine(workIp,"src-baseline")),"InPlace skips source-stub baseline capture");
+
+            // 2. 各自建子文件夹模式（PerInputSubfolder）：分别落盘到 ST01\天工格式输出、ST02\天工格式输出，且防二次扫描误扫输出目录
+            string st1OutSub=Path.Combine(st1,"天工格式输出");
+            Directory.CreateDirectory(st1OutSub);
+            File.WriteAllText(Path.Combine(st1OutSub,"OldLeftover.step"),"x"); // 模拟上次输出目录里的干扰文件
+            var subOpts=new ConvertOptions{ OutputMode=ConvertOutputMode.PerInputSubfolder, OutputSubfolder="天工格式输出" };
+            subOpts.Inputs.Add(st1);
+            subOpts.Inputs.Add(st2);
+            Assert(subOpts.Validate()==null,"PerInputSubfolder validates cleanly");
+            Assert(!ConvertOptions.IsValidSubfolderName("a\\b")&&!ConvertOptions.IsValidSubfolderName(".."),"invalid subfolder names rejected");
+            var subItems=ConvertPlanner.Scan(subOpts);
+            Assert(subItems.Count==6,"PerInputSubfolder skips output subfolder during recursive scan: got "+subItems.Count);
+            ConvertItem subS1Prt=subItems.Find(x=>string.Equals(x.Source,s1Prt,StringComparison.OrdinalIgnoreCase));
+            ConvertItem subS2Asm=subItems.Find(x=>string.Equals(x.Source,s2Asm,StringComparison.OrdinalIgnoreCase));
+            Assert(string.Equals(subS1Prt.Target,Path.Combine(st1,"天工格式输出","子部件","Bracket.par"),StringComparison.OrdinalIgnoreCase),"PerInputSubfolder mirrors ST01 subfolder under ST01\\天工格式输出: "+subS1Prt.Target);
+            Assert(string.Equals(subS2Asm.Target,Path.Combine(st2,"天工格式输出","ST02_Top.asm"),StringComparison.OrdinalIgnoreCase),"PerInputSubfolder puts ST02 under ST02\\天工格式输出: "+subS2Asm.Target);
+            string workSub=Path.Combine(root,"work-sub");
+            ConvertSourceBaseline.CaptureForBatch(workSub,subItems,subOpts);
+            Assert(ConvertSourceBaseline.TryLoadExisting(workSub,st1)!=null,"PerInputSubfolder captures source dir baseline for ST01");
+            Assert(ConvertSourceBaseline.TryLoadExisting(workSub,st1OutSub)==null,"PerInputSubfolder excludes ST01 output subfolder from baseline");
+
+            // 3. 统一输出到指定目录（SingleRoot）：多输入勾选镜像时按站位名分目录；重名目录自动带上级目录名消歧
+            var singleMulti=new ConvertOptions{ OutputMode=ConvertOutputMode.SingleRoot, OutputRoot=sharedOut, FlatOutput=false };
+            singleMulti.Inputs.Add(st1);
+            singleMulti.Inputs.Add(st2);
+            var smItems=ConvertPlanner.Scan(singleMulti);
+            ConvertItem smS1=smItems.Find(x=>string.Equals(x.Source,s1Asm1,StringComparison.OrdinalIgnoreCase));
+            ConvertItem smS2=smItems.Find(x=>string.Equals(x.Source,s2Asm,StringComparison.OrdinalIgnoreCase));
+            Assert(string.Equals(smS1.Target,Path.Combine(sharedOut,"ST01","ST01_Top.asm"),StringComparison.OrdinalIgnoreCase),"SingleRoot multi-input isolates ST01 into sharedOut\\ST01: "+smS1.Target);
+            Assert(string.Equals(smS2.Target,Path.Combine(sharedOut,"ST02","ST02_Top.asm"),StringComparison.OrdinalIgnoreCase),"SingleRoot multi-input isolates ST02 into sharedOut\\ST02: "+smS2.Target);
+
+            var sameLeaf=new ConvertOptions{ OutputMode=ConvertOutputMode.SingleRoot, OutputRoot=sharedOut, FlatOutput=false };
+            sameLeaf.Inputs.Add(lineA3d);
+            sameLeaf.Inputs.Add(lineB3d);
+            var slItems=ConvertPlanner.Scan(sameLeaf);
+            ConvertItem slA=slItems.Find(x=>x.Source.EndsWith("A.SLDASM",StringComparison.OrdinalIgnoreCase));
+            ConvertItem slB=slItems.Find(x=>x.Source.EndsWith("B.SLDASM",StringComparison.OrdinalIgnoreCase));
+            Assert(string.Equals(slA.Target,Path.Combine(sharedOut,"线体A_3D","A.asm"),StringComparison.OrdinalIgnoreCase),"SingleRoot disambiguates duplicate leaf dir with parent name (A): "+slA.Target);
+            Assert(string.Equals(slB.Target,Path.Combine(sharedOut,"线体B_3D","B.asm"),StringComparison.OrdinalIgnoreCase),"SingleRoot disambiguates duplicate leaf dir with parent name (B): "+slB.Target);
+
+            // 4. CommonParentDirectory 与 DefaultReportDirectory
+            Assert(ConvertPlanner.SameDir(ConvertPlanner.CommonParentDirectory(new[]{st1,st2}),root),"CommonParentDirectory finds shared parent for ST01 & ST02");
+            Assert(ConvertPlanner.SameDir(ConvertPlanner.DefaultReportDirectory(new[]{st1,st2},inPlace),root),"DefaultReportDirectory places multi-station report in shared parent");
+            Assert(ConvertPlanner.CommonParentDirectory(new[]{@"C:\ST01",@"D:\ST02"})=="","CommonParentDirectory returns empty across different drives");
+            Assert(ConvertPlanner.SameDir(ConvertPlanner.DefaultReportDirectory(new[]{@"C:\ST01",@"D:\ST02"},inPlace),@"C:\ST01"),"DefaultReportDirectory falls back to first dir across different drives");
+        } finally { try{ Directory.Delete(root,true); }catch{} }
     }
 
     // 动态抢占队列（优先级 + LPT + 多线程无重复抢占 + 装配体相位屏障）、预跳过过滤与跨进程已写索引测试

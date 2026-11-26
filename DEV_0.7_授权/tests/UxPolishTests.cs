@@ -20,6 +20,7 @@ namespace TianGongCadSuite {
             // 1. 现代文件夹选择器 COM vtable 绑定测试（不弹窗）
             string sysTemp = Path.GetTempPath();
             Check(FolderPicker.ProbeComSelfTest(sysTemp), "FolderPicker IFileDialog COM vtable self-test");
+            Check(FolderPicker.ProbeComMultiSelfTest(sysTemp), "FolderPicker IFileOpenDialog multi-select COM vtable self-test");
             Check(FolderPicker.ResolveExistingDir(Path.Combine(sysTemp, "nonexistent-sub-a", "sub-b")).Length > 0, "FolderPicker resolves nearest existing parent dir");
 
             string tmpDir = Path.Combine(sysTemp, "tg-ux-test-" + Guid.NewGuid().ToString("N"));
@@ -71,6 +72,52 @@ namespace TianGongCadSuite {
                     Check(df.TestDimensionStyle == "A3-国标", "DrawingForm supports switching to A3-国标");
                     df.TestSetDimensionStyle("A3-国标水平");
                     Check(df.TestDimensionStyle == "A3-国标-水平", "DrawingForm normalizes A3-国标水平 to A3-国标-水平");
+                }
+
+                // 4. FormatConvertForm：默认方案 B（各自源文件夹原地输出）、多站位预览与模式切换
+                string stA = Path.Combine(tmpDir, "ST01");
+                string stB = Path.Combine(tmpDir, "ST02");
+                string outAll = Path.Combine(tmpDir, "总输出");
+                Directory.CreateDirectory(stA);
+                Directory.CreateDirectory(stB);
+                Directory.CreateDirectory(outAll);
+                File.WriteAllText(Path.Combine(stA, "a.SLDASM"), "dummy");
+                File.WriteAllText(Path.Combine(stB, "b.SLDASM"), "dummy");
+                TianGongCadSuite.Licensing.LicenseTestHooks.GateOverride = 0;
+                try {
+                    using (var fc = new FormatConvertForm()) {
+                        fc.ShowInTaskbar = false;
+                        fc.StartPosition = FormStartPosition.Manual;
+                        fc.Location = new System.Drawing.Point(-20000, -20000);
+                        fc.Show();
+                        Check(fc.TestOutputMode == ConvertOutputMode.InPlace, "FormatConvertForm defaults to InPlace (Scheme B)");
+                        fc.TestAddSources(new[] { stA, stB });
+                        fc.GoPageForTest(1);
+                        Application.DoEvents();
+                        var ipDirs = fc.TestPreviewDirs();
+                        Check(ipDirs.Count == 2 && ConvertPlanner.SameDir(ipDirs[0], stA) && ConvertPlanner.SameDir(ipDirs[1], stB),
+                            "FormatConvertForm InPlace preview maps ST01->ST01 and ST02->ST02");
+                        fc.TestSetOutputMode(ConvertOutputMode.PerInputSubfolder);
+                        Application.DoEvents();
+                        var subDirs = fc.TestPreviewDirs();
+                        Check(subDirs.Count == 2
+                            && ConvertPlanner.SameDir(subDirs[0], Path.Combine(stA, ConvertOptions.DefaultOutputSubfolder))
+                            && ConvertPlanner.SameDir(subDirs[1], Path.Combine(stB, ConvertOptions.DefaultOutputSubfolder)),
+                            "FormatConvertForm PerInputSubfolder preview maps each station to its own subfolder");
+                        fc.TestSetOutputMode(ConvertOutputMode.SingleRoot);
+                        fc.TestSetOutputRoot(outAll);
+                        Application.DoEvents();
+                        var singleDirs = fc.TestPreviewDirs();
+                        Check(singleDirs.Count == 2
+                            && ConvertPlanner.SameDir(singleDirs[0], Path.Combine(outAll, "ST01"))
+                            && ConvertPlanner.SameDir(singleDirs[1], Path.Combine(outAll, "ST02")),
+                            "FormatConvertForm SingleRoot multi-station preview separates ST01 and ST02");
+                        fc.Size = fc.MinimumSize;
+                        Application.DoEvents();
+                        fc.Close();
+                    }
+                } finally {
+                    TianGongCadSuite.Licensing.LicenseTestHooks.GateOverride = -1;
                 }
             } finally {
                 try { Directory.Delete(tmpDir, true); } catch { }

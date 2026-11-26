@@ -13,7 +13,18 @@ using System.Windows.Forms;
 namespace TianGongCadSuite {
     public sealed class FormatConvertForm : Form {
         readonly ListBox inputs=new ListBox();
+        readonly Segmented outputMode=new Segmented("各自源文件夹（原地）","各自建子文件夹","统一输出到指定目录");
         readonly TextBox output=new TextBox();
+        readonly TextBox subfolderBox=new TextBox();
+        readonly ListBox outputPreview=new ListBox();
+        readonly List<string> previewDirs=new List<string>();
+        readonly List<string> lastRunOutputDirs=new List<string>();
+        Panel outRow;
+        Panel subRow;
+        FieldGrid optsGrid;
+        FieldGrid.Row mirrorRow;
+        VerticalStack outStack;
+        bool initializingMode;
         readonly CheckBox mirror=new CheckBox();
         readonly CheckBox parts=new CheckBox();
         readonly CheckBox assemblies=new CheckBox();
@@ -84,7 +95,7 @@ namespace TianGongCadSuite {
             var addFiles=Ui.Small("添加文件…");addFiles.Click+=delegate{ AddFiles();RefreshRail(); };
             var addFolder=Ui.Small("添加文件夹…");addFolder.Click+=delegate{ AddFolder();RefreshRail(); };
             var remove=Ui.Small("移除选中");((FlatButton)remove).SetFore(Ui.Text2);remove.Click+=delegate{ RemoveSelected();RefreshRail(); };
-            var clear=Ui.Small("清空");((FlatButton)clear).SetFore(Ui.Text2);clear.Click+=delegate{ if(timer.Enabled)return;sources.Clear();items.Clear();scanned=false;AutoOutput();RefreshList();RefreshRail(); };
+            var clear=Ui.Small("清空");((FlatButton)clear).SetFore(Ui.Text2);clear.Click+=delegate{ if(timer.Enabled)return;sources.Clear();items.Clear();lastRunOutputDirs.Clear();scanned=false;AutoOutput();RefreshList();RefreshRail(); };
             shell.AddHeader(pIn,addFiles);shell.AddHeader(pIn,addFolder);shell.AddHeader(pIn,remove);shell.AddHeader(pIn,clear);
             var inStack=new VerticalStack{ Dock=DockStyle.Fill,Padding=new Padding(0),Gap=Ui.S(10),AutoScroll=false };
             pIn.Body.Controls.Add(inStack);
@@ -110,41 +121,87 @@ namespace TianGongCadSuite {
             inStack.Add(frame,true);inStack.Add(kinds);
 
             // ---- ② 输出设置 ----
-            var outStack=new VerticalStack{ Dock=DockStyle.Fill,Padding=new Padding(0),Gap=Ui.S(14),AutoScroll=false };
+            outStack=new VerticalStack{ Dock=DockStyle.Fill,Padding=new Padding(0),Gap=Ui.S(12),AutoScroll=true };
             pOut.Body.Controls.Add(outStack);
-            var outRow=new Panel{ Height=Ui.S(68),BackColor=Ui.Bg };
-            var outLabel=new Label{ Text="输出目录",AutoSize=false,Font=Ui.F9B,ForeColor=Ui.Text2,BackColor=Ui.Bg,Bounds=new Rectangle(0,0,Ui.S(200),Ui.S(24)) };
+            int labelW=Ui.S(84);
+            var modeRow=new Panel{ Height=Ui.S(38),BackColor=Ui.Bg };
+            var modeLabel=new Label{ Text="输出位置",AutoSize=false,Font=Ui.F9B,ForeColor=Ui.Text2,BackColor=Ui.Bg,TextAlign=ContentAlignment.MiddleLeft,Bounds=new Rectangle(0,Ui.S(2),labelW,Ui.S(34)) };
+            outputMode.Height=Ui.S(34);
+            outputMode.Width=outputMode.PreferredWidth;
+            modeRow.Controls.AddRange(new Control[]{ modeLabel,outputMode });
+            modeRow.Resize+=delegate{
+                int avail=Math.Max(Ui.S(220),modeRow.Width-labelW);
+                outputMode.SetBounds(labelW,Ui.S(2),Math.Min(outputMode.PreferredWidth,avail),Ui.S(34));
+            };
+
+            outRow=new Panel{ Height=Ui.S(36),BackColor=Ui.Bg };
+            var outLabel=new Label{ Text="输出目录",AutoSize=false,Font=Ui.F9B,ForeColor=Ui.Text2,BackColor=Ui.Bg,TextAlign=ContentAlignment.MiddleLeft,Bounds=new Rectangle(0,Ui.S(3),labelW,Ui.S(30)) };
             output.BorderStyle=BorderStyle.FixedSingle;output.Font=Ui.F9;
             var browse=Ui.Secondary("浏览…",80,30);browse.Click+=delegate{ BrowseOutput();RefreshRail(); };
             var openDir=Ui.Ghost("打开");openDir.Click+=delegate{ OpenOutputFolder(); };
             outRow.Controls.AddRange(new Control[]{ outLabel,output,browse,openDir });
             outRow.Resize+=delegate{
                 int w=outRow.Width, btns=browse.Width+openDir.Width+Ui.S(16);
-                output.SetBounds(0,Ui.S(30),Math.Max(Ui.S(80),w-btns),Ui.S(30));
-                browse.Location=new Point(output.Right+Ui.S(8),Ui.S(29));
-                openDir.Location=new Point(browse.Right+Ui.S(6),Ui.S(29));
+                output.SetBounds(labelW,Ui.S(3),Math.Max(Ui.S(80),w-labelW-btns),Ui.S(30));
+                browse.Location=new Point(output.Right+Ui.S(8),Ui.S(2));
+                openDir.Location=new Point(browse.Right+Ui.S(6),Ui.S(2));
             };
-            output.TextChanged+=delegate{ if(!settingOutput)outputAuto=output.Text.Trim().Length==0; RefreshRail(); };
-            var opts=new FieldGrid{ BackColor=Ui.Bg,LabelWidth=Ui.S(84) };
-            mirror.Text="镜像源目录结构（推荐，避免同名覆盖）";mirror.Checked=true;mirror.AutoSize=true;mirror.CheckedChanged+=delegate{ Unscan(); };
+            output.TextChanged+=delegate{ if(!settingOutput)outputAuto=output.Text.Trim().Length==0; UpdateEstimate(); RefreshRail(); };
+
+            subRow=new Panel{ Height=Ui.S(36),BackColor=Ui.Bg };
+            var subLabel=new Label{ Text="子文件夹",AutoSize=false,Font=Ui.F9B,ForeColor=Ui.Text2,BackColor=Ui.Bg,TextAlign=ContentAlignment.MiddleLeft,Bounds=new Rectangle(0,Ui.S(3),labelW,Ui.S(30)) };
+            subfolderBox.BorderStyle=BorderStyle.FixedSingle;subfolderBox.Font=Ui.F9;subfolderBox.Text=ConvertOptions.DefaultOutputSubfolder;
+            var subHint=new Label{ Text="建在每个输入文件夹内（源目录 0 残留）",AutoSize=true,Font=Ui.F8,ForeColor=Ui.Muted,BackColor=Ui.Bg };
+            subRow.Controls.AddRange(new Control[]{ subLabel,subfolderBox,subHint });
+            subRow.Resize+=delegate{
+                int boxW=Math.Min(Ui.S(220),Math.Max(Ui.S(100),subRow.Width-labelW-Ui.S(12)));
+                subfolderBox.SetBounds(labelW,Ui.S(3),boxW,Ui.S(30));
+                subHint.Location=new Point(subfolderBox.Right+Ui.S(10),Math.Max(0,(subRow.Height-subHint.Height)/2));
+            };
+            subfolderBox.TextChanged+=delegate{
+                if(initializingMode)return;
+                string val=subfolderBox.Text.Trim();
+                if(ConvertOptions.IsValidSubfolderName(val))Choices.Set("convert.outputSubfolder",val);
+                Unscan();
+            };
+
+            optsGrid=new FieldGrid{ BackColor=Ui.Bg,LabelWidth=labelW,Tag="autoheight" };
+            mirror.Text="镜像源目录结构（多文件夹自动按站位分目录，避免同名覆盖）";mirror.Checked=true;mirror.AutoSize=true;mirror.CheckedChanged+=delegate{ Unscan(); UpdateEstimate(); };
             force.Text="覆盖已存在的转换结果";force.AutoSize=true;
             verify.Text="转换后重新打开校验引用";verify.AutoSize=true;
-            opts.Add("目录结构",mirror);
-            opts.Add("已存在",force);
-            opts.Add("校验",verify);
+            mirrorRow=optsGrid.Add("目录结构",mirror);
+            optsGrid.Add("已存在",force);
+            optsGrid.Add("校验",verify);
             workers.Minimum=1;workers.Maximum=8;workers.Value=Math.Max(1,Math.Min(8,ConvertPlanner.SuggestedWorkers(8,Environment.ProcessorCount,(long)AvailableMemoryMb())));workers.Width=Ui.S(72);workers.BorderStyle=BorderStyle.FixedSingle;workers.TextAlign=HorizontalAlignment.Right;
             autoWorkers.Text="自动（智能并发，推荐）";autoWorkers.Checked=true;autoWorkers.AutoSize=true;
             autoWorkers.CheckedChanged+=delegate{ workers.Enabled=!autoWorkers.Checked; UpdateEstimate(); };
             workers.ValueChanged+=delegate{ UpdateEstimate(); };
             workers.Enabled=false;
-            opts.Add("并行进程",autoWorkers,workers);
+            optsGrid.Add("并行进程",autoWorkers,workers);
             keepPool.Text="热驻留进程池（连续转换秒启动，空闲 5 分钟自动释放）";keepPool.Checked=true;keepPool.AutoSize=true;
             keepPool.CheckedChanged+=delegate{ if(!keepPool.Checked&&!timer.Enabled&&warmPool.AliveCount>0){ ReleaseWarmPool(); } UpdateEstimate(); };
-            opts.Add("热池驻留",keepPool);
-            opts.Height=opts.PreferredHeight;
-            estimate.AutoSize=false;estimate.ForeColor=Ui.Muted;estimate.Font=Ui.F8;estimate.BackColor=Ui.Bg;estimate.Height=Ui.S(84);
-            UpdateEstimate();
-            outStack.Add(outRow);outStack.Add(opts);outStack.Add(estimate);
+            optsGrid.Add("热池驻留",keepPool);
+            optsGrid.Height=optsGrid.PreferredHeight;
+
+            var previewCard=Ui.Card("输出位置预览（双击打开目录）",0,"");
+            previewCard.Padding=Ui.SPad(10,36,8,8);
+            previewCard.MinimumSize=new Size(0,Ui.S(86));
+            outputPreview.Dock=DockStyle.Fill;outputPreview.BorderStyle=BorderStyle.None;outputPreview.IntegralHeight=false;
+            outputPreview.Font=Ui.F8;outputPreview.ForeColor=Ui.Text2;outputPreview.BackColor=Color.White;outputPreview.ItemHeight=Ui.S(22);
+            Ui.EnableDoubleBuffer(outputPreview);
+            outputPreview.DoubleClick+=delegate{ OpenPreviewSelection(); };
+            previewCard.Controls.Add(outputPreview);
+
+            estimate.AutoSize=false;estimate.ForeColor=Ui.Muted;estimate.Font=Ui.F8;estimate.BackColor=Ui.Bg;estimate.Height=Ui.S(68);
+            estimate.MinimumSize=new Size(0,Ui.S(54));estimate.Tag="autoheight";
+            outStack.Add(modeRow);outStack.Add(outRow);outStack.Add(subRow);outStack.Add(optsGrid);outStack.Add(previewCard,true);outStack.Add(estimate);
+
+            outputMode.SelectedIndexChanged+=delegate{
+                if(initializingMode)return;
+                Choices.Set("convert.outputMode",ConvertOptions.FormatOutputMode(CurrentOutputMode()));
+                ApplyOutputModeUi();
+                Unscan();
+            };
 
             // ---- ③ 转换 ----
             var runStack=new VerticalStack{ Dock=DockStyle.Fill,Padding=new Padding(0),Gap=Ui.S(12),AutoScroll=false };
@@ -183,11 +240,100 @@ namespace TianGongCadSuite {
             // 记住的话，哪天往同一个输出文件夹补转几个新文件，前面改过的全被重新转换覆盖掉、一声不响。每次要覆盖就当场勾。
             Choices.Bind(autoWorkers,"convert.autoWorkers");
             Choices.Bind(keepPool,"convert.keepPool");
-            UpdateEstimate();
+            // 0.13.10：默认「各自源文件夹（原地）」（方案 B），多站位自动转换到各自文件夹内；记住用户的模式切换。
+            initializingMode=true;
+            try{
+                ConvertOutputMode savedMode=ConvertOptions.ParseOutputMode(Choices.Get("convert.outputMode","inplace"),ConvertOutputMode.InPlace);
+                outputMode.SelectedIndex=ModeToIndex(savedMode);
+                string savedSub=Choices.Get("convert.outputSubfolder",ConvertOptions.DefaultOutputSubfolder);
+                subfolderBox.Text=ConvertOptions.IsValidSubfolderName(savedSub)?savedSub.Trim():ConvertOptions.DefaultOutputSubfolder;
+            }finally{ initializingMode=false; }
+            ApplyOutputModeUi();
             RefreshPoolUi();
+        }
+        static int ModeToIndex(ConvertOutputMode mode){
+            if(mode==ConvertOutputMode.PerInputSubfolder)return 1;
+            if(mode==ConvertOutputMode.SingleRoot)return 2;
+            return 0;
+        }
+        ConvertOutputMode CurrentOutputMode(){
+            if(outputMode.SelectedIndex==1)return ConvertOutputMode.PerInputSubfolder;
+            if(outputMode.SelectedIndex==2)return ConvertOutputMode.SingleRoot;
+            return ConvertOutputMode.InPlace;
+        }
+        void ApplyOutputModeUi(){
+            ConvertOutputMode mode=CurrentOutputMode();
+            if(outRow!=null)outRow.Visible=mode==ConvertOutputMode.SingleRoot;
+            if(subRow!=null)subRow.Visible=mode==ConvertOutputMode.PerInputSubfolder;
+            if(optsGrid!=null&&mirrorRow!=null){
+                optsGrid.Show(mirrorRow,mode!=ConvertOutputMode.InPlace);
+                optsGrid.Height=optsGrid.PreferredHeight;
+            }
+            if(outStack!=null)outStack.PerformLayout();
+            UpdateEstimate();
             RefreshRail();
         }
+        void RefreshOutputPreview(){
+            if(outputPreview==null)return;
+            var options=BuildOptions();
+            var map=ConvertPlanner.ResolveOutputRoots(options);
+            outputPreview.BeginUpdate();
+            try{
+                outputPreview.Items.Clear();
+                previewDirs.Clear();
+                if(sources.Count==0){
+                    if(options.OutputMode==ConvertOutputMode.InPlace)
+                        outputPreview.Items.Add("请先在第 1 步添加站位文件夹或文件；多个站位将各自直接输出到各自源文件夹内。");
+                    else if(options.OutputMode==ConvertOutputMode.PerInputSubfolder)
+                        outputPreview.Items.Add("请先在第 1 步添加站位文件夹或文件；多个站位将各自输出到「各自源文件夹\\"+options.EffectiveSubfolder()+"」。");
+                    else
+                        outputPreview.Items.Add("请先在第 1 步添加站位文件夹或文件并选择输出目录；多站位勾选镜像时自动按站位名分目录。");
+                    return;
+                }
+                if(options.OutputMode==ConvertOutputMode.SingleRoot&&string.IsNullOrWhiteSpace(options.OutputRoot)){
+                    outputPreview.Items.Add("请在上方选择统一输出目录。");
+                    return;
+                }
+                if(options.OutputMode==ConvertOutputMode.PerInputSubfolder&&!ConvertOptions.IsValidSubfolderName(options.OutputSubfolder)){
+                    outputPreview.Items.Add("子文件夹名称不合法，请修改（不能包含 \\ / : * ? \" < > |）。");
+                    return;
+                }
+                foreach(var kv in map){
+                    string srcRoot=kv.Key;
+                    string dstRoot=kv.Value;
+                    string line;
+                    if(options.OutputMode==ConvertOutputMode.InPlace){
+                        line=srcRoot+"  →  原地输出（直接保存在此文件夹）";
+                    }else if(options.OutputMode==ConvertOutputMode.SingleRoot&&options.FlatOutput){
+                        line=srcRoot+"  →  "+dstRoot+"（平铺）";
+                    }else{
+                        line=srcRoot+"  →  "+dstRoot;
+                    }
+                    outputPreview.Items.Add(line);
+                    previewDirs.Add(dstRoot);
+                }
+            }finally{ outputPreview.EndUpdate(); }
+        }
+        void OpenPreviewSelection(){
+            int idx=outputPreview.SelectedIndex;
+            if(idx<0||idx>=previewDirs.Count)return;
+            OpenFolderSafe(previewDirs[idx],false);
+        }
         public void GoPageForTest(int i){ shell.Go(i,false); }
+#if TG_DEV_BUILD
+        internal ConvertOutputMode TestOutputMode { get{ return CurrentOutputMode(); } }
+        internal void TestSetOutputMode(ConvertOutputMode mode){ outputMode.SelectedIndex=ModeToIndex(mode); }
+        internal void TestSetOutputRoot(string dir){ output.Text=dir??""; }
+        internal void TestSetSubfolder(string name){ subfolderBox.Text=name??""; }
+        internal void TestAddSources(IEnumerable<string> paths){ AddSources(paths); }
+        internal List<string> TestPreviewDirs(){ return new List<string>(previewDirs); }
+        internal List<string> TestPreviewLines(){
+            var list=new List<string>();
+            foreach(object item in outputPreview.Items)list.Add(Convert.ToString(item));
+            return list;
+        }
+        internal ConvertOptions TestBuildOptions(){ return BuildOptions(); }
+#endif
         void UpdatePrimary(){
             int cur=shell.Current;
             bool running=timer.Enabled;
@@ -200,8 +346,19 @@ namespace TianGongCadSuite {
         void RefreshRail(){
             int n=inputs.Items.Count;
             shell.Rail.Set(0,n==0?"文件或文件夹，可多选":n+" 项"+(items.Count>0?" · 扫到 "+items.Count+" 个文件":""),n>0,false);
-            string o=output.Text.Trim();
-            shell.Rail.Set(1,o.Length==0?"选输出目录":(mirror.Checked?"镜像目录 · ":"")+Path.GetFileName(o.TrimEnd('\\','/')),o.Length>0,false);
+            var options=BuildOptions();
+            var dirs=ConvertPlanner.ResolveDistinctOutputDirs(options);
+            if(options.OutputMode==ConvertOutputMode.InPlace){
+                shell.Rail.Set(1,dirs.Count>1?("各自源文件夹 · "+dirs.Count+" 处"):"各自源文件夹（原地）",true,false);
+            }else if(options.OutputMode==ConvertOutputMode.PerInputSubfolder){
+                bool ok=options.HasOutputTarget();
+                shell.Rail.Set(1,ok?("各自子文件夹 · "+options.EffectiveSubfolder()):"请填合法子文件夹名",ok,false);
+            }else{
+                string o=output.Text.Trim();
+                string prefix=mirror.Checked?(dirs.Count>1?"按站位分目录 · ":"镜像目录 · "):"";
+                shell.Rail.Set(1,o.Length==0?"选输出目录":(prefix+ConvertPlanner.FolderDisplayName(o)),o.Length>0,false);
+            }
+            RefreshOutputPreview();
             inputEmpty.Visible=n==0;
             UpdatePrimary();
         }
@@ -241,8 +398,8 @@ namespace TianGongCadSuite {
         }
         void AddFolder(){
             string init=sources.Count>0?sources[sources.Count-1]:"";
-            string dir=FolderPicker.Pick(this,"选择包含 SolidWorks / STEP 文件的文件夹（可重复添加多个）",init,"convert.input");
-            if(!string.IsNullOrEmpty(dir))AddSource(dir);
+            string[] dirs=FolderPicker.PickMultiple(this,"选择包含 SolidWorks / STEP 文件的文件夹（可按住 Ctrl 多选多个站位）",init,"convert.input");
+            if(dirs!=null&&dirs.Length>0)AddSources(dirs);
         }
         void OnFormDragEnter(object sender,DragEventArgs e){
             if(!timer.Enabled&&e.Data!=null&&e.Data.GetDataPresent(DataFormats.FileDrop))e.Effect=DragDropEffects.Copy;
@@ -280,6 +437,7 @@ namespace TianGongCadSuite {
                 if(!string.IsNullOrEmpty(path)&&existing.Add(path)){ sources.Add(path); changed=true; }
             }
             if(!changed)return;
+            lastRunOutputDirs.Clear();
             AutoOutput();
             Unscan();
         }
@@ -301,6 +459,7 @@ namespace TianGongCadSuite {
                 foreach(string c in chosen)inputs.Items.Remove(c);
             }else{
                 foreach(string c in chosen){ sources.RemoveAll(x=>string.Equals(x,c,StringComparison.OrdinalIgnoreCase));inputs.Items.Remove(c); }
+                lastRunOutputDirs.Clear();
                 AutoOutput();
             }
         }
@@ -309,10 +468,41 @@ namespace TianGongCadSuite {
             if(!string.IsNullOrEmpty(dir))output.Text=dir;
         }
         void OpenOutputFolder(){
-            string path=output.Text;
+            var options=BuildOptions();
+            string path=null;
+            bool createIfMissing=false;
+            if(options.OutputMode==ConvertOutputMode.SingleRoot&&!string.IsNullOrWhiteSpace(options.OutputRoot)){
+                path=options.OutputRoot;
+                createIfMissing=true;
+            }else{
+                var dirs=lastRunOutputDirs.Count>0?lastRunOutputDirs:ConvertPlanner.ResolveDistinctOutputDirs(options);
+                if(dirs.Count==1){
+                    path=dirs[0];
+                    createIfMissing=lastRunOutputDirs.Count>0;
+                }else if(dirs.Count>1){
+                    string common=ConvertPlanner.CommonParentDirectory(dirs);
+                    path=(!string.IsNullOrEmpty(common)&&Directory.Exists(common))?common:dirs[0];
+                }
+            }
+            if(string.IsNullOrEmpty(path)){
+                MessageBox.Show(this,"还没有可打开的输出目录，请先添加输入文件夹。","天工格式转换");
+                return;
+            }
+            OpenFolderSafe(path,createIfMissing);
+        }
+        void OpenFolderSafe(string path,bool createIfMissing){
             try{
+                if(string.IsNullOrEmpty(path))return;
+                string target=path;
+                if(createIfMissing){
+                    Directory.CreateDirectory(target);
+                }else if(!Directory.Exists(target)){
+                    target=FolderPicker.ResolveExistingDir(target);
+                }
                 // 输出目录选的是盘符根（D:\）时原来拼成 "D:\""，\" 被当成引号，打开的是「文档」
-                if(path!=null&&path.Length>0){ Directory.CreateDirectory(path); Process.Start("explorer.exe",CommandLine.Quote(path)); }
+                if(!string.IsNullOrEmpty(target)&&Directory.Exists(target)){
+                    Process.Start("explorer.exe",CommandLine.Quote(target));
+                }
             }catch(Exception e){ MessageBox.Show(this,"无法打开目录："+e.Message,"天工格式转换"); }
         }
         void RefreshList(){
@@ -335,9 +525,11 @@ namespace TianGongCadSuite {
 
         ConvertOptions BuildOptions(){
             var options=new ConvertOptions();
-            options.OutputRoot=output.Text.Trim();
+            options.OutputMode=CurrentOutputMode();
+            options.OutputRoot=options.OutputMode==ConvertOutputMode.SingleRoot?output.Text.Trim():"";
+            options.OutputSubfolder=subfolderBox.Text.Trim();
             options.Recursive=recursive.Checked;
-            options.FlatOutput=!mirror.Checked;
+            options.FlatOutput=options.OutputMode!=ConvertOutputMode.InPlace&&!mirror.Checked;
             options.Force=force.Checked;
             options.VerifyReopen=verify.Checked;
             options.IncludeParts=parts.Checked;
@@ -356,7 +548,7 @@ namespace TianGongCadSuite {
         void UpdateEstimate(){
             int cores=Environment.ProcessorCount;
             long mem=(long)AvailableMemoryMb();
-            var previewOpts=new ConvertOptions{ OutputRoot=output.Text.Trim(), FlatOutput=!mirror.Checked };
+            var previewOpts=BuildOptions();
             int suggested=items.Count>0
                 ?ConvertPlanner.SuggestedWorkers(items,cores,mem,previewOpts)
                 :ConvertPlanner.SuggestedWorkers(8,cores,mem);
@@ -364,7 +556,12 @@ namespace TianGongCadSuite {
                 ?("当前模式：自动并发（按本机 "+cores+" 核 / 可用内存 "+mem+" MB，多模型自动建议 "+suggested+" 进程；单文件或小批次自动降为 1 进程）。")
                 :("当前模式：手动指定 "+(int)workers.Value+" 个并行进程（并行预拉起 + 动态任务队列均衡，自动不超过实际待转文件数）。");
             string poolNote=keepPool.Checked?"热驻留已开（连续批次 0 秒启动，空闲 5 分钟自动释放）":"热驻留已关（每批结束立即释放隐藏 CAD）";
-            estimate.Text=mode+"\r\n并行引擎：大型装配同目录总装优先串行防碰撞、内存感知调度、源目录零残留自动清理；"+poolNote+"。\r\n输出格式：装配 .asm、零件 .par、钣金 .psm、工程图 .dft；由天工CAD自带转换器完成。";
+            string outNote=previewOpts.OutputMode==ConvertOutputMode.InPlace
+                ?"原地输出：多站位各自在源目录内转换（同目录装配自动串行防锁冲突，不同站位可并行）"
+                :(previewOpts.OutputMode==ConvertOutputMode.PerInputSubfolder
+                    ?"独立子目录输出：各站位分别写入各自「"+previewOpts.EffectiveSubfolder()+"」并保持源目录 0 残留"
+                    :"统一目录输出：源目录 0 残留自动清理，多站位勾选镜像时自动按站位分目录");
+            estimate.Text=mode+"\r\n"+outNote+"；"+poolNote+"。\r\n输出格式：装配 .asm、零件 .par、钣金 .psm、工程图 .dft；由天工CAD自带转换器完成。";
         }
         static ulong AvailableMemoryMb(){
             try{
@@ -377,7 +574,7 @@ namespace TianGongCadSuite {
         void ScanInputs(bool keepRemovals){
             var options=BuildOptions();
             string problem=options.Validate();
-            if(problem!=null&&problem.IndexOf("输出目录",StringComparison.Ordinal)<0){ MessageBox.Show(this,problem,"天工格式转换"); return; }
+            if(problem!=null&&problem.IndexOf("输出目录",StringComparison.Ordinal)<0&&problem.IndexOf("子文件夹",StringComparison.Ordinal)<0){ MessageBox.Show(this,problem,"天工格式转换"); return; }
             // 扫描后列表里手动移掉的文件，重扫（勾了覆盖 / 校验时开始转换会自动重扫）也别再加回来
             HashSet<string> keep=null;
             if(scanned&&keepRemovals){ keep=new HashSet<string>(StringComparer.OrdinalIgnoreCase);foreach(var i in items)keep.Add(i.Source); }
@@ -411,7 +608,7 @@ namespace TianGongCadSuite {
         // 源文件 / 输出路径超过 259 个字符的有几个（输出只算得出顶层文件，零件按同一层估）
         string LongPathWarning(ConvertOptions options){
             int src=0,dst=0;string example=null;
-            bool hasOut=!string.IsNullOrEmpty(options.OutputRoot)&&options.OutputRoot.Trim().Length>0;   // 还没选输出目录时只查源文件
+            bool hasOut=options.HasOutputTarget();   // 还没选输出目录时只查源文件
             foreach(ConvertItem item in items){
                 if(item.Source.Length>MaxPath){ src++; if(example==null)example=item.Source; }
                 else if(hasOut){
@@ -423,7 +620,12 @@ namespace TianGongCadSuite {
             if(src==0&&dst==0)return null;
             var sb=new StringBuilder("注意：");
             if(src>0)sb.Append(src+" 个文件本身的路径超过 "+MaxPath+" 个字符，天工打不开（把项目文件夹挪到浅一点的地方，比如 D:\\项目\\）；");
-            if(dst>0)sb.Append(dst+" 个文件转出来的路径会超过 "+MaxPath+" 个字符、存不上（把输出目录选短一点，比如 D:\\转换输出，或者不勾「镜像源目录结构」）；");
+            if(dst>0){
+                if(options.OutputMode==ConvertOutputMode.InPlace)
+                    sb.Append(dst+" 个文件转出来的路径会超过 "+MaxPath+" 个字符、存不上（可把项目文件夹挪浅，或改用「统一输出到指定目录」选短路径如 D:\\转换输出）；");
+                else
+                    sb.Append(dst+" 个文件转出来的路径会超过 "+MaxPath+" 个字符、存不上（可改用「各自源文件夹（原地）」，或把输出目录选短一点如 D:\\转换输出）；");
+            }
             sb.Append("例如 "+Path.GetFileName(example)+"。");
             return sb.ToString();
         }
@@ -431,25 +633,35 @@ namespace TianGongCadSuite {
         void StartConversion(){
             if(timer.Enabled)return;
             var options=BuildOptions();
-            // 先建输出目录再校验：默认的输出目录（加文件夹时自动填的「…\天工格式输出」）本来就还不存在，
-            // 原来先校验，点「开始转换」就报"输出目录不存在"，用户得自己去建一个
-            if(options.OutputRoot.Length>0&&options.Inputs.Count>0){ try{ Directory.CreateDirectory(options.OutputRoot); }catch(Exception e){ MessageBox.Show(this,"无法创建输出目录："+e.Message,"天工格式转换"); return; } }
+            // 统一总目录模式下先建输出目录再校验：默认输出目录（…\天工格式输出）本来就还不存在。
+            if(options.OutputMode==ConvertOutputMode.SingleRoot&&options.OutputRoot.Length>0&&options.Inputs.Count>0){
+                try{ Directory.CreateDirectory(options.OutputRoot); }
+                catch(Exception e){ MessageBox.Show(this,"无法创建输出目录："+e.Message,"天工格式转换"); return; }
+            }
             string problem=options.Validate();
             if(problem!=null){ MessageBox.Show(this,problem,"天工格式转换"); return; }
             if(items.Count==0||force.Checked||verify.Checked)ScanInputs(true);
             if(items.Count==0)return;
-            // 用户先扫描再切页修改输出目录时，必须按当前 options 重算所有条目的 Target 并复查超长路径，
+            // 用户先扫描再切页修改输出模式/目录时，必须按当前 options 重算所有条目的 OutputRoot 与 Target 并复查超长路径，
             // 否则预跳过项与 pending 项在 CSV 报告里会写入旧路径或空路径。
-            for(int i=0;i<items.Count;i++){
-                try{ items[i].Target=ConvertPlanner.TopTarget(items[i],options); }
-                catch(PathTooLongException){ items[i].Target=null; }
+            ConvertPlanner.ApplyOutputRoots(items,options);
+            var outDirs=ConvertPlanner.ResolveDistinctOutputDirs(items,options);
+            foreach(string dir in outDirs){
+                try{ Directory.CreateDirectory(dir); }
+                catch(Exception e){ MessageBox.Show(this,"无法创建输出目录 "+dir+"："+e.Message,"天工格式转换"); return; }
             }
+            lastRunOutputDirs.Clear();
+            lastRunOutputDirs.AddRange(outDirs);
             string pathWarn=LongPathWarning(options);
             if(pathWarn!=null)AppendLog(pathWarn);
 
             processes.Clear();statusFiles.Clear();finishedStatusFiles.Clear();offsets.Clear();rows.Clear();
             totalPlanned=items.Count;
-            reportPath=Path.Combine(options.OutputRoot,"转换报告-"+DateTime.Now.ToString("yyyyMMdd-HHmmss")+".csv");
+            string reportDir=ConvertPlanner.DefaultReportDirectory(outDirs,options);
+            if(!string.IsNullOrEmpty(reportDir)){
+                try{ Directory.CreateDirectory(reportDir); }catch{}
+            }
+            reportPath=Path.Combine(string.IsNullOrEmpty(reportDir)?Path.GetTempPath():reportDir,"转换报告-"+DateTime.Now.ToString("yyyyMMdd-HHmmss")+".csv");
             startedAt=DateTime.Now;
 
             // 启动任何隐藏 CAD 前先过滤已存在有效输出的文件：全部已转过时毫秒级结束，不白等十几秒启 CAD。
@@ -505,8 +717,16 @@ namespace TianGongCadSuite {
             string poolSummary=reused>0
                 ?(newlyBooted>0?("复用热池 "+reused+" 个 + 同步预拉起 "+newlyBooted+" 个"):("热池秒复用 "+reused+" 个隐藏 CAD"))
                 :("同步预拉起 "+newlyBooted+" 个隐藏 CAD");
+            string outputSummary=outDirs.Count==1
+                ?("输出目录 "+outDirs[0])
+                :("共 "+outDirs.Count+" 个独立输出目录（"+(options.OutputMode==ConvertOutputMode.InPlace?"各自源文件夹原地输出":(options.OutputMode==ConvertOutputMode.PerInputSubfolder?("各自建「"+options.EffectiveSubfolder()+"」"):"统一目录按站位分目录"))+"）");
             AppendLog("开始转换：共 "+items.Count+" 个文件"+(preSkippedCount>0?"（预跳过已存在 "+preSkippedCount+" 个，实际待转 "+pending.Count+" 个）":"")
-                +"，启用 "+processes.Count+" 个并发进程（"+poolSummary+"）。输出目录 "+options.OutputRoot);
+                +"，启用 "+processes.Count+" 个并发进程（"+poolSummary+"）。"+outputSummary);
+            if(outDirs.Count>1){
+                int show=Math.Min(10,outDirs.Count);
+                for(int oi=0;oi<show;oi++)AppendLog("  输出目录 #"+(oi+1)+"："+outDirs[oi]);
+                if(outDirs.Count>show)AppendLog("  … 等共 "+outDirs.Count+" 个输出目录");
+            }
             AppendLog("硬件评估：CPU "+cores+" 逻辑核、可用内存 "+availMb+" MB，采用动态抢占队列（装配优先 + 源主干跨进程去重）。");
             start.Enabled=false;stop.Enabled=true;saveReport.Enabled=false;releasePool.Enabled=false;
             progress.Maximum=Math.Max(1,totalPlanned);progress.Value=Math.Min(progress.Maximum,rows.Count);

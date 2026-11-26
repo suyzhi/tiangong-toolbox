@@ -555,9 +555,11 @@ namespace TianGongCadSuite {
             string goPath=Path.Combine(poolDir,"slot-"+slotId.ToString(CultureInfo.InvariantCulture)+".go");
             string tmpPath=goPath+".tmp";
             string line=string.Join("\t",new[]{
-                queueDir,statusFile,options.OutputRoot,
+                queueDir,statusFile,options.OutputRoot??"",
                 options.FlatOutput?"1":"0",options.VerifyReopen?"1":"0",options.Force?"1":"0",
-                workRoot
+                workRoot,
+                ConvertOptions.FormatOutputMode(options.OutputMode),
+                options.EffectiveSubfolder()
             });
             File.WriteAllText(tmpPath,line,new UTF8Encoding(false));
             if(File.Exists(goPath))File.Delete(goPath);

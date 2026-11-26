@@ -40,6 +40,8 @@ namespace TianGongCadSuite {
                 if(args[i]=="--wid"&&i+1<args.Length){ int.TryParse(args[++i],NumberStyles.Integer,CultureInfo.InvariantCulture,out workerId); }
                 else if(args[i]=="--rot"&&i+1<args.Length){ int.TryParse(args[++i],NumberStyles.Integer,CultureInfo.InvariantCulture,out rotTarget); }
                 else if(args[i]=="--before"&&i+1<args.Length){ forbiddenPids=ParsePids(args[++i]); }
+                else if(args[i]=="--mode"&&i+1<args.Length){ options.OutputMode=ConvertOptions.ParseOutputMode(args[++i],ConvertOutputMode.SingleRoot); }
+                else if(args[i]=="--subfolder"&&i+1<args.Length){ options.OutputSubfolder=args[++i]; }
             }
             bool isQueue=Directory.Exists(jobSource);
             int exit=0;
@@ -133,9 +135,10 @@ namespace TianGongCadSuite {
             // 这次前面任意进程转装配时已经把它一起转好存出来了（含按源主干去重，覆盖/续跑模式均跳过，杜绝重复转换；
             // 平铺输出模式下严查源路径匹配，避免不同子文件夹同名零件被误跳过）。
             var candidateTargets=ConvertPlanner.CandidateTargets(item,options);
+            bool isFlat=options.FlatOutput&&options.OutputMode!=ConvertOutputMode.InPlace;
             bool wroteAlready=session!=null
-                ?session.WroteThisRun(candidateTargets,item.Source,options.FlatOutput)
-                :(options.FlatOutput
+                ?session.WroteThisRun(candidateTargets,item.Source,isFlat)
+                :(isFlat
                     ?ConvertWrittenIndex.ContainsForFlatSource(lockRoot,candidateTargets,item.Source)
                     :ConvertWrittenIndex.ContainsAnyOrSource(lockRoot,candidateTargets,item.Source));
             if(wroteAlready){
@@ -296,7 +299,7 @@ namespace TianGongCadSuite {
 
                         string statusFile=null;
                         try{
-                            string spec=File.ReadAllText(busyFile,new UTF8Encoding(false)).Trim();
+                            string spec=File.ReadAllText(busyFile,new UTF8Encoding(false)).TrimEnd('\r','\n');
                             string[] fields=spec.Split('\t');
                             if(fields.Length>=7){
                                 string queueDir=fields[0];
@@ -307,6 +310,8 @@ namespace TianGongCadSuite {
                                 options.VerifyReopen=fields[4]=="1";
                                 options.Force=fields[5]=="1";
                                 string workRoot=fields[6];
+                                if(fields.Length>=8)options.OutputMode=ConvertOptions.ParseOutputMode(fields[7],ConvertOutputMode.SingleRoot);
+                                if(fields.Length>=9&&!string.IsNullOrWhiteSpace(fields[8]))options.OutputSubfolder=fields[8].Trim();
                                 Action<string> emitLog=delegate(string m){ ConvertLog.Append(statusFile,ConvertProtocol.Line("LOG",m)); };
 
                                 if(session==null||!session.IsAlive()){

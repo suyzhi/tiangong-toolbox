@@ -494,11 +494,14 @@ namespace TianGongCadSuite {
             bool isSw=ConvertPlanner.IsSolidWorks(item.Source);
             string srcDir=null;
             try{ srcDir=Path.GetDirectoryName(Path.GetFullPath(item.Source)); }catch{}
-            bool sameFolderOutput=false;
-            try{
-                string expectedTopDir=Path.GetDirectoryName(ConvertPlanner.TopTarget(item,options));
-                sameFolderOutput=ConvertPlanner.SameDir(srcDir,expectedTopDir);
-            }catch{}
+            string itemOutRoot=ConvertPlanner.OutputRootFor(item,options);
+            bool sameFolderOutput=options!=null&&options.OutputMode==ConvertOutputMode.InPlace;
+            if(!sameFolderOutput){
+                try{
+                    string expectedTopDir=Path.GetDirectoryName(ConvertPlanner.TopTarget(item,options));
+                    sameFolderOutput=ConvertPlanner.SameDir(srcDir,expectedTopDir);
+                }catch{}
+            }
             bool hasBatchBaseline=false;
             HashSet<string> preExistingSrcFiles=!sameFolderOutput?ConvertSourceBaseline.LoadOrCapture(lockRoot,srcDir,out hasBatchBaseline):null;
             var sourceStubsToClean=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -547,7 +550,7 @@ namespace TianGongCadSuite {
                             foreach(string p in seenPaths.Keys){
                                 try{
                                     string pdir=Path.GetDirectoryName(p);
-                                    if(!string.IsNullOrEmpty(pdir)&&!ConvertSourceBaseline.IsUnderDir(p,options.OutputRoot)){
+                                    if(!string.IsNullOrEmpty(pdir)&&!ConvertSourceBaseline.IsUnderDir(p,itemOutRoot)){
                                         sourceStubsToClean.Add(p);
                                         touchedSrcDirs.Add(pdir);
                                     }
@@ -636,7 +639,7 @@ namespace TianGongCadSuite {
                     string rawAssigned=SafeFullNameOrNull(doc);
                     if(isSw&&!sameFolderOutput&&rawAssigned!=null&&staged==null){
                         try{
-                            if(!ConvertSourceBaseline.IsUnderDir(rawAssigned,options.OutputRoot)){
+                            if(!ConvertSourceBaseline.IsUnderDir(rawAssigned,itemOutRoot)){
                                 sourceStubsToClean.Add(rawAssigned);
                                 string rdir=Path.GetDirectoryName(rawAssigned);
                                 if(!string.IsNullOrEmpty(rdir))touchedSrcDirs.Add(rdir);
@@ -676,7 +679,8 @@ namespace TianGongCadSuite {
                         }
                     }
                     string sourceKey=trueSource??assigned??finalName;
-                    if(options.FlatOutput){
+                    bool isFlat=options.FlatOutput&&options.OutputMode!=ConvertOutputMode.InPlace;
+                    if(isFlat){
                         string flatClash;
                         string flatResolved=ResolveFlatTargetCrossRun(target,sourceKey,out flatClash);
                         if(!string.Equals(flatResolved,target,StringComparison.OrdinalIgnoreCase)){
@@ -816,7 +820,7 @@ namespace TianGongCadSuite {
                         }catch{}
                     }
                     foreach(string dir in touchedSrcDirs){
-                        if(string.IsNullOrEmpty(dir)||ConvertSourceBaseline.IsUnderDir(dir,options.OutputRoot))continue;
+                        if(string.IsNullOrEmpty(dir)||ConvertSourceBaseline.IsUnderDir(dir,itemOutRoot))continue;
                         HashSet<string> baseSnap=ConvertPlanner.SameDir(dir,srcDir)
                             ?preExistingSrcFiles
                             :ConvertSourceBaseline.TryLoadExisting(lockRoot,dir);
@@ -827,14 +831,14 @@ namespace TianGongCadSuite {
                         if(baseSnap!=null){
                             DateTime? minUtc=(ConvertPlanner.SameDir(dir,srcDir)&&!hasBatchBaseline)?(DateTime?)openStartUtc.AddSeconds(-2):null;
                             if(dirStubs.Count>0){
-                                CleanupCreatedSourceStubs(dirStubs,baseSnap,writtenThisItem,options.OutputRoot,true,minUtc);
+                                CleanupCreatedSourceStubs(dirStubs,baseSnap,writtenThisItem,itemOutRoot,true,minUtc);
                             }
                             if(isSw){
-                                CleanupCreatedSourceStubs(SnapshotSourceNativeFiles(dir),baseSnap,writtenThisItem,options.OutputRoot,true,minUtc);
+                                CleanupCreatedSourceStubs(SnapshotSourceNativeFiles(dir),baseSnap,writtenThisItem,itemOutRoot,true,minUtc);
                             }
                         } else if(dirStubs.Count>0){
                             // 未在批次前基线内的外部目录：仅清理明确属于本次 Open 时间之后产生的临时副本。
-                            CleanupCreatedSourceStubs(dirStubs,null,writtenThisItem,options.OutputRoot,true,openStartUtc.AddSeconds(-2));
+                            CleanupCreatedSourceStubs(dirStubs,null,writtenThisItem,itemOutRoot,true,openStartUtc.AddSeconds(-2));
                         }
                     }
                 }

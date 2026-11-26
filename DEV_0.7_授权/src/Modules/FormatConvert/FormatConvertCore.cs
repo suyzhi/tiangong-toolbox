@@ -6,10 +6,22 @@ using System.Linq;
 using System.Text;
 
 namespace TianGongCadSuite {
+    // 输出位置模式（0.13.10）：
+    //   SingleRoot        = 统一输出到指定总目录（多输入勾选镜像时按站位目录名自动分子目录，不再混成一层）
+    //   PerInputSubfolder = 每个输入文件夹下新建子文件夹（如 ST01\天工格式输出、ST02\天工格式输出）
+    //   InPlace           = 直接输出到各自源文件夹（原地输出，ST01 落 ST01\、ST02 落 ST02\，不拉长路径）
+    public enum ConvertOutputMode {
+        SingleRoot=0,
+        PerInputSubfolder=1,
+        InPlace=2
+    }
     // Pure planning/reporting layer. No CAD, no WinForms: unit-testable.
     public sealed class ConvertOptions {
+        public const string DefaultOutputSubfolder="天工格式输出";
         public List<string> Inputs;
         public string OutputRoot;
+        public ConvertOutputMode OutputMode;
+        public string OutputSubfolder;
         public bool Recursive;
         public bool FlatOutput;      // true = every output lands in OutputRoot; false = mirror the input tree
         public bool Force;           // re-convert even when the target already exists
@@ -20,14 +32,47 @@ namespace TianGongCadSuite {
         public bool IncludeStep;     // .stp/.step through the STEP translator
         public bool VerifyReopen;    // reopen the produced top document and check for missing references
         public ConvertOptions(){
-            Inputs=new List<string>();OutputRoot="";Recursive=true;FlatOutput=false;Force=false;Workers=1;
+            Inputs=new List<string>();OutputRoot="";OutputMode=ConvertOutputMode.SingleRoot;OutputSubfolder=DefaultOutputSubfolder;
+            Recursive=true;FlatOutput=false;Force=false;Workers=1;
             IncludeAssemblies=true;IncludeParts=true;IncludeDrawings=false;IncludeStep=true;VerifyReopen=false;
         }
         public ConvertOptions Clone(){
             var c=new ConvertOptions();
-            c.Inputs.AddRange(Inputs);c.OutputRoot=OutputRoot;c.Recursive=Recursive;c.FlatOutput=FlatOutput;
+            c.Inputs.AddRange(Inputs);c.OutputRoot=OutputRoot;c.OutputMode=OutputMode;c.OutputSubfolder=OutputSubfolder;
+            c.Recursive=Recursive;c.FlatOutput=FlatOutput;
             c.Force=Force;c.Workers=Workers;c.IncludeAssemblies=IncludeAssemblies;c.IncludeParts=IncludeParts;
             c.IncludeDrawings=IncludeDrawings;c.IncludeStep=IncludeStep;c.VerifyReopen=VerifyReopen;return c;
+        }
+        public string EffectiveSubfolder(){
+            string s=OutputSubfolder==null?"":OutputSubfolder.Trim();
+            return s.Length>0?s:DefaultOutputSubfolder;
+        }
+        public bool HasOutputTarget(){
+            if(OutputMode==ConvertOutputMode.InPlace)return true;
+            if(OutputMode==ConvertOutputMode.PerInputSubfolder)return IsValidSubfolderName(OutputSubfolder);
+            return !string.IsNullOrWhiteSpace(OutputRoot);
+        }
+        public static bool IsValidSubfolderName(string name){
+            if(string.IsNullOrWhiteSpace(name))return false;
+            string t=name.Trim();
+            if(t=="."||t=="..")return false;
+            if(t.IndexOf('\\')>=0||t.IndexOf('/')>=0||t.IndexOf(':')>=0)return false;
+            var bad=Path.GetInvalidFileNameChars();
+            for(int i=0;i<t.Length;i++)if(Array.IndexOf(bad,t[i])>=0)return false;
+            return true;
+        }
+        public static string FormatOutputMode(ConvertOutputMode mode){
+            if(mode==ConvertOutputMode.InPlace)return "inplace";
+            if(mode==ConvertOutputMode.PerInputSubfolder)return "subfolder";
+            return "single";
+        }
+        public static ConvertOutputMode ParseOutputMode(string text,ConvertOutputMode fallback){
+            if(string.IsNullOrWhiteSpace(text))return fallback;
+            string t=text.Trim().ToLowerInvariant();
+            if(t=="inplace"||t=="2")return ConvertOutputMode.InPlace;
+            if(t=="subfolder"||t=="perinputsubfolder"||t=="1")return ConvertOutputMode.PerInputSubfolder;
+            if(t=="single"||t=="singleroot"||t=="0")return ConvertOutputMode.SingleRoot;
+            return fallback;
         }
         public List<string> Extensions(){
             var list=new List<string>();
@@ -39,9 +84,13 @@ namespace TianGongCadSuite {
         }
         public string Validate(){
             if(Inputs.Count==0)return "请先添加要转换的文件或文件夹。";
-            if(OutputRoot==null||OutputRoot.Trim().Length==0)return "请选择输出目录。";
+            if(OutputMode==ConvertOutputMode.SingleRoot){
+                if(OutputRoot==null||OutputRoot.Trim().Length==0)return "请选择输出目录。";
+                if(!Directory.Exists(OutputRoot))return "输出目录不存在："+OutputRoot;
+            }else if(OutputMode==ConvertOutputMode.PerInputSubfolder){
+                if(!IsValidSubfolderName(OutputSubfolder))return "输出子文件夹名称不合法（请填单个文件夹名，不能包含路径分隔符或非法字符）。";
+            }
             if(Workers<1||Workers>8)return "并行进程数必须在 1 到 8 之间。";
-            if(!Directory.Exists(OutputRoot))return "输出目录不存在："+OutputRoot;
             foreach(string input in Inputs){
                 if(!File.Exists(input)&&!Directory.Exists(input))return "输入不存在："+input;
             }
@@ -52,6 +101,7 @@ namespace TianGongCadSuite {
         public int Index;
         public string Source;      // absolute path of the SolidWorks file
         public string Root;        // the input folder it was discovered under (or its own folder)
+        public string OutputRoot;  // per-item resolved output root (used in multi-station / subfolder / multi-root modes)
         public long Size;
         public string Target;      // expected top-level output (.asm/.par/.psm/.dft)
         public int Worker=-1;
@@ -86,19 +136,240 @@ namespace TianGongCadSuite {
         public static bool IsLockFile(string name){
             return name.StartsWith("~$",StringComparison.Ordinal)||name.StartsWith(".~",StringComparison.Ordinal);
         }
+        // 统一目录路径规范化：盘符根（如 D:\）保留末尾反斜杠，普通目录去掉末尾分隔符，避免字典键值与前缀比对不一致。
+        public static string NormalizeDir(string path){
+            if(string.IsNullOrWhiteSpace(path))return "";
+            try{
+                string full=Path.GetFullPath(path.Trim());
+                string root=Path.GetPathRoot(full);
+                if(!string.IsNullOrEmpty(root)&&string.Equals(full,root,StringComparison.OrdinalIgnoreCase))return root;
+                return full.TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar);
+            }catch{ return path.Trim(); }
+        }
+        public static string FolderDisplayName(string dir){
+            string norm=NormalizeDir(dir);
+            if(norm.Length==0)return "";
+            string leaf=Path.GetFileName(norm.TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar));
+            if(!string.IsNullOrEmpty(leaf))return leaf;
+            return norm.TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar);
+        }
+        static string SafeFolderSegment(string dir){
+            string norm=NormalizeDir(dir);
+            string leaf=Path.GetFileName(norm.TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar));
+            if(!string.IsNullOrEmpty(leaf))return Sanitize(leaf);
+            string drive=norm.TrimEnd('\\','/',':');
+            return Sanitize(drive.Length>0?(drive+"盘"):"根目录");
+        }
+        static string InputRootOf(string raw){
+            if(string.IsNullOrWhiteSpace(raw))return "";
+            try{
+                string full=Path.GetFullPath(raw.Trim());
+                if(File.Exists(full))return NormalizeDir(Path.GetDirectoryName(full));
+                if(Directory.Exists(full))return NormalizeDir(full);
+                // 尚未创建或纯测试路径：带支持扩展名的按文件所在目录算，其余按文件夹算
+                if(IsSupported(full))return NormalizeDir(Path.GetDirectoryName(full));
+                return NormalizeDir(full);
+            }catch{ return ""; }
+        }
+        // 按当前输出模式为每个独立输入根目录解析对应的输出根目录：
+        // · InPlace：各自源目录自身；
+        // · PerInputSubfolder：各自源目录\<子文件夹名>（如 ST01\天工格式输出、ST02\天工格式输出）；
+        // · SingleRoot：单输入或平铺模式沿用 OutputRoot；多输入且勾选镜像时在 OutputRoot 下按站位目录名分目录，同名自动消歧。
+        public static Dictionary<string,string> ResolveOutputRoots(ConvertOptions options){
+            var map=new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
+            if(options==null)return map;
+            var distinctRoots=new List<string>();
+            var rootSet=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach(string raw in options.Inputs){
+                string r=InputRootOf(raw);
+                if(r.Length>0&&rootSet.Add(r))distinctRoots.Add(r);
+            }
+            if(distinctRoots.Count==0)return map;
+            if(options.OutputMode==ConvertOutputMode.InPlace){
+                foreach(string r in distinctRoots)map[r]=r;
+                return map;
+            }
+            if(options.OutputMode==ConvertOutputMode.PerInputSubfolder){
+                string sub=options.EffectiveSubfolder();
+                foreach(string r in distinctRoots)map[r]=NormalizeDir(Path.Combine(r,sub));
+                return map;
+            }
+            if(string.IsNullOrWhiteSpace(options.OutputRoot))return map;
+            string baseOut=NormalizeDir(options.OutputRoot);
+            if(distinctRoots.Count<=1||options.FlatOutput){
+                foreach(string r in distinctRoots)map[r]=baseOut;
+                return map;
+            }
+            var leafCounts=new Dictionary<string,int>(StringComparer.OrdinalIgnoreCase);
+            foreach(string r in distinctRoots){
+                string seg=SafeFolderSegment(r);
+                int c;leafCounts.TryGetValue(seg,out c);leafCounts[seg]=c+1;
+            }
+            var usedNames=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach(string r in distinctRoots){
+                string seg=SafeFolderSegment(r);
+                string candidate=seg;
+                int count;
+                if(leafCounts.TryGetValue(seg,out count)&&count>1){
+                    // 两个不同路径末尾同名（如 线体A\3D 与 线体B\3D）：优先拼上级目录名消歧，更直观。
+                    try{
+                        string parent=Path.GetDirectoryName(r.TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar));
+                        if(!string.IsNullOrEmpty(parent)&&!SameDir(parent,Path.GetPathRoot(parent))){
+                            string pseg=SafeFolderSegment(parent);
+                            if(!string.IsNullOrEmpty(pseg))candidate=Sanitize(pseg+"_"+seg);
+                        }
+                    }catch{}
+                }
+                string unique=candidate;
+                for(int n=2;!usedNames.Add(unique);n++)unique=candidate+" ("+n+")";
+                map[r]=NormalizeDir(Path.Combine(baseOut,unique));
+            }
+            return map;
+        }
+        public static List<string> ResolveDistinctOutputDirs(ConvertOptions options){
+            return ResolveDistinctOutputDirs(null,options);
+        }
+        public static List<string> ResolveDistinctOutputDirs(IEnumerable<ConvertItem> items,ConvertOptions options){
+            var result=new List<string>();
+            var seen=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if(items!=null){
+                foreach(ConvertItem item in items){
+                    string d=OutputRootFor(item,options);
+                    if(d.Length>0){
+                        string norm=NormalizeDir(d);
+                        if(seen.Add(norm))result.Add(norm);
+                    }
+                }
+            }
+            if(result.Count==0&&options!=null){
+                var map=ResolveOutputRoots(options);
+                foreach(string raw in options.Inputs){
+                    string r=InputRootOf(raw);
+                    string d;
+                    if(r.Length>0&&map.TryGetValue(r,out d)&&d.Length>0&&seen.Add(d))result.Add(d);
+                }
+                if(result.Count==0&&options.OutputMode==ConvertOutputMode.SingleRoot&&!string.IsNullOrWhiteSpace(options.OutputRoot)){
+                    string norm=NormalizeDir(options.OutputRoot);
+                    if(seen.Add(norm))result.Add(norm);
+                }
+            }
+            return result;
+        }
+        public static string OutputRootFor(ConvertItem item,ConvertOptions options){
+            if(item!=null&&!string.IsNullOrWhiteSpace(item.OutputRoot))return NormalizeDir(item.OutputRoot);
+            if(options==null)return "";
+            if(options.OutputMode==ConvertOutputMode.InPlace){
+                if(item!=null&&!string.IsNullOrWhiteSpace(item.Root))return NormalizeDir(item.Root);
+                if(item!=null&&!string.IsNullOrWhiteSpace(item.Source)){
+                    try{ return NormalizeDir(Path.GetDirectoryName(Path.GetFullPath(item.Source))); }catch{}
+                }
+                return "";
+            }
+            if(options.OutputMode==ConvertOutputMode.PerInputSubfolder){
+                string baseRoot=null;
+                if(item!=null&&!string.IsNullOrWhiteSpace(item.Root))baseRoot=NormalizeDir(item.Root);
+                else if(item!=null&&!string.IsNullOrWhiteSpace(item.Source)){
+                    try{ baseRoot=NormalizeDir(Path.GetDirectoryName(Path.GetFullPath(item.Source))); }catch{}
+                }
+                if(!string.IsNullOrEmpty(baseRoot))return NormalizeDir(Path.Combine(baseRoot,options.EffectiveSubfolder()));
+                return "";
+            }
+            return string.IsNullOrWhiteSpace(options.OutputRoot)?"":NormalizeDir(options.OutputRoot);
+        }
+        public static void ApplyOutputRoots(List<ConvertItem> items,ConvertOptions options){
+            if(items==null||options==null)return;
+            var rootMap=ResolveOutputRoots(options);
+            bool hasOut=options.HasOutputTarget();
+            for(int i=0;i<items.Count;i++){
+                ConvertItem item=items[i];
+                string normRoot=NormalizeDir(item.Root);
+                string resolved;
+                if(normRoot.Length>0&&rootMap.TryGetValue(normRoot,out resolved))item.OutputRoot=resolved;
+                else{
+                    item.OutputRoot=null;
+                    if(hasOut){
+                        string fallback=OutputRootFor(item,options);
+                        if(fallback.Length>0)item.OutputRoot=fallback;
+                    }
+                }
+                if(!hasOut){ item.Target=null; continue; }
+                try{ item.Target=TopTarget(item,options); }
+                catch(PathTooLongException){ item.Target=null; }
+            }
+        }
+        // 多输出目录求最长公共父目录（跨盘或无公共父目录返回 ""），供报告落盘与一键打开目录使用。
+        public static string CommonParentDirectory(IEnumerable<string> dirs){
+            if(dirs==null)return "";
+            var list=new List<string>();
+            foreach(string raw in dirs){
+                string norm=NormalizeDir(raw);
+                if(norm.Length>0)list.Add(norm);
+            }
+            if(list.Count==0)return "";
+            if(list.Count==1)return list[0];
+            string firstRoot;
+            try{ firstRoot=Path.GetPathRoot(list[0]); }catch{ return ""; }
+            if(string.IsNullOrEmpty(firstRoot))return "";
+            var segLists=new List<string[]>(list.Count);
+            for(int i=0;i<list.Count;i++){
+                string pr;
+                try{ pr=Path.GetPathRoot(list[i]); }catch{ return ""; }
+                if(!string.Equals(pr,firstRoot,StringComparison.OrdinalIgnoreCase))return "";
+                string rest=list[i].Substring(pr.Length).Trim(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar);
+                string[] segs=rest.Length==0?new string[0]:rest.Split(new[]{Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar},StringSplitOptions.RemoveEmptyEntries);
+                segLists.Add(segs);
+            }
+            int minLen=segLists[0].Length;
+            for(int i=1;i<segLists.Count;i++)if(segLists[i].Length<minLen)minLen=segLists[i].Length;
+            int common=0;
+            while(common<minLen){
+                string seg=segLists[0][common];
+                bool allMatch=true;
+                for(int i=1;i<segLists.Count;i++){
+                    if(!string.Equals(segLists[i][common],seg,StringComparison.OrdinalIgnoreCase)){ allMatch=false; break; }
+                }
+                if(!allMatch)break;
+                common++;
+            }
+            string acc=firstRoot;
+            for(int i=0;i<common;i++)acc=Path.Combine(acc,segLists[0][i]);
+            return NormalizeDir(acc);
+        }
+        // 计算汇总 CSV 报告的默认存放目录：单输出目录直接放里面；多输出目录优先放共同父目录（排除盘符根防无写权限），否则放首个输出目录。
+        public static string DefaultReportDirectory(IList<string> outputDirs,ConvertOptions options){
+            if(options!=null&&options.OutputMode==ConvertOutputMode.SingleRoot&&!string.IsNullOrWhiteSpace(options.OutputRoot))
+                return NormalizeDir(options.OutputRoot);
+            if(outputDirs==null||outputDirs.Count==0)return "";
+            if(outputDirs.Count==1)return NormalizeDir(outputDirs[0]);
+            string common=CommonParentDirectory(outputDirs);
+            if(common.Length>0){
+                try{
+                    if(!SameDir(common,Path.GetPathRoot(common)))return common;
+                }catch{}
+            }
+            return NormalizeDir(outputDirs[0]);
+        }
         // One directory walk per root. Lock files and non-target extensions are dropped; directories
         // are walked once, so scanning cost is O(files) and independent of the number of workers.
         public static List<ConvertItem> Scan(ConvertOptions options){
             var items=new List<ConvertItem>();
             var seen=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var wanted=new HashSet<string>(options.Extensions(),StringComparer.OrdinalIgnoreCase);
+            // 递归扫描时跳过本批将要写入的子输出目录（如 ST01\天工格式输出），防止二次续跑把上次输出目录又扫进来。
+            var skipOutDirs=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if(options.OutputMode!=ConvertOutputMode.InPlace){
+                var outMap=ResolveOutputRoots(options);
+                foreach(var kv in outMap){
+                    if(!string.IsNullOrEmpty(kv.Value)&&!SameDir(kv.Key,kv.Value))skipOutDirs.Add(NormalizeDir(kv.Value));
+                }
+            }
             foreach(string raw in options.Inputs){
                 string input=Path.GetFullPath(raw);
-                if(File.Exists(input)){ Add(items,seen,wanted,input,Path.GetDirectoryName(input)); continue; }
+                if(File.Exists(input)){ Add(items,seen,wanted,input,NormalizeDir(Path.GetDirectoryName(input))); continue; }
                 if(!Directory.Exists(input))continue;
-                string root=input;
-                var visited=new HashSet<string>(StringComparer.OrdinalIgnoreCase){ input };
-                var stack=new Stack<string>();stack.Push(input);
+                string root=NormalizeDir(input);
+                var visited=new HashSet<string>(StringComparer.OrdinalIgnoreCase){ root };
+                var stack=new Stack<string>();stack.Push(root);
                 while(stack.Count>0){
                     string dir=stack.Pop();
                     string[] files;
@@ -112,16 +383,17 @@ namespace TianGongCadSuite {
                         if(name.StartsWith(".",StringComparison.Ordinal))continue;
                         // 目录联接 / 符号链接不跟进去：指回上级目录的联接（用户目录里的 Application Data 之类）会让扫描永远转圈、内存涨满
                         try{ if((File.GetAttributes(sub)&FileAttributes.ReparsePoint)!=0)continue; }catch{ continue; }
-                        if(!visited.Add(Path.GetFullPath(sub)))continue;
-                        stack.Push(sub);
+                        string fullSub=NormalizeDir(sub);
+                        if(skipOutDirs.Contains(fullSub))continue;
+                        if(!visited.Add(fullSub))continue;
+                        stack.Push(fullSub);
                     }
                 }
             }
             items.Sort(delegate(ConvertItem a,ConvertItem b){ int c=string.Compare(a.Source,b.Source,StringComparison.OrdinalIgnoreCase); return c; });
-            // 还没选输出目录也能扫（0.10.3）：原来按空的输出目录算输出路径，Path.GetFullPath("") 直接抛「路径的形式不合法」，点「扫描文件」就弹未处理的异常
-            bool hasOut=!string.IsNullOrWhiteSpace(options.OutputRoot);
-            // 路径超长（H 盘 SolidWorks 项目里有 266 个字符的）算不出输出路径时这一个 Target 留空，别让整次扫描失败
-            for(int i=0;i<items.Count;i++){ items[i].Index=i; try{ items[i].Target=hasOut?TopTarget(items[i],options):null; }catch(PathTooLongException){ items[i].Target=null; } }
+            for(int i=0;i<items.Count;i++)items[i].Index=i;
+            // 还没选输出目录也能扫（0.10.3）；多站位模式按各输入目录解析 OutputRoot，超长路径单项 Target 留空不中断整批扫描。
+            ApplyOutputRoots(items,options);
             return items;
         }
         static void Add(List<ConvertItem> items,HashSet<string> seen,HashSet<string> wanted,string file,string root){
@@ -350,9 +622,13 @@ namespace TianGongCadSuite {
         }
 
         public static string TopTargetFor(ConvertItem item,ConvertOptions options,string extension){
-            string outRoot=Path.GetFullPath(options.OutputRoot);
             string name=Path.GetFileNameWithoutExtension(item.Source)+extension;
-            if(options.FlatOutput)return Path.Combine(outRoot,name);
+            if(options!=null&&options.OutputMode==ConvertOutputMode.InPlace){
+                string srcDir=Path.GetDirectoryName(Path.GetFullPath(item.Source));
+                return Path.Combine(srcDir,name);
+            }
+            string outRoot=OutputRootFor(item,options);
+            if(options!=null&&options.FlatOutput)return Path.Combine(outRoot,name);
             return Path.Combine(outRoot,RelativeFolder(Path.GetDirectoryName(item.Source),item.Root),name);
         }
         // Every path the top-level document could end up at. Used for the "already converted" check so
@@ -398,10 +674,27 @@ namespace TianGongCadSuite {
         // Output path of a component document. Solid Edge assigns each translated component a source
         // folder plus a native extension; that assignment is preserved so references stay resolvable.
         public static string ComponentTarget(string assignedPath,string finalName,ConvertItem item,ConvertOptions options){
-            string outRoot=Path.GetFullPath(options.OutputRoot);
             string name=finalName;
             if(name==null||name.Length==0)name=Path.GetFileName(assignedPath);
-            if(options.FlatOutput)return Path.Combine(outRoot,Sanitize(name));
+            if(options!=null&&options.OutputMode==ConvertOutputMode.InPlace){
+                string ownDir=Path.GetDirectoryName(Path.GetFullPath(item.Source));
+                // STEP 导入产生的子文档没有独立源磁盘路径，一律落盘在 .stp/.step 所在目录（绝不落到系统 Temp 目录）。
+                if(!IsSolidWorks(item.Source))return Path.Combine(ownDir,Sanitize(name));
+                string compDir=null;
+                try{
+                    if(assignedPath!=null&&Path.IsPathRooted(assignedPath)){
+                        string cand=Path.GetDirectoryName(Path.GetFullPath(assignedPath));
+                        string tempRoot=Path.GetTempPath();
+                        bool ownInTemp=ConvertSourceBaseline.IsUnderDir(ownDir,tempRoot);
+                        bool candInConverterTemp=ConvertSourceBaseline.IsUnderDir(cand,Path.Combine(tempRoot,"TianGongConverter"));
+                        if(!string.IsNullOrEmpty(cand)&&!candInConverterTemp&&(ownInTemp||!ConvertSourceBaseline.IsUnderDir(cand,tempRoot)))compDir=cand;
+                    }
+                }catch{}
+                if(string.IsNullOrEmpty(compDir))compDir=ownDir;
+                return Path.Combine(compDir,Sanitize(name));
+            }
+            string outRoot=OutputRootFor(item,options);
+            if(options!=null&&options.FlatOutput)return Path.Combine(outRoot,Sanitize(name));
             string folder=null;
             try{ if(assignedPath!=null&&Path.IsPathRooted(assignedPath))folder=Path.GetDirectoryName(assignedPath); }catch{}
             if(folder==null||folder.Length==0)folder=Path.GetDirectoryName(item.Source);
@@ -598,13 +891,17 @@ namespace TianGongCadSuite {
                 long dirSw=0; swBytesByDir.TryGetValue(d,out dirSw);
                 // 与 ConvertQueue.Write 保持一致：同目录就地输出（sameOut）会强制串行，不虚增闲置进程数。
                 bool sameOut=false;
-                if(options!=null&&!string.IsNullOrWhiteSpace(options.OutputRoot)){
-                    ConvertItem sample;
-                    if(asmSampleByDir.TryGetValue(d,out sample)){
-                        try{
-                            string tgtDir=Path.GetDirectoryName(ConvertPlanner.TopTarget(sample,options));
-                            sameOut=ConvertPlanner.SameDir(d,tgtDir);
-                        }catch{}
+                if(options!=null&&options.HasOutputTarget()){
+                    if(options.OutputMode==ConvertOutputMode.InPlace){
+                        sameOut=true;
+                    }else{
+                        ConvertItem sample;
+                        if(asmSampleByDir.TryGetValue(d,out sample)){
+                            try{
+                                string tgtDir=Path.GetDirectoryName(ConvertPlanner.TopTarget(sample,options));
+                                sameOut=ConvertPlanner.SameDir(d,tgtDir);
+                            }catch{}
+                        }
                     }
                 }
                 if(IsSerializedAsmDir(c,maxSz)||sameOut){
@@ -714,11 +1011,15 @@ namespace TianGongCadSuite {
                     long dm=0; asmMaxByDir.TryGetValue(d,out dm);
                     long dsw=0; swBytesByDir.TryGetValue(d,out dsw);
                     bool sameOut=false;
-                    if(options!=null&&!string.IsNullOrWhiteSpace(options.OutputRoot)){
-                        try{
-                            string tgtDir=Path.GetDirectoryName(ConvertPlanner.TopTarget(item,options));
-                            sameOut=ConvertPlanner.SameDir(d,tgtDir);
-                        }catch{}
+                    if(options!=null&&options.HasOutputTarget()){
+                        if(options.OutputMode==ConvertOutputMode.InPlace){
+                            sameOut=true;
+                        }else{
+                            try{
+                                string tgtDir=Path.GetDirectoryName(ConvertPlanner.TopTarget(item,options));
+                                sameOut=ConvertPlanner.SameDir(d,tgtDir);
+                            }catch{}
+                        }
                     }
                     if(ConvertPlanner.IsSerializedAsmDir(dc,dm)||sameOut){
                         string dh=ConvertWrittenIndex.HashPath(d);
@@ -730,7 +1031,11 @@ namespace TianGongCadSuite {
                     }
                 }
                 string file=Path.Combine(queueDir,phase.ToString(CultureInfo.InvariantCulture)+"_"+i.ToString("D6",CultureInfo.InvariantCulture)+tag+TaskExtension);
-                string line=item.Index.ToString(CultureInfo.InvariantCulture)+"\t"+item.Source+"\t"+(item.Root??"")+"\t"+item.Size.ToString(CultureInfo.InvariantCulture);
+                string resolvedOut=item.OutputRoot;
+                if(string.IsNullOrEmpty(resolvedOut)&&options!=null&&options.HasOutputTarget()){
+                    resolvedOut=ConvertPlanner.OutputRootFor(item,options);
+                }
+                string line=item.Index.ToString(CultureInfo.InvariantCulture)+"\t"+item.Source+"\t"+(item.Root??"")+"\t"+item.Size.ToString(CultureInfo.InvariantCulture)+"\t"+(resolvedOut??"");
                 File.WriteAllText(file,line,utf8);
             }
             return ordered.Count;
@@ -858,7 +1163,7 @@ namespace TianGongCadSuite {
                         }
                         string raw=ReadAllTextShared(mine);
                         if(raw==null){ Complete(mine); continue; }
-                        string[] parts=raw.Trim().Split('\t');
+                        string[] parts=raw.TrimEnd('\r','\n').Split('\t');
                         if(parts.Length<3){ Complete(mine); continue; }
                         var parsed=new ConvertItem();
                         int idx;
@@ -870,6 +1175,7 @@ namespace TianGongCadSuite {
                         long sz;
                         if(parts.Length>3&&long.TryParse(parts[3],NumberStyles.Integer,CultureInfo.InvariantCulture,out sz))parsed.Size=sz;
                         else{ try{ parsed.Size=new FileInfo(parsed.Source).Length; }catch{ parsed.Size=0; } }
+                        if(parts.Length>4&&!string.IsNullOrWhiteSpace(parts[4]))parsed.OutputRoot=parts[4].Trim();
                         item=parsed;
                         claimedPath=mine;
                         claimed=true;
@@ -1034,15 +1340,33 @@ namespace TianGongCadSuite {
                 return fp.StartsWith(fr+Path.DirectorySeparatorChar,StringComparison.OrdinalIgnoreCase);
             }catch{ return false; }
         }
+        public static bool IsUnderAnyDir(string path,IEnumerable<string> rootDirs){
+            if(string.IsNullOrEmpty(path)||rootDirs==null)return false;
+            foreach(string r in rootDirs){
+                if(!string.IsNullOrEmpty(r)&&IsUnderDir(path,r))return true;
+            }
+            return false;
+        }
         public static void CaptureForBatch(string workRoot,IEnumerable<ConvertItem> items,ConvertOptions options){
             if(string.IsNullOrEmpty(workRoot)||items==null)return;
-            string outRoot=options!=null&&!string.IsNullOrWhiteSpace(options.OutputRoot)?options.OutputRoot:null;
+            // 原地输出模式保留源目录生成的全部结果，不执行源目录临时副本清理，无需采集基线快照。
+            if(options!=null&&options.OutputMode==ConvertOutputMode.InPlace)return;
+            var outRoots=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if(options!=null&&!string.IsNullOrWhiteSpace(options.OutputRoot))outRoots.Add(ConvertPlanner.NormalizeDir(options.OutputRoot));
             var dirs=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var roots=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach(ConvertItem item in items){
                 if(item==null||string.IsNullOrEmpty(item.Source))continue;
                 try{
+                    string itemOut=ConvertPlanner.OutputRootFor(item,options);
+                    if(!string.IsNullOrEmpty(itemOut))outRoots.Add(ConvertPlanner.NormalizeDir(itemOut));
                     string d=Path.GetDirectoryName(Path.GetFullPath(item.Source));
+                    if(options!=null&&options.HasOutputTarget()){
+                        try{
+                            string tgtDir=Path.GetDirectoryName(ConvertPlanner.TopTarget(item,options));
+                            if(ConvertPlanner.SameDir(d,tgtDir))continue;
+                        }catch{}
+                    }
                     if(!string.IsNullOrEmpty(d))dirs.Add(d);
                     if(!string.IsNullOrEmpty(item.Root)&&Directory.Exists(item.Root))roots.Add(Path.GetFullPath(item.Root));
                 }catch{}
@@ -1052,7 +1376,7 @@ namespace TianGongCadSuite {
             int extraCap=400;
             foreach(string root in roots){
                 if(dirs.Count>=extraCap)break;
-                AddSubDirsSafe(root,dirs,outRoot,extraCap);
+                AddSubDirsSafe(root,dirs,outRoots,extraCap);
                 try{
                     string parent=Path.GetDirectoryName(root.TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar));
                     if(!string.IsNullOrEmpty(parent)&&!ConvertPlanner.SameDir(parent,Path.GetPathRoot(parent))&&Directory.Exists(parent)){
@@ -1061,7 +1385,7 @@ namespace TianGongCadSuite {
                             try{
                                 if((File.GetAttributes(sib)&FileAttributes.ReparsePoint)!=0)continue;
                                 string full=Path.GetFullPath(sib);
-                                if(outRoot!=null&&IsUnderDir(full,outRoot))continue;
+                                if(IsUnderAnyDir(full,outRoots))continue;
                                 dirs.Add(full);
                             }catch{}
                         }
@@ -1072,16 +1396,16 @@ namespace TianGongCadSuite {
             try{ Directory.CreateDirectory(baseDir); }catch{ return; }
             var utf8=new UTF8Encoding(false);
             foreach(string d in dirs){
-                if(outRoot!=null&&IsUnderDir(d,outRoot))continue;
+                if(IsUnderAnyDir(d,outRoots))continue;
                 WriteBaselineFile(baseDir,d,SnapshotNativeFiles(d),utf8);
             }
         }
-        static void AddSubDirsSafe(string root,HashSet<string> dirs,string outRoot,int cap){
+        static void AddSubDirsSafe(string root,HashSet<string> dirs,IEnumerable<string> outRoots,int cap){
             var stack=new Stack<string>();
             stack.Push(root);
             while(stack.Count>0&&dirs.Count<cap){
                 string cur=stack.Pop();
-                if(outRoot!=null&&IsUnderDir(cur,outRoot))continue;
+                if(IsUnderAnyDir(cur,outRoots))continue;
                 dirs.Add(cur);
                 string[] subs;
                 try{ subs=Directory.GetDirectories(cur); }catch{ continue; }
@@ -1091,7 +1415,7 @@ namespace TianGongCadSuite {
                         if(string.IsNullOrEmpty(name)||name.StartsWith(".",StringComparison.Ordinal))continue;
                         if((File.GetAttributes(subs[i])&FileAttributes.ReparsePoint)!=0)continue;
                         string full=Path.GetFullPath(subs[i]);
-                        if(outRoot!=null&&IsUnderDir(full,outRoot))continue;
+                        if(IsUnderAnyDir(full,outRoots))continue;
                         if(dirs.Add(full))stack.Push(full);
                     }catch{}
                 }

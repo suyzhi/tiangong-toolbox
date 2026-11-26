@@ -11,6 +11,7 @@ namespace TianGongCadSuite {
         const uint FOS_NOCHANGEDIR = 0x00000008;
         const uint FOS_PICKFOLDERS = 0x00000020;
         const uint FOS_FORCEFILESYSTEM = 0x00000040;
+        const uint FOS_ALLOWMULTISELECT = 0x00000200;
         const uint FOS_PATHMUSTEXIST = 0x00000800;
         const uint SIGDN_FILESYSPATH = 0x80058000;
         const int ERROR_CANCELLED = unchecked((int)0x800704C7);
@@ -28,6 +29,17 @@ namespace TianGongCadSuite {
             void GetDisplayName(uint sigdnName, [MarshalAs(UnmanagedType.LPWStr)] out string ppszName);
             void GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);
             void Compare(IShellItem psi, uint hint, out int piOrder);
+        }
+
+        [ComImport, Guid("b63ea76d-1f85-456f-a19c-48159efa858b"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IShellItemArray {
+            void BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppvOut);
+            void GetPropertyStore(int flags, ref Guid riid, out IntPtr ppv);
+            void GetPropertyDescriptionList(IntPtr keyType, ref Guid riid, out IntPtr ppv);
+            void GetAttributes(int dwAttribFlags, uint sfgaoMask, out uint psfgaoAttribs);
+            void GetCount(out uint pdwNumItems);
+            void GetItemAt(uint dwIndex, out IShellItem ppsi);
+            void EnumItems(out IntPtr ppenumShellItems);
         }
 
         [ComImport, Guid("42f85136-db7e-439c-85f1-e4075d135fc8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -58,6 +70,36 @@ namespace TianGongCadSuite {
             void SetFilter(IntPtr pFilter);
         }
 
+        [ComImport, Guid("d57c7288-d4ad-4768-be02-9d969532d960"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IFileOpenDialog {
+            [PreserveSig] int Show(IntPtr parent);
+            void SetFileTypes(uint cFileTypes, IntPtr rgFilterSpec);
+            void SetFileTypeIndex(uint iFileType);
+            void GetFileTypeIndex(out uint piFileType);
+            void Advise(IntPtr pfde, out uint pdwCookie);
+            void Unadvise(uint dwCookie);
+            void SetOptions(uint fos);
+            void GetOptions(out uint pfos);
+            void SetDefaultFolder(IShellItem psi);
+            void SetFolder(IShellItem psi);
+            void GetFolder(out IShellItem ppsi);
+            void GetCurrentSelection(out IShellItem ppsi);
+            void SetFileName([MarshalAs(UnmanagedType.LPWStr)] string pszName);
+            void GetFileName([MarshalAs(UnmanagedType.LPWStr)] out string pszName);
+            void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string pszTitle);
+            void SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string pszText);
+            void SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string pszLabel);
+            void GetResult(out IShellItem ppsi);
+            void AddPlace(IShellItem psi, int fdap);
+            void SetDefaultExtension([MarshalAs(UnmanagedType.LPWStr)] string pszDefaultExtension);
+            void Close(int hr);
+            void SetClientGuid(ref Guid guid);
+            void ClearClientData();
+            void SetFilter(IntPtr pFilter);
+            void GetResults(out IShellItemArray ppenum);
+            void GetSelectedItems(out IShellItemArray ppsai);
+        }
+
         // 选择目录。取消返回 null；rememberKey 非空时自动记住该场景上次选过的文件夹。
         public static string Pick(IWin32Window owner, string title, string initialPath = "", string rememberKey = "") {
             string startDir = ResolveExistingDir(initialPath);
@@ -73,6 +115,81 @@ namespace TianGongCadSuite {
                 Choices.Set("dir." + rememberKey, picked);
             }
             return picked;
+        }
+
+        // 一次多选多个文件夹（支持按住 Ctrl / Shift 框选多个站位目录）。取消返回空数组。
+        public static string[] PickMultiple(IWin32Window owner, string title, string initialPath = "", string rememberKey = "") {
+            string startDir = ResolveExistingDir(initialPath);
+            if (startDir.Length == 0 && !string.IsNullOrEmpty(rememberKey)) {
+                startDir = ResolveExistingDir(Choices.Get("dir." + rememberKey, ""));
+            }
+
+            string[] picked;
+            if (!TryPickModernMultiple(owner, title, startDir, out picked)) {
+                string single = PickLegacy(owner, title, startDir);
+                picked = string.IsNullOrEmpty(single) ? new string[0] : new[] { single };
+            }
+            if (picked != null && picked.Length > 0 && !string.IsNullOrEmpty(rememberKey)) {
+                Choices.Set("dir." + rememberKey, picked[picked.Length - 1]);
+            }
+            return picked ?? new string[0];
+        }
+
+        static bool TryPickModernMultiple(IWin32Window owner, string title, string startDir, out string[] picked) {
+            picked = new string[0];
+            IFileOpenDialog dlg = null;
+            IShellItem initItem = null;
+            IShellItemArray results = null;
+            try {
+                Type comType = Type.GetTypeFromCLSID(ClsidFileOpenDialog);
+                if (comType == null) return false;
+                dlg = (IFileOpenDialog)Activator.CreateInstance(comType);
+                uint opts = 0;
+                try { dlg.GetOptions(out opts); } catch { }
+                dlg.SetOptions(opts | FOS_PICKFOLDERS | FOS_ALLOWMULTISELECT | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR);
+                if (!string.IsNullOrWhiteSpace(title)) dlg.SetTitle(title);
+
+                if (startDir.Length > 0) {
+                    Guid iid = IidIShellItem;
+                    if (SHCreateItemFromParsingName(startDir, IntPtr.Zero, ref iid, out initItem) == 0 && initItem != null) {
+                        dlg.SetFolder(initItem);
+                    }
+                }
+
+                IntPtr hwnd = owner != null ? owner.Handle : IntPtr.Zero;
+                int hr = dlg.Show(hwnd);
+                if (hr == ERROR_CANCELLED) return true;
+                if (hr < 0) Marshal.ThrowExceptionForHR(hr);
+
+                dlg.GetResults(out results);
+                if (results != null) {
+                    uint count;
+                    results.GetCount(out count);
+                    var list = new System.Collections.Generic.List<string>((int)count);
+                    for (uint i = 0; i < count; i++) {
+                        IShellItem item = null;
+                        try {
+                            results.GetItemAt(i, out item);
+                            if (item != null) {
+                                string path;
+                                item.GetDisplayName(SIGDN_FILESYSPATH, out path);
+                                if (!string.IsNullOrWhiteSpace(path)) list.Add(path);
+                            }
+                        } finally {
+                            ReleaseCom(item);
+                        }
+                    }
+                    picked = list.ToArray();
+                }
+                return true;
+            } catch (Exception e) {
+                Log.Write("FolderPickerModernMulti", e.Message);
+                return false;
+            } finally {
+                ReleaseCom(results);
+                ReleaseCom(initItem);
+                ReleaseCom(dlg);
+            }
         }
 
         // 返回 true 表示现代对话框已走完（picked == null 说明用户点取消）；返回 false 表示需要降级到老式对话框。
@@ -172,6 +289,30 @@ namespace TianGongCadSuite {
                         string back;
                         item.GetDisplayName(SIGDN_FILESYSPATH, out back);
                         if (string.IsNullOrEmpty(back)) return false;
+                    }
+                }
+                return true;
+            } finally {
+                ReleaseCom(item);
+                ReleaseCom(dlg);
+            }
+        }
+        internal static bool ProbeComMultiSelfTest(string dir) {
+            IFileOpenDialog dlg = null;
+            IShellItem item = null;
+            try {
+                Type comType = Type.GetTypeFromCLSID(ClsidFileOpenDialog);
+                if (comType == null) return false;
+                dlg = (IFileOpenDialog)Activator.CreateInstance(comType);
+                uint opts;
+                dlg.GetOptions(out opts);
+                dlg.SetOptions(opts | FOS_PICKFOLDERS | FOS_ALLOWMULTISELECT | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR);
+                dlg.SetTitle("SelfTestMulti");
+                string existing = ResolveExistingDir(dir);
+                if (existing.Length > 0) {
+                    Guid iid = IidIShellItem;
+                    if (SHCreateItemFromParsingName(existing, IntPtr.Zero, ref iid, out item) == 0 && item != null) {
+                        dlg.SetFolder(item);
                     }
                 }
                 return true;
