@@ -75,10 +75,15 @@ namespace TianGongCadSuite {
             try { sizeBox.SelectedItem = "M6"; } finally { loading = false; }
             ApplySize();
             FormClosed += (s, e) => Cleanup();
-            // 上次关窗口前改的那批还没撤销（0.8.5，同自动打孔）：同一个文档里接着能「撤销修改」
+            // 上次关窗口前改的那批还没撤销（0.8.5，同自动打孔）：先校验零件 COM 引用仍存活再恢复
             if (carried != null && !carried.IsEmpty && carriedFor.Length > 0 && string.Equals(carriedFor, HostName(), StringComparison.OrdinalIgnoreCase)) {
-                lastUndo = carried; carried = null; carriedFor = ""; RefreshAll();
-                SetStatus("上次关窗口前改的 " + lastUndo.Count + " 个孔特征还能「撤销修改」。在模型里点要改的孔开始。", Ui.Muted);
+                bool alive = carriedParts.Count == 0 || carriedParts.Any(TargetFace.PartAlive);
+                if (alive) {
+                    lastUndo = carried; carried = null; carriedFor = ""; carriedParts.Clear(); RefreshAll();
+                    SetStatus("上次关窗口前改的 " + lastUndo.Count + " 个孔特征还能「撤销修改」。在模型里点要改的孔开始。", Ui.Muted);
+                } else {
+                    ClearCarried();
+                }
             }
         }
 
@@ -180,7 +185,7 @@ namespace TianGongCadSuite {
             shell.Footer.Status = status;
             status.ForeColor = Ui.Accent;
             status.Text = "在模型里点要改的孔（孔口圆边、孔内壁，或点一个带孔的平面）。";
-            status.TextChanged += (s, e) => tips.SetToolTip(status, status.Text);
+            status.TextChanged += (s, e) => { if (!closing && !IsDisposed) tips.SetToolTip(status, status.Text); };
             shell.PageChanged += (s, e) => UpdatePrimary();
         }
 
@@ -369,6 +374,7 @@ namespace TianGongCadSuite {
         }
 
         void SetStatus(string text, Color color){
+            if (closing || IsDisposed) return;
             if (status.Text == text && status.ForeColor == color) return;
             status.Text = text; status.ForeColor = color;
         }
@@ -466,9 +472,12 @@ namespace TianGongCadSuite {
                 LastResult = "改孔型中断：" + e.Message;
                 if (!SuppressDialogs) MessageBox.Show(this, AutoHoleWriter.Friendly(e), "改孔型", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             } finally {
-                busy = false; UseWaitCursor = false;
-                if (hadCommand) { try { StartPicking(); } catch (Exception ex) { SetStatus(AutoHoleWriter.Friendly(ex), Ui.Warn); } }
-                RefreshAll();
+                busy = false;
+                if (!closing && !IsDisposed) {
+                    UseWaitCursor = false;
+                    if (hadCommand && command == null) { try { StartPicking(); } catch (Exception ex) { SetStatus(AutoHoleWriter.Friendly(ex), Ui.Warn); } }
+                    RefreshAll();
+                }
             }
         }
 
@@ -500,9 +509,12 @@ namespace TianGongCadSuite {
                 SetStatus("撤销没有完成：" + AutoHoleWriter.Friendly(e), Ui.Bad);
                 LastResult = "撤销中断：" + e.Message;
             } finally {
-                busy = false; UseWaitCursor = false;
-                if (hadCommand) { try { StartPicking(); } catch (Exception ex) { SetStatus(AutoHoleWriter.Friendly(ex), Ui.Warn); } }
-                RefreshAll();
+                busy = false;
+                if (!closing && !IsDisposed) {
+                    UseWaitCursor = false;
+                    if (hadCommand && command == null) { try { StartPicking(); } catch (Exception ex) { SetStatus(AutoHoleWriter.Friendly(ex), Ui.Warn); } }
+                    RefreshAll();
+                }
             }
         }
 
@@ -524,7 +536,10 @@ namespace TianGongCadSuite {
                 mouse.LocateMode = (int)SolidEdgeConstants.seLocateModes.seLocateQuickPick;
                 // MouseMove 为空处理函数，关闭以消除三维视口每像素 COM 回调风暴
                 mouse.EnabledMove = false;
-                ((F.ISEMouseEx)mouse).InterDocumentLocate = assembly != null;
+                // 装配下允许跨零件选，但正在原位编辑零件时不能开：打开会把上下文强切回装配导致写模型失败
+                bool editingPart = false;
+                try { editingPart = app.ActiveDocument is P.PartDocument; } catch { }
+                ((F.ISEMouseEx)mouse).InterDocumentLocate = assembly != null && !editingPart;
                 ((F.ISEMouseEx2)mouse).LocateFrontToBack = true;
                 ((F.ISEMouseEx3)mouse).PathfinderLocate = false;
                 mouse.ClearLocateFilter();
@@ -590,14 +605,21 @@ namespace TianGongCadSuite {
             if (c != null) try { c.Done = true; } catch { }
         }
         static HoleEditUndo carried; static string carriedFor = "";
+        static readonly List<P.PartDocument> carriedParts = new List<P.PartDocument>();
+        internal static void ClearCarried(){ carried = null; carriedFor = ""; carriedParts.Clear(); }
         string HostName(){ try { return assembly != null ? assembly.FullName : partDoc != null ? partDoc.FullName : ""; } catch { return ""; } }
         void Cleanup(){
             if (closing) return; closing = true;
-            if (lastUndo != null && !lastUndo.IsEmpty) { carried = lastUndo; carriedFor = HostName(); }
+            if (lastUndo != null && !lastUndo.IsEmpty) {
+                carried = lastUndo; carriedFor = HostName();
+                carriedParts.Clear();
+                foreach (var t in targets) if (t != null && t.Part != null && !carriedParts.Contains(t.Part)) carriedParts.Add(t.Part);
+            }
             StopCommand(); try { tips.Dispose(); } catch { }
         }
 
         public new void MouseClick(short b, short s, double x, double y, double z, object w, int k, object g){
+            if (closing || busy || IsDisposed) return;
             if (b == 1) { if (g == null) { SetStatus("这里没有捕捉到对象。零件没激活（重开大装配后常见）时，先在天工里右键它选「激活」。", Ui.Warn); return; } AcceptPick(g); }
             // 右键交给天工弹 QuickPick 选遮挡面（0.8.5）。原来右键 = 关窗口；关窗口用 Esc 或「关闭」按钮
         }
@@ -608,17 +630,27 @@ namespace TianGongCadSuite {
         public void MouseDrag(short b, short s, double x, double y, double z, object w, short ds, int k, object g){ }
         // 用户在天工里点了别的命令：选了孔就只暂停选择（原来窗口直接关掉，选好的孔全丢），回到窗口点一下接着选
         bool paused;
+        // 句柄未创建或窗体已释放时禁止直接 BeginInvoke，并在回调入口再次校验 closing / IsDisposed
+        void SafeBeginInvoke(Action action){
+            if (closing || IsDisposed || !IsHandleCreated) return;
+            try {
+                BeginInvoke((Action)(() => {
+                    if (closing || IsDisposed) return;
+                    action();
+                }));
+            } catch { }
+        }
         // 功能区上又点了本命令（0.10.3）：已经选了东西就把这个窗口提到前面、接着选，不再连同选好的东西关掉重开
         // （窗口暂停选择以后，用户很自然地再点一下功能区按钮想"接着来"）。见 ToolContext.Show 的 reuse
         internal bool ReuseFor(object doc){
             if (closing || IsDisposed || !ReferenceEquals((object)assembly ?? partDoc, doc) || !(targets.Count > 0 || (lastUndo != null && !lastUndo.IsEmpty))) return false;
-            BeginInvoke((Action)(() => OnActivated(EventArgs.Empty)));
+            SafeBeginInvoke(() => OnActivated(EventArgs.Empty));
             return true;
         }
         public void Terminate(){
-            if (closing || busy) return;
-            if (targets.Count > 0 || (lastUndo != null && !lastUndo.IsEmpty)) { paused = true; BeginInvoke((Action)(() => { StopCommand(); SetStatus("天工里开始了别的命令，选择已暂停（已选的孔都还在）。回到这个窗口点一下就接着选。", Ui.Muted); })); return; }
-            BeginInvoke((Action)(() => Close()));
+            if (closing || busy || IsDisposed) return;
+            if (targets.Count > 0 || (lastUndo != null && !lastUndo.IsEmpty)) { paused = true; SafeBeginInvoke(() => { StopCommand(); SetStatus("天工里开始了别的命令，选择已暂停（已选的孔都还在）。回到这个窗口点一下就接着选。", Ui.Muted); }); return; }
+            SafeBeginInvoke(() => Close());
         }
         protected override void OnActivated(EventArgs e){
             base.OnActivated(e);

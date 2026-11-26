@@ -143,7 +143,7 @@ namespace TianGongCadSuite {
                     shape != null && shape.Problem.Length > 0 ? shape.Problem : "点一个参考孔，或直接改下面的孔参数");
                 return;
             }
-            const float ml = 46, mr = 48, mt = 40, mb = 22;
+            float ml = Ui.S(46), mr = Ui.S(48), mt = Ui.S(40), mb = Ui.S(26);
             var box = new RectangleF(ml, mt, Math.Max(20, Width - ml - mr), Math.Max(20, Height - mt - mb));
             double worldW = Math.Max(0.2, shape.MouthDiameterMm);
             double worldH = Math.Max(0.2, shape.ThicknessMm);
@@ -227,10 +227,13 @@ namespace TianGongCadSuite {
                 if (shape.Kind == HoleKind.Counterbore) mouthText = "沉孔 Φ" + Draw2.N(shape.CounterboreDiaMm);
                 else if (shape.Kind == HoleKind.Countersink) mouthText = "锥孔 Φ" + Draw2.N(shape.CountersinkDiaMm);
                 else if (shape.Chamfer) mouthText = "Φ" + Draw2.N(shape.HoleDiameterMm);
-                float dimY = plateT - 16;
+                float dimY = plateT - Ui.S(16);
                 float halfMouth = X(shape.MouthRadiusMm) - axisX;
-                float dimHalf = shape.Chamfer && shape.Kind == HoleKind.Through ? X(shape.HoleRadiusMm) - axisX : halfMouth;
-                float dimZ = shape.Chamfer ? Y(shape.ChamferDepMm) : plateT;
+                // 带孔口倒角时（通孔/螺纹孔/沉孔），尺寸线落在倒角下沿，宽度取倒角下沿实际直径而非倒角顶径 MouthRadiusMm
+                float dimHalf = shape.Chamfer
+                    ? (shape.Kind == HoleKind.Counterbore ? X(shape.CounterboreDiaMm / 2.0) - axisX : X(shape.HoleRadiusMm) - axisX)
+                    : halfMouth;
+                float dimZ = shape.Chamfer ? Y(Math.Min(shape.ChamferDepMm, shape.VoidDepthMm)) : plateT;
                 if (shape.Chamfer) { dimY = dimZ; }
                 Draw2.DimH(g, dimPen, dimBrush, f, Ui.Accent, axisX - dimHalf, axisX + dimHalf, dimY, mouthText, true, shape.Chamfer);
 
@@ -287,9 +290,10 @@ namespace TianGongCadSuite {
                 }
             }
 
-            // 7) 底部一行小字
+            // 7) 底部一行小字（按实际字体高度留白，避免高 DPI 下被底部裁切）
             string cap = "剖面：按实际孔型绘制　·　板厚 " + Draw2.N(shape.ThicknessMm) + " 为示意";
-            Draw2.Halo(g, cap, Ui.F8, Ui.Muted, plateL, Height - 15);
+            float capH = Draw2.Measure(g, cap, Ui.F8).Height;
+            Draw2.Halo(g, cap, Ui.F8, Ui.Muted, plateL, Height - capH - Ui.S(2));
         }
     }
 
@@ -342,13 +346,14 @@ namespace TianGongCadSuite {
             // 孔口比板还宽时，投影范围要算上它，免得画到框外
             minEx -= shape.MouthRadiusMm; maxEx += shape.MouthRadiusMm;
 
-            const float pad = 16;
-            float capH = 16;
+            float pad = Ui.S(16);
+            float topPad = Ui.S(16);
+            float capH = Math.Max(Ui.S(16), Draw2.Measure(g, "半", Ui.F8).Height + Ui.S(4));
             float availW = Math.Max(30, Width - pad * 2);
-            float availH = Math.Max(30, Height - pad * 2 - capH - 16);
+            float availH = Math.Max(30, Height - pad * 2 - capH - topPad);
             float scale = (float)Math.Min(availW / Math.Max(1e-6, maxEx - minEx), availH / Math.Max(1e-6, maxEy - minEy));
             float offX = pad + (availW - (float)((maxEx - minEx) * scale)) / 2f - (float)(minEx * scale);
-            float offY = pad + 16 + (availH - (float)((maxEy - minEy) * scale)) / 2f - (float)(minEy * scale);
+            float offY = pad + topPad + (availH - (float)((maxEy - minEy) * scale)) / 2f - (float)(minEy * scale);
 
             Func<double, double, double, PointF> P = (x, y, z) =>
                 new PointF(offX + (float)((x - y) * Cos30 * scale), offY + (float)(((x + y) * Sin30 + z) * scale));
@@ -424,8 +429,9 @@ namespace TianGongCadSuite {
             // 卡片标题已经写了"打完后的样子"，这里只留孔型和深度；太窄放不下就再短一点，别两头被切
             string cap = "半剖轴测　·　" + shape.KindName + (shape.Through ? " 贯通" : " 深 " + Draw2.N(shape.DepthMm))
                        + "　·　板厚 " + Draw2.N(shape.ThicknessMm) + " 为示意";
-            if (Draw2.Measure(g, cap, Ui.F8).Width > Width - 8) cap = shape.KindName + (shape.Through ? " 贯通" : " 深 " + Draw2.N(shape.DepthMm));
-            Draw2.HaloCenter(g, cap, Ui.F8, Ui.Muted, Width / 2f, Height - 15);
+            var capSz = Draw2.Measure(g, cap, Ui.F8);
+            if (capSz.Width > Width - 8) { cap = shape.KindName + (shape.Through ? " 贯通" : " 深 " + Draw2.N(shape.DepthMm)); capSz = Draw2.Measure(g, cap, Ui.F8); }
+            Draw2.HaloCenter(g, cap, Ui.F8, Ui.Muted, Width / 2f, Height - capSz.Height - Ui.S(2));
         }
 
         // 立方体的 12 条棱（用来画"被切掉那半块"的虚影）
@@ -459,34 +465,61 @@ namespace TianGongCadSuite {
             using (var p = new Pen(Color.FromArgb(0x7E, 0x90, 0xA6), 1f)) g.DrawLines(p, top);
         }
 
-        // 孔口那半圈 + 能看进去的内壁。剖面最后画，会盖住该盖住的部分，所以这里不用自己截断。
+        // 孔口那半圈 + 能看进去的内壁。按实际 VoidDepthMm（而非板厚 t）截断盲孔，并绘制沉孔倒角与平底/V 型底。
         void DrawHole(Graphics g, Func<double,double,double,PointF> P, HoleShape s, double cx, double cy, double t){
             double r = s.HoleRadiusMm;
+            double zEnd = Math.Min(s.VoidDepthMm, t);
+            double zCylEnd = s.Through ? zEnd : Math.Max(0, zEnd - s.TipHeightMm);
             var deep = Color.FromArgb(0x6B, 0x7E, 0x95);      // 孔内壁（背光，深）
-            var seat = Color.FromArgb(0x93, 0xA6, 0xBC);      // 锥座
-            var floor = Color.FromArgb(0xC9, 0xD7, 0xE6);     // 沉孔底（平面，受光）
+            var seat = Color.FromArgb(0x93, 0xA6, 0xBC);      // 锥座 / 倒角 / 钻尖锥底
+            var floor = Color.FromArgb(0xC9, 0xD7, 0xE6);     // 沉孔底 / 平底（平面，受光）
 
             if (s.Kind == HoleKind.Counterbore) {
                 double cbR = s.CounterboreDiaMm / 2.0;
-                double dep = Math.Min(s.CounterboreDepMm, t);
-                Surface(g, P, cx, cy, cbR, 0, cbR, dep, deep);            // 沉孔侧壁
-                Surface(g, P, cx, cy, r, dep, cbR, dep, floor);           // 沉孔底（半环）
-                Surface(g, P, cx, cy, r, dep, r, t, deep);                // 下面那段主孔
-                using (var p = new Pen(Color.FromArgb(0x5C, 0x6E, 0x84), 1.4f)) g.DrawLines(p, HalfArc(P, cx, cy, cbR, 0, 48));
+                double zTop = 0;
+                if (s.Chamfer) {
+                    zTop = Math.Min(s.ChamferDepMm, zEnd);
+                    Surface(g, P, cx, cy, s.MouthRadiusMm, 0, cbR, zTop, seat);   // 沉孔口倒角
+                }
+                double dep = Math.Max(zTop, Math.Min(s.CounterboreDepMm, zEnd));
+                if (dep > zTop) Surface(g, P, cx, cy, cbR, zTop, cbR, dep, deep); // 沉孔侧壁
+                Surface(g, P, cx, cy, r, dep, cbR, dep, floor);                   // 沉孔底（半环）
+                double mainEnd = Math.Max(dep, zCylEnd);
+                if (mainEnd > dep) Surface(g, P, cx, cy, r, dep, r, mainEnd, deep); // 下面那段主孔
+                DrawBlindBottom(g, P, s, cx, cy, r, mainEnd, zEnd, seat, floor);
+                using (var p = new Pen(Color.FromArgb(0x5C, 0x6E, 0x84), 1.4f)) g.DrawLines(p, HalfArc(P, cx, cy, s.Chamfer ? s.MouthRadiusMm : cbR, 0, 48));
             } else if (s.Kind == HoleKind.Countersink) {
                 double csR = s.CountersinkDiaMm / 2.0;
-                double dep = Math.Min(s.CountersinkDepMm, t);
-                Surface(g, P, cx, cy, csR, 0, r, dep, seat);              // 锥座
-                Surface(g, P, cx, cy, r, dep, r, t, deep);                // 主孔
+                double dep = Math.Min(s.CountersinkDepMm, zEnd);
+                Surface(g, P, cx, cy, csR, 0, r, dep, seat);                      // 锥座
+                double mainEnd = Math.Max(dep, zCylEnd);
+                if (mainEnd > dep) Surface(g, P, cx, cy, r, dep, r, mainEnd, deep); // 主孔
+                DrawBlindBottom(g, P, s, cx, cy, r, mainEnd, zEnd, seat, floor);
                 using (var p = new Pen(Color.FromArgb(0x5C, 0x6E, 0x84), 1.4f)) g.DrawLines(p, HalfArc(P, cx, cy, csR, 0, 48));
             } else {
-                double r0 = r, z0 = 0;
+                double z0 = 0;
                 if (s.Chamfer) {
-                    Surface(g, P, cx, cy, s.MouthRadiusMm, 0, r, Math.Min(s.ChamferDepMm, t), seat);
-                    z0 = Math.Min(s.ChamferDepMm, t);
+                    z0 = Math.Min(s.ChamferDepMm, zEnd);
+                    Surface(g, P, cx, cy, s.MouthRadiusMm, 0, r, z0, seat);
                 }
-                if (z0 < t) Surface(g, P, cx, cy, r0, z0, r0, t, deep);
+                double mainEnd = Math.Max(z0, zCylEnd);
+                if (mainEnd > z0) Surface(g, P, cx, cy, r, z0, r, mainEnd, deep);
+                DrawBlindBottom(g, P, s, cx, cy, r, mainEnd, zEnd, seat, floor);
                 using (var p = new Pen(Color.FromArgb(0x5C, 0x6E, 0x84), 1.4f)) g.DrawLines(p, HalfArc(P, cx, cy, s.MouthRadiusMm, 0, 48));
+            }
+        }
+        static void DrawBlindBottom(Graphics g, Func<double,double,double,PointF> P, HoleShape s, double cx, double cy, double r, double zCylEnd, double zEnd, Color seat, Color floor){
+            if (s.Through) return;
+            if (s.Bottom == HoleBottom.VBottom && zEnd > zCylEnd + 1e-6) {
+                var rim = HalfArc(P, cx, cy, r, zCylEnd, 40);
+                var poly = new List<PointF>(rim);
+                poly.Add(P(cx, cy, zEnd));
+                using (var b = new SolidBrush(seat)) g.FillPolygon(b, poly.ToArray());
+                using (var p = new Pen(Color.FromArgb(0x7E, 0x90, 0xA6), 1f)) g.DrawLines(p, rim);
+            } else {
+                var rim = HalfArc(P, cx, cy, r, zEnd, 40);
+                using (var b = new SolidBrush(floor)) g.FillPolygon(b, rim);
+                using (var p = new Pen(Color.FromArgb(0x7E, 0x90, 0xA6), 1f)) g.DrawLines(p, rim);
             }
         }
 

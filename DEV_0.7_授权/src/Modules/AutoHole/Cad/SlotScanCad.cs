@@ -14,6 +14,7 @@ namespace TianGongCadSuite {
         public double LengthMm;    // 总长（两圆心距 + 宽）
         public double WidthMm;     // 槽宽（= 圆弧直径）
         public object Owner;       // 参考零件文档
+        public Transform Placement;// 参考零件在装配里的变换（用于 DropRefsOn 区分同零件多实例）
         public string Source = "";
         public string Label { get { return "腰孔 " + LengthMm.ToString("0.##") + "×" + WidthMm.ToString("0.##"); } }
         public bool Same(SlotReference o){
@@ -42,8 +43,11 @@ namespace TianGongCadSuite {
                 G.Loops loops = null; try { loops = f.Loops as G.Loops; } catch { }
                 if (loops == null) continue;
                 foreach (G.Loop loop in loops) {
+                    // 外环是跑道形外形轮廓或凸台顶面，不是内孔腰孔
+                    bool outer = true;
+                    try { outer = loop.IsOuterLoop; } catch { }
+                    if (outer) continue;
                     var arcs = new List<V3>(); int lines = 0, others = 0; bool hasIt = false;
-                    double rr = 0;
                     foreach (G.Edge e in (G.Edges)loop.Edges) {
                         if (SameEdge(e, edge)) hasIt = true;
                         object g = null; try { g = e.Geometry; } catch { }
@@ -51,12 +55,14 @@ namespace TianGongCadSuite {
                         if (ci != null) {
                             Array cc = new double[3], aa = new double[3]; double rad = 0;
                             ci.GetCircleData(ref cc, ref aa, out rad);
-                            arcs.Add(V3.From(cc)); rr = rad;
+                            arcs.Add(V3.From(cc));
                             if (Math.Abs(rad - r) > 1e-6) others++;
                         } else if (g is G.Line) lines++; else others++;
                     }
                     if (!hasIt) continue;
                     if (arcs.Count != 2 || lines != 2 || others != 0) return null;
+                    // 校验圆弧壁面朝向，排除板上立起的腰形凸台底环
+                    if (!HoleScanCad.LooksLikeHoleEdge(f, edge, c1)) return null;
                     var other = (arcs[0] - c1).Length < 1e-7 ? arcs[1] : arcs[0];
                     double dist = (other - c1).Length;
                     if (dist < 1e-6) return null;
@@ -66,6 +72,7 @@ namespace TianGongCadSuite {
                         Axis = pg.Transform.Vector(axis).Unit(),
                         Direction = pg.Transform.Vector((other - c1) * (1.0 / dist)).Unit(),
                         LengthMm = (dist + 2 * r) * 1000.0, WidthMm = 2 * r * 1000.0,
+                        Placement = pg.Transform,
                         Source = "腰孔圆弧"
                     };
                     try { s.Owner = edge.Document; } catch { }

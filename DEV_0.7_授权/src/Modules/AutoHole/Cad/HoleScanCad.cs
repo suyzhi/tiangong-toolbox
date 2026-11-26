@@ -153,6 +153,16 @@ namespace TianGongCadSuite {
                     foreach (G.Edge e in (G.Edges)body.get_Edges(G.FeatureTopologyQueryTypeConstants.igQueryAll)) {
                         var c = Circle(e);
                         if (c == null) continue;
+                        G.Face wf;
+                        c.Wall = WallOf(e, null, out wf);
+                        c.WallFace = wf;
+                        // 标记凸台/销外壁圆边，避免 InnerBelow 把同轴凸台当成沉孔下面的孔；
+                        // 若相邻壁面为孔内壁圆柱面，记下其沿轴线总长度作为二级台阶（如倒角+沉孔）的深度上限。
+                        c.IsBoss = WallSaysHole(wf) == 0;
+                        if (!c.IsBoss && wf != null && IsRoundWall(wf)) {
+                            double spanM = FaceAxisSpan(wf, c.Axis);
+                            if (spanM > 1e-4) c.MaxStepDepthMm = spanM * 1000.0 + 0.5;
+                        }
                         list.Add(c);
                     }
                 }
@@ -161,6 +171,56 @@ namespace TianGongCadSuite {
             Prune();
             if (key.Length > 0) { circles[key] = list; stamps[key] = DateTime.UtcNow; }
             return list;
+        }
+        // 壁面沿指定单位轴向的包围盒投影长度（米）
+        static double FaceAxisSpan(G.Face wallFace, V3 axis){
+            if (wallFace == null || !axis.Finite || axis.Length < 0.5) return 0;
+            Array lo = new double[3], hi = new double[3];
+            try { wallFace.GetRange(ref lo, ref hi); } catch { return 0; }
+            V3 bLo = V3.From(lo), bHi = V3.From(hi);
+            if (!bLo.Finite || !bHi.Finite) return 0;
+            V3 u = axis.Unit();
+            double minP = double.PositiveInfinity, maxP = double.NegativeInfinity;
+            for (int k = 0; k < 8; k++) {
+                var p = new V3((k & 1) == 0 ? bLo.X : bHi.X, (k & 2) == 0 ? bLo.Y : bHi.Y, (k & 4) == 0 ? bLo.Z : bHi.Z);
+                double d = p.Dot(u);
+                if (d < minP) minP = d;
+                if (d > maxP) maxP = d;
+            }
+            return Math.Max(0, maxP - minP);
+        }
+        // 根据孔口相邻壁面与已知入孔方向，写入 InwardAxis 与 MaxStepDepthMm，
+        // 避免薄壁双面方管/型材对壁的异径孔被跨空腔误判成沉孔。
+        static void ApplyWallHint(CircleCandidate c, G.Face wallFace, V3 inwardHint){
+            if (c == null) return;
+            V3 dir = inwardHint;
+            if (wallFace != null && IsRoundWall(wallFace)) {
+                Array lo = new double[3], hi = new double[3];
+                try {
+                    wallFace.GetRange(ref lo, ref hi);
+                    V3 bLo = V3.From(lo), bHi = V3.From(hi);
+                    if (bLo.Finite && bHi.Finite) {
+                        if (!dir.Finite || dir.Length < 0.5) {
+                            V3 mid = (bLo + bHi) * 0.5;
+                            double proj = (mid - c.Center).Dot(c.Axis);
+                            if (Math.Abs(proj) > 1e-4) dir = proj > 0 ? c.Axis : c.Axis * -1.0;
+                        }
+                        if (dir.Finite && dir.Length > 0.5) {
+                            dir = dir.Unit();
+                            c.InwardAxis = dir;
+                            double reachM = double.NegativeInfinity;
+                            for (int k = 0; k < 8; k++) {
+                                var p = new V3((k & 1) == 0 ? bLo.X : bHi.X, (k & 2) == 0 ? bLo.Y : bHi.Y, (k & 4) == 0 ? bLo.Z : bHi.Z);
+                                double d = (p - c.Center).Dot(dir);
+                                if (d > reachM) reachM = d;
+                            }
+                            if (reachM > 1e-4) c.MaxStepDepthMm = reachM * 1000.0 + 0.5;
+                            return;
+                        }
+                    }
+                } catch { }
+            }
+            if (dir.Finite && dir.Length > 0.5) c.InwardAxis = dir.Unit();
         }
 
         // 这张面自己的圆口（默认只取**内环**上的整圆：孔口都是内环，外环上的圆是轮廓圆角或凸台顶面）。
@@ -218,8 +278,9 @@ namespace TianGongCadSuite {
         //       Φ20 凸台的壁 z∈[10,15] → 偏 +2.5mm = 凸台。
         // 判不了（找不到壁面 / 面片外法向读不出来 / 壁几乎不在两侧）一律按孔处理：
         // 宁可多认一个让用户在预览里看见，也不要静默漏掉该打的孔。
+        // 注意：不能因 part == null 就跳过 —— 钣金件（.psm）同样有 planarFace 与 mouth.WallFace / BodyOf(null, planarFace)。
         static bool LooksLikeHole(P.PartDocument part, G.Face planarFace, CircleCandidate mouth){
-            if (part == null || planarFace == null || mouth == null) return true;
+            if (planarFace == null || mouth == null) return true;
             V3 outward = OutwardOf(planarFace);
             if (!outward.Finite || outward.Length < 0.5) return true;
             // 0.9.1：先用孔口这条边自己旁边的那张壁面。原来按"同轴同径"去整个实体里找第一张，**不看轴向位置** ——
@@ -229,12 +290,24 @@ namespace TianGongCadSuite {
             if (wall != null && !IsRoundWall(wall)) wall = null;
             if (wall == null) wall = WallFaceOf(part, BodyOf(part, planarFace), mouth);
             if (wall == null) return true;
+            if (WallSaysHole(wall) == 0) return false;
             Array lo = new double[3], hi = new double[3];
             try { wall.GetRange(ref lo, ref hi); } catch { return true; }
             var centre = (V3.From(lo) + V3.From(hi)) * 0.5;
             double offsetMm = (centre - mouth.Center).Dot(outward) * 1000.0;
             if (Math.Abs(offsetMm) < 0.5) return true;      // 壁几乎不偏：判不出来，不拦
             return offsetMm < 0;
+        }
+        // 给 SlotScanCad.FromArc 复用：判断平面上的圆弧边相邻壁面是否往材料内部凹（孔）而非向外凸（腰形凸台）
+        internal static bool LooksLikeHoleEdge(G.Face planarFace, G.Edge edge, V3 circleCenter){
+            if (planarFace == null || edge == null) return true;
+            G.Face wf;
+            WallOf(edge, planarFace, out wf);
+            if (WallSaysHole(wf) == 0) return false;
+            P.PartDocument part = null;
+            try { part = planarFace.Document as P.PartDocument; } catch { }
+            var c = new CircleCandidate { Center = circleCenter, WallFace = wf };
+            return LooksLikeHole(part, planarFace, c);
         }
 
         static bool IsRoundWall(G.Face f){
@@ -319,16 +392,18 @@ namespace TianGongCadSuite {
             try { circle = edge.Geometry as G.Circle; } catch { }
             if (circle == null) throw new ArgumentException("选中的边不是圆孔。请在模型上点击孔口的圆形边线。");
             // 圆弧（腰孔两头、倒圆角）不是孔（0.8.5）：原来照样按"孔"配，在腰孔一头打出一个圆孔
-            // 但导入的零件（STEP）常把一个整圆孔口拆成两段半圆：同一个圆上还有别的弧段就照常认
+            // 但导入的零件（STEP）常把一个整圆孔口拆成两段半圆：同一个圆上还有别的弧段就照常认。
+            // 注意：钣金件（.psm）的 owner 为 null，BodyCircles(null, edge) 仍会经 BodyOf 从 edge.Body 读取同实体圆边；
+            // 容差与 HoleScan.MergeArcs 对齐（圆心 0.01mm、半径 0.005mm），避免两段半圆跨 1µm 漏拼。
             bool closed = true; try { closed = edge.IsClosed; } catch { }
             if (!closed) {
                 P.PartDocument owner = null; try { owner = edge.Document as P.PartDocument; } catch { }
                 Array cc = new double[3], ax = new double[3]; double rr = 0;
                 circle.GetCircleData(ref cc, ref ax, out rr);
+                V3 c0 = V3.From(cc), a0 = V3.From(ax);
                 int same = 0;
-                if (owner != null)
-                    foreach (var bc in BodyCircles(owner, edge))
-                        if ((bc.Center - V3.From(cc)).Length < 1e-6 && Math.Abs(bc.RadiusMm - rr * 1000.0) < 0.001 && HoleScan.Parallel(bc.Axis, V3.From(ax))) same++;
+                foreach (var bc in BodyCircles(owner, edge))
+                    if ((bc.Center - c0).Length < 1e-5 && Math.Abs(bc.RadiusMm - rr * 1000.0) < 0.005 && HoleScan.Parallel(bc.Axis, a0)) same++;
                 if (same < 2) throw new ArgumentException("这是一段圆弧（腰孔的一头或圆角），不是整圆的孔，没法按它配孔。腰孔请用「批量排孔」勾「排成腰孔」打。");
             }
             Array c = new double[3], axis = new double[3]; double radius = 0;
@@ -339,8 +414,11 @@ namespace TianGongCadSuite {
             var mouth = new CircleCandidate { Center = V3.From(c), Axis = V3.From(axis).Unit(), RadiusMm = radius * 1000.0, Tag = edge };
             G.Face wallFace;
             mouth.Wall = WallOf(edge, null, out wallFace);
+            mouth.WallFace = wallFace;
             if (WallSaysHole(wallFace) == 0) throw new ArgumentException(BossWallMessage);
-            var all = part != null ? BodyCircles(part, edge) : new List<CircleCandidate>();
+            ApplyWallHint(mouth, wallFace, new V3());
+            // 钣金件（.psm）part 为 null 时也照常从 edge.Body 读取全实体圆边，保证沉孔/锥沉/倒角能认出下面的孔径
+            var all = BodyCircles(part, edge);
             var hole = HoleScan.FromCircle(mouth, HoleScan.MergeArcs(all));
             if (hole == null) throw new ArgumentException("这条边读不出孔径，请重新点一次孔口的圆形边线。");
             hole.Center = pg.Transform.Point(hole.Center);
@@ -358,11 +436,15 @@ namespace TianGongCadSuite {
             var all = BodyCircles(target.Part, target.Face);
             bool byLoops;
             var mouths = FaceCircles(target.Face, true, out byLoops);
+            V3 outward = OutwardOf(target.Face);
+            V3 inward = outward.Finite && outward.Length > 0.5 ? outward * -1.0 : new V3();
             // 内环上的整圆里仍然可能混进"圆凸台的底圆"（实测它同样长在内环上），逐个判一遍。
             var kept = new List<CircleCandidate>();
             foreach (var m in mouths) {
-                if (LooksLikeHole(target.Part, target.Face, m)) kept.Add(m);
-                else skippedCount++;
+                if (LooksLikeHole(target.Part, target.Face, m)) {
+                    ApplyWallHint(m, m.WallFace as G.Face, inward);
+                    kept.Add(m);
+                } else skippedCount++;
             }
             var holes = HoleScan.FromCircles(kept, all);
             foreach (var h in holes) {
@@ -418,7 +500,7 @@ namespace TianGongCadSuite {
                         Axis = target.Placement.Vector(n).Unit(),
                         Direction = target.Placement.Vector((arcs[1].Center - arcs[0].Center) * (1.0 / dist)).Unit(),
                         LengthMm = dist * 1000.0 + 2 * arcs[0].RadiusMm, WidthMm = 2 * arcs[0].RadiusMm,
-                        Owner = (object)target.Part ?? DocOf(target.Face), Source = target.Label
+                        Owner = (object)target.Part ?? DocOf(target.Face), Placement = target.Placement, Source = target.Label
                     });
                 }
             } catch (Exception e) { Log.Write("HoleScanSlots", e); }
@@ -449,18 +531,39 @@ namespace TianGongCadSuite {
                 cylinder.GetCylinderData(ref bp, ref ax, out r);
                 if (!(r > 1e-6)) throw new ArgumentException("这个圆柱面的半径读出来是 0，请重新点一次。");
                 if (WallSaysHole(face) == 0) throw new ArgumentException(BossWallMessage);
-                mouth = new CircleCandidate { Center = V3.From(bp), Axis = V3.From(ax).Unit(), RadiusMm = r * 1000.0, Wall = "Cylinder" };
+                V3 basePt = V3.From(bp), unitAx = V3.From(ax).Unit();
+                // 圆柱基点可能在轴线任意位置：投影面片包围盒中心到轴线上，并用面片半高限制 InnerBelow 深度
+                V3 centerOnAxis = basePt;
+                double halfSpanMm = 0;
+                Array flo = new double[3], fhi = new double[3];
+                try {
+                    face.GetRange(ref flo, ref fhi);
+                    V3 bLo = V3.From(flo), bHi = V3.From(fhi);
+                    if (bLo.Finite && bHi.Finite) {
+                        V3 mid = (bLo + bHi) * 0.5;
+                        centerOnAxis = basePt + unitAx * (mid - basePt).Dot(unitAx);
+                        double spanM = FaceAxisSpan(face, unitAx);
+                        if (spanM > 1e-4) halfSpanMm = spanM * 500.0 + 0.5;
+                    }
+                } catch { }
+                mouth = new CircleCandidate { Center = centerOnAxis, Axis = unitAx, RadiusMm = r * 1000.0, Wall = "Cylinder", WallFace = face, MaxStepDepthMm = halfSpanMm };
                 label = "圆柱面";
             }
 
             var cone = geometry as G.Cone;
             if (cone != null) {
                 bool byLoops;
-                var own = FaceCircles(face, false, out byLoops);
-                foreach (var c in own) if (mouth == null || c.RadiusMm < mouth.RadiusMm) mouth = c;
+                // 导入 STEP 零件的圆锥面边界常把整圆拆成两段半圆：先 MergeArcs 拼整圆再挑最小可用圆口
+                var own = HoleScan.MergeArcs(FaceCircles(face, false, out byLoops));
+                foreach (var c in own) {
+                    if (!HoleScan.Usable(c)) continue;
+                    if (mouth == null || c.RadiusMm < mouth.RadiusMm) mouth = c;
+                }
                 if (mouth == null)
                     throw new ArgumentException("这个圆锥面上读不到圆边（多半是孔口倒角面）。请点孔的圆柱内壁，或点孔口的圆形边线。");
                 mouth.Wall = "Cone";
+                double coneSpanM = FaceAxisSpan(face, mouth.Axis);
+                if (coneSpanM > 1e-4) mouth.MaxStepDepthMm = Math.Max(coneSpanM * 1000.0 + 0.5, mouth.DiameterMm * 1.5);
                 label = "圆锥面";
             }
 
@@ -479,7 +582,8 @@ namespace TianGongCadSuite {
                 throw new ArgumentException("这个面的类型是 " + GeometryName(geometry) + "，认不出孔径。请点孔口的圆形边线或孔的圆柱内壁。");
             }
 
-            var hole = HoleScan.FromCircle(mouth, all);
+            // all 同样需要 MergeArcs，否则导入件沉孔内壁/孔底的拆段圆弧无法被 InnerBelow 识别
+            var hole = HoleScan.FromCircle(mouth, HoleScan.MergeArcs(all));
             if (hole == null) throw new ArgumentException("没能从这条面上算出孔径，请重新点一次。");
             hole.Center = pg.Transform.Point(hole.Center);
             hole.Axis = pg.Transform.Vector(hole.Axis).Unit();

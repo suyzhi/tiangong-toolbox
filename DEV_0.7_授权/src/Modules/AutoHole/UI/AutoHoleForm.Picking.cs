@@ -41,7 +41,7 @@ namespace TianGongCadSuite {
                 highlights = assembly.HighlightSets.Add();
                 highlights.Color = ColorTranslator.ToOle(Color.DeepSkyBlue);
             } catch { Cleanup(); throw; }
-            if (!preloaded) { preloaded = true; try { BeginInvoke((Action)PreloadSelection); } catch { } }
+            if (!preloaded) { preloaded = true; SafeBeginInvoke(PreloadSelection); }
         }
 
         // 打开窗口前在天工里已经选好的孔边 / 面（0.8.5）：很多人习惯先选再点命令，原来窗口打开后完全不管，还得重新点一遍。
@@ -317,15 +317,35 @@ namespace TianGongCadSuite {
                 }
                 if (g.Holes.Count == 0) groups.Remove(g);
             }
-            // 从这张面认进来的腰孔（同一个零件、中心在这张面上）
+            // 从这张面认进来的腰孔（同一个零件实例、共面、且轮廓落在这张面上）
+            // 注意：腰孔中心 Center 落在空腔中，FaceFrameReader.ContainsPoint 用三角形面片测空腔恒返回 false；
+            // 改测两头圆弧圆心（面片 Circles 列表含这两条圆弧）及腰孔轮廓四边中点（紧贴面片三角形边），既能识别空心腰孔又能区分共面分片。
             foreach (var sl in slots.ToList()) {
-                bool samePart = ReferenceEquals(sl.Owner, t.Part);
-                if (!samePart) { try { samePart = string.Equals(((P.PartDocument)sl.Owner).FullName, t.Part.FullName, StringComparison.OrdinalIgnoreCase); } catch { } }
-                if (!samePart || Math.Abs((sl.Center - t.Plane.Point).Dot(nrm)) > 0.0002 || !FaceFrameReader.ContainsPoint(t, sl.Center)) continue;
+                bool sameInst = sl.Placement == null || TargetFace.SamePlacement(sl.Placement, t.Placement);
+                bool samePart = sameInst && ReferenceEquals(sl.Owner, t.Part);
+                if (!samePart && sameInst) { try { samePart = string.Equals(((P.PartDocument)sl.Owner).FullName, t.Part.FullName, StringComparison.OrdinalIgnoreCase); } catch { } }
+                if (!samePart || Math.Abs((sl.Center - t.Plane.Point).Dot(nrm)) > 0.0002 || !SlotOnTargetFace(sl, t, nrm)) continue;
                 slots.Remove(sl); slotPicks.Remove(sl); n++;
             }
             if (n > 0) { scannedPicks.Clear(); lastScanNote = ""; }
             return n;
+        }
+        static bool SlotOnTargetFace(SlotReference sl, TargetFace t, V3 nrm){
+            if (FaceFrameReader.ContainsPoint(t, sl.Center)) return true;
+            try {
+                V3 dir = sl.Direction - nrm * sl.Direction.Dot(nrm);
+                if (dir.Length < 1e-6) return false;
+                dir = dir.Unit();
+                V3 side = nrm.Cross(dir);
+                if (side.Length > 1e-6) side = side.Unit();
+                double halfLen = sl.LengthMm * 0.0005;
+                double halfWid = sl.WidthMm * 0.0005;
+                double halfSpan = Math.Max(0, halfLen - halfWid);
+                if (halfSpan > 1e-6 && (FaceFrameReader.ContainsPoint(t, sl.Center + dir * halfSpan) || FaceFrameReader.ContainsPoint(t, sl.Center - dir * halfSpan))) return true;
+                if (FaceFrameReader.ContainsPoint(t, sl.Center + dir * halfLen) || FaceFrameReader.ContainsPoint(t, sl.Center - dir * halfLen)) return true;
+                if (side.Length > 0.5 && (FaceFrameReader.ContainsPoint(t, sl.Center + side * halfWid) || FaceFrameReader.ContainsPoint(t, sl.Center - side * halfWid))) return true;
+            } catch { }
+            return false;
         }
 
         // 参考腰孔沿它的贯穿方向投到打孔面上的中心（斜的 > 2° 不投）

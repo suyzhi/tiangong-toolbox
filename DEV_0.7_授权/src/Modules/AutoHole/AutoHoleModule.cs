@@ -7,7 +7,8 @@ namespace TianGongCadSuite {
     // 命令 6：自动打孔。零门槛交互 —— 点孔、点面、点打孔。
     public sealed class AutoHoleModule : IToolModule {
         readonly ToolContext context;
-        public AutoHoleModule(ToolContext value){ context = value; }
+        static ToolContext activeContext;
+        public AutoHoleModule(ToolContext value){ context = value; activeContext = value; }
         public string Id { get { return "auto-hole"; } }
         public IEnumerable<ToolCommand> Commands {
             get {
@@ -46,6 +47,7 @@ namespace TianGongCadSuite {
                     "盲孔可以改深度或改成贯通；贯通孔不能直接改成盲孔（天工接口限制）。改错了点「撤销修改」。",
                     () => context.HasEditableContext() || context.HasStandalonePart(),
                     () => {
+                        if (!CloseIdleLastEdit()) return;
                         var part = context.HasEditableContext() ? null : StandalonePart();
                         if (part != null) { context.Show(() => new HoleEditForm(context.Application, part), f => ((HoleEditForm)f).StartPicking(), f => f is HoleEditForm && ((HoleEditForm)f).ReuseFor(part)); return; }
                         var doc = context.RequireEditableAssembly(); context.Show(() => new HoleEditForm(context.Application, doc), f => ((HoleEditForm)f).StartPicking(), f => f is HoleEditForm && ((HoleEditForm)f).ReuseFor(doc));
@@ -74,31 +76,63 @@ namespace TianGongCadSuite {
             context.Show(() => made = new AutoHoleForm(context.Application, doc), f => { ((AutoHoleForm)f).StartPicking(); ((AutoHoleForm)f).PreloadReferences(holes, missingPart); });
             return made;
         }
-        // 「自动打孔 / 批量排孔」的「改孔型…」：另开改孔型窗口，把刚打的那批孔带进去（打孔窗口留着）
-        // 「改孔型…」开的窗口不归 ToolContext 管：原来每点一次开一个，几个改孔型窗口抢同一个鼠标选择（同 0.10.1 修的「去配孔」）。
-        // 上一个没在改就先关掉；正在改就不开新的（0.10.3）
+        // 「自动打孔 / 批量排孔」的「改孔型…」：另开改孔型窗口，把刚打的那批孔带进去（打孔窗口留着）。
+        // 统一接入 ToolContext.ShowCompanion：参与跨命令 IBusyTool 检查与宿主卸载清理，同时与功能区命令 9 互斥不抢鼠标。
         static HoleEditForm lastEdit;
+        static bool CloseIdleLastEdit(){
+            if (lastEdit == null || lastEdit.IsDisposed) { lastEdit = null; return true; }
+            if (lastEdit.Busy) throw new InvalidOperationException("「" + lastEdit.Text + "」正在" + lastEdit.BusyWhat + "，等它做完再点别的命令。");
+            try { lastEdit.Close(); } catch { }
+            bool closed = lastEdit.IsDisposed;
+            if (closed) lastEdit = null;
+            return closed;
+        }
         static bool ReplaceLastEdit(){
-            if (lastEdit == null || lastEdit.IsDisposed) return true;
+            if (lastEdit == null || lastEdit.IsDisposed) { lastEdit = null; return true; }
             if (lastEdit.Busy) { try { lastEdit.Activate(); } catch { } return false; }
             try { lastEdit.Close(); } catch { }
-            return lastEdit.IsDisposed;
+            bool closed = lastEdit.IsDisposed;
+            if (closed) lastEdit = null;
+            return closed;
+        }
+        static bool OpenEditCore(F.Application app, Func<HoleEditForm> create, IList<KeyValuePair<SolidEdgePart.PartDocument, string>> created){
+            if (lastEdit != null && !lastEdit.IsDisposed && lastEdit.Busy) {
+                try { lastEdit.Activate(); } catch { }
+                return false;
+            }
+            HoleEditForm f = null;
+            if (activeContext != null) {
+                activeContext.ShowCompanion(() => { f = create(); return f; }, x => x is HoleEditForm, x => false);
+                if (f == null) return false;
+            } else {
+                if (!ReplaceLastEdit()) return false;
+                f = create();
+                try { f.Show(new CadOwner(app.ActiveFramehWnd)); }
+                catch { CloseFailedEdit(f); throw; }
+            }
+            lastEdit = f;
+            f.FormClosed += (s, e) => { if (ReferenceEquals(lastEdit, f)) lastEdit = null; };
+            try {
+                f.StartPicking();
+                f.Preload(created);
+                return true;
+            } catch {
+                // StartPicking 或 Preload 抛错时必须彻底关掉并释放窗口，防止残留僵尸窗口
+                CloseFailedEdit(f);
+                throw;
+            }
+        }
+        static void CloseFailedEdit(HoleEditForm f){
+            if (f == null) return;
+            if (ReferenceEquals(lastEdit, f)) lastEdit = null;
+            try { if (!f.IsDisposed) f.Close(); } catch { }
+            try { if (!f.IsDisposed) f.Dispose(); } catch { }
         }
         internal static bool OpenEdit(F.Application app, SolidEdgePart.PartDocument part, IList<KeyValuePair<SolidEdgePart.PartDocument, string>> created){
-            if (!ReplaceLastEdit()) return false;
-            var f = new HoleEditForm(app, part); lastEdit = f;
-            f.Show(new CadOwner(app.ActiveFramehWnd));
-            f.StartPicking();
-            f.Preload(created);
-            return true;
+            return OpenEditCore(app, () => new HoleEditForm(app, part), created);
         }
         internal static bool OpenEdit(F.Application app, A.AssemblyDocument doc, IList<KeyValuePair<SolidEdgePart.PartDocument, string>> created){
-            if (!ReplaceLastEdit()) return false;
-            var f = new HoleEditForm(app, doc); lastEdit = f;
-            f.Show(new CadOwner(app.ActiveFramehWnd));
-            f.StartPicking();
-            f.Preload(created);
-            return true;
+            return OpenEditCore(app, () => new HoleEditForm(app, doc), created);
         }
         // 单独打开的零件（不是在装配里原位编辑）：批量排孔、改孔型在这里也能用（0.8.5）。原来这两个按钮在零件环境里一直是灰的
         SolidEdgePart.PartDocument StandalonePart(){
@@ -109,6 +143,17 @@ namespace TianGongCadSuite {
                 return part;
             } catch { return null; }
         }
-        public void Dispose(){}
+        public void Dispose(){
+            var f = lastEdit; lastEdit = null;
+            if (f != null) {
+                try { if (!f.IsDisposed) f.Close(); } catch { }
+                try { if (!f.IsDisposed) f.Dispose(); } catch { }
+            }
+            // 插件卸载时释放全部跨窗口静态撤销缓存持有的 COM 引用
+            try { AutoHoleForm.Carried.Undo = null; AutoHoleForm.Carried.Created = null; } catch { }
+            try { AutoHolePatternForm.Carried.Undo = null; AutoHolePatternForm.Carried.Created = null; } catch { }
+            try { HoleEditForm.ClearCarried(); } catch { }
+            if (ReferenceEquals(activeContext, context)) activeContext = null;
+        }
     }
 }

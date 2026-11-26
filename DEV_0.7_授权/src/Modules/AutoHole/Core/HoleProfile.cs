@@ -123,15 +123,19 @@ namespace TianGongCadSuite {
             if (spec == null) return 8.0;
             double t;
             if (!spec.Through) {
+                // 盲孔不能用 60mm 封顶，否则深度 > 60mm 的盲孔会在剖面里直接穿底
                 t = spec.Depth + Math.Max(2.0, spec.Depth * 0.25);
             } else {
                 t = Math.Max(3.0, spec.HoleDiameter * 1.6);
-                // 指定了螺纹深度的贯通螺纹孔：板要比螺纹深，否则看不出"螺纹只攻了一段"
+                if (t > 60) t = 60;
+                // 指定了螺纹深度的贯通螺纹孔 / 沉孔 / 锥孔：示意板厚必须大于特征深度，免得剖面裁切
                 if (spec.Kind == HoleKind.Tapped && !spec.ThreadFull) t = Math.Max(t, spec.ThreadDepth + Math.Max(2.0, spec.ThreadDepth * 0.25));
-                if (spec.Kind == HoleKind.Counterbore) t = Math.Max(t, spec.CounterboreDepth * 1.6);
-                if (spec.Kind == HoleKind.Countersink) t = Math.Max(t, spec.CountersinkDiameter * 0.5);
+                if (spec.Kind == HoleKind.Counterbore) t = Math.Max(t, Math.Max(spec.CounterboreDepth * 1.6, spec.CounterboreDepth + 2.0));
+                if (spec.Kind == HoleKind.Countersink) {
+                    double csDep = CountersinkDepthMm(spec.CountersinkDiameter / 2.0, spec.HoleDiameter / 2.0, spec.CountersinkAngle);
+                    t = Math.Max(t, Math.Max(spec.CountersinkDiameter * 0.5, csDep + 2.0));
+                }
             }
-            if (t > 60) t = 60;
             return Math.Round(t * 2.0, MidpointRounding.AwayFromZero) / 2.0;   // 取到 0.5
         }
 
@@ -212,32 +216,39 @@ namespace TianGongCadSuite {
         }
 
         // 右半轮廓，从孔口轴线走到孔底轴线。顺序就是画图顺序。
+        // 用单调递增的 zCur 兜底，避免大倒角 + 浅沉孔、或浅盲沉孔 + V 型底出现 Z 回退自交。
         static void BuildWall(HoleShape s, double mouthR, double r){
             var w = s.Wall;
             double zBottom = s.VoidDepthMm;
+            double zCur = 0;
             w.Add(new HolePt(0, 0));
             if (s.Chamfer) {
                 // 倒角：孔口径向长 Setback，轴向深 Setback/tan(Angle)
                 w.Add(new HolePt(mouthR + s.ChamferSetbackMm, 0));
-                w.Add(new HolePt(mouthR, Math.Min(s.ChamferDepMm, zBottom)));
+                zCur = Math.Min(s.ChamferDepMm, zBottom);
+                w.Add(new HolePt(mouthR, zCur));
             } else {
                 w.Add(new HolePt(mouthR, 0));
             }
             if (s.Kind == HoleKind.Counterbore) {
-                double d = Math.Min(s.CounterboreDepMm, zBottom);
+                double d = Math.Max(zCur, Math.Min(s.CounterboreDepMm, zBottom));
+                zCur = d;
                 w.Add(new HolePt(s.CounterboreDiaMm / 2.0, d));
                 w.Add(new HolePt(r, d));
             } else if (s.Kind == HoleKind.Countersink) {
-                w.Add(new HolePt(r, Math.Min(s.CountersinkDepMm, zBottom)));
+                double d = Math.Max(zCur, Math.Min(s.CountersinkDepMm, zBottom));
+                zCur = d;
+                w.Add(new HolePt(r, d));
             }
             if (s.Through) {
-                w.Add(new HolePt(r, zBottom));
+                w.Add(new HolePt(r, Math.Max(zCur, zBottom)));
                 w.Add(new HolePt(0, zBottom));
             } else if (s.Bottom == HoleBottom.VBottom && s.TipHeightMm > 0) {
-                w.Add(new HolePt(r, Math.Max(0, zBottom - s.TipHeightMm)));
+                double zCyl = Math.Max(zCur, Math.Max(0, zBottom - s.TipHeightMm));
+                w.Add(new HolePt(r, zCyl));
                 w.Add(new HolePt(0, zBottom));
             } else {
-                w.Add(new HolePt(r, zBottom));
+                w.Add(new HolePt(r, Math.Max(zCur, zBottom)));
                 w.Add(new HolePt(0, zBottom));
             }
         }

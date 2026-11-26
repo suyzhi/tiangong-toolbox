@@ -112,9 +112,13 @@ namespace TianGongCadSuite {
             FormClosed += (s, e) => Cleanup();
             HoleUndo carried; List<KeyValuePair<P.PartDocument, string>> carriedCreated;
             if (Carried.Take(HostDoc, out carried, out carriedCreated)) {
-                lastUndo = carried; lastCreated = carriedCreated;
-                undoButton.Enabled = true; editButton.Enabled = lastCreated != null && lastCreated.Count > 0;
-                SetStatus("上次关窗口前排的 " + carried.HoleCount + " 个孔还能撤销（「撤销本次打孔」）。点要排孔的那个平面。", Ui.Muted);
+                var aliveCreated = carriedCreated == null ? null : carriedCreated.Where(kv => TargetFace.PartAlive(kv.Key)).ToList();
+                bool valid = carriedCreated == null || carriedCreated.Count == 0 || (aliveCreated != null && aliveCreated.Count > 0);
+                if (valid) {
+                    lastUndo = carried; lastCreated = aliveCreated;
+                    undoButton.Enabled = true; editButton.Enabled = lastCreated != null && lastCreated.Count > 0;
+                    SetStatus("上次关窗口前排的 " + carried.HoleCount + " 个孔还能撤销（「撤销本次打孔」）。点要排孔的那个平面。", Ui.Muted);
+                }
             }
         }
 
@@ -153,6 +157,7 @@ namespace TianGongCadSuite {
         void Cleanup(){ if (closing) return; closing = true; try { Carried.Keep(HostDoc, lastUndo, lastCreated); } catch { } StopCommand(); if (moreMenu != null) { try { moreMenu.Dispose(); } catch { } moreMenu = null; } try { tips.Dispose(); } catch { } }
 
         public new void MouseClick(short b, short s, double x, double y, double z, object w, int k, object g){
+            if (closing || busy || IsDisposed) return;
             if (b == 1) { if (g == null) { SetStatus("这里没有捕捉到对象。零件没激活（重开大装配后常见）时，先在天工里右键它选「激活」。", Ui.Warn); return; } AcceptPick(g); }
             // 右键交给天工弹 QuickPick 选遮挡面（0.8.5）。原来右键 = 关窗口；关窗口用 Esc 或「关闭」按钮
         }
@@ -165,20 +170,30 @@ namespace TianGongCadSuite {
         // 这个窗口说好了要留着（参考孔、规格都还在）—— 原来照样被关掉。现在只是暂停选择，用户回到这个窗口时自动接着选
         bool handingOver, paused;
         bool HasPicks { get { return target != null || (lastUndo != null && !lastUndo.IsEmpty); } }
+        // 句柄未创建或窗体已释放时禁止直接 BeginInvoke，并在回调入口再次校验 closing / IsDisposed
+        void SafeBeginInvoke(Action action){
+            if (closing || IsDisposed || !IsHandleCreated) return;
+            try {
+                BeginInvoke((Action)(() => {
+                    if (closing || IsDisposed) return;
+                    action();
+                }));
+            } catch { }
+        }
         // 功能区上又点了本命令（0.10.3）：已经选了东西就把这个窗口提到前面、接着选，不再连同选好的东西关掉重开
         // （窗口暂停选择以后，用户很自然地再点一下功能区按钮想"接着来"）。见 ToolContext.Show 的 reuse
         internal bool ReuseFor(object doc){
             if (closing || IsDisposed || !ReferenceEquals((object)assembly ?? partDoc, doc) || !(HasPicks)) return false;
-            BeginInvoke((Action)(() => OnActivated(EventArgs.Empty)));
+            SafeBeginInvoke(() => OnActivated(EventArgs.Empty));
             return true;
         }
         public void Terminate(){
-            if (closing || busy) return;
-            if (handingOver) { handingOver = false; paused = true; BeginInvoke((Action)(() => { StopCommand(); SetStatus("选择已暂停（改孔型窗口在用鼠标）。回到这个窗口点一下就接着选。", Ui.Muted); })); return; }
+            if (closing || busy || IsDisposed) return;
+            if (handingOver) { handingOver = false; paused = true; SafeBeginInvoke(() => { StopCommand(); SetStatus("选择已暂停（改孔型窗口在用鼠标）。回到这个窗口点一下就接着选。", Ui.Muted); }); return; }
             // 用户在天工里点了别的命令（选择工具、测量、隐藏零件……）：原来窗口直接关掉，选好的参考孔、打孔面全丢，还得从头点。
             // 已经选了东西就只暂停选择、窗口留着，回到窗口点一下接着选；什么都没选才照旧关掉
-            if (HasPicks) { paused = true; BeginInvoke((Action)(() => { StopCommand(); SetStatus("天工里开始了别的命令，选择已暂停（已选的都还在）。回到这个窗口点一下就接着选。", Ui.Muted); })); return; }
-            BeginInvoke((Action)(() => Close()));
+            if (HasPicks) { paused = true; SafeBeginInvoke(() => { StopCommand(); SetStatus("天工里开始了别的命令，选择已暂停（已选的都还在）。回到这个窗口点一下就接着选。", Ui.Muted); }); return; }
+            SafeBeginInvoke(() => Close());
         }
         protected override void OnActivated(EventArgs e){
             base.OnActivated(e);

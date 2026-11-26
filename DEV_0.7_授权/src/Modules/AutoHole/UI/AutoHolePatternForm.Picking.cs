@@ -30,7 +30,10 @@ namespace TianGongCadSuite {
                 mouse.LocateMode = (int)SolidEdgeConstants.seLocateModes.seLocateQuickPick;
                 // MouseMove 为空处理函数，关闭以消除三维视口每像素 COM 回调风暴
                 mouse.EnabledMove = false;
-                ((F.ISEMouseEx)mouse).InterDocumentLocate = assembly != null;
+                // 装配下允许跨零件选，但正在原位编辑零件时不能开：打开会把上下文强切回装配导致写模型失败
+                bool editingPart = false;
+                try { editingPart = app.ActiveDocument is P.PartDocument; } catch { }
+                ((F.ISEMouseEx)mouse).InterDocumentLocate = assembly != null && !editingPart;
                 ((F.ISEMouseEx2)mouse).LocateFrontToBack = true;
                 ((F.ISEMouseEx3)mouse).PathfinderLocate = false;
                 ConfigureFilter();
@@ -41,15 +44,13 @@ namespace TianGongCadSuite {
             // 打开前在天工里选好的面 / 方向边（0.8.5，同自动打孔）：按先后当成点了一下
             if (!preloaded) {
                 preloaded = true;
-                try {
-                    BeginInvoke((Action)(() => {
-                        if (closing || busy) return;
-                        try {
-                            var set = assembly != null ? assembly.SelectSet : partDoc.SelectSet; int n = Math.Min(set.Count, 3);
-                            for (int i = 1; i <= n; i++) { object o = null; try { o = set.Item(i); } catch { } if (o != null && !(o is A.Occurrence) && !(o is A.SubOccurrence)) AcceptPick(o); }
-                        } catch (Exception e) { Log.Write("AutoHolePatternPreselect", e.Message); }
-                    }));
-                } catch { }
+                SafeBeginInvoke(() => {
+                    if (closing || busy || IsDisposed) return;
+                    try {
+                        var set = assembly != null ? assembly.SelectSet : partDoc.SelectSet; int n = Math.Min(set.Count, 3);
+                        for (int i = 1; i <= n; i++) { object o = null; try { o = set.Item(i); } catch { } if (o != null && !(o is A.Occurrence) && !(o is A.SubOccurrence)) AcceptPick(o); }
+                    } catch (Exception e) { Log.Write("AutoHolePatternPreselect", e.Message); }
+                });
             }
         }
         bool preloaded;
@@ -92,11 +93,11 @@ namespace TianGongCadSuite {
                     try { sameFace = target != null && frame != null && TargetFace.SameFace(target, fresh); }
                     catch { sameFace = false; }
                     target = fresh; faceSelection = selected;
-                    dirSelection = null; circleReady = false;
                     if (sameFace) {
-                        // 同一个面再点一次 = 沿用原来选的方向边，不当成"新选面"清掉
+                        // 同一个面再点一次 = 沿用原来选的方向边和定位圆，不当成"新选面"清掉
                         SetStatus("还是这个面。" + frame.Label, Ui.Accent);
                     } else {
+                        dirSelection = null; circleReady = false;
                         frame = FaceFrameReader.Read(target);   // 自动取最长边
                         faceText = FaceLabel(target) + "　方向：" + frame.Label;
                         // 零件在装配里用了好几次：孔打在零件文件上，每处都会有（0.8.5）
@@ -259,18 +260,19 @@ namespace TianGongCadSuite {
                         }
                     } else {
                         var offs = HolePatternSolver.Offsets(frame.LengthMm, spec);
-                        spanX = frame.LengthMm * 1.1; spanY = Math.Max(frame.WidthMm, hs.HoleDiameter * 4) * 1.6;
+                        spanX = frame.LengthMm * 1.15; spanY = Math.Max(frame.WidthMm, hs.HoleDiameter * 4) * 1.45;
                         // 横向偏移：+Perp 画在上方（屏幕 y 向下，所以取负）
                         float lat = -(float)spec.LateralMm;
                         foreach (var o in offs) centres.Add(new PointF((float)(o - frame.LengthMm / 2.0), lat));
                     }
                 } catch { return; }   // 参数不成立：预览文字里已经说了原因
                 if (spanX <= 0 || spanY <= 0) return;
-                float pad = 16;
+                float pad = Ui.S(16);
                 float scale = Math.Min((area.Width - 2 * pad) / (float)spanX, (area.Height - 2 * pad) / (float)spanY);
                 if (scale <= 0) return;
                 float cx = area.Width / 2f, cy = area.Height / 2f;
-                float w = (float)(spanX / 1.25 * scale), h = (float)(spanY / 1.25 * scale);
+                // 沿线模式面框直接按真实 frame.LengthMm × frame.WidthMm 绘制（不能对 spanX/spanY 误除 1.25 导致面框缩小/拉高、孔位画出面外或方向边悬空）
+                float w = (float)(frame.LengthMm * scale), h = (float)(frame.WidthMm * scale);
                 if (Kind == HolePatternKind.Circular) {
                     var r = (float)(circleRadiusMm * scale);
                     g.DrawEllipse(pen, cx - r * 1.35f, cy - r * 1.35f, r * 2.7f, r * 2.7f);
@@ -291,18 +293,21 @@ namespace TianGongCadSuite {
                 }
                 if (Kind != HolePatternKind.Circular) {
                     float ly = cy - (float)(spec.LateralMm * scale);
+                    float over = Ui.S(6);
                     if (Math.Abs(spec.LateralMm) > 1e-9) g.DrawLine(dash, cx - w / 2, cy, cx + w / 2, cy);   // 面的中线（虚线）
-                    g.DrawLine(accent, cx - w / 2 - 6, ly, cx + w / 2 + 6, ly);                             // 孔心所在的线
-                    TextRenderer.DrawText(g, "起端", Ui.F8, new Point((int)(cx - w / 2), (int)(cy + h / 2 + 2)), Ui.Muted);
+                    g.DrawLine(accent, cx - w / 2 - over, ly, cx + w / 2 + over, ly);                       // 孔心所在的线
+                    TextRenderer.DrawText(g, "起端", Ui.F8, new Point((int)(cx - w / 2), (int)(cy + h / 2 + Ui.S(2))), Ui.Muted);
                     // 方向边（量「离方向边」的那条）：画成粗线
                     float ey = cy - (float)(frame.EdgeLateralMm * scale);
                     using (var edgePen = new Pen(Ui.Warn, 2.4f)) g.DrawLine(edgePen, cx - w / 2, ey, cx + w / 2, ey);
-                    TextRenderer.DrawText(g, "方向边", Ui.F8, new Point((int)(cx + w / 2 - 44), (int)(ey + (ey < cy ? 2 : -16))), Ui.Warn);
+                    var dirSz = TextRenderer.MeasureText(g, "方向边", Ui.F8);
+                    TextRenderer.DrawText(g, "方向边", Ui.F8, new Point((int)(cx + w / 2 - dirSz.Width), (int)(ey + (ey < cy ? Ui.S(2) : -(dirSz.Height + Ui.S(2))))), Ui.Warn);
                 }
             }
         }
 
         void SetStatus(string text, Color color){
+            if (closing || IsDisposed) return;
             if (status.Text == text && status.ForeColor == color) return;
             status.Text = text; status.ForeColor = color;
         }

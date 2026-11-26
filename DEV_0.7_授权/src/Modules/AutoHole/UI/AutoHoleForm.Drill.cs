@@ -81,9 +81,11 @@ namespace TianGongCadSuite {
                 if (assembly.ReadOnly) throw new InvalidOperationException("装配是只读打开的，无法打孔。请用可写方式打开装配后再试。");
 
                 busy = true; run.Enabled = false; run.Text = "打孔中…"; run.Progress = 0; UpdatePrimary(); UseWaitCursor = true;
-                AutoHoleWriter.Progress = progress;   // 开着两个自动打孔窗口时，进度写到正在打孔的这一个
+                var prevProgress = AutoHoleWriter.Progress;
+                AutoHoleWriter.Progress = progress;   // 仅在打孔执行期间挂载进度回调，finally 还原，避免多窗串扰
                 hadCommand = command != null;   // 打完只恢复"原来就在选"的状态（外部脚本驱动时没有选择命令）
                 StopCommand();
+                try {
 
                 var refs = new List<ReferenceHole>(); var specs = new List<HoleSpec>();
                 foreach (var g in groups) foreach (var h in g.Holes) { refs.Add(h); specs.Add(g.Spec); }
@@ -165,6 +167,9 @@ namespace TianGongCadSuite {
                 }
                 } finally { Release(); NativeHoleLink.BackTo(app, startDoc); }
 
+                // 宿主若在 DoEvents 期间关闭销毁了本窗口，不能再访问 UI 控件或重启 StartPicking 泄漏 COM 命令
+                if (closing || IsDisposed) return;
+
                 ShowDrillResult(y, keep, stepped, drilledLabels);
                 { var done = DrillDone; if (done != null) { try { done(y.Made); } catch (Exception e) { Log.Write("AutoHoleDrillDone", e); } } }
 
@@ -177,6 +182,7 @@ namespace TianGongCadSuite {
                 scannedPicks.Clear();
                 // 打完孔模型变了：面扫描的圆缓存要作废，下一张面重新读一遍。
                 foreach (var t in y.Parts) if (t != null && t.Part != null) HoleScanCad.Invalidate(t.Part);
+                if (closing || IsDisposed) return;
                 busy = false; run.Text = "开始打孔"; run.Progress = -1; UseWaitCursor = false;
                 drilledOnce = drilledOnce || y.Made > 0;
                 if (hadCommand) { try { StartPicking(); } catch (Exception ex) { SetStatus(AutoHoleWriter.Friendly(ex), Ui.Warn); } }
@@ -185,14 +191,20 @@ namespace TianGongCadSuite {
                 SetStatus(statusAfterDrill, statusAfterDrillColor);
                 if (y.Made > 0) shell.ShowToast("已打 " + y.Made + " 个孔" + (y.Failed > 0 ? "，失败 " + y.Failed + " 个" : "") + "　点下一个面可以接着打", y.Failed > 0 ? Ui.Warn : Ui.Ok,
                                                 "撤销本次打孔", (s2, e2) => UndoLastBatch());
+                } finally {
+                    busy = false;
+                    if (AutoHoleWriter.Progress == progress) AutoHoleWriter.Progress = prevProgress;
+                }
             } catch (Exception e) {
                 Log.Write("AutoHoleDrill", e);
                 // 中途失败也可能已经进出过原位编辑：面片缓存作废，下次从用户点的引用重读（不然每次重试都拿同一份旧面数据）
                 resolved.Clear();
-                busy = false; run.Text = "开始打孔"; run.Progress = -1; UseWaitCursor = false;
+                busy = false;
+                LastResult = "打孔中断：" + e.Message;
+                if (closing || IsDisposed) return;
+                run.Text = "开始打孔"; run.Progress = -1; UseWaitCursor = false;
                 try { if (hadCommand && command == null) StartPicking(); } catch { }
                 SetStatus(AutoHoleWriter.Friendly(e), Ui.Bad);
-                LastResult = "打孔中断：" + e.Message;
                 if (!SuppressDialogs) MessageBox.Show(this, AutoHoleWriter.Friendly(e), "自动打孔", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
@@ -479,9 +491,12 @@ namespace TianGongCadSuite {
                 SetStatus("撤销没有完成：" + AutoHoleWriter.Friendly(e), Ui.Bad);
                 LastResult = "撤销中断：" + e.Message;
             } finally {
-                busy = false; UseWaitCursor = false;
-                if (hadCmd) { try { StartPicking(); } catch (Exception ex) { SetStatus(AutoHoleWriter.Friendly(ex), Ui.Warn); } }
-                RefreshPreview();
+                busy = false;
+                if (!closing && !IsDisposed) {
+                    UseWaitCursor = false;
+                    if (hadCmd && command == null) { try { StartPicking(); } catch (Exception ex) { SetStatus(AutoHoleWriter.Friendly(ex), Ui.Warn); } }
+                    RefreshPreview();
+                }
             }
         }
         void OpenEdit(){

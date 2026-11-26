@@ -60,6 +60,13 @@ namespace TianGongCadSuite {
             return t1 >= lo - tol && t0 <= hi + tol;
         }
         public bool Hits(V3 originAssembly, V3 axisAssembly, double lo, double hi, double tol){
+            double gap; int side;
+            return Hits(originAssembly, axisAssembly, lo, hi, tol, out gap, out side);
+        }
+        // 带出命中侧（-1 = lo 之前、0 = 夹在 [lo,hi] 内部、+1 = hi 之后）与到孔口的轴向间隙（米），
+        // 供 HoleCheck.Run 按物理最近距离而非装配遍历顺序挑缺孔零件，并支持孔两端/中间同时报漏孔。
+        internal bool Hits(V3 originAssembly, V3 axisAssembly, double lo, double hi, double tol, out double gapM, out int side){
+            gapM = 0; side = 0;
             if (boxesLocal == null) return Hits(originAssembly, axisAssembly);   // 没有包围盒信息：退回不限距离
             if (World.HasValue && !NearBox(World.Value, originAssembly, axisAssembly, lo, hi, tol)) return false;
             var origin = Placement.InversePoint(originAssembly);
@@ -77,32 +84,60 @@ namespace TianGongCadSuite {
                 double t0, t1;
                 if (!b.Clip(origin, dir, out t0, out t1)) continue;
                 if (t1 < lo - tol || t0 > hi + tol) continue;
-                if (t1 > lo + eps && t0 < hi - eps) return true;      // 面横穿孔自己的那一段：两个零件在这里叠着
+                if (t1 > lo + eps && t0 < hi - eps) { gapM = 0; side = 0; return true; }      // 面横穿孔自己的那一段：两个零件在这里叠着
                 if (t0 >= hi - eps) beyondHi = Math.Min(beyondHi, t0);
                 else beforeLo = Math.Max(beforeLo, t1);
             }
             // 0.10.2：孔口贴着对方零件的外轮廓、却没贴着材料（中间空了 > SlotGap）= 孔正对着对方的 T 型槽口 / 凹槽，
             // 螺钉进的是槽里的 T 型螺母，对方本来就不打孔。真机（宝马托盘升降门，SolidWorks 转过来的）：支架 Φ6.2 孔正对铝型材的槽口，
             // 型材材料在孔口外 3mm 才开始（RayDebug），按"3mm 以内算挨着"报了漏打孔；型材上这类误报 40 来条。
-            // 孔口在对方外轮廓之外（两个零件之间本来就隔着垫片 / 支座的空当）照旧按 tol 算
+            // 孔口在对方外轮廓之外（两个零件之间本来就隔着垫片 / 支座的空当）照旧按 tol 算。
+            // 注意：必须要求孔口确实贴在单个实体外包络的「入射外表面」上（|entryT| <= FlushTol），不能只判"落在合并 AABB 内部"，
+            // 否则 L 型/U 型凹腔内部或多实体间隙里真漏了孔的件会被合并包围盒吞掉。
             bool hitHi = !double.IsPositiveInfinity(beyondHi), hitLo = !double.IsNegativeInfinity(beforeLo);
             var unit = axisAssembly.Unit();
-            if (hitHi && beyondHi - hi > SlotGap && InsideWorld(originAssembly + unit * hi)) hitHi = false;
-            if (hitLo && lo - beforeLo > SlotGap && InsideWorld(originAssembly + unit * lo)) hitLo = false;
-            return hitHi || hitLo;
+            if (hitHi && beyondHi - hi > SlotGap && OnOuterSurface(originAssembly + unit * hi, unit)) hitHi = false;
+            if (hitLo && lo - beforeLo > SlotGap && OnOuterSurface(originAssembly + unit * lo, unit * -1.0)) hitLo = false;
+            if (!hitHi && !hitLo) return false;
+            double gapHi = hitHi ? Math.Max(0, beyondHi - hi) : double.PositiveInfinity;
+            double gapLo = hitLo ? Math.Max(0, lo - beforeLo) : double.PositiveInfinity;
+            if (gapHi <= gapLo) { gapM = gapHi; side = 1; } else { gapM = gapLo; side = -1; }
+            return true;
         }
         const double SlotGap = 0.0005;   // 孔口和对方材料之间空出来超过 0.5mm 才算"对着槽口"
-        // 零件自己坐标里的包围盒（各实体局部范围的并集）。判"孔口在不在对方外轮廓里"用它 —— 斜放的零件，World 换到装配坐标再取范围会胖一圈
+        const double FlushTol = 0.00025; // 孔口贴着外轮廓面（入射距离 <= 0.25mm）才按槽口豁免
+        // 零件自己坐标里的包围盒（各实体局部范围的并集）。保留兼容旧调用；多实体件优先用 BodyLocals 逐实体判断。
         public Box3? Local;
-        bool InsideWorld(V3 p){
-            const double pad = 0.0002;
+        // 每个实体的局部包围盒（多实体件不能把各实体合并成一个大盒子，否则实体间空隙会被误判在件内）
+        public Box3[] BodyLocals;
+        bool OnOuterSurface(V3 pAssembly, V3 dirAssembly){
+            if (BodyLocals != null && BodyLocals.Length > 0) {
+                var q = Placement.InversePoint(pAssembly);
+                var d = Placement.InverseNormal(dirAssembly);
+                if (!q.Finite || !d.Finite || d.Length < 1e-12) return false;
+                d = d.Unit();
+                for (int i = 0; i < BodyLocals.Length; i++)
+                    if (OnBoxEntry(BodyLocals[i], q, d)) return true;
+                return false;
+            }
             if (Local.HasValue) {
-                var q = Placement.InversePoint(p); var l = Local.Value;
-                return q.X >= l.Lo.X - pad && q.X <= l.Hi.X + pad && q.Y >= l.Lo.Y - pad && q.Y <= l.Hi.Y + pad && q.Z >= l.Lo.Z - pad && q.Z <= l.Hi.Z + pad;
+                var q = Placement.InversePoint(pAssembly);
+                var d = Placement.InverseNormal(dirAssembly);
+                if (!q.Finite || !d.Finite || d.Length < 1e-12) return false;
+                return OnBoxEntry(Local.Value, q, d.Unit());
             }
             if (!World.HasValue) return false;
-            var w = World.Value;
-            return p.X >= w.Lo.X - pad && p.X <= w.Hi.X + pad && p.Y >= w.Lo.Y - pad && p.Y <= w.Hi.Y + pad && p.Z >= w.Lo.Z - pad && p.Z <= w.Hi.Z + pad;
+            if (!dirAssembly.Finite || dirAssembly.Length < 1e-12) return false;
+            return OnBoxEntry(World.Value, pAssembly, dirAssembly.Unit());
+        }
+        static bool OnBoxEntry(Box3 box, V3 q, V3 d){
+            if (q.X < box.Lo.X - FlushTol || q.X > box.Hi.X + FlushTol
+             || q.Y < box.Lo.Y - FlushTol || q.Y > box.Hi.Y + FlushTol
+             || q.Z < box.Lo.Z - FlushTol || q.Z > box.Hi.Z + FlushTol) return false;
+            double t0, t1;
+            if (!box.Clip(q, d, out t0, out t1)) return false;
+            // 射线从 q 沿 d 进入盒子时，若 q 贴在盒子入射表面则 t0 ≈ 0；若 q 深陷在凹形件内部则 t0 明显为负
+            return Math.Abs(t0) <= FlushTol && t1 > SlotGap;
         }
     }
 
@@ -115,6 +150,10 @@ namespace TianGongCadSuite {
         }
         public int Count { get { return byName.Count; } }
         public IEnumerable<PartRayTarget> All { get { return byName.Values; } }
+        internal PartRayTarget Get(string partName){
+            PartRayTarget t;
+            return partName != null && byName.TryGetValue(partName, out t) ? t : null;
+        }
         // 按这个孔自己的轴向范围 ± CoaxialSpanTolMm 查
         public bool Hits(HoleRecord hole, string partName){
             if (hole == null) return false;

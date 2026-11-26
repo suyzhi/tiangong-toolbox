@@ -45,6 +45,7 @@ namespace TianGongCadSuite {
         Action<int, int> LinkPulse(){
             var tick = System.Diagnostics.Stopwatch.StartNew();
             return (i, n) => {
+                if (closing || IsDisposed) return;
                 if (tick.ElapsedMilliseconds < 300) return;
                 tick.Restart();
                 SetStatus("正在读取装配里的零件 " + i + " / " + n + " …", Ui.Accent);
@@ -57,34 +58,47 @@ namespace TianGongCadSuite {
             catch { SetStatus("打开这个窗口时的装配已经关掉了。请关掉这个窗口，在装配里重新点「自动打孔」。", Ui.Bad); return false; }
         }
         void ScanLinks(bool manual){
-            if (assembly == null || closing) return;
+            if (assembly == null || closing || IsDisposed) return;
             if (busy) return;
             if (!AssemblyAlive()) return;
+            bool hadCmd = command != null;
             try {
                 UseWaitCursor = true; busy = true; rescanButton.Enabled = false; syncButton.Enabled = false; run.Enabled = false;
+                // 扫描期间会泵 DoEvents：先停掉鼠标拾取命令，防止用户此时在 CAD 视口点击触发重入
+                StopCommand();
                 var report = HoleSync.Scan(assembly, LinkPulse());
+                if (closing || IsDisposed) return;
                 busy = false;
                 ShowLinkReport(report, "");
                 if (manual) SetStatus(report.Summary, report.Misplaced > 0 ? Ui.Warn : Ui.Ok);
             } catch (Exception e) {
                 busy = false;
                 Log.Write("AutoHoleLinkScan", e);
+                if (closing || IsDisposed) return;
                 ShowLinkReport(null, "检查失败：" + AutoHoleWriter.Friendly(e));
-            } finally { busy = false; UseWaitCursor = false; RefreshPreview(); }
+            } finally {
+                busy = false;
+                if (!closing && !IsDisposed) {
+                    UseWaitCursor = false;
+                    if (hadCmd && command == null) { try { StartPicking(); } catch (Exception ex) { SetStatus(AutoHoleWriter.Friendly(ex), Ui.Warn); } }
+                    RefreshPreview();
+                }
+            }
         }
 
         // 一键同步：先重新查一遍（别拿着几分钟前的结果去改模型），再把错位的孔挪回去。
         void SyncLinks(){
-            if (assembly == null || busy || closing) return;
+            if (assembly == null || busy || closing || IsDisposed) return;
             if (!AssemblyAlive()) return;
             hadCommand = command != null;
             try {
-                busy = true; UseWaitCursor = true; syncButton.Enabled = false; run.Enabled = false;
+                busy = true; UseWaitCursor = true; syncButton.Enabled = false; rescanButton.Enabled = false; run.Enabled = false;
                 SetStatus("正在同步孔位…", Ui.Accent);
                 StopCommand();
                 // 天工原生关联的孔：让天工更新链接（= 天工里「更新所有链接」），孔自己跟上参考孔
                 try { NativeHoleLink.UpdateLinks(assembly); } catch (Exception e) { Log.Write("AutoHoleUpdateLinks", e); }
                 var report = HoleSync.Scan(assembly, LinkPulse());
+                if (closing || IsDisposed) return;
                 int want = report.Misplaced;
                 string native = report.NativeLinks > 0
                     ? "天工关联：已更新 " + report.NativeLinks + " 个孔位链接" + (report.NativeBroken > 0 ? "，其中 " + report.NativeBroken + " 个断了（参考零件被删掉或换掉了）" : "")
@@ -96,20 +110,22 @@ namespace TianGongCadSuite {
                               + (report.Broken > 0 ? "（" + report.Broken + " 个找不到参考孔）" : "") + "。";
                     LastResult = ok;
                     SetStatus(ok, report.NativeBroken > 0 || report.Broken > 0 ? Ui.Warn : Ui.Ok);
-                    if (report.NativeBroken > 0 && !SuppressDialogs)
+                    if (report.NativeBroken > 0 && !SuppressDialogs && !closing && !IsDisposed)
                         MessageBox.Show(this, ok + "\r\n\r\n断了的孔位链接：\r\n· " + string.Join("\r\n· ", report.NativeBrokenLabels.Take(12).ToArray())
                                         + "\r\n\r\n这些孔不会再跟着参考孔走。在天工特征树里看这个链接的状态；不要了就删掉它所在的「关联孔 …」组重新打。",
                                         "同步孔位", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 } else {
                     HoleSync.Apply(report);
+                    if (closing || IsDisposed) return;
                     string msg = "同步孔位：挪回 " + report.Moved + " 个孔" + (report.Failed > 0 ? "，失败 " + report.Failed + " 个" : "") + "。";
                     if (native.Length > 0) msg += "\r\n" + native + "。";
                     if (report.NativeBrokenLabels.Count > 0) msg += "\r\n断了的孔位链接：" + string.Join("；", report.NativeBrokenLabels.Take(8).ToArray());
                     if (report.Notes.Count > 0) msg += "\r\n\r\n说明：\r\n· " + string.Join("\r\n· ", report.Notes.ToArray());
                     msg += "\r\n\r\n请保存装配。";
                     LastResult = msg;
-                    if (!SuppressDialogs)
+                    if (!SuppressDialogs && !closing && !IsDisposed)
                         MessageBox.Show(this, msg, "同步孔位", MessageBoxButtons.OK, report.Failed > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
+                    if (closing || IsDisposed) return;
                     SetStatus("同步完成：挪回 " + report.Moved + " 个孔" + (report.Failed > 0 ? "，失败 " + report.Failed + " 个" : "") + "。",
                               report.Failed > 0 ? Ui.Warn : Ui.Ok);
                     // 模型改过了：打孔面的面片缓存全部作废，下次用到时重读
@@ -120,14 +136,18 @@ namespace TianGongCadSuite {
                 }
             } catch (Exception e) {
                 Log.Write("AutoHoleSync", e);
-                SetStatus("同步孔位失败：" + AutoHoleWriter.Friendly(e), Ui.Bad);
                 LastResult = "同步中断：" + e.Message;
+                if (closing || IsDisposed) return;
+                SetStatus("同步孔位失败：" + AutoHoleWriter.Friendly(e), Ui.Bad);
                 if (!SuppressDialogs) MessageBox.Show(this, AutoHoleWriter.Friendly(e), "同步孔位", MessageBoxButtons.OK, MessageBoxIcon.Error);
             } finally {
-                busy = false; UseWaitCursor = false;
-                if (hadCommand) { try { StartPicking(); } catch (Exception ex) { SetStatus(AutoHoleWriter.Friendly(ex), Ui.Warn); } }
-                if (lastLinks != null) ShowLinkReport(lastLinks, "");
-                RefreshPreview();
+                busy = false;
+                if (!closing && !IsDisposed) {
+                    UseWaitCursor = false;
+                    if (hadCommand && command == null) { try { StartPicking(); } catch (Exception ex) { SetStatus(AutoHoleWriter.Friendly(ex), Ui.Warn); } }
+                    if (lastLinks != null) ShowLinkReport(lastLinks, "");
+                    RefreshPreview();
+                }
             }
         }
     }

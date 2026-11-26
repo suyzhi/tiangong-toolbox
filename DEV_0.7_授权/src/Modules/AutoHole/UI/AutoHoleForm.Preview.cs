@@ -151,6 +151,7 @@ namespace TianGongCadSuite {
         // 换孔型 / 换规格都要按标准表重填尺寸。选中了参考孔就改那一组；没选中就改草稿。
         // 两条路必须一样 —— 否则"没点孔的时候选 M6，孔径还停在 6.00"，看着像没生效。
         void ApplyKindChange(){
+            if (busy || closing || IsDisposed) return;
             var g = Selected;
             var kind = (HoleKind)kindSeg.SelectedIndex;
             var cur = (g != null && g.Spec != null) ? g.Spec : EditorSpec();
@@ -192,6 +193,7 @@ namespace TianGongCadSuite {
         }
 
         void ApplySizeChange(){
+            if (busy || closing || IsDisposed) return;
             var g = Selected;
             int si = sizeBox.SelectedIndex;
             if (si <= 0) { WriteBack(); return; }          // 自定义：尺寸按手填的来，不动
@@ -209,6 +211,7 @@ namespace TianGongCadSuite {
         }
 
         void WriteBack(){
+            if (busy || closing || IsDisposed) return;
             var g = Selected;
             if (g == null || g.Spec == null) {
                 // 没选中参考孔：面板上的值存成草稿。"孔形状"照样实时跟着变，
@@ -390,6 +393,7 @@ namespace TianGongCadSuite {
         }
 
         void SetStatus(string text, Color color){
+            if (closing || IsDisposed) return;
             if (status.Text == text && status.ForeColor == color) return;
             status.Text = text; status.ForeColor = color;
         }

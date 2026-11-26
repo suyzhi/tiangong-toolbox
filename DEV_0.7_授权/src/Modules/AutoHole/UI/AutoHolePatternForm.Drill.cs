@@ -59,6 +59,7 @@ namespace TianGongCadSuite {
                 // 带零件间链接的零件（用「自动打孔」保持关联打过孔的零件都是）：天工只许在原位编辑里改它，
                 // 在装配里直接建孔每个孔两侧都是 0x80010108（0.7.11 现场，自动打孔早就这么处理了，排孔漏了）。
                 object startDoc = null; try { startDoc = app.ActiveDocument; } catch { }
+                string targetFullName = ""; try { targetFullName = target.Part.FullName ?? ""; } catch { }
                 NativeHoleLink.InPlace inPlace = null;
                 if (assembly != null && NativeHoleLink.HasLinks(target.Part)) {   // 单独打开的零件：本来就在零件自己的环境里，不用原位编辑
                     string other = NativeHoleLink.TargetOpenElsewhere(app, assembly, target);
@@ -68,6 +69,10 @@ namespace TianGongCadSuite {
                     if (inPlace == null) Log.Write("AutoHolePatternEnter", ewhy);
                 }
                 try {
+                // 进原位后装配侧的 target.Part 代理可能断连（RPC_E_DISCONNECTED），
+                // 不能指望 AnchorToActivePart 再从已断连的 target.Part.Application 拿 ActiveDocument；
+                // 这里直接用窗口持有的活 app / inPlace.Part 把 target 重锚到当前活零件文档。
+                target = ReanchorIfDisconnected(target, inPlace, targetFullName);
                 if (SlotMode) {
                     var localDir = target.Placement.InverseNormal(frame.Direction);
                     var lc = new List<V3>(); var ld = new List<V3>();
@@ -129,18 +134,110 @@ namespace TianGongCadSuite {
                 editButton.Enabled = lastCreated.Count > 0;
                 SetStatus("完成：" + res.Created + " 个孔" + (res.Failures.Count > 0 ? "，失败 " + res.Failures.Count : ""), res.Failures.Count > 0 ? Ui.Warn : Ui.Ok);
                 try { if (target != null && target.Part != null) HoleScanCad.Invalidate(target.Part); } catch { }
-                busy = false; run.Text = "开始打孔"; UseWaitCursor = false;
+                busy = false;
+                if (closing || IsDisposed) return;
+                run.Text = "开始打孔"; UseWaitCursor = false;
                 if (hadCommand) { try { StartPicking(); } catch (Exception ex) { SetStatus(AutoHoleWriter.Friendly(ex), Ui.Warn); } }
                 RefreshPreview();
             } catch (Exception e) {
                 Log.Write("AutoHolePatternRun", e);
-                busy = false; run.Text = "开始打孔"; UseWaitCursor = false;
+                busy = false;
+                LastResult = "排孔中断：" + e.Message;
+                if (closing || IsDisposed) return;
+                run.Text = "开始打孔"; UseWaitCursor = false;
                 try { if (hadCommand && command == null) StartPicking(); } catch { }
                 SetStatus(AutoHoleWriter.Friendly(e), Ui.Bad);
-                LastResult = "排孔中断：" + e.Message;
                 if (!SuppressDialogs) MessageBox.Show(this, AutoHoleWriter.Friendly(e), "批量排孔", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 RefreshPreview();
             }
+        }
+
+        // 进原位后若 target.Part（装配代理文档）断连，改用窗口持有的活 app / inPlace.Part 重建有效 TargetFace，
+        // 避免下游 AnchorToActivePart/DrillRequests 读取 target.Part.Application 抛 RPC_E_DISCONNECTED。
+        TargetFace ReanchorIfDisconnected(TargetFace cur, NativeHoleLink.InPlace inPlace, string expectedFullName){
+            if (cur == null) return null;
+            P.PartDocument active = null;
+            if (inPlace != null && TargetFace.PartAlive(inPlace.Part)) active = inPlace.Part;
+            if (active == null) {
+                var act = SafeActive() as P.PartDocument;
+                if (act != null && TargetFace.PartAlive(act)) {
+                    string af = ""; try { af = act.FullName ?? ""; } catch { }
+                    if (string.IsNullOrEmpty(expectedFullName) || string.Equals(af, expectedFullName, StringComparison.OrdinalIgnoreCase))
+                        active = act;
+                }
+            }
+            if (active == null) {
+                if (TargetFace.PartAlive(cur.Part)) return cur;
+                if (faceSelection != null) {
+                    try {
+                        var fresh = AutoHoleReader.ReadTarget(faceSelection);
+                        fresh.Instances = cur.Instances; fresh.Risk = cur.Risk; fresh.LinkNote = cur.LinkNote;
+                        return fresh;
+                    } catch (Exception e) { Log.Write("AutoHolePatternReanchorRead", e.Message); }
+                }
+                return cur;
+            }
+            // 已拿到活的活动零件文档：当原 Part 已断连或不是当前活动文档时，用活 active 重锚
+            if (TargetFace.PartAlive(cur.Part) && ReferenceEquals(cur.Part, active)) return cur;
+            G.Face matched = FindMatchingFaceOnActive(active, cur);
+            var anchored = new TargetFace {
+                Plane = cur.Plane,
+                Face = matched,
+                Part = active,
+                Placement = cur.Placement,
+                Pick = cur.Pick,
+                Bounds = cur.Bounds,
+                Body = Math.Max(1, cur.Body),
+                PartName = cur.PartName,
+                FaceId = cur.FaceId,
+                Label = cur.Label,
+                LinkNote = cur.LinkNote,
+                Instances = cur.Instances,
+                Risk = cur.Risk
+            };
+            if (matched != null) {
+                try { anchored.FaceId = matched.ID.ToString(CultureInfo.InvariantCulture); } catch { }
+                anchored.Label = AutoHoleReader.FaceText(active, anchored.Body, anchored.FaceId);
+            }
+            return anchored;
+        }
+        static G.Face FindMatchingFaceOnActive(P.PartDocument active, TargetFace cur){
+            try {
+                if (active == null || cur == null || cur.Plane == null || cur.Placement == null || active.Models.Count < 1) return null;
+                int bodyIndex = Math.Max(1, cur.Body);
+                var model = PartBodies.Model(active, bodyIndex);
+                if (model == null) return null;
+                V3 localPoint = cur.Placement.InversePoint(cur.Plane.Point);
+                V3 localNormal = cur.Placement.InverseNormal(cur.Plane.Normal).Unit();
+                G.Face bestFace = null; double bestDist = double.MaxValue;
+                foreach (G.Face cand in (G.Faces)((G.Body)model.Body).get_Faces(G.FeatureTopologyQueryTypeConstants.igQueryAll)) {
+                    var plane = cand.Geometry as G.Plane;
+                    if (plane == null) continue;
+                    Array pt = new double[3], nv = new double[3];
+                    try { plane.GetPlaneData(ref pt, ref nv); } catch { continue; }
+                    V3 cn = V3.From(nv).Unit();
+                    // 优先按 FaceId 精确匹配；若 FaceId 不可用则要求同向或严格共面且局部点落在该面片包围盒内
+                    string cid = ""; try { cid = cand.ID.ToString(CultureInfo.InvariantCulture); } catch { }
+                    if (!string.IsNullOrEmpty(cur.FaceId) && cid == cur.FaceId && Math.Abs(cn.Dot(localNormal)) >= 0.999) {
+                        double dId = Math.Abs((V3.From(pt) - localPoint).Dot(localNormal));
+                        if (dId <= 1e-5) return cand;
+                    }
+                    if (cn.Dot(localNormal) < 0.999) continue;
+                    double dist = Math.Abs((V3.From(pt) - localPoint).Dot(localNormal));
+                    if (dist > 1e-6) continue;
+                    Array lo = new double[3], hi = new double[3];
+                    try {
+                        cand.GetRange(ref lo, ref hi);
+                        V3 bLo = V3.From(lo), bHi = V3.From(hi);
+                        const double pad = 1e-4;
+                        if (localPoint.X < bLo.X - pad || localPoint.X > bHi.X + pad
+                         || localPoint.Y < bLo.Y - pad || localPoint.Y > bHi.Y + pad
+                         || localPoint.Z < bLo.Z - pad || localPoint.Z > bHi.Z + pad) continue;
+                    } catch { }
+                    if (dist < bestDist) { bestDist = dist; bestFace = cand; }
+                }
+                return bestFace;
+            } catch (Exception e) { Log.Write("AutoHolePatternFindFace", e.Message); return null; }
         }
 
         // 按现在的参数排出来的孔心（装配坐标，已投到打孔面上）
@@ -195,9 +292,12 @@ namespace TianGongCadSuite {
                 SetStatus("撤销没有完成：" + AutoHoleWriter.Friendly(e), Ui.Bad);
                 LastResult = "撤销中断：" + e.Message;
             } finally {
-                busy = false; UseWaitCursor = false;
-                if (hadCmd) { try { StartPicking(); } catch (Exception ex) { SetStatus(AutoHoleWriter.Friendly(ex), Ui.Warn); } }
-                RefreshPreview();
+                busy = false;
+                if (!closing && !IsDisposed) {
+                    UseWaitCursor = false;
+                    if (hadCmd && command == null) { try { StartPicking(); } catch (Exception ex) { SetStatus(AutoHoleWriter.Friendly(ex), Ui.Warn); } }
+                    RefreshPreview();
+                }
             }
         }
         void OpenEdit(){

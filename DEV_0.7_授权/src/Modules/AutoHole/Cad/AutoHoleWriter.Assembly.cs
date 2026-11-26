@@ -33,6 +33,7 @@ namespace TianGongCadSuite {
             var result = new List<HoleRecord>();
             parts = AssemblyPart.List(assembly, warnings);
             var byBucket = new Dictionary<string, List<HoleRecord>>(StringComparer.Ordinal);
+            var shaftBuckets = new Dictionary<string, List<HoleRecord>>(StringComparer.Ordinal);
             var edgeCache = new Dictionary<string, LocalCircles>(StringComparer.OrdinalIgnoreCase);
             // 只有判定口径里的孔径（默认 3–25mm）会参与检查；螺栓杆/销只拿来和这些孔比同轴，比孔大的不可能穿过孔。
             // 口径以外的圆边（圆管、大圆角、细小倒圆）原来也逐条判凸台、建引用 —— 每条五六次 COM 调用，白花。
@@ -67,40 +68,60 @@ namespace TianGongCadSuite {
                     try { centre = placement.Point(lc.Centre); axis = placement.Vector(lc.Axis).Unit(); } catch { continue; }
                     if (!centre.Finite) continue;
                     double dia = lc.Diameter;
-                    if (lc.Boss) {           // 螺栓杆、销、圆凸台的外圆不是孔，单独记下
-                        if (dia >= minShaft && dia <= maxShaft) shafts.Add(new HoleRecord { Center = centre, Axis = axis, DiameterMm = dia, PartName = partName });
+                    if (lc.Boss) {           // 螺栓杆、销、圆凸台的外圆不是孔，单独记下；同轴同径两端圆边合并扩展 AxialMin..AxialMax
+                        if (dia >= minShaft && dia <= maxShaft) {
+                            var srec = new HoleRecord { Center = centre, Axis = axis, DiameterMm = dia, PartName = partName };
+                            AddDedupedHole(shaftBuckets, shafts, srec);
+                        }
                         continue;
                     }
                     if (dia < minHole || dia > maxHole) continue;
                     var owner = ap; var picked = lc.Edge;
                     var rec = new HoleRecord { Center = centre, Axis = axis, DiameterMm = dia, PartName = partName,
                                                MakeSelection = () => owner.Reference(picked) };
-                    // 通孔有上下两条圆边，同一个孔只保留一条记录。
-                    // 去重原来是对全表线性扫描（O(E²)，E = 全装配圆边数）；SameHoleLine 要求
-                    // "同一零件 + 直径相差 ≤0.01mm"，所以先按「零件名 + 直径取整到 0.1mm」分桶，
-                    // 只跟同桶里的记录比，绝大多数无关比较直接跳过。
-                    string bucket = partName + "|" + Math.Round(rec.DiameterMm, 1).ToString(CultureInfo.InvariantCulture);
-                    List<HoleRecord> same;
-                    if (!byBucket.TryGetValue(bucket, out same)) { same = new List<HoleRecord>(); byBucket[bucket] = same; }
-                    // 去重的同时把这条边的位置并进那个孔的轴向范围：上下两条边合并后，范围就是孔深，
-                    // 配孔检查据此判"两个孔沿轴线挨不挨着"。
-                    bool dup = false;
-                    foreach (var existing in same) if (HoleCheck.SameHoleLine(existing, rec)) { existing.Extend(rec.Center); dup = true; break; }
-                    if (!dup) { same.Add(rec); result.Add(rec); }
+                    // 通孔有上下两条圆边，同一个孔只保留一条记录；按「零件名 + 0.1mm 直径分桶」并检查相邻桶 (b-1,b,b+1)，
+                    // 防止 6.3499999 与 6.3500001 这类跨 .x5 边界的上下孔口落进不同桶导致重复记录。
+                    AddDedupedHole(byBucket, result, rec);
                 }
             }
             }
             return result;
         }
+        static void AddDedupedHole(Dictionary<string, List<HoleRecord>> buckets, List<HoleRecord> target, HoleRecord rec){
+            int bin = (int)Math.Round(rec.DiameterMm * 10.0);
+            for (int db = -1; db <= 1; db++) {
+                string nb = rec.PartName + "|" + (bin + db).ToString(CultureInfo.InvariantCulture);
+                List<HoleRecord> same;
+                if (!buckets.TryGetValue(nb, out same)) continue;
+                for (int i = 0; i < same.Count; i++) {
+                    if (HoleCheck.SameHoleLine(same[i], rec)) { same[i].Extend(rec.Center); return; }
+                }
+            }
+            string bucket = rec.PartName + "|" + bin.ToString(CultureInfo.InvariantCulture);
+            List<HoleRecord> list;
+            if (!buckets.TryGetValue(bucket, out list)) { list = new List<HoleRecord>(); buckets[bucket] = list; }
+            list.Add(rec);
+            target.Add(rec);
+        }
 
         // 一个实体上口径以内的圆边（零件坐标）：孔口 / 螺栓杆外圆。同一个零件文件的各个实例共用（见 CollectAssemblyHoles）
         sealed class LocalCircle { public V3 Centre, Axis; public double Diameter; public bool Boss; public G.Edge Edge; }
         sealed class LocalCircles { public int EdgeCount; public readonly List<LocalCircle> Items = new List<LocalCircle>(); }
+        struct ArcCell : IEquatable<ArcCell> {
+            public readonly int X, Y, Z;
+            public ArcCell(int x, int y, int z){ X = x; Y = y; Z = z; }
+            public bool Equals(ArcCell o){ return X == o.X && Y == o.Y && Z == o.Z; }
+            public override bool Equals(object obj){ return obj is ArcCell && Equals((ArcCell)obj); }
+            public override int GetHashCode(){ unchecked { int h = X; h = (h * 397) ^ Y; h = (h * 397) ^ Z; return h; } }
+        }
+        struct ArcEntry { public V3 Centre, Axis; public double Radius; }
         static LocalCircles ReadCircles(G.Edges edges, int edgeCount, double minHole, double maxHole, double minShaft, double maxShaft){
             var res = new LocalCircles { EdgeCount = edgeCount };
             // 单段圆弧（腰孔两头、圆角）不是孔（0.8.5）：原来圆弧也当孔收，腰孔压在螺纹孔上这种调节结构，腰孔两头各报一条假的漏打孔。
-            // 但导入件常把一个整圆孔口拆成两段：同一个圆的第二段起照常当孔（去重会把它们并成一条）
-            var arcSeen = new HashSet<string>(StringComparer.Ordinal);
+            // 但导入件常把一个整圆孔口拆成两段：改用 0.02mm 空间网格 + 27 邻格容差比对（圆心 <0.01mm、半径 <0.005mm、轴线平行，
+            // 与 HoleScan.MergeArcs 对齐），消除 1µm 字符串取整跨界分裂与区域文化小数点差异。
+            const double arcCellM = 2e-5;
+            var arcGrid = new Dictionary<ArcCell, List<ArcEntry>>();
             foreach (G.Edge edge in edges) {
                 G.Circle circle = null;
                 try { circle = edge.Geometry as G.Circle; } catch { }
@@ -108,16 +129,33 @@ namespace TianGongCadSuite {
                 Array c = new double[3], ax = new double[3]; double r = 0;
                 try { circle.GetCircleData(ref c, ref ax, out r); } catch { continue; }
                 if (r <= 0) continue;
+                V3 centre = V3.From(c), axis = V3.From(ax);
+                if (!centre.Finite || !axis.Finite || axis.Length < 1e-12) continue;
                 bool closedEdge = true; try { closedEdge = edge.IsClosed; } catch { }
                 if (!closedEdge) {
-                    string key = Math.Round(Convert.ToDouble(c.GetValue(0)), 6) + "," + Math.Round(Convert.ToDouble(c.GetValue(1)), 6) + "," + Math.Round(Convert.ToDouble(c.GetValue(2)), 6) + "," + Math.Round(r, 6);
-                    if (arcSeen.Add(key)) continue;
+                    int gx = (int)Math.Floor(centre.X / arcCellM), gy = (int)Math.Floor(centre.Y / arcCellM), gz = (int)Math.Floor(centre.Z / arcCellM);
+                    bool matched = false;
+                    for (int dx = -1; dx <= 1 && !matched; dx++)
+                        for (int dy = -1; dy <= 1 && !matched; dy++)
+                            for (int dz = -1; dz <= 1 && !matched; dz++) {
+                                List<ArcEntry> cell;
+                                if (!arcGrid.TryGetValue(new ArcCell(gx + dx, gy + dy, gz + dz), out cell)) continue;
+                                for (int i = 0; i < cell.Count; i++) {
+                                    var prev = cell[i];
+                                    if ((prev.Centre - centre).Length < 1e-5 && Math.Abs(prev.Radius - r) < 5e-6 && HoleScan.Parallel(prev.Axis, axis)) { matched = true; break; }
+                                }
+                            }
+                    if (!matched) {
+                        var ck = new ArcCell(gx, gy, gz);
+                        List<ArcEntry> cell;
+                        if (!arcGrid.TryGetValue(ck, out cell)) { cell = new List<ArcEntry>(); arcGrid[ck] = cell; }
+                        cell.Add(new ArcEntry { Centre = centre, Axis = axis, Radius = r });
+                        continue;
+                    }
                 }
                 double dia = r * 2000.0;
                 bool holeSize = dia >= minHole && dia <= maxHole, shaftSize = dia >= minShaft && dia <= maxShaft;
                 if (!holeSize && !shaftSize) continue;
-                V3 centre = V3.From(c), axis = V3.From(ax);
-                if (!centre.Finite || !axis.Finite) continue;
                 res.Items.Add(new LocalCircle { Centre = centre, Axis = axis, Diameter = dia, Boss = HoleScanCad.IsBossEdge(edge), Edge = edge });
             }
             return res;
@@ -163,10 +201,21 @@ namespace TianGongCadSuite {
                     });
                     target.World = WorldBox(bodyBoxes, placement);
                     target.Local = LocalBox(bodyBoxes);
+                    target.BodyLocals = LocalBoxes(bodyBoxes);
                     index.Add(target);
                 }
                 return index;
             }
+        }
+
+        static Box3[] LocalBoxes(IList<Box3?> boxes){
+            if (boxes == null || boxes.Count == 0) return null;
+            var arr = new Box3[boxes.Count];
+            for (int i = 0; i < boxes.Count; i++) {
+                if (!boxes[i].HasValue) return null;
+                arr[i] = boxes[i].Value;
+            }
+            return arr;
         }
 
         static Box3? BodyBox(G.Body b){

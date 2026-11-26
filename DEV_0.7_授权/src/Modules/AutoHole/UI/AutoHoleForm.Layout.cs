@@ -164,7 +164,7 @@ namespace TianGongCadSuite {
             shell.Footer.Status = status;
             status.ForeColor = Ui.Accent;
             status.Text = "点孔口圆边、孔内壁，或直接点一个带孔的面（面上的孔会自动认出来）。";
-            status.TextChanged += (s, e) => tips.SetToolTip(status, status.Text);
+            status.TextChanged += (s, e) => { if (!closing && !IsDisposed) tips.SetToolTip(status, status.Text); };
             shell.PageChanged += (s, e) => UpdatePrimary();
         }
 
@@ -194,7 +194,7 @@ namespace TianGongCadSuite {
         void BuildSpecCard(Panel page){
             var stack = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = Ui.S(8) };
             page.Controls.Add(stack);
-            groupTabs.SelectedChanged += (s, e) => { if (groupTabs.Selected >= 0 && groupTabs.Selected < refList.Items.Count) refList.SelectedIndex = groupTabs.Selected; };
+            groupTabs.SelectedChanged += (s, e) => { if (!busy && !closing && !IsDisposed && groupTabs.Selected >= 0 && groupTabs.Selected < refList.Items.Count) refList.SelectedIndex = groupTabs.Selected; };
             editWho.AutoSize = false; editWho.Font = Ui.F9B; editWho.ForeColor = Ui.Text; editWho.AutoEllipsis = true; editWho.Height = Ui.S(24); editWho.BackColor = Ui.Bg;
             editNote.AutoSize = false; editNote.Font = Ui.F8; editNote.ForeColor = Ui.Muted; editNote.AutoEllipsis = true; editNote.Height = Ui.S(22); editNote.BackColor = Ui.Bg;
 
@@ -352,29 +352,28 @@ namespace TianGongCadSuite {
         }
 
         void WireEvents(){
-            kindSeg.SelectedIndexChanged += (s, e) => { if (!loading) ApplyKindChange(); };
-            sizeBox.SelectedIndexChanged += (s, e) => { if (!loading) ApplySizeChange(); };
-            bottomBox.SelectedIndexChanged += (s, e) => { if (!loading) WriteBack(); };
+            kindSeg.SelectedIndexChanged += (s, e) => { if (!loading && !busy) ApplyKindChange(); };
+            sizeBox.SelectedIndexChanged += (s, e) => { if (!loading && !busy) ApplySizeChange(); };
+            bottomBox.SelectedIndexChanged += (s, e) => { if (!loading && !busy) WriteBack(); };
             // 单选按钮成对触发（一个取消、一个选中），只在"被选中"的那一下处理，免得写两遍
-            throughRadio.CheckedChanged += (s, e) => { if (!loading && throughRadio.Checked) WriteBack(); };
-            blindRadio.CheckedChanged += (s, e) => { if (!loading && blindRadio.Checked) WriteBack(); };
-            threadFullRadio.CheckedChanged += (s, e) => { if (!loading && threadFullRadio.Checked) WriteBack(); };
-            threadPartRadio.CheckedChanged += (s, e) => { if (!loading && threadPartRadio.Checked) WriteBack(); };
-            chamferCheck.CheckedChanged += (s, e) => { if (!loading) WriteBack(); };
+            throughRadio.CheckedChanged += (s, e) => { if (!loading && !busy && throughRadio.Checked) WriteBack(); };
+            blindRadio.CheckedChanged += (s, e) => { if (!loading && !busy && blindRadio.Checked) WriteBack(); };
+            threadFullRadio.CheckedChanged += (s, e) => { if (!loading && !busy && threadFullRadio.Checked) WriteBack(); };
+            threadPartRadio.CheckedChanged += (s, e) => { if (!loading && !busy && threadPartRadio.Checked) WriteBack(); };
+            chamferCheck.CheckedChanged += (s, e) => { if (!loading && !busy) WriteBack(); };
             foreach (var n in new NumericUpDown[]{ diaNum, depthNum, bottomAngNum, threadNum, cboreDiaNum, cboreDepNum, csinkDiaNum, csinkAngNum, chamferSetNum, chamferAngNum })
-                n.ValueChanged += (s, e) => { if (!loading) WriteBack(); };
-            refList.SelectedIndexChanged += (s, e) => { groupTabs.Selected = refList.SelectedIndex; if (!loading) LoadEditor(); };
+                n.ValueChanged += (s, e) => { if (!loading && !busy) WriteBack(); };
+            refList.SelectedIndexChanged += (s, e) => { if (busy || closing || IsDisposed) return; groupTabs.Selected = refList.SelectedIndex; if (!loading) LoadEditor(); };
             // 两个勾选记住用户上次的选择（只在用户自己点的时候存：Click 不会被代码改 Checked 触发，测试脚本改它不会写进用户设置）
-            linkCheck.CheckedChanged += (s, e) => { RefreshPreview(false); faceList.Invalidate(); };
-            linkCheck.Click += (s, e) => SaveChoices();
+            linkCheck.CheckedChanged += (s, e) => { if (busy || closing || IsDisposed) return; RefreshPreview(false); faceList.Invalidate(); };
+            linkCheck.Click += (s, e) => { if (!busy && !closing && !IsDisposed) SaveChoices(); };
             // 打孔重试期间 CAD 正忙，这里把重试进度写到状态栏并让界面刷一次，
-            // 用户看到的就不是"卡死了"，而是"正在重试 2/6"。
+            // 用户看到的就不是"卡死了"，而是"正在重试 2/6"（仅在 RunDrill 期间临时挂载，不常驻污染其它窗口）。
             progress = msg => {
                 if (closing || IsDisposed) return;
                 SetStatus(msg, Ui.Warn);
                 try { status.Update(); System.Windows.Forms.Application.DoEvents(); } catch { }
             };
-            AutoHoleWriter.Progress = progress;
         }
 
         // ---------------- 列表绘制 ----------------

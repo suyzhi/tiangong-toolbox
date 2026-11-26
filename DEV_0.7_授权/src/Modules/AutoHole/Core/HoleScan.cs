@@ -15,6 +15,9 @@ namespace TianGongCadSuite {
         public string Source = "";  // 来源（边号等），出问题时能说清是哪个圆
         public object Tag;          // 原始 CAD 对象，调用方自己用
         public object WallFace;     // 这个圆旁边那张壁面（CAD 面对象；面扫描判"孔还是凸台"用，读不到为 null）
+        public bool IsBoss;         // 凸台/销/轴的外壁圆边（非孔；InnerBelow 不应将其误认成沉孔下面的孔）
+        public V3 InwardAxis;       // 已知入孔朝向（指向材料内部，单位向量；未知时为零向量）
+        public double MaxStepDepthMm; // 沉孔/锥沉/倒角允许向下找内圆的最大轴向距离（毫米；<=0 用默认上限）
         public double DiameterMm { get { return RadiusMm * 2.0; } }
         public override string ToString(){
             return "Φ" + HoleScan.N(DiameterMm) + " @ " + Center + " 轴 " + Axis + (Wall.Length > 0 ? " 壁=" + Wall : "");
@@ -91,19 +94,39 @@ namespace TianGongCadSuite {
         // 平孔则只有自己这一个直径（上下两条圆边同径），所以"找不到更小的同轴圆"就是平孔。
         // 取**最小**的那个同轴圆：沉孔底与出口同径时它是同一个答案，倒角孔也只有出口这一个候选。
         public static bool InnerBelow(CircleCandidate mouth, IList<CircleCandidate> all, out CircleCandidate inner){
+            return InnerBelowCore(mouth, all, 0, out inner);
+        }
+        static bool InnerBelowCore(CircleCandidate mouth, IList<CircleCandidate> all, int depth, out CircleCandidate inner){
             inner = null;
-            if (!Usable(mouth)) return false;
+            if (!Usable(mouth) || all == null) return false;
+            bool hasInward = mouth.InwardAxis.Finite && mouth.InwardAxis.Length > 0.5;
+            V3 inward = hasInward ? mouth.InwardAxis.Unit() : new V3();
+            // 沉孔/锥沉/倒角内圆必在合理深度内；若 CAD 侧提供了壁面深度（MaxStepDepthMm）则按壁面实际长度收紧，
+            // 避免薄壁双面方管/型材的对壁异径孔或背面凸台被跨空腔误认成沉孔。
+            double maxDepthMm = mouth.MaxStepDepthMm > 0 ? mouth.MaxStepDepthMm : Math.Max(mouth.DiameterMm * 2.5, 25.0);
             foreach (var other in all) {
                 if (other == null || ReferenceEquals(other, mouth)) continue;
+                if (other.IsBoss) continue;                                        // 排除凸台/销外壁圆边
                 if (!Usable(other)) continue;
                 if (other.RadiusMm > mouth.RadiusMm - StepToleranceMm) continue;   // 不比孔口小
                 if (!Parallel(other.Axis, mouth.Axis)) continue;                   // 不同轴
                 if (RadialOffsetMm(mouth.Center, mouth.Axis, other.Center) > CoaxialOffsetMm) continue;
+                if (hasInward) {
+                    double axialInMm = (other.Center - mouth.Center).Dot(inward) * 1000.0;
+                    if (axialInMm < -0.05 || axialInMm > maxDepthMm) continue;     // 必须在入孔一侧且在台阶深度内
+                } else {
+                    if (Math.Abs(AxialOffsetMm(mouth.Center, mouth.Axis, other.Center)) > maxDepthMm) continue;
+                }
                 // 不再要求"不同平面"：点沉孔底那个环形面时，外圆 Φ11 与内圆 Φ6.6 是共面的，
                 // 而按它们算出来的孔径都是 Φ6.6（环形面的外圆会顺着出口圆落到 6.6），去不去掉这一条结果一样。
                 // 去掉它的好处是"圆柱面认孔"那条路：圆柱的基点是轴上任意一点，
                 // 要求"不同平面"会把它与某个圆共面时该圆的候选资格误删掉。
                 if (inner == null || other.RadiusMm < inner.RadiusMm) inner = other;
+            }
+            // 两级台阶（例如沉孔口还带孔口倒角）：第 1 级（倒角）向下落到沉孔口，再沿沉孔壁顺延一级找到真正主孔。
+            if (inner != null && depth < 2 && mouth.MaxStepDepthMm > 0) {
+                CircleCandidate deeper;
+                if (InnerBelowCore(inner, all, depth + 1, out deeper)) inner = deeper;
             }
             return inner != null;
         }
@@ -154,7 +177,12 @@ namespace TianGongCadSuite {
                 }
                 var first = arcs[i];
                 if (n < 2) { result.Add(first); continue; }
-                result.Add(new CircleCandidate { Center = first.Center, Axis = first.Axis, RadiusMm = first.RadiusMm, Closed = true, Wall = first.Wall, Source = first.Source + "（" + n + " 段圆弧拼成）", Tag = first.Tag, WallFace = first.WallFace });
+                result.Add(new CircleCandidate {
+                    Center = first.Center, Axis = first.Axis, RadiusMm = first.RadiusMm, Closed = true,
+                    Wall = first.Wall, Source = first.Source + "（" + n + " 段圆弧拼成）",
+                    Tag = first.Tag, WallFace = first.WallFace,
+                    IsBoss = first.IsBoss, InwardAxis = first.InwardAxis, MaxStepDepthMm = first.MaxStepDepthMm
+                });
             }
             return result;
         }

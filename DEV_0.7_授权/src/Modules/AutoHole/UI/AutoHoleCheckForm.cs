@@ -39,14 +39,15 @@ namespace TianGongCadSuite {
         }
         F.HighlightSet highlights;
         List<HoleIssue> issues = new List<HoleIssue>();
-        // 检查出来的全部（合并后）；issues 是去掉判定口径里「不查的零件」以后的。改「不查的零件」只重新筛，不用重查
+        // 检查出来的原始结果（合并前）；Refilter 先按「不查的零件」整条路径筛选，再做 HoleCheck.Merge，
+        // 避免外购件与自制件同名零件被合并串号，改「不查的零件」时也无需重查。
         List<HoleIssue> allIssues = new List<HoleIssue>();
         int skippedPlaces;
         List<HoleIssue> shown = new List<HoleIssue>();
         List<string> shownSubtitles = new List<string>();
         readonly Timer selectDebounce = new Timer { Interval = 150 };
         int holeCount, groupCount, failedParts;
-        bool busy, checkedOnce;          // 扫描中：RunCheck 里有 DoEvents，必须挡住重入
+        bool busy, closing, checkedOnce; // 扫描中：RunCheck 里有 DoEvents，必须挡住重入与关闭后访问
         readonly Label status = new Label();
         readonly Label summary = new Label();
         readonly SmoothListBox list = new SmoothListBox();
@@ -80,7 +81,7 @@ namespace TianGongCadSuite {
             foreach (var kv in new[]{ new KeyValuePair<ToggleChip, string>(cMissing, "check.missing"), new KeyValuePair<ToggleChip, string>(cMis, "check.misaligned"), new KeyValuePair<ToggleChip, string>(cWrong, "check.wrong"), new KeyValuePair<ToggleChip, string>(cUnpaired, "check.unpaired") }) {
                 var chip = kv.Key; string key = kv.Value;
                 chip.Checked = Choices.Get(key, chip.Checked ? "1" : "0") == "1";
-                chip.Click += (s, e) => Choices.Set(key, chip.Checked ? "1" : "0");
+                chip.Click += (s, e) => { if (!busy && !closing && !IsDisposed) Choices.Set(key, chip.Checked ? "1" : "0"); };
             }
             Choices.Bind(autoJump, "check.autoJump");
             BuildLayout();
@@ -126,7 +127,7 @@ namespace TianGongCadSuite {
             top.Controls.Add(countLine);
             foreach (var c in new[]{ cMissing, cMis, cWrong, cUnpaired }) {
                 c.RailStyle = true; c.Height = hChip;
-                c.CheckedChanged += (s, e) => ApplyFilter();
+                c.CheckedChanged += (s, e) => { if (!busy && !closing && !IsDisposed) ApplyFilter(); };
                 top.Controls.Add(c);
             }
             top.Resize += (s, e) => {
@@ -158,24 +159,25 @@ namespace TianGongCadSuite {
             summary.AutoSize = false; summary.TextAlign = ContentAlignment.MiddleLeft; summary.AutoEllipsis = true;
             summary.ForeColor = Ui.Muted; summary.BackColor = Ui.Bg; summary.Font = Ui.F9; summary.Height = Ui.S(24);
             summary.Text = "还没检查";
-            summary.TextChanged += (s, e) => tips.SetToolTip(summary, summary.Text);
+            summary.TextChanged += (s, e) => { if (!closing && !IsDisposed) tips.SetToolTip(summary, summary.Text); };
             list.IntegralHeight = false; list.BorderStyle = BorderStyle.None;
             list.DrawMode = DrawMode.OwnerDrawFixed; list.ItemHeight = Ui.S(70); list.BackColor = Color.White;
             Ui.EnableDoubleBuffer(list);
             list.DrawItem += DrawIssue;
             selectDebounce.Tick += (s, e) => {
                 selectDebounce.Stop();
-                if (IsDisposed) return;
+                if (busy || closing || IsDisposed) return;
                 HighlightSelected();
                 if (autoJump.Checked) JumpToSelected(false);
             };
             list.SelectedIndexChanged += (s, e) => {
+                if (busy || closing || IsDisposed) return;
                 ShowDetail();
                 // 快速上下键浏览问题列表时 150ms 防抖再执行 CAD 高亮与 3D 镜头跳转
                 selectDebounce.Stop();
                 selectDebounce.Start();
             };
-            list.DoubleClick += (s, e) => { selectDebounce.Stop(); HighlightSelected(); JumpToSelected(true); };
+            list.DoubleClick += (s, e) => { if (busy || closing || IsDisposed) return; selectDebounce.Stop(); HighlightSelected(); JumpToSelected(true); };
             var detailCard = Ui.Card("涉及的孔", 140, "");
             detailCard.Fill = true;
             detail.Dock = DockStyle.Fill; detail.Multiline = true; detail.ReadOnly = true; detail.BorderStyle = BorderStyle.None;
@@ -195,7 +197,7 @@ namespace TianGongCadSuite {
             shell.Footer.Status = status;
             status.ForeColor = Ui.Muted;
             status.Text = "就绪。点「开始检查」（Ctrl+Enter）。";
-            status.TextChanged += (s, e) => tips.SetToolTip(status, status.Text);
+            status.TextChanged += (s, e) => { if (!closing && !IsDisposed) tips.SetToolTip(status, status.Text); };
         }
 
         void DrawIssue(object sender, DrawItemEventArgs e){
@@ -247,16 +249,34 @@ namespace TianGongCadSuite {
         }
 
         // ---------------- 检查 ----------------
+        void SetBusyControls(bool isBusy){
+            run.Enabled = !isBusy;
+            rules.Enabled = !isBusy;
+            autoJump.Enabled = !isBusy;
+            cMissing.Enabled = cMis.Enabled = cWrong.Enabled = cUnpaired.Enabled = !isBusy;
+            if (isBusy) {
+                copy.Enabled = false;
+                list.Enabled = false;
+                jump.Enabled = false;
+                goDrill.Enabled = false;
+            } else {
+                copy.Enabled = issues.Count > 0;
+                list.Enabled = shown.Count > 0;
+                ShowDetail();
+            }
+        }
         void RunCheck(){
-            if (busy) return;                       // DoEvents 期间可能被 Ctrl+Enter 再进来
+            if (busy || closing || IsDisposed) return;   // DoEvents 期间可能被 Ctrl+Enter 再进来
             busy = true;
+            selectDebounce.Stop();
             try {
                 if (assembly == null) throw new InvalidOperationException("请先打开装配文件。");
                 // 窗口开着时装配被关掉（或关了又打开）：原来往下走报一句看不懂的"对象已断开"
                 try { var nm = assembly.Name; } catch { throw new InvalidOperationException("打开这个窗口时的装配已经关掉了。请关掉这个窗口，在装配里重新点「配孔检查」。"); }
-                run.Enabled = false; run.Text = "检查中…"; UseWaitCursor = true;
+                SetBusyControls(true); run.Text = "检查中…"; UseWaitCursor = true;
                 SetStatus("正在读取装配里的孔…", Ui.Accent);
                 Application.DoEvents();
+                if (closing || IsDisposed) return;
 
                 // 一次性建好「零件名 -> 实体」表：漏打孔判定要按名字查几百次零件，
                 // 每次重新遍历 Occurrences 读 occ.Name 都是跨进程 COM 调用（O(S×P²)）。
@@ -267,23 +287,31 @@ namespace TianGongCadSuite {
                 // 大装配要读一分多钟：期间隔一会儿刷一下状态栏、泵一次消息（不然 Windows 把天工判成"未响应"，用户以为卡死去强关）
                 var tick = System.Diagnostics.Stopwatch.StartNew();
                 Action<string, int, int> pulse = (what, i, n) => {
+                    if (closing || IsDisposed) throw new OperationCanceledException();
                     if (tick.ElapsedMilliseconds < 300) return;
                     tick.Restart();
                     SetStatus(what + " " + i + " / " + n + " …", Ui.Accent);
                     try { status.Update(); Application.DoEvents(); } catch { }
+                    if (closing || IsDisposed) throw new OperationCanceledException();
                 };
                 var holes = AutoHoleWriter.CollectAssemblyHoles(assembly, out warnings, out shafts, out parts, (i, n) => pulse("正在读取零件", i, n));
+                if (closing || IsDisposed) return;
                 var bodies = AutoHoleWriter.OccurrenceBodies.Build(parts);
+                if (closing || IsDisposed) return;
                 var allNames = new List<string>();
                 foreach (var ap in parts) if (!ap.Ignored && !allNames.Contains(ap.Name)) allNames.Add(ap.Name);   // 隐藏 / 参考件不当漏打孔的零件
                 int ignored = parts.Count(x => x.Ignored);
                 int nested = parts.Count(x => x.Nested);
                 lastHoles = holes; lastShafts = shafts;
                 SetStatus("读到 " + holes.Count + " 个孔，正在配对…", Ui.Accent); Application.DoEvents();
-                // 孤孔一律算出来，显示与否交给筛选胶囊（不用为了看孤孔再检查一遍）
-                var found = HoleCheck.Run(holes, null, true, allNames, bodies, shafts, (i, n) => pulse("正在配对同轴孔", i, n));
+                if (closing || IsDisposed) return;
+                // 孤孔一律算出来，显示与否交给筛选胶囊（不用为了看孤孔再检查一遍）；同时由 Run 直接带出同轴孔组数，避免二次全量分组
+                int groupsFound;
+                var found = HoleCheck.Run(holes, null, true, allNames, bodies, shafts, (i, n) => pulse("正在配对同轴孔", i, n), out groupsFound);
+                if (closing || IsDisposed) return;
                 MarkFailedFeatures(found, parts);
-                ShowIssues(HoleCheck.Merge(found), HoleCheck.Relevant(holes).Count, HoleCheck.CountGroups(holes));
+                // allIssues 保存未合并的原始问题，由 Refilter 先按完整实例路径过滤「不查的零件」再合并
+                ShowIssues(found, HoleCheck.Relevant(holes).Count, groupsFound);
                 failedParts = warnings.Count; lastWarnings = warnings;
                 string s = summary.Text;
                 if (nested > 0) s += "　（含子装配里的 " + nested + " 个零件）";
@@ -291,13 +319,21 @@ namespace TianGongCadSuite {
                 if (warnings.Count > 0) s += "　（" + warnings.Count + " 个零件读取失败）";
                 SetStatus(s, issues.Count(i => i.Kind != HoleIssueKind.Unpaired) == 0 ? Ui.Ok : Ui.Warn);
                 // 读取失败的是哪几个零件：原来只说"N 个零件读取失败"，不知道是哪几个、漏查了谁
-                if (warnings.Count > 0) tips.SetToolTip(status, s + "\r\n\r\n读取失败的零件（这些零件上的孔没查）：\r\n· " + string.Join("\r\n· ", warnings.Take(20).ToArray()) + (warnings.Count > 20 ? "\r\n……共 " + warnings.Count + " 个" : ""));
+                if (warnings.Count > 0 && !closing && !IsDisposed) tips.SetToolTip(status, s + "\r\n\r\n读取失败的零件（这些零件上的孔没查）：\r\n· " + string.Join("\r\n· ", warnings.Take(20).ToArray()) + (warnings.Count > 20 ? "\r\n……共 " + warnings.Count + " 个" : ""));
+            } catch (OperationCanceledException) {
+                return;
             } catch (Exception e) {
                 Log.Write("AutoHoleCheck", e);
+                if (closing || IsDisposed) return;
                 SetStatus(AutoHoleWriter.Friendly(e), Ui.Bad);
                 MessageBox.Show(this, AutoHoleWriter.Friendly(e), "配孔检查", MessageBoxButtons.OK, MessageBoxIcon.Error);
             } finally {
-                busy = false; run.Enabled = true; run.Text = checkedOnce ? "重新检查" : "开始检查"; UseWaitCursor = false;
+                busy = false;
+                if (!closing && !IsDisposed) {
+                    run.Text = checkedOnce ? "重新检查" : "开始检查";
+                    UseWaitCursor = false;
+                    SetBusyControls(false);
+                }
             }
         }
 
@@ -317,20 +353,28 @@ namespace TianGongCadSuite {
         }
 
         void ShowIssues(List<HoleIssue> found, int holes, int groups){
+            if (closing || IsDisposed) return;
             allIssues = found ?? new List<HoleIssue>(); holeCount = holes; groupCount = groups; checkedOnce = true;
             Refilter();
             ApplyFilter();
-            copy.Enabled = issues.Count > 0;
+            copy.Enabled = !busy && issues.Count > 0;
         }
 
         void Refilter(){
             var words = HoleCheck.Options.SkipWords();
-            issues = allIssues.Where(i => !HoleCheck.Skipped(i, words)).ToList();
-            skippedPlaces = allIssues.Where(i => HoleCheck.Skipped(i, words)).Sum(i => i.Places);
+            var kept = new List<HoleIssue>();
+            int skipped = 0;
+            foreach (var it in allIssues) {
+                if (HoleCheck.Skipped(it, words)) skipped += Math.Max(1, it.Places);
+                else kept.Add(it);
+            }
+            issues = HoleCheck.Merge(kept);
+            skippedPlaces = skipped;
         }
 
         // 胶囊上的数是"一共找到几条"（不受筛选影响）；列表只显示勾着的几类
         void ApplyFilter(){
+            if (closing || IsDisposed) return;
             shown = issues.Where(i =>
                 (i.Kind == HoleIssueKind.MissingHole && cMissing.Checked) ||
                 (i.Kind == HoleIssueKind.Misaligned && cMis.Checked) ||
@@ -347,7 +391,7 @@ namespace TianGongCadSuite {
                 foreach (var i in shown) list.Items.Add(i.Message);
                 if (shown.Count == 0) list.Items.Add("");   // 空状态那一行（DrawIssue 画成居中提示，不能选）
             } finally { list.EndUpdate(); }
-            list.Enabled = shown.Count > 0;
+            list.Enabled = !busy && shown.Count > 0;
             cMissing.Text = "漏打孔 " + issues.Count(i => i.Kind == HoleIssueKind.MissingHole);
             cMis.Text = "孔偏了 " + issues.Count(i => i.Kind == HoleIssueKind.Misaligned);
             cWrong.Text = "配错孔 " + issues.Count(i => i.Kind == HoleIssueKind.WrongSpec);
@@ -366,6 +410,7 @@ namespace TianGongCadSuite {
         }
 
         void ShowDetail(){
+            if (closing || IsDisposed) return;
             int idx = list.SelectedIndex;
             if (idx < 0 || idx >= shown.Count) {
                 jump.Enabled = false; goDrill.Enabled = false;
@@ -374,8 +419,8 @@ namespace TianGongCadSuite {
                 return;
             }
             var it = shown[idx];
-            jump.Enabled = it.Holes.Count > 0;
-            goDrill.Enabled = it.Kind == HoleIssueKind.MissingHole && GoDrill != null;
+            jump.Enabled = !busy && it.Holes.Count > 0;
+            goDrill.Enabled = !busy && it.Kind == HoleIssueKind.MissingHole && GoDrill != null;
             var sb = new StringBuilder();
             sb.Append("【").Append(it.KindName).Append("】").Append(it.Done.Length > 0 ? "（" + it.Done + "）" : "").Append(it.Message).Append("\r\n");
             foreach (var h in it.Holes.OrderBy(x => x.PartName, StringComparer.Ordinal))
@@ -387,9 +432,10 @@ namespace TianGongCadSuite {
             detail.ForeColor = Ui.Text;
         }
 
-        void SetStatus(string text, Color color){ status.Text = text; status.ForeColor = color; }
+        void SetStatus(string text, Color color){ if (closing || IsDisposed) return; status.Text = text; status.ForeColor = color; }
 
         void CopyResults(){
+            if (busy || closing || IsDisposed) return;
             try {
                 var sb = new StringBuilder();
                 sb.AppendLine("配孔检查 " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
@@ -408,7 +454,7 @@ namespace TianGongCadSuite {
         }
 
         void HighlightSelected(){
-            if (assembly == null) return;
+            if (assembly == null || busy || closing || IsDisposed) return;
             try {
                 if (highlights == null) {
                     highlights = assembly.HighlightSets.Add();
@@ -427,6 +473,7 @@ namespace TianGongCadSuite {
 
         // 跳转到孔：镜头框住这一条涉及的所有孔（只有一个孔时按孔径放大）
         void JumpToSelected(bool explicitly){
+            if (busy || closing || IsDisposed) return;
             int idx = list.SelectedIndex;
             if (idx < 0 || idx >= shown.Count) return;
             var it = shown[idx];
@@ -444,6 +491,7 @@ namespace TianGongCadSuite {
 
         // 去配孔：漏打孔那一条的孔带进「自动打孔」当参考孔
         void GoDrillSelected(){
+            if (busy || closing || IsDisposed) return;
             int idx = list.SelectedIndex;
             if (idx < 0 || idx >= shown.Count || GoDrill == null) return;
             var it = shown[idx];
@@ -462,11 +510,20 @@ namespace TianGongCadSuite {
             try {
                 var f = GoDrill(new List<HoleRecord>(it.Holes), HoleCheck.ShortPart(it.MissingPart));
                 lastDrill = f;
-                // 去配孔打完：这一条标成"已配"（0.8.5）。原来检查窗口里这条一直挂着红的「漏打孔」，配了哪几条、还剩哪几条只能再整装配查一遍
+                // 去配孔打完：这一条标成"已配"（0.8.5）。合并多处但只配了一部分时写清实际配了多少处，不误标整组全已配；
+                // 全配完时同步写回原始 allIssues，防止用户改「不查的零件」触发 Refilter 时丢掉已配标记。
                 if (f != null) f.DrillDone += made => {
-                    if (made <= 0 || IsDisposed) return;
-                    it.Done = "已配 " + made + " 个孔";
-                    try { list.Invalidate(); ShowDetail(); SetStatus("「" + HoleCheck.ShortPart(it.MissingPart) + "」上配好了 " + made + " 个孔（这一条已标成已配；要确认可以点「重新检查」）。", Ui.Ok); } catch { }
+                    if (made <= 0 || closing || IsDisposed) return;
+                    bool partial = it.Places > 1 && made < it.Places;
+                    string doneText = partial ? ("已配 " + made + " / " + it.Places + " 处") : ("已配 " + made + " 个孔");
+                    it.Done = doneText;
+                    if (!partial) {
+                        var holeSet = new HashSet<HoleRecord>(it.Holes);
+                        foreach (var raw in allIssues) {
+                            if (raw.Kind == HoleIssueKind.MissingHole && raw.Holes.Any(holeSet.Contains)) raw.Done = doneText;
+                        }
+                    }
+                    try { list.Invalidate(); ShowDetail(); SetStatus("「" + HoleCheck.ShortPart(it.MissingPart) + "」上配好了 " + made + " 个孔（" + (partial ? "共 " + it.Places + " 处，其余位置可继续配" : "这一条已标成已配") + "；要确认可以点「重新检查」）。", Ui.Ok); } catch { }
                 };
             }
             catch (Exception e) { Log.Write("AutoHoleCheckGoDrill", e); SetStatus("打不开自动打孔：" + e.Message, Ui.Bad); }
@@ -475,12 +532,13 @@ namespace TianGongCadSuite {
         AutoHoleForm lastDrill;
         void EditOptions(){
             // 检查中（会泵消息）改口径：HoleCheck.Run 一半用旧口径一半用新口径，结果对不上
-            if (busy) { SetStatus("正在检查，做完再改判定口径。", Ui.Warn); return; }
+            if (busy || closing || IsDisposed) { SetStatus("正在检查，做完再改判定口径。", Ui.Warn); return; }
             var before = HoleCheck.Options;
             using (var f = new HoleCheckOptionsForm(HoleCheck.Options)) {
                 if (f.ShowDialog(this) != DialogResult.OK || f.Result == null) return;
                 HoleCheck.Options = f.Result;
             }
+            if (closing || IsDisposed) return;
             tips.SetToolTip(rules, HoleCheck.Options.Describe());
             var o = HoleCheck.Options;
             bool numbers = before == null || before.MinDiameterMm != o.MinDiameterMm || before.MaxDiameterMm != o.MaxDiameterMm || before.AxisAngleTolDeg != o.AxisAngleTolDeg
@@ -493,6 +551,7 @@ namespace TianGongCadSuite {
         }
 
         void Cleanup(){
+            closing = true;
             selectDebounce.Stop();
             try { selectDebounce.Dispose(); } catch { }
             if (highlights != null) { try { highlights.Delete(); } catch { } highlights = null; }

@@ -174,7 +174,7 @@ namespace TianGongCadSuite {
             shell.Footer.Status = status;
             status.ForeColor = Ui.Accent;
             status.Text = "点要排孔的那个平面。";
-            status.TextChanged += (s, e) => tips.SetToolTip(status, status.Text);
+            status.TextChanged += (s, e) => { if (!closing && !IsDisposed) tips.SetToolTip(status, status.Text); };
             shell.PageChanged += (s, e) => UpdatePrimary();
             LoadPresets(null);
         }

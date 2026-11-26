@@ -23,55 +23,164 @@ namespace TianGongCadSuite {
             return SameLine(a, b, Math.Cos(AxisAngleTolDeg * Math.PI / 180.0));
         }
 
+        // 方向与网格值类型键：消除原字符串拼接 + Split + int.Parse 堆分配
+        struct Int3Key : IEquatable<Int3Key> {
+            public readonly int X, Y, Z;
+            public Int3Key(int x, int y, int z){ X = x; Y = y; Z = z; }
+            public bool Equals(Int3Key o){ return X == o.X && Y == o.Y && Z == o.Z; }
+            public override bool Equals(object obj){ return obj is Int3Key && Equals((Int3Key)obj); }
+            public override int GetHashCode(){ unchecked { int h = X; h = (h * 397) ^ Y; h = (h * 397) ^ Z; return h; } }
+        }
+        struct Int2Key : IEquatable<Int2Key> {
+            public readonly int U, V;
+            public Int2Key(int u, int v){ U = u; V = v; }
+            public bool Equals(Int2Key o){ return U == o.U && V == o.V; }
+            public override bool Equals(object obj){ return obj is Int2Key && Equals((Int2Key)obj); }
+            public override int GetHashCode(){ unchecked { return (U * 397) ^ V; } }
+        }
+
         // 按"同一条轴线"分组。方向相同，且横向偏移不超过两孔中较小的半径（一个孔的轴线还落在
         // 另一个孔里），就算同组 —— 分组容差必须比 AxisOffsetTolMm 宽：两者相同的话，偏了
         // 0.5mm 的两个孔根本进不了同一组，只会变成两个（默认隐藏的）孤孔，"孔偏了"永远报不出来。
         // 组内是否真的偏了，由 Run 再用 AxisOffsetTolMm 判。
         //
-        // 原来每来一个新孔都要跟"已有的每一组"比一次，最坏 O(n²)（几千个孔时明显）。
-        // 轴线方向先按 ±0.5° 量化成一个桶键：方向差超过 2° 的孔一定不同桶，
-        // 所以只需在同一个（或相邻的 26 个）桶里做精确比较。相邻桶必须一起看 ——
-        // 两个方向只差 0.4° 但落在桶边界两侧时，粗筛会把它们分到不同桶。
-        // 反平行的轴线也算同一条（SameLine 用 |dot|），所以还要再看"反方向"那个桶键的相邻桶。
+        // 1. 方向步长按 AxisAngleTolDeg 动态计算（dirStep > 2*sin(tol/2)），保证任意容差（0.1°~29°）内
+        //    方向差 <= tol 的两轴一定落在相邻 ±1 桶内，不再出现 0.76°~2° 同轴孔被硬编码 0.0087 步长拆开。
+        // 2. 占装配 95%+ 的三正交主轴（±X/±Y/±Z，偏差 <= 1e-7）额外按垂直平面的 2D 空间网格分桶，
+        //    避免几千个 Z 向孔全部落进同一方向桶退化成 O(n²)。斜孔仍会与容差内的主轴组交叉比对，结果严格等价。
         public static List<List<HoleRecord>> GroupByAxis(IList<HoleRecord> holes){
             var groups = new List<List<HoleRecord>>();
-            if (holes == null) return groups;
-            double cosTol = Math.Cos(AxisAngleTolDeg * Math.PI / 180.0);
-            var buckets = new Dictionary<string, List<List<HoleRecord>>>(StringComparer.Ordinal);
+            if (holes == null || holes.Count == 0) return groups;
+            double tolRad = AxisAngleTolDeg * Math.PI / 180.0;
+            double cosTol = Math.Cos(tolRad);
+            // 弦长 2*sin(tol/2) < dirStep 保证每一分量差 < dirStep，从而 |Round(a/s) - Round(b/s)| <= 1
+            double dirStep = Math.Max(0.01, 2.0 * Math.Sin(tolRad * 0.5) * 1.05);
+            double maxDia = 0;
+            foreach (var h in holes) if (h != null && h.DiameterMm > maxDia) maxDia = h.DiameterMm;
+            // 正交主轴 2D 网格步长必须大于最大可能同组横向偏心，保证任意同组主轴孔必落在 3×3 邻格内
+            double cellM = Math.Max(0.05, (Math.Max(AxisOffsetTolMm, maxDia * 0.5) + 1.0) / 1000.0);
+
+            var dirBuckets = new Dictionary<Int3Key, List<List<HoleRecord>>>();
+            var cardinalGrids = new Dictionary<Int2Key, List<List<HoleRecord>>>[3];
+            var cardinalLists = new List<List<HoleRecord>>[3];
+            for (int k = 0; k < 3; k++) {
+                cardinalGrids[k] = new Dictionary<Int2Key, List<List<HoleRecord>>>();
+                cardinalLists[k] = new List<List<HoleRecord>>();
+            }
+            // 记录已加入某正交列表或方向桶的组，避免跨主轴/斜孔混入时重复索引
+            var inCardinal = new HashSet<List<HoleRecord>>[3];
+            for (int k = 0; k < 3; k++) inCardinal[k] = new HashSet<List<HoleRecord>>();
+
             foreach (var h in holes) {
                 if (h == null) continue;
-                var key = DirKey(h.Axis);
+                V3 u;
+                try { u = h.Axis.Unit(); } catch { continue; }
+                if (!u.Finite) continue;
+                int card = CardinalAxis(u);
                 List<HoleRecord> hit = null;
-                foreach (var nk in NeighbourKeys(key).Concat(NeighbourKeys(DirKey(h.Axis * -1)))) {
-                    List<List<HoleRecord>> cand;
-                    if (!buckets.TryGetValue(nk, out cand)) continue;
-                    foreach (var g in cand) {
-                        // 必须跟组内**每一个**成员比，不能只比 g[0]：
-                        // 一个圆柱沉孔在实体上就是"同轴两个直径"（Φ5.5 过孔 + Φ11 沉孔），
-                        // 采集顺序决定了 g[0] 是哪一个。只比 g[0] 的话，另一条直径会因为
-                        // "跟 g[0] 横向差 0.2mm 以上"（其实是同一轴线的另一个截面）而被拆成
-                        // 两条假轴线 —— 于是沉孔的假阳性又从这里绕回来了。
-                        bool same = false;
-                        foreach (var refh in g) {
-                            if (!SameLine(refh, h, cosTol, GroupOffsetMm(refh, h))) continue;
-                            same = true; break;
+
+                if (card >= 0) {
+                    // 先查同正交主轴的 3×3 空间邻格（O(1)）
+                    int cu, cv;
+                    CardinalCell(h.Center, card, cellM, out cu, out cv);
+                    var grid = cardinalGrids[card];
+                    for (int du = -1; du <= 1 && hit == null; du++) {
+                        for (int dv = -1; dv <= 1 && hit == null; dv++) {
+                            List<List<HoleRecord>> cand;
+                            if (!grid.TryGetValue(new Int2Key(cu + du, cv + dv), out cand)) continue;
+                            hit = FindMatchingGroup(cand, h, cosTol);
                         }
-                        if (!same) continue;
-                        hit = g; break;
                     }
-                    if (hit != null) break;
-                    if (hit != null) break;
+                    // 再查相邻方向桶里的斜孔组（数量极少，兼容先斜后正的到达顺序）
+                    if (hit == null && dirBuckets.Count > 0)
+                        hit = SearchDirBuckets(dirBuckets, u, dirStep, h, cosTol);
+                } else {
+                    // 斜孔：查 ±u 方向桶及其 27 邻桶
+                    if (dirBuckets.Count > 0)
+                        hit = SearchDirBuckets(dirBuckets, u, dirStep, h, cosTol);
+                    // 若斜孔轴线与某个正交主轴夹角在容差内，也与该主轴组比对（兼容先正后斜）
+                    if (hit == null) {
+                        for (int k = 0; k < 3 && hit == null; k++) {
+                            double comp = k == 0 ? Math.Abs(u.X) : (k == 1 ? Math.Abs(u.Y) : Math.Abs(u.Z));
+                            if (comp < cosTol || cardinalLists[k].Count == 0) continue;
+                            hit = FindMatchingGroup(cardinalLists[k], h, cosTol);
+                        }
+                    }
                 }
+
                 if (hit == null) {
                     hit = new List<HoleRecord>();
-                    List<List<HoleRecord>> cand;
-                    if (!buckets.TryGetValue(key, out cand)) { cand = new List<List<HoleRecord>>(); buckets[key] = cand; }
-                    cand.Add(hit);
+                    groups.Add(hit);
                 }
                 hit.Add(h);
+
+                if (card >= 0) {
+                    int cu, cv;
+                    CardinalCell(h.Center, card, cellM, out cu, out cv);
+                    var key2 = new Int2Key(cu, cv);
+                    List<List<HoleRecord>> cell;
+                    if (!cardinalGrids[card].TryGetValue(key2, out cell)) { cell = new List<List<HoleRecord>>(); cardinalGrids[card][key2] = cell; }
+                    if (!cell.Contains(hit)) cell.Add(hit);
+                    if (inCardinal[card].Add(hit)) cardinalLists[card].Add(hit);
+                } else {
+                    var dk = QuantizeDir(u, dirStep);
+                    List<List<HoleRecord>> cand;
+                    if (!dirBuckets.TryGetValue(dk, out cand)) { cand = new List<List<HoleRecord>>(); dirBuckets[dk] = cand; }
+                    if (!cand.Contains(hit)) cand.Add(hit);
+                }
             }
-            foreach (var kv in buckets) foreach (var g in kv.Value) groups.Add(g);
             return groups;
+        }
+
+        // 判断单位向量是否几乎与 ±X(0) / ±Y(1) / ±Z(2) 重合（偏差 <= 1e-7，即使相距 100m 投影漂移也仅 0.01mm）
+        static int CardinalAxis(V3 u){
+            const double eps = 1e-7;
+            if (Math.Abs(u.Y) <= eps && Math.Abs(u.Z) <= eps) return 0;
+            if (Math.Abs(u.X) <= eps && Math.Abs(u.Z) <= eps) return 1;
+            if (Math.Abs(u.X) <= eps && Math.Abs(u.Y) <= eps) return 2;
+            return -1;
+        }
+        static void CardinalCell(V3 c, int axis, double cellM, out int cu, out int cv){
+            double u = axis == 0 ? c.Y : c.X;
+            double v = axis == 2 ? c.Y : c.Z;
+            cu = (int)Math.Floor(u / cellM);
+            cv = (int)Math.Floor(v / cellM);
+        }
+        static Int3Key QuantizeDir(V3 axis, double step){
+            return new Int3Key((int)Math.Round(axis.X / step), (int)Math.Round(axis.Y / step), (int)Math.Round(axis.Z / step));
+        }
+        static List<HoleRecord> SearchDirBuckets(Dictionary<Int3Key, List<List<HoleRecord>>> buckets, V3 u, double step, HoleRecord h, double cosTol){
+            var k1 = QuantizeDir(u, step);
+            var hit = SearchNeighbours(buckets, k1, h, cosTol);
+            if (hit != null) return hit;
+            var k2 = QuantizeDir(u * -1.0, step);
+            if (!k2.Equals(k1)) hit = SearchNeighbours(buckets, k2, h, cosTol);
+            return hit;
+        }
+        static List<HoleRecord> SearchNeighbours(Dictionary<Int3Key, List<List<HoleRecord>>> buckets, Int3Key key, HoleRecord h, double cosTol){
+            for (int dx = -1; dx <= 1; dx++)
+                for (int dy = -1; dy <= 1; dy++)
+                    for (int dz = -1; dz <= 1; dz++) {
+                        List<List<HoleRecord>> cand;
+                        if (!buckets.TryGetValue(new Int3Key(key.X + dx, key.Y + dy, key.Z + dz), out cand)) continue;
+                        var hit = FindMatchingGroup(cand, h, cosTol);
+                        if (hit != null) return hit;
+                    }
+            return null;
+        }
+        static List<HoleRecord> FindMatchingGroup(List<List<HoleRecord>> cand, HoleRecord h, double cosTol){
+            for (int i = 0; i < cand.Count; i++) {
+                var g = cand[i];
+                // 必须跟组内**每一个**成员比，不能只比 g[0]：
+                // 一个圆柱沉孔在实体上就是"同轴两个直径"（Φ5.5 过孔 + Φ11 沉孔），
+                // 采集顺序决定了 g[0] 是哪一个。只比 g[0] 的话，另一条直径会因为
+                // "跟 g[0] 横向差 0.2mm 以上"（其实是同一轴线的另一个截面）而被拆成
+                // 两条假轴线 —— 于是沉孔的假阳性又从这里绕回来了。
+                for (int j = 0; j < g.Count; j++) {
+                    if (SameLine(g[j], h, cosTol, GroupOffsetMm(g[j], h))) return g;
+                }
+            }
+            return null;
         }
 
         // 两个孔是不是同一条轴线：方向相同或**相反**（相差 180° 也算），且横向偏移在容差内。
@@ -96,26 +205,6 @@ namespace TianGongCadSuite {
             return Math.Max(AxisOffsetTolMm, Math.Min(a.DiameterMm, b.DiameterMm) / 2.0);
         }
 
-        // 方向量化：单位向量按 ±0.5° 取整（cos/sin 步长 ≈ 0.0087）。
-        // 不做正反规范化：原来按"第一个非零分量为正"翻转，用的是 == 0 精确判断，而装配变换算出来的轴线
-        // 带 1e-16 量级的浮点噪声 —— (0,0,1) 落在 z=+115 桶，(1.2e-16,0,-1) 却不翻转、落在 z=-115 桶，
-        // 两桶不相邻，同一条轴线的两个孔连候选都进不了（偏 0.5mm 的一对孔被报成两个孤孔而不是"孔偏了"）。
-        // 反平行由 GroupByAxis 另查反方向桶键来覆盖。Math.Round 对正负对称，所以反方向的键正好是各分量取负。
-        const double DirStep = 0.0087;
-        static string DirKey(V3 axis){
-            Func<double, int> q = v => (int)Math.Round(v / DirStep);
-            return q(axis.X) + "," + q(axis.Y) + "," + q(axis.Z);
-        }
-        // 27 个相邻桶键（含自身）：覆盖"方向差 0.5° 但被桶边界切开"的情况
-        static IEnumerable<string> NeighbourKeys(string key){
-            var p = key.Split(',');
-            int x = int.Parse(p[0], CultureInfo.InvariantCulture), y = int.Parse(p[1], CultureInfo.InvariantCulture), z = int.Parse(p[2], CultureInfo.InvariantCulture);
-            for (int dx = -1; dx <= 1; dx++)
-                for (int dy = -1; dy <= 1; dy++)
-                    for (int dz = -1; dz <= 1; dz++)
-                        yield return (x + dx) + "," + (y + dy) + "," + (z + dz);
-        }
-
         // 两个直径是否构成合法的"配做"关系：底孔+过孔（同规格），或过孔+沉孔。
         public static bool IsValidPair(double aMm, double bMm, out string why){
             why = "";
@@ -124,13 +213,19 @@ namespace TianGongCadSuite {
             // 有没有一个螺纹规格能同时解释两个孔（螺纹孔 / 过孔 / 沉头让位孔）。0.10.1 焊接台车实测：
             // 原来只认表里的两档过孔，Φ6（M5 粗装配过孔，HIWIN 导轨的标准孔）配 M5 螺纹孔 Φ4.13 一条导轨报 20 条「配错孔」；
             // Φ7（M6 粗装配过孔）先被认成 M8 底孔，正确的 M6 连接报「M8 与 M6」
-            // 正好等于某个规格螺纹孔直径的（Φ17.5 = M20 底孔、Φ4.13 = M5 内小径）就按那个螺纹孔读，
-            // 除非另一个也正好是螺纹孔直径 —— 两个不同规格的螺纹孔叠在一根轴上不是真设计，那就让大的那个当过孔（Φ5 + M4 螺纹孔）。
-            // 原来没有这一条：M20 螺母 Φ17.5 配 Φ19 的孔被当成「M16 螺栓穿两个过孔」放过了（OK310 围栏副本实测）
+            // 正好等于某个规格螺纹孔直径的（Φ17.5 = M20 底孔、Φ4.13 = M5 内小径）优先按螺纹孔读，
+            // 除非另一个孔与它在更小规格上构成「标准过孔 + 沉孔让位孔」（如 M16 Φ17.5+Φ26）或「标准过孔 + 同规格过孔」（如 M4 Φ4.5+Φ5.0）。
+            // 同时仍拦截「M20 螺母 Φ17.5 配非标准 Φ19」被误读成 M16 两个过孔。
             bool exA = ExactTapped(aMm), exB = ExactTapped(bMm);
             if (exA != exB) {
                 double tapped = exA ? aMm : bMm, other = exA ? bMm : aMm;
-                foreach (var r in HoleMatcher.Table) if (IsTapped(r, tapped) && IsClearance(r, other)) return true;
+                foreach (var r in HoleMatcher.Table) {
+                    if (IsTapped(r, tapped) && IsClearance(r, other)) return true;
+                    // tapped 同时也是 r 的标准过孔，other 是 r 的沉孔让位孔（如 M16 Φ17.5 + Φ26、M20 Φ21 + Φ33）
+                    if (IsStandardClearance(r, tapped) && IsCounterboreRelief(r, other)) return true;
+                    // other 是 r 的标准过孔且 tapped 也是 r 的过孔（如 M4 标准过孔 Φ4.5 + 粗装配过孔 Φ5.0）
+                    if (IsStandardClearance(r, other) && IsClearance(r, tapped)) return true;
+                }
             } else {
                 foreach (var r in HoleMatcher.Table) {
                     if (Fits(r, aMm, bMm) || Fits(r, bMm, aMm)) return true;
@@ -159,13 +254,29 @@ namespace TianGongCadSuite {
         static double Nominal(ThreadRow r){
             double n; return double.TryParse(r.Size.TrimStart('M', 'm'), NumberStyles.Float, CultureInfo.InvariantCulture, out n) ? n : 0;
         }
-        // 这个直径是不是规格 r 的螺纹孔（底孔 / 内小径，粗牙按表，细牙按螺距算）
+        // 是否是规格 r 的标准过孔（精配/中配 ±0.1mm）
+        static bool IsStandardClearance(ThreadRow r, double d){
+            return Math.Abs(d - r.ClearanceClose) <= 0.1 || Math.Abs(d - r.ClearanceMid) <= 0.1;
+        }
+        static bool IsAnyStandardClearance(double d){
+            foreach (var r in HoleMatcher.Table) if (Math.Abs(d - r.ClearanceClose) <= 0.05 || Math.Abs(d - r.ClearanceMid) <= 0.05) return true;
+            return false;
+        }
+        static bool IsCounterboreRelief(ThreadRow r, double d){
+            return d >= r.CounterboreDia - HoleMatcher.Tolerance && d <= r.CounterboreDia + 1.0;
+        }
+        // 这个直径是不是规格 r 的螺纹孔（底孔 / 内小径，粗牙按表，细牙按螺距算）。
+        // 容差不能用 HoleMatcher.Tolerance(0.35mm)：相邻规格的过孔与底孔间距常只有 0.1~0.3mm（如 Φ3.4 与 M4 底孔 3.3、
+        // Φ4.5 与 M5 底孔 4.2、Φ5.3 与 M6 底孔 5.0、Φ6.4/6.6 与 M8 内小径 6.647、Φ10.5 与 M12 底孔 10.2），
+        // 0.35mm 会把相邻规格过孔错配全部误放过。真实螺纹底孔落在 [MinorDia-0.04, TapDrill+0.05] 区间内。
         public static bool IsTapped(ThreadRow r, double d){
-            if (Math.Abs(d - r.TapDrill) <= HoleMatcher.Tolerance || Math.Abs(d - r.MinorDia) <= HoleMatcher.Tolerance) return true;
+            if (d >= r.MinorDia - 0.04 && d <= r.TapDrill + 0.05) return true;
             double n = Nominal(r);
             foreach (var f in FinePitches) {
                 if (f[0] != n) continue;
-                if (Math.Abs(d - (n - 1.0825 * f[1])) <= 0.2 || Math.Abs(d - (n - f[1])) <= 0.2) return true;
+                if (Math.Abs(d - (n - 1.0825 * f[1])) <= 0.06) return true;
+                // 细牙底孔 n-p 可能正好撞上更小规格的标准过孔（如 M10×1=9.0 撞 M8 过孔、M12×1.5=10.5 撞 M10 精配、M12×1=11.0 撞 M10 过孔）
+                if (Math.Abs(d - (n - f[1])) <= 0.05 && !IsAnyStandardClearance(d)) return true;
             }
             return false;
         }
@@ -178,15 +289,17 @@ namespace TianGongCadSuite {
             }
             return false;
         }
+        // 真正大于公称直径的过孔（不含 d ≈ 公称直径 的铰制/配合孔）
+        static bool IsRealClearance(ThreadRow r, double d){
+            double n = Nominal(r);
+            if (n <= 0) return false;
+            return d >= n + Math.Max(0.2, 0.05 * n) - 0.01 && d <= n * 1.25 + 0.2;
+        }
         // 这个直径能不能让规格 r 的螺钉穿过：比公称直径大、不超过粗装配过孔（≈ 公称 ×1.25，GB/T 5277 粗装配 M5 5.8、M6 7、M8 10……）；
         // M12 以上的铰制孔 / 配合孔（孔径 = 公称直径）也算
         public static bool IsClearance(ThreadRow r, double d){
+            if (IsRealClearance(r, d)) return true;
             double n = Nominal(r);
-            if (n <= 0) return false;
-            // 正好也是别的规格攻丝底孔的直径（Φ5 = M6 底孔）照样算：两种读法里「两个不同规格的螺纹孔叠在一根轴上」不是真设计，
-            // 「M4 螺钉穿 Φ5 孔拧进 M4 螺纹孔」才是（用户 10-25 就照着把手底座的 Φ5 孔打了 M4 螺纹孔）
-            // 下限按 GB/T 5277 精装配（M4 4.3、M6 6.4、M10 10.5……）：Φ4.13 这种 M5 螺纹孔不能当 M4 过孔
-            if (d >= n + Math.Max(0.2, 0.05 * n) - 0.01 && d <= n * 1.25 + 0.2) return true;
             return n >= 12 && Math.Abs(d - n) <= 0.05;
         }
         // small 和 big 在规格 r 上配得上：螺纹孔 + 过孔、过孔 + 过孔（螺栓 + 螺母），
@@ -196,20 +309,20 @@ namespace TianGongCadSuite {
             if (!smallClear && !IsTapped(r, small)) return false;
             if (IsClearance(r, big)) return true;
             // 让位孔只配真正的过孔（Φ12 正好等于 M12 公称直径的配合孔不算：Φ12 + Φ20 照样报）
-            bool realClear = smallClear && Math.Abs(small - Nominal(r)) > 0.05;
-            return realClear && big >= r.CounterboreDia - HoleMatcher.Tolerance && big <= r.CounterboreDia + 1.0;
+            return IsRealClearance(r, small) && IsCounterboreRelief(r, big);
         }
 
-        // 这一串孔是不是一个完整的螺纹连接（同一规格：一个零件上是螺纹孔、另一个零件上是过孔）。
+        // 这一串孔是不是一个完整的螺纹连接（同一规格：一个零件上是螺纹孔、另一个零件上是真正过孔）。
         // 完整的连接，螺钉到螺纹孔就到头了：轴线再往外穿过的零件（螺纹孔下面垫着的底板、螺钉头上面盖着的盖板）不需要孔，
-        // 原来照样报「漏打孔」—— 焊接台车上 17 号板的 M6 螺纹孔下面是 002 底板，一个螺钉报一条
+        // 原来照样报「漏打孔」—— 焊接台车上 17 号板的 M6 螺纹孔下面是 002 底板，一个螺钉报一条。
+        // 过孔侧必须用 IsRealClearance（排除 d ≈ 公称直径 的配合孔），防止 {11.0, 12.0} 或 {17.5, 20.0} 误判成完整连接吞掉底板漏孔。
         public static bool CompleteJoint(IList<HoleRecord> chain){
             if (chain == null || chain.Count < 2) return false;
             var minByPart = chain.GroupBy(h => h.PartName).Select(g => g.Min(x => x.DiameterMm)).ToList();
             if (minByPart.Count < 2) return false;
             foreach (var r in HoleMatcher.Table) {
                 int tapped = 0, clear = 0;
-                foreach (var d in minByPart) { if (IsTapped(r, d)) tapped++; else if (IsClearance(r, d)) clear++; }
+                foreach (var d in minByPart) { if (IsTapped(r, d)) tapped++; else if (IsRealClearance(r, d)) clear++; }
                 if (tapped > 0 && clear > 0) return true;
             }
             return false;
@@ -290,14 +403,33 @@ namespace TianGongCadSuite {
             }
             return map;
         }
-        static bool HasCoaxialShaft(Dictionary<string, List<HoleRecord>> shaftsByPart, string part, HoleRecord hole){
+        // 零件 part 在这个孔的轴线上有没有一根同轴的轴/销/螺栓杆：
+        // ① 轴线平行（< AxisAngleTolDeg）且横向偏差不超过孔半径；
+        // ② 轴径与孔径相称（防止目标件自身 Φ16/Φ20 凸台吞掉 Φ6.6 孔的真实漏打孔）；
+        // ③ 轴向区间确实落在孔附近（防止 300mm 外的同轴销钉或目标件背面凸台误豁免）。
+        static bool HasCoaxialShaft(Dictionary<string, List<HoleRecord>> shaftsByPart, string part, HoleRecord hole, double minHoleDiaMm, V3 o, V3 a, double lo, double hi, double spanM){
             List<HoleRecord> shafts;
             if (shaftsByPart == null || hole == null || part == null || !shaftsByPart.TryGetValue(part, out shafts)) return false;
             double cosTol = Math.Cos(AxisAngleTolDeg * Math.PI / 180.0);
-            double tol = Math.Max(AxisOffsetTolMm, hole.DiameterMm / 2.0);
-            foreach (var s in shafts) {
+            double refDia = minHoleDiaMm > 0 ? minHoleDiaMm : hole.DiameterMm;
+            double latTol = Math.Max(AxisOffsetTolMm, refDia / 2.0);
+            double minDia = refDia * 0.35;
+            double maxDia = refDia * 1.25 + 0.5;
+            double spanTol = Math.Max(spanM, 0.005);
+            double pointTol = Math.Max(0.025, Math.Max(spanM, hi - lo) * 2.0);
+            for (int i = 0; i < shafts.Count; i++) {
+                var s = shafts[i];
+                if (s.DiameterMm < minDia || s.DiameterMm > maxDia) continue;
                 if (Math.Abs(s.Axis.Dot(hole.Axis)) < cosTol) continue;
-                if (LateralMm(hole, s) <= tol) return true;
+                if (LateralMm(hole, s) > latTol) continue;
+                double sLo, sHi;
+                Span(s, o, a, out sLo, out sHi);
+                if (sHi - sLo > 1e-4) {
+                    if (sHi < lo - spanTol || sLo > hi + spanTol) continue;
+                } else {
+                    if (sHi < lo - pointTol || sLo > hi + pointTol) continue;
+                }
+                return true;
             }
             return false;
         }
@@ -327,6 +459,14 @@ namespace TianGongCadSuite {
         public static List<HoleIssue> Run(IList<HoleRecord> holes, Func<HoleRecord, string, bool> rayHitsPart,
                                           bool reportUnpaired = false, IList<string> allParts = null,
                                           PartRayIndex bodies = null, IList<HoleRecord> shafts = null, Action<int, int> progress = null){
+            int unusedGroups;
+            return Run(holes, rayHitsPart, reportUnpaired, allParts, bodies, shafts, progress, out unusedGroups);
+        }
+        // 带出实际同轴孔组数 groupCount，避免调用方在 Run 之后重复调 CountGroups 再跑一遍全量分组。
+        public static List<HoleIssue> Run(IList<HoleRecord> holes, Func<HoleRecord, string, bool> rayHitsPart,
+                                          bool reportUnpaired, IList<string> allParts,
+                                          PartRayIndex bodies, IList<HoleRecord> shafts, Action<int, int> progress, out int groupCount){
+            groupCount = 0;
             var issues = new List<HoleIssue>();
             if (holes == null) return issues;
             var relevant = Relevant(holes);
@@ -338,44 +478,79 @@ namespace TianGongCadSuite {
             var skip = Options.SkipWords();
             var shaftsByPart = ShaftsByPart(shafts);
             // 「型材自动填充」生成的内嵌板（填充板_….par）：型材侧面的扳手孔正对着槽里的板，没人会在玻璃 / 填充板上配孔（围栏副本实测 4 条）。
-            // 一次挑掉（原来每串孔 × 每个零件都截一次名字）
+            // 一次挑掉（原来每串孔 × 每个零件都截一次名字）；同时预解析射线目标与跳过标记，消除内层百万次字典/子串查询。
             var candidates = partUniverse.Where(p => !ShortPart(p).StartsWith(PanelNaming.Prefix, StringComparison.Ordinal)).ToList();
+            var candTargets = bodies != null ? new PartRayTarget[candidates.Count] : null;
+            var candSkipped = new bool[candidates.Count];
+            for (int ci = 0; ci < candidates.Count; ci++) {
+                if (candTargets != null) candTargets[ci] = bodies.Get(candidates[ci]);
+                candSkipped[ci] = skip.Length > 0 && NameHas(candidates[ci], skip);
+            }
 
             int gi = 0;
             foreach (var g in groups) {
-                if (progress != null) { try { progress(++gi, groups.Count); } catch { } }
+                if (progress != null) { try { progress(++gi, groups.Count); } catch (OperationCanceledException) { throw; } catch { } }
                 // 同一条轴线上被同一个零件"挡住"的几段孔，合成一条漏打孔（A、C 有孔、中间的 B 没孔 -> 只报 B 一次）
                 var missingByPart = new Dictionary<string, HoleIssue>(StringComparer.Ordinal);
                 var missingOrder = new List<string>();
-                foreach (var chain in SplitByGap(g, CoaxialSpanTolMm)) {
+                var chains = SplitByGap(g, CoaxialSpanTolMm);
+                groupCount += chains.Count;
+                foreach (var chain in chains) {
                     var parts = chain.Select(h => h.PartName).Distinct().ToList();
+                    var partSet = parts.Count > 2 ? new HashSet<string>(parts, StringComparer.Ordinal) : null;
 
                     // 轴线在这串孔附近穿过、却没有孔的零件（0.8.5：几个零件都有孔时也查 —— 原来只查"只有一个零件有孔"的，
-                    // 上板 + 中间垫板都有孔、下面的块漏了螺纹孔这种最常见的漏孔反而报不出来）
-                    string hitPart = null;
+                    // 上板 + 中间垫板都有孔、下面的块漏了螺纹孔这种最常见的漏孔反而报不出来）。
+                    // 遍历全部候选（不再遇第一个就 break 依赖装配遍历顺序）：
+                    //   · 夹在孔段内部（side==0）的所有缺孔件全部报出；
+                    //   · 孔口两端（side==-1 / +1）各按轴向最近距离选最贴近孔口的缺孔件（同距离 ≤0.05mm 的并列件一并报出）；
+                    //   · 只要存在非「不查的零件」命中，就优先只报自制件，避免外购件挡住支架的真漏孔。
+                    var reportParts = new List<string>();
                     {
                         var h = chain[0];
+                        double minDia = h.DiameterMm;
+                        for (int k = 1; k < chain.Count; k++) if (chain[k].DiameterMm < minDia) minDia = chain[k].DiameterMm;
                         V3 o, a; double lo, hi; ChainSpan(chain, out o, out a, out lo, out hi);
                         // 已经是完整的螺纹连接（螺纹孔 + 过孔）：只查夹在这串孔中间的零件，两头外面贴着的不算漏孔（见 CompleteJoint）
                         double span = tol;
                         if (hi - lo > 0.0015 && CompleteJoint(chain)) { lo += 0.0005; hi -= 0.0005; span = 0; }
-                        // 先碰到的是「不查的零件」（外购件）就接着找：同一条轴线上真漏了孔的支架不能被它挡住（只报一个零件）
-                        string skippedHit = null;
-                        foreach (var other in candidates) {
-                            if (parts.Contains(other)) continue;
-                            if (HasCoaxialShaft(shaftsByPart, other, h)) continue;   // 同轴的螺栓杆 / 销：本来就该穿过它
-                            bool hit = bodies != null ? bodies.Hits(other, o, a, lo, hi, span)
-                                     : (parts.Count == 1 && rayHitsPart != null && rayHitsPart(h, other));
+                        var keepMid = new List<string>(); var skipMid = new List<string>();
+                        var keepLo = new List<KeyValuePair<string, double>>(); var skipLo = new List<KeyValuePair<string, double>>();
+                        var keepHi = new List<KeyValuePair<string, double>>(); var skipHi = new List<KeyValuePair<string, double>>();
+                        // 先查射线/包围盒命中再查同轴螺栓杆：大装配上 99.9% 的零件连包围盒都够不着，前置 HasCoaxialShaft 会空耗百万次遍历
+                        for (int ci = 0; ci < candidates.Count; ci++) {
+                            string other = candidates[ci];
+                            if (partSet != null ? partSet.Contains(other) : parts.Contains(other)) continue;
+                            bool hit; double gapM = 0; int side = 1;
+                            if (candTargets != null) {
+                                var target = candTargets[ci];
+                                hit = target != null && target.Hits(o, a, lo, hi, span, out gapM, out side);
+                            } else {
+                                hit = parts.Count == 1 && rayHitsPart != null && rayHitsPart(h, other);
+                            }
                             if (!hit) continue;
-                            if (skip.Length > 0 && NameHas(other, skip)) { if (skippedHit == null) skippedHit = other; continue; }
-                            hitPart = other; break;
+                            if (HasCoaxialShaft(shaftsByPart, other, h, minDia, o, a, lo, hi, span)) continue;   // 同轴的螺栓杆 / 销：本来就该穿过它
+                            bool isSkip = candSkipped[ci];
+                            if (side == 0) { if (isSkip) skipMid.Add(other); else keepMid.Add(other); }
+                            else if (side < 0) { if (isSkip) skipLo.Add(new KeyValuePair<string, double>(other, gapM)); else keepLo.Add(new KeyValuePair<string, double>(other, gapM)); }
+                            else { if (isSkip) skipHi.Add(new KeyValuePair<string, double>(other, gapM)); else keepHi.Add(new KeyValuePair<string, double>(other, gapM)); }
                         }
-                        if (hitPart == null) hitPart = skippedHit;
-                        if (hitPart != null) {
+                        bool anyKeep = keepMid.Count > 0 || keepLo.Count > 0 || keepHi.Count > 0;
+                        if (anyKeep) {
+                            reportParts.AddRange(keepMid);
+                            AddClosest(keepLo, reportParts);
+                            AddClosest(keepHi, reportParts);
+                        } else {
+                            reportParts.AddRange(skipMid);
+                            AddClosest(skipLo, reportParts);
+                            AddClosest(skipHi, reportParts);
+                        }
+                        for (int ri = 0; ri < reportParts.Count; ri++) {
+                            string hp = reportParts[ri];
                             HoleIssue mi;
-                            if (!missingByPart.TryGetValue(hitPart, out mi)) {
-                                mi = new HoleIssue { Kind = HoleIssueKind.MissingHole, Holes = new List<HoleRecord>(), MissingPart = hitPart };
-                                missingByPart[hitPart] = mi; missingOrder.Add(hitPart);
+                            if (!missingByPart.TryGetValue(hp, out mi)) {
+                                mi = new HoleIssue { Kind = HoleIssueKind.MissingHole, Holes = new List<HoleRecord>(), MissingPart = hp };
+                                missingByPart[hp] = mi; missingOrder.Add(hp);
                             }
                             mi.Holes.AddRange(chain);
                         }
@@ -383,7 +558,7 @@ namespace TianGongCadSuite {
 
                     if (parts.Count == 1) {
                         var h = chain[0];
-                        if (hitPart == null && reportUnpaired) {
+                        if (reportParts.Count == 0 && reportUnpaired) {
                             issues.Add(new HoleIssue { Kind = HoleIssueKind.Unpaired, Holes = chain,
                                 Message = ShortPart(h.PartName) + " 上的 Φ" + N(h.DiameterMm) + " 孔" + Pos(h) + "是孤孔（附近其他零件上没有同轴孔）" });
                         }
@@ -440,6 +615,14 @@ namespace TianGongCadSuite {
             return issues;
         }
 
+        static void AddClosest(List<KeyValuePair<string, double>> sideHits, List<string> dest){
+            if (sideHits.Count == 0) return;
+            double best = double.PositiveInfinity;
+            for (int i = 0; i < sideHits.Count; i++) if (sideHits[i].Value < best) best = sideHits[i].Value;
+            for (int i = 0; i < sideHits.Count; i++)
+                if (sideHits[i].Value <= best + 5e-5 && !dest.Contains(sideHits[i].Key)) dest.Add(sideHits[i].Key);
+        }
+
         static string N(double v){ return v.ToString("0.##", CultureInfo.InvariantCulture); }
 
         // 只有位置不同、别的完全一样的问题合成一条（「…（共 8 处）」）：一条导轨 20 个螺钉孔、一排 8 个安装孔，
@@ -450,17 +633,33 @@ namespace TianGongCadSuite {
             if (issues == null) return list;
             var byKey = new Dictionary<string, HoleIssue>(StringComparer.Ordinal);
             foreach (var it in issues) {
-                // 实例序号（「底板.par:3」的 :3）也不算区别：同一个外购件用了 64 次，里面同一处孔报 64 条（OK310 围栏副本实测 256 条是这种）
-                string key = ((int)it.Kind) + "|" + StripInstance(ShortPart(it.MissingPart)) + "|" + StripInstance(StripPos(it.Message));
+                if (it == null) continue;
+                // 实例序号（「底板.par:3」的 :3）不算区别：同一个外购件用了 64 次，里面同一处孔报 64 条（OK310 围栏副本实测 256 条是这种）。
+                // 但必须保留子装配路径（StripInstance(it.MissingPart) 与 Parts 路径），不能用 ShortPart 剥掉子装配名：
+                // 否则「FESTO.asm:1/板.par:1」与「自制.asm:1/板.par:1」会合并成一条，导致外购件筛选串号。
+                string partsKey = it.Parts == null || it.Parts.Count == 0
+                    ? ""
+                    : string.Join(",", it.Parts.Select(StripInstance).ToArray());
+                string key = ((int)it.Kind) + "|" + StripInstance(it.MissingPart) + "|" + partsKey + "|" + StripInstance(StripPos(it.Message));
                 HoleIssue m;
                 if (!byKey.TryGetValue(key, out m)) {
-                    m = new HoleIssue { Kind = it.Kind, Message = it.Message, MissingPart = it.MissingPart, Done = it.Done, Holes = new List<HoleRecord>(it.Holes), Parts = new List<string>(it.Parts) };
+                    m = new HoleIssue {
+                        Kind = it.Kind, Message = it.Message, MissingPart = it.MissingPart, Done = it.Done,
+                        Places = Math.Max(1, it.Places),
+                        Holes = new List<HoleRecord>(it.Holes), Parts = new List<string>(it.Parts)
+                    };
                     byKey[key] = m; list.Add(m);
                     continue;
                 }
-                m.Places++;
+                m.Places += Math.Max(1, it.Places);
                 m.Holes.AddRange(it.Holes);
-                m.Message = StripInstance(StripPos(it.Message)) + "（共 " + m.Places + " 处）";
+                if (it.Parts != null) {
+                    foreach (var p in it.Parts) if (!m.Parts.Contains(p)) m.Parts.Add(p);
+                }
+                if (m.Done.Length == 0 && !string.IsNullOrEmpty(it.Done)) m.Done = it.Done;
+                string baseMsg = StripInstance(StripPos(it.Message));
+                baseMsg = System.Text.RegularExpressions.Regex.Replace(baseMsg, "（共 \\d+ 处）$", "");
+                m.Message = baseMsg + "（共 " + m.Places + " 处）";
             }
             return list;
         }

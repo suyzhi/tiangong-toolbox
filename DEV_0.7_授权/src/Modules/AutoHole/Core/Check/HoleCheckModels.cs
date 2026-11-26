@@ -47,21 +47,22 @@ namespace TianGongCadSuite {
         // 读不到包围盒时用它：等价于"整条直线都算命中"（退回原来的判法，宁可多报不漏报）
         public static Box3 Infinite { get { return new Box3(new V3(-1e9, -1e9, -1e9), new V3(1e9, 1e9, 1e9)); } }
         // 直线 o + d·t（d 为单位向量）穿过盒子的参数区间；不穿过返回 false。
+        // 展开 X/Y/Z 标量计算，避免热点循环里每次求交在托管堆上分配 4 个 double[3] 数组。
         public bool Clip(V3 o, V3 d, out double t0, out double t1){
             t0 = double.NegativeInfinity; t1 = double.PositiveInfinity;
-            double[] os = { o.X, o.Y, o.Z }, ds = { d.X, d.Y, d.Z }, los = { Lo.X, Lo.Y, Lo.Z }, his = { Hi.X, Hi.Y, Hi.Z };
-            for (int i = 0; i < 3; i++) {
-                if (Math.Abs(ds[i]) < 1e-12) {
-                    if (os[i] < los[i] - 1e-9 || os[i] > his[i] + 1e-9) return false;
-                    continue;
-                }
-                double a = (los[i] - os[i]) / ds[i], b = (his[i] - os[i]) / ds[i];
-                if (a > b) { double tmp = a; a = b; b = tmp; }
-                if (a > t0) t0 = a;
-                if (b < t1) t1 = b;
-                if (t0 > t1 + 1e-12) return false;
-            }
+            if (!ClipAxis(o.X, d.X, Lo.X, Hi.X, ref t0, ref t1)) return false;
+            if (!ClipAxis(o.Y, d.Y, Lo.Y, Hi.Y, ref t0, ref t1)) return false;
+            if (!ClipAxis(o.Z, d.Z, Lo.Z, Hi.Z, ref t0, ref t1)) return false;
             return true;
+        }
+        static bool ClipAxis(double o, double d, double lo, double hi, ref double t0, ref double t1){
+            if (Math.Abs(d) < 1e-12) return o >= lo - 1e-9 && o <= hi + 1e-9;
+            double inv = 1.0 / d;
+            double a = (lo - o) * inv, b = (hi - o) * inv;
+            if (a > b) { double tmp = a; a = b; b = tmp; }
+            if (a > t0) t0 = a;
+            if (b < t1) t1 = b;
+            return t0 <= t1 + 1e-12;
         }
     }
 
