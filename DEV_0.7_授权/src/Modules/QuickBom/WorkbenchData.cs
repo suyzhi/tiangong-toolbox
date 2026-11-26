@@ -67,10 +67,10 @@ namespace TianGongCadSuite {
                 if (Prop.Has("材料处理") || Prop.IsEdited("材料处理")) return "材料处理";
                 return "表面处理";
             }
-            if (canonicalField == "优先等级") {
+            if (canonicalField == "优先等级" || canonicalField == "加工优先等级") {
                 if (Prop.Has("优先等级") || Prop.IsEdited("优先等级")) return "优先等级";
                 if (Prop.Has("加工优先等级") || Prop.IsEdited("加工优先等级")) return "加工优先等级";
-                return "优先等级";
+                return canonicalField;
             }
             return canonicalField;
         }
@@ -87,6 +87,16 @@ namespace TianGongCadSuite {
         }
 
         public string GetPropValue(string canonicalField) {
+            // 锁定 / 读取失败 / 仅工程图行不能写回文件属性卡，但允许在表里修改核心 6 列供清单导出：
+            // 此时直接读 Bom.*，避免改完马上弹回 Prop.Original 旧值造成屏幕显示与导出 Excel 脑裂。
+            if (!CanWriteProps) {
+                if (canonicalField == "零件名称") return Bom.PartName ?? "";
+                if (canonicalField == "图号") return Bom.DrawingNo ?? "";
+                if (canonicalField == "数量") return Bom.Quantity.ToString();
+                if (canonicalField == "表面处理") return Bom.SurfaceTreatment ?? "";
+                if (canonicalField == "批次") return Bom.Batch ?? "";
+                if (canonicalField == "优先等级" || canonicalField == "加工优先等级") return Bom.Priority ?? "";
+            }
             string key = PropKeyFor(canonicalField);
             string v = Prop.Value(key);
             if (canonicalField == "零件名称") return v.Length > 0 || Prop.IsEdited(key) ? v : Bom.PartName;
@@ -94,7 +104,7 @@ namespace TianGongCadSuite {
             if (canonicalField == "数量") return v.Length > 0 || Prop.IsEdited(key) ? v : Bom.Quantity.ToString();
             if (canonicalField == "表面处理") return v.Length > 0 || Prop.IsEdited(key) ? v : Bom.SurfaceTreatment;
             if (canonicalField == "批次") return v.Length > 0 || Prop.IsEdited(key) ? v : Bom.Batch;
-            if (canonicalField == "优先等级") return v.Length > 0 || Prop.IsEdited(key) ? v : Bom.Priority;
+            if (canonicalField == "优先等级" || canonicalField == "加工优先等级") return v.Length > 0 || Prop.IsEdited(key) ? v : Bom.Priority;
             return v;
         }
 
@@ -290,6 +300,10 @@ namespace TianGongCadSuite {
         public static readonly string[] CoreSharedPropFields = {
             "零件名称", "图号", "数量", "表面处理", "批次", "优先等级"
         };
+        // 已被固定核心列按别名承接的同类属性名（避免默认同时出现「优先等级」与「加工优先等级」两列互相覆盖 Bom.Priority）
+        static readonly string[] CoreSharedPropAliases = {
+            "零件名", "零件图号", "材料处理", "加工优先等级"
+        };
 
         // 常用机械工程字段下拉联想词库（用于单元格编辑自动补全，仍支持自由输入任意值）
         public static readonly string[] SuggestedMaterials = {
@@ -333,6 +347,9 @@ namespace TianGongCadSuite {
         public static bool IsCoreSharedField(string field) {
             for (int i = 0; i < CoreSharedPropFields.Length; i++) {
                 if (string.Equals(CoreSharedPropFields[i], field, StringComparison.Ordinal)) return true;
+            }
+            for (int i = 0; i < CoreSharedPropAliases.Length; i++) {
+                if (string.Equals(CoreSharedPropAliases[i], field, StringComparison.Ordinal)) return true;
             }
             return false;
         }
@@ -452,8 +469,11 @@ namespace TianGongCadSuite {
                     r.Rename.Revert();
                     r.Prop.Path = to;
                     r.Bom.ModelPath = to;
-                    // 若清单图号原本就是旧文件名（且没有自定义属性图号覆盖），顺手跟着变成新文件名
-                    if (string.Equals(r.Bom.DrawingNo, oldBase, StringComparison.OrdinalIgnoreCase) && !r.IsPropEdited("图号")) {
+                    // 仅当文件本身没有非空自定义「图号」属性（清单图号原本只是回退自旧文件名）时，改名后才自动跟着变成新文件名，
+                    // 防止原文件已有 Prop.Original["图号"] == oldBase 时表格仍显旧图号而导出 Bom.DrawingNo 偷偷变成新文件名
+                    string dnoKey = r.PropKeyFor("图号");
+                    bool hasCustomDno = r.CanWriteProps && !string.IsNullOrEmpty(r.Prop.Value(dnoKey));
+                    if (string.Equals(r.Bom.DrawingNo, oldBase, StringComparison.OrdinalIgnoreCase) && !r.IsPropEdited("图号") && !hasCustomDno) {
                         r.Bom.DrawingNo = newBase;
                     }
                 }

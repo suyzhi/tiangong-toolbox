@@ -212,6 +212,14 @@ namespace TianGongCadSuite {
             var host = new ToolStripControlHost(root) { Padding = new Padding(0), Margin = new Padding(0), AutoSize = false, Size = root.Size };
             drop.Items.Add(host);
             drop.Opened += (s, e) => { layoutFoot(); try { searchBox.Focus(); } catch { } };
+            // ToolStripDropDown.Close() 只隐藏不释放：关闭后延后一拍 Dispose 掉整棵弹出控件树，避免每次点列筛选泄漏 ~15 个 Win32 USER 句柄
+            drop.Closed += (s, e) => {
+                Action disposeDrop = () => { try { if (!drop.IsDisposed) drop.Dispose(); } catch { } };
+                try {
+                    if (anchor != null && !anchor.IsDisposed && anchor.IsHandleCreated) anchor.BeginInvoke(disposeDrop);
+                    else disposeDrop();
+                } catch { disposeDrop(); }
+            };
             drop.Show(screenPoint);
             return drop;
         }

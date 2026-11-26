@@ -12,19 +12,54 @@ using System.Threading;
 // 它看到的是磁盘上的原始字节：改名前后各读一次文件头，原来加密、改完不加密就停下报错（插件会整体退回）。
 //
 // 用法:
-//   本程序 <清单文件> <结果文件>            —— 移动（改名，批量改名用）
-//   本程序 --copy <清单文件> <结果文件>     —— 复制（快速出清单复制原三维 / 工程图用，保持加密头不变）
-// 结果文件：第一行 "OK <处理了几个>" 或 "FAIL <处理了几个>"，第二行是原因
+//   本程序 <清单文件> <结果文件>                —— 移动（改名，批量改名用，遇错即停）
+//   本程序 --best-effort <清单文件> <结果文件>  —— 回滚移动（单步失败记账并继续退回其余文件，绝不因首个文件被占而滞留临时名）
+//   本程序 --copy <清单文件> <结果文件>         —— 复制（快速出清单复制原三维 / 工程图用，保持加密头不变）
+// 结果文件：第一行 "OK <处理了几个>" / "FAIL <处理了几个>" / "PARTIAL <处理了几个>"，后续行为原因或 "FAIL_IDX\t<序号>\t<原因>"
 static class RenameWorker {
     const string Head = "%TSD-Header";
     static int Main(string[] args){
         bool copy = args.Length >= 3 && args[0] == "--copy";
-        string listFile = copy ? args[1] : args[0];
-        string outFile = copy ? args[2] : args[1];
+        bool bestEffort = !copy && args.Length >= 3 && args[0] == "--best-effort";
+        string listFile = (copy || bestEffort) ? args[1] : args[0];
+        string outFile = (copy || bestEffort) ? args[2] : args[1];
         int done = 0;
         string why = "";
         try {
             var lines = File.ReadAllLines(listFile, Encoding.UTF8);
+            if (bestEffort) {
+                var failures = new List<string>();
+                int stepIdx = 0;
+                foreach (var line in lines) {
+                    if (line.Length == 0) continue;
+                    int curIdx = stepIdx++;
+                    try {
+                        var ab = line.Split('\t');
+                        if (ab.Length != 2) throw new InvalidOperationException("清单格式不对：" + line);
+                        bool before = Encrypted(ab[0]);
+                        Move(ab[0], ab[1]);
+                        if (before && !Encrypted(ab[1])) {
+                            try { Move(ab[1], ab[0]); } catch { }
+                            throw new InvalidOperationException("改名后文件不再是加密的（" + Path.GetFileName(ab[0]) + "）");
+                        }
+                        done++;
+                    } catch (Exception ex) {
+                        string msg = (ex.Message ?? "").Replace("\r", " ").Replace("\n", " ").Replace("\t", " ");
+                        failures.Add("FAIL_IDX\t" + curIdx + "\t" + msg);
+                    }
+                    try { File.WriteAllText(outFile, "RUNNING " + done + "\r\n", Encoding.UTF8); } catch { }
+                }
+                if (failures.Count == 0) {
+                    File.WriteAllText(outFile, "OK " + done + "\r\n", Encoding.UTF8);
+                    return 0;
+                }
+                var sb = new StringBuilder();
+                sb.Append("PARTIAL ").Append(done).Append("\r\n");
+                for (int i = 0; i < failures.Count; i++) sb.Append(failures[i]).Append("\r\n");
+                File.WriteAllText(outFile, sb.ToString(), Encoding.UTF8);
+                return 1;
+            }
+
             foreach (var line in lines) {
                 if (line.Length == 0) continue;
                 var ab = line.Split('\t');

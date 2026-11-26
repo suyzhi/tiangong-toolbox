@@ -128,7 +128,7 @@ namespace TianGongCadSuite {
                 // 填了一表新名字、手一滑点了关闭（或点了功能区别的命令）：原来一声不响全丢
                 if (!quiet && e.CloseReason == CloseReason.UserClosing && !ConfirmDiscard()) e.Cancel = true;
             };
-            FormClosed += (s, e) => { filterDebounce.Stop(); filterDebounce.Dispose(); };
+            FormClosed += (s, e) => { cad.CancelWarm(); filterDebounce.Stop(); filterDebounce.Dispose(); };
             UpdateStatus();
         }
 
@@ -210,11 +210,18 @@ namespace TianGongCadSuite {
 
         public void LoadActive(){
             if (!ConfirmDiscard()) return;
-            // 在装配里原位编辑着零件：改名时要关掉文档，原来会把这个原位编辑中的零件文档直接关掉（连带打断整个原位编辑）
+            // 在装配里原位编辑着零件 / 钣金 / 子装配：改名时要关掉文档，直接关掉会打断原位编辑。
+            // SheetMetalDocument / AssemblyDocument 不继承 PartDocument，用反射统一读 InPlaceActivated 属性。
             try {
-                var ip = app == null ? null : app.ActiveDocument as SolidEdgePart.PartDocument;
-                if (ip != null && ip.InPlaceActivated) {
-                    status.Text = "天工正在原位编辑「" + ip.Name + "」：先退出原位编辑（回到顶层装配），再点「载入当前文档」。";
+                object activeDoc = app == null ? null : app.ActiveDocument;
+                bool ipa = false;
+                if (activeDoc != null) {
+                    try { ipa = Convert.ToBoolean(activeDoc.GetType().InvokeMember("InPlaceActivated", System.Reflection.BindingFlags.GetProperty, null, activeDoc, null)); } catch { }
+                }
+                if (ipa) {
+                    string name = "";
+                    try { name = Convert.ToString(activeDoc.GetType().InvokeMember("Name", System.Reflection.BindingFlags.GetProperty, null, activeDoc, null)); } catch { }
+                    status.Text = "天工正在原位编辑「" + name + "」：先退出原位编辑（回到顶层装配），再点「载入当前文档」。";
                     status.ForeColor = Ui.Warn;
                     return;
                 }

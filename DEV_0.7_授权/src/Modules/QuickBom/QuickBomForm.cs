@@ -113,6 +113,10 @@ namespace TianGongCadSuite {
         readonly Panel topDrawer = new Panel();
         Panel headerPanel;
         Panel renamePanel;
+        Panel railTopPanel;
+        Panel railFootPanel;
+        Control toolbarPanel;
+        Button[] headerActionButtons;
         VerticalStack mainStack;
         Segmented drawerSeg;
         Segmented colViewSeg;
@@ -169,7 +173,7 @@ namespace TianGongCadSuite {
         bool outputManuallyEdited;
         bool suppressHeaderEvents;
         bool rebuilding;
-        bool busy, stopRequested, forceClose;
+        bool busy, canStopBusy, stopRequested, forceClose;
         string busyWhat = "处理中";
         int stateFilter; // 0 全部 / 1 已勾选导出 / 2 待改名 / 3 属性待写入 / 4 缺图或待补
         int colViewMode; // 0 全部列 / 1 改名 / 2 属性 / 3 清单
@@ -222,7 +226,8 @@ namespace TianGongCadSuite {
             var btnTemplates = Ui.Small("模板设置…"); btnTemplates.Click += (s, e) => EditTemplates();
             var btnRevert = Ui.Small("撤销修改"); btnRevert.Click += (s, e) => RevertAllEdits();
             var btnRemove = Ui.Small("移除选中行"); btnRemove.Click += (s, e) => RemoveSelectedRows();
-            foreach (var b in new[] { btnCols, btnTemplates, btnRevert, btnRemove }) ((FlatButton)b).SetFore(Ui.Text2);
+            headerActionButtons = new[] { btnCols, btnTemplates, btnRevert, btnRemove };
+            foreach (var b in headerActionButtons) ((FlatButton)b).SetFore(Ui.Text2);
             shell.AddHeader(page, btnCols);
             shell.AddHeader(page, btnTemplates);
             shell.AddHeader(page, btnRevert);
@@ -234,7 +239,8 @@ namespace TianGongCadSuite {
 
             BuildTopDrawer();
             mainStack.Add(topDrawer);
-            mainStack.Add(BuildToolbar());
+            toolbarPanel = BuildToolbar();
+            mainStack.Add(toolbarPanel);
 
             var gridFrame = Ui.Card("", 0, "");
             gridFrame.Padding = Ui.SPad(2, 2, 2, 6);
@@ -295,8 +301,8 @@ namespace TianGongCadSuite {
                 SaveRememberedDefaults();
                 SaveColumnWidthsNow();
             };
-            FormClosed += (s, e) => { keyShield.Dispose(); filterDebounce.Dispose(); colWidthDebounce.Dispose(); tips.Dispose(); gridMenu.Dispose(); };
-            filterDebounce.Tick += (s, e) => { filterDebounce.Stop(); if (!IsDisposed) RebuildGrid(); };
+            FormClosed += (s, e) => { renameCad.CancelWarm(); keyShield.Dispose(); filterDebounce.Dispose(); colWidthDebounce.Dispose(); tips.Dispose(); gridMenu.Dispose(); };
+            filterDebounce.Tick += (s, e) => { filterDebounce.Stop(); if (!IsDisposed && !busy) RebuildGrid(); };
             colWidthDebounce.Tick += (s, e) => { colWidthDebounce.Stop(); if (!IsDisposed) SaveColumnWidthsNow(); };
         }
 
@@ -335,6 +341,7 @@ namespace TianGongCadSuite {
             int hLoad = Ui.S(36), hBtn = Ui.S(28), hChk = Ui.S(22), hLbl = Ui.S(18), hBox = Ui.S(26);
             int railTopH = hLoad + Ui.S(4) + hBtn + Ui.S(2) + hChk + Ui.S(2) + hBtn + Ui.S(8) + hLbl + Ui.S(2) + hBox + Ui.S(2);
             var railTop = new Panel { BackColor = Ui.Rail, Height = railTopH };
+            railTopPanel = railTop;
             var btnLoadActive = Ui.Secondary("载入当前文档", 200, 36); btnLoadActive.Click += (s, e) => LoadActive();
             var btnScanFolder = Ui.Ghost("扫描模型文件夹…"); btnScanFolder.Click += (s, e) => PickAndScanFolder();
             chkRecursive.AutoSize = false; chkRecursive.Height = hChk; chkRecursive.Font = Ui.F8; chkRecursive.ForeColor = Ui.Text2; chkRecursive.BackColor = Ui.Rail; chkRecursive.AutoEllipsis = true;
@@ -382,7 +389,7 @@ namespace TianGongCadSuite {
             shell.Rail.Add("待改名", "").Dot = Color.FromArgb(0xF5, 0x9E, 0x0B);
             shell.Rail.Add("属性待写入", "").Dot = Ui.Accent;
             shell.Rail.Add("缺图 / 待补", "").Dot = Ui.Bad;
-            shell.Rail.SelectedChanged += (s, e) => { stateFilter = shell.Rail.Selected; RebuildGrid(); };
+            shell.Rail.SelectedChanged += (s, e) => { if (busy) return; stateFilter = shell.Rail.Selected; RebuildGrid(); };
             filterBox.TextChanged += (s, e) => {
                 bool showClear = filterBox.Text.Length > 0;
                 if (filterClearBtn.Visible != showClear) {
@@ -397,6 +404,7 @@ namespace TianGongCadSuite {
             // 侧栏底部：6 种导出格式 + 附加项
             int fmtRowH = Ui.S(22), footChkH = Ui.S(23), footGap = Ui.S(1);
             var railFoot = new Panel { BackColor = Ui.Rail, Height = Ui.S(18) + fmtRowH * 2 + Ui.S(6) + (footChkH + footGap) * 4 + Ui.S(2) };
+            railFootPanel = railFoot;
             var lblFmt = new Label { Text = "导出格式（每件 6 种）", AutoSize = false, Font = Ui.F8, ForeColor = Ui.Text2, BackColor = Ui.Rail };
             var fmtPanel = new TableLayoutPanel { ColumnCount = 3, RowCount = 2, BackColor = Ui.Rail, Margin = new Padding(0) };
             fmtPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 38f));
@@ -549,7 +557,7 @@ namespace TianGongCadSuite {
 
             chkFollowRename.AutoSize = true; chkFollowRename.Font = Ui.F8; chkFollowRename.ForeColor = Ui.Text2; chkFollowRename.BackColor = Ui.Rail; chkFollowRename.Margin = Ui.SPad(0, 6, 16, 0);
             Choices.Bind(chkFollowRename, "rename.follow");
-            chkFollowRename.CheckedChanged += (s, e) => { ValidateRenames(); RebuildGrid(); };
+            chkFollowRename.CheckedChanged += (s, e) => { if (busy) return; ValidateRenames(); RebuildGrid(); };
 
             chkFillMissing.AutoSize = true; chkFillMissing.Font = Ui.F8; chkFillMissing.ForeColor = Ui.Text2; chkFillMissing.BackColor = Ui.Rail; chkFillMissing.Margin = Ui.SPad(0, 6, 0, 0);
             Choices.Bind(chkFillMissing, "propcard.fillMissing");
@@ -618,20 +626,21 @@ namespace TianGongCadSuite {
             drawerSeg.Height = Ui.S(30);
             drawerSeg.Width = Math.Max(Ui.S(200), drawerSeg.PreferredWidth);
             drawerSeg.Margin = Ui.SPad(0, 1, 6, 2);
-            drawerSeg.SelectedIndexChanged += (s, e) => ApplyDrawerMode(drawerSeg.SelectedIndex, true);
+            drawerSeg.SelectedIndexChanged += (s, e) => { if (!busy) ApplyDrawerMode(drawerSeg.SelectedIndex, true); };
 
             colViewSeg = new Segmented("全部列", "改名", "属性", "清单");
             colViewSeg.Height = Ui.S(30);
             colViewSeg.Width = Math.Max(Ui.S(210), colViewSeg.PreferredWidth);
             colViewSeg.Margin = Ui.SPad(0, 1, 6, 2);
-            colViewSeg.SelectedIndexChanged += (s, e) => ApplyColumnView(colViewSeg.SelectedIndex, true);
+            colViewSeg.SelectedIndexChanged += (s, e) => { if (!busy) ApplyColumnView(colViewSeg.SelectedIndex, true); };
 
             var bAll = Ui.Small("全选"); bAll.Click += (s, e) => SetVisibleSelected(true);
             var bNone = Ui.Small("全不选"); bNone.Click += (s, e) => SetVisibleSelected(false);
-            var bDraftOnly = Ui.Small("只勾有图"); bDraftOnly.Click += (s, e) => { PushUndo(); foreach (var r in visibleRows) r.Bom.Selected = !r.IsDraftOnly && r.Bom.HasDraft; RefreshAllVisibleRowsInPlace(); };
+            var bDraftOnly = Ui.Small("只勾有图"); bDraftOnly.Click += (s, e) => { if (busy) return; PushUndo(); foreach (var r in visibleRows) r.Bom.Selected = !r.IsDraftOnly && r.Bom.HasDraft; RefreshAllVisibleRowsInPlace(); };
             var bMetrics = Ui.Small("重算八大类"); bMetrics.Click += (s, e) => LoadMetricsForSelected();
             tips.SetToolTip(bMetrics, "读取勾选零件的三维外形尺寸与质量，按公司八大类规则重算分类。");
             var bOccQty = Ui.Small("按实例数"); bOccQty.Click += (s, e) => {
+                if (busy) return;
                 PushUndo();
                 foreach (var r in rows) if (r.Bom.Selected) r.SetPropValue("数量", Math.Max(1, r.Bom.OccCount).ToString());
                 RefreshAllVisibleRowsInPlace();
@@ -646,7 +655,7 @@ namespace TianGongCadSuite {
             clearFiltersBtn.SetFore(Ui.Accent);
             clearFiltersBtn.Margin = Ui.SPad(2, 3, 2, 2);
             clearFiltersBtn.Visible = false;
-            clearFiltersBtn.Click += (s, e) => ClearAllFiltersAndSort();
+            clearFiltersBtn.Click += (s, e) => { if (!busy) ClearAllFiltersAndSort(); };
             tips.SetToolTip(clearFiltersBtn, "清除所有表头列筛选并恢复默认排序。");
 
             // 把「选中格填成 + 输入框 + 填入」绑成整体，窗口变窄时整组换行，绝不出现标签和输入框分离
@@ -785,6 +794,7 @@ namespace TianGongCadSuite {
                 }
             };
             grid.CellBeginEdit += (s, e) => {
+                if (busy) { e.Cancel = true; return; }
                 if (e.RowIndex < 0 || e.RowIndex >= grid.Rows.Count) return;
                 var r = grid.Rows[e.RowIndex].Tag as WorkbenchRow;
                 if (r == null) return;
@@ -1202,11 +1212,14 @@ namespace TianGongCadSuite {
                     return;
                 }
                 propCad.RefreshActiveContext();
+                renameCad.SetRootPath(srcPath);
                 ReplaceRows(list);
                 lastScannedFolder = "";
                 sourceFolder = string.IsNullOrEmpty(srcPath) ? "" : (Directory.Exists(srcPath) ? srcPath : Path.GetDirectoryName(srcPath));
+                // 切到新文档时恢复按新表头自动推荐输出目录，避免复用窗口后误覆盖上一装配手动选过的旧输出目录
+                outputManuallyEdited = false;
                 shell.SetTitle(Title, source);
-                ApplyInferredHeader(srcPath);
+                ApplyInferredHeader(srcPath, true);
                 ValidateRenames();
                 RebuildGrid();
                 renameCad.Warm(rows.Select(r => r.Rename.Path));
@@ -1284,7 +1297,7 @@ namespace TianGongCadSuite {
                     if (dirs.Count > 0) sourceFolder = dirs[0];
                     else if (files.Count > 0) sourceFolder = Path.GetDirectoryName(files[0]);
                 }
-                if (count > 0 && string.IsNullOrWhiteSpace(tbProjectCode.Text)) ApplyInferredHeader(sourceFolder);
+                if (count > 0 && string.IsNullOrWhiteSpace(tbProjectCode.Text)) ApplyInferredHeader(sourceFolder, false);
                 ValidateRenames();
                 RebuildGrid();
                 if (count > 0) renameCad.Warm(rows.Select(r => r.Rename.Path));
@@ -1304,13 +1317,14 @@ namespace TianGongCadSuite {
             try {
                 var list = bomCad.CollectFromFolder(folder, recursive, Pulse);
                 propCad.ResetContext();
+                renameCad.SetRootPath("");
                 ReplaceRows(list);
                 sourceFolder = folder;
                 lastScannedFolder = folder;
                 outputManuallyEdited = false;
                 string folderName = Path.GetFileName(folder.TrimEnd('\\', '/'));
                 shell.SetTitle(Title, "文件夹「" + folderName + "」" + (recursive ? "（含子文件夹）" : "（仅当前层）"));
-                ApplyInferredHeader(folder);
+                ApplyInferredHeader(folder, true);
                 ValidateRenames();
                 RebuildGrid();
                 renameCad.Warm(rows.Select(r => r.Rename.Path));
@@ -1347,7 +1361,7 @@ namespace TianGongCadSuite {
                     if (string.IsNullOrEmpty(sourceFolder) && dlg.FileNames.Length > 0) {
                         sourceFolder = Path.GetDirectoryName(dlg.FileNames[0]);
                     }
-                    if (count > 0 && string.IsNullOrWhiteSpace(tbProjectCode.Text)) ApplyInferredHeader(sourceFolder);
+                    if (count > 0 && string.IsNullOrWhiteSpace(tbProjectCode.Text)) ApplyInferredHeader(sourceFolder, false);
                     ValidateRenames();
                     RebuildGrid();
                     if (count > 0) renameCad.Warm(rows.Select(r => r.Rename.Path));
@@ -1375,12 +1389,14 @@ namespace TianGongCadSuite {
             if (busy) return;
             var todo = rows.Where(r => r.Bom.Selected && !r.IsDraftOnly).Select(r => r.Bom).ToList();
             if (todo.Count == 0) { SetStatus("没有勾选的零件。", Ui.Muted); return; }
-            BeginBusy("读取尺寸与重量");
+            BeginBusy("读取尺寸与重量", true);
+            runBtn.Text = "停止";
             try {
                 int n = bomCad.LoadMetricsForItems(todo, Pulse, () => stopRequested);
                 RebuildGrid();
                 SetStatus("已读取 " + n + " 个零件的尺寸与重量，并按规则重算八大类。", Ui.Ok);
             } finally {
+                runBtn.Text = "开始出清单";
                 EndBusy();
             }
         }
@@ -1400,6 +1416,7 @@ namespace TianGongCadSuite {
         }
 
         void ApplyRenameReplace() {
+            if (busy) return;
             string find = findBox.Text ?? "";
             if (find.Length == 0) { SetStatus("请先输入要查找的文字。", Ui.Warn); return; }
             var targets = TargetRowsForBatch();
@@ -1417,6 +1434,7 @@ namespace TianGongCadSuite {
         }
 
         void ApplyRenameAffix() {
+            if (busy) return;
             string pre = prefixBox.Text ?? "", suf = suffixBox.Text ?? "";
             if (pre.Length == 0 && suf.Length == 0) { SetStatus("请先输入前面加或后面加的文字。", Ui.Warn); return; }
             var targets = TargetRowsForBatch();
@@ -1434,6 +1452,7 @@ namespace TianGongCadSuite {
         }
 
         void ApplyRenameTemplate() {
+            if (busy) return;
             string tpl = (templateBox.Text ?? "").Trim();
             if (tpl.Length == 0) { SetStatus("请先输入命名模板（例如 {图号} 或 {图号}-{零件名称}）。", Ui.Warn); return; }
             var targets = TargetRowsForBatch();
@@ -1462,6 +1481,7 @@ namespace TianGongCadSuite {
         }
 
         void SyncDrawingNoToNewName() {
+            if (busy) return;
             var targets = TargetRowsForBatch();
             PushUndo();
             int n = WorkbenchRules.SyncDrawingNoToNewName(targets);
@@ -1472,6 +1492,7 @@ namespace TianGongCadSuite {
         }
 
         void SyncFileNameToDrawingNo() {
+            if (busy) return;
             var targets = TargetRowsForBatch();
             PushUndo();
             int n = WorkbenchRules.SyncFileNameToDrawingNo(targets);
@@ -1537,8 +1558,15 @@ namespace TianGongCadSuite {
             Choices.Set("quickbom.tpl.code", customCodeTemplate);
         }
 
-        void ApplyInferredHeader(string srcPath) {
+        void ApplyInferredHeader(string srcPath, bool clearPerAssembly) {
             var h = ReadHeaderFromUi();
+            // 切换到新装配 / 新文件夹时先清空按装配归属的表头字段，避免新装配缺项目号或项目名称时静默沿用上一装配的残留值
+            if (clearPerAssembly) {
+                h.ProjectCode = "";
+                h.ProjectName = "";
+                h.MechanismNo = "";
+                h.ListTitle = "";
+            }
             BomRules.InferHeader(rows.Select(r => r.Bom).ToList(), srcPath, h);
             suppressHeaderEvents = true;
             try {
@@ -1926,12 +1954,13 @@ namespace TianGongCadSuite {
             writePropsBtn.Enabled = !busy && propCount > 0;
             writePropsBtn.SetFore(propCount > 0 ? Ui.Accent : Ui.Text);
             if (propTextChanged) Ui.FitButton(writePropsBtn);
+            runBtn.Enabled = !busy || canStopBusy;
 
             if (renTextChanged || propTextChanged) shell.Footer.PerformLayout();
         }
 
         void OnGridCellValueChanged(object sender, DataGridViewCellEventArgs e) {
-            if (rebuilding || e.RowIndex < 0 || e.RowIndex >= grid.Rows.Count) return;
+            if (busy || rebuilding || e.RowIndex < 0 || e.RowIndex >= grid.Rows.Count) return;
             var r = grid.Rows[e.RowIndex].Tag as WorkbenchRow;
             if (r == null) return;
             // 单格修改仅快照当前 1 行，彻底消除几百行整表深拷贝卡顿
@@ -1996,7 +2025,7 @@ namespace TianGongCadSuite {
         }
 
         void OnGridKeyDown(object sender, KeyEventArgs e) {
-            if (grid.IsCurrentCellInEditMode) return;
+            if (busy || grid.IsCurrentCellInEditMode) return;
             if (e.Control && !e.Alt) {
                 if (!e.Shift) {
                     if (e.KeyCode == Keys.C) {
@@ -2075,6 +2104,7 @@ namespace TianGongCadSuite {
         }
 
         void PerformUndo() {
+            if (busy) return;
             if (undoStack.Count == 0) {
                 SetStatus("没有可撤销的上一步表格修改。", Ui.Muted);
                 return;
@@ -2093,6 +2123,7 @@ namespace TianGongCadSuite {
         }
 
         void PerformRedo() {
+            if (busy) return;
             if (redoStack.Count == 0) {
                 SetStatus("没有可重做的修改。", Ui.Muted);
                 return;
@@ -2121,6 +2152,7 @@ namespace TianGongCadSuite {
         }
 
         void CopySelectedCells() {
+            if (busy) return;
             if (grid.IsCurrentCellInEditMode) grid.EndEdit();
             var cells = new List<DataGridViewCell>();
             foreach (DataGridViewCell c in grid.SelectedCells) {
@@ -2175,11 +2207,13 @@ namespace TianGongCadSuite {
         }
 
         void CutSelectedCells() {
+            if (busy) return;
             CopySelectedCells();
             DeleteSelectedCells();
         }
 
         void PasteFromClipboard() {
+            if (busy) return;
             if (grid.IsCurrentCellInEditMode) grid.EndEdit();
             bool clipBusy;
             string text = GetClipboardTextSafe(out clipBusy);
@@ -2193,7 +2227,7 @@ namespace TianGongCadSuite {
                 return;
             }
 
-            // 单值粘贴（例如复制了 1 个格，不管当前选中 1 格还是框选了多格，全部填入）
+            // 单值粘贴（例如复制了 1 个格，不管当前选中 1 格还是框选了多格，全部填入；必须跳过当前列视图下隐藏的列）
             if (clip.Count == 1 && clip[0].Length == 1) {
                 string val = clip[0][0];
                 var targets = new List<DataGridViewCell>();
@@ -2204,9 +2238,11 @@ namespace TianGongCadSuite {
                 bool touchedRename = false;
                 int written = 0;
                 foreach (var cell in targets) {
-                    if (cell.ReadOnly || cell.ColumnIndex == ColSel) continue;
+                    if (cell.OwningColumn == null || !cell.OwningColumn.Visible || cell.ReadOnly || cell.ColumnIndex == ColSel) continue;
                     var r = grid.Rows[cell.RowIndex].Tag as WorkbenchRow;
                     if (r == null) continue;
+                    if (cell.ColumnIndex == ColNewName && r.Rename.Locked.Length > 0) continue;
+                    if (IsPropertyColumn(cell.ColumnIndex) && !r.CanWriteProps && cell.ColumnIndex >= FixedColCount) continue;
                     if (cell.ColumnIndex == ColNewName) touchedRename = true;
                     ApplyCellText(r, cell.ColumnIndex, val);
                     written++;
@@ -2254,6 +2290,8 @@ namespace TianGongCadSuite {
                 for (int dc = 0; dc < rowVals.Length && startCol + dc < visCols.Count; dc++) {
                     var col = visCols[startCol + dc];
                     if (col.ReadOnly || col.Index == ColSel) continue;
+                    if (col.Index == ColNewName && r.Rename.Locked.Length > 0) continue;
+                    if (IsPropertyColumn(col.Index) && !r.CanWriteProps && col.Index >= FixedColCount) continue;
                     if (col.Index == ColNewName) blockTouchedRename = true;
                     ApplyCellText(r, col.Index, rowVals[dc]);
                     blockWritten++;
@@ -2270,12 +2308,13 @@ namespace TianGongCadSuite {
         }
 
         void FillDownSelectedCells() {
-            if (grid.SelectedCells.Count == 0) return;
+            if (busy || grid.SelectedCells.Count == 0) return;
             var byCol = new Dictionary<int, List<int>>();
             foreach (DataGridViewCell cell in grid.SelectedCells) {
                 if (cell.RowIndex < 0 || cell.ColumnIndex < 0) continue;
                 var col = grid.Columns[cell.ColumnIndex];
-                if (col.ReadOnly || cell.ColumnIndex == ColSeq) continue;
+                // 跨隐藏列拖选或 Ctrl+A 时跳过不可见列，防止静默篡改当前视图隐藏的新文件名 / 属性列
+                if (!col.Visible || col.ReadOnly || cell.ColumnIndex == ColSeq) continue;
                 List<int> list;
                 if (!byCol.TryGetValue(cell.ColumnIndex, out list)) { list = new List<int>(); byCol[cell.ColumnIndex] = list; }
                 if (!list.Contains(cell.RowIndex)) list.Add(cell.RowIndex);
@@ -2312,6 +2351,8 @@ namespace TianGongCadSuite {
                         dstRow.Bom.Selected = srcSel && !dstRow.IsDraftOnly;
                         filled++;
                     } else {
+                        if (colIdx == ColNewName && dstRow.Rename.Locked.Length > 0) continue;
+                        if (IsPropertyColumn(colIdx) && !dstRow.CanWriteProps && colIdx >= FixedColCount) continue;
                         if (colIdx == ColNewName) touchedRename = true;
                         ApplyCellText(dstRow, colIdx, srcText);
                         filled++;
@@ -2325,16 +2366,21 @@ namespace TianGongCadSuite {
         }
 
         void DeleteSelectedCells() {
-            if (grid.SelectedCells.Count == 0) return;
+            if (busy || grid.SelectedCells.Count == 0) return;
             PushUndo();
             bool touchedRename = false;
             int cleared = 0;
             foreach (DataGridViewCell cell in grid.SelectedCells) {
-                if (cell.ReadOnly || cell.ColumnIndex == ColSel) continue;
+                if (cell.OwningColumn == null || !cell.OwningColumn.Visible || cell.ReadOnly || cell.ColumnIndex == ColSel) continue;
                 var r = grid.Rows[cell.RowIndex].Tag as WorkbenchRow;
                 if (r == null) continue;
-                if (cell.ColumnIndex == ColNewName) { r.Rename.Revert(); touchedRename = true; cleared++; }
-                else { ApplyCellText(r, cell.ColumnIndex, ""); cleared++; }
+                if (cell.ColumnIndex == ColNewName) {
+                    if (r.Rename.Locked.Length > 0) continue;
+                    r.Rename.Revert(); touchedRename = true; cleared++;
+                } else {
+                    if (IsPropertyColumn(cell.ColumnIndex) && !r.CanWriteProps && cell.ColumnIndex >= FixedColCount) continue;
+                    ApplyCellText(r, cell.ColumnIndex, ""); cleared++;
+                }
             }
             if (cleared == 0) { PopUnusedUndo(); return; }
             if (touchedRename) ValidateRenames();
@@ -2342,14 +2388,17 @@ namespace TianGongCadSuite {
         }
 
         void FillSelectedCells(string text) {
+            if (busy) return;
             if (grid.SelectedCells.Count == 0) { SetStatus("请先在表格里选中要填入的单元格。", Ui.Muted); return; }
             PushUndo();
             bool touchedRename = false;
             int n = 0;
             foreach (DataGridViewCell cell in grid.SelectedCells) {
-                if (cell.ReadOnly || cell.ColumnIndex == ColSel) continue;
+                if (cell.OwningColumn == null || !cell.OwningColumn.Visible || cell.ReadOnly || cell.ColumnIndex == ColSel) continue;
                 var r = grid.Rows[cell.RowIndex].Tag as WorkbenchRow;
                 if (r == null) continue;
+                if (cell.ColumnIndex == ColNewName && r.Rename.Locked.Length > 0) continue;
+                if (IsPropertyColumn(cell.ColumnIndex) && !r.CanWriteProps && cell.ColumnIndex >= FixedColCount) continue;
                 if (cell.ColumnIndex == ColNewName) touchedRename = true;
                 ApplyCellText(r, cell.ColumnIndex, text);
                 n++;
@@ -2365,12 +2414,14 @@ namespace TianGongCadSuite {
         }
 
         void SetVisibleSelected(bool sel) {
+            if (busy) return;
             PushUndo();
             foreach (var r in visibleRows) r.Bom.Selected = sel && !r.IsDraftOnly;
             RefreshAllVisibleRowsInPlace();
         }
 
         void SetPickedRowsSelected(bool sel) {
+            if (busy) return;
             var picked = CollectPickedRows();
             if (picked.Count == 0) return;
             PushUndo();
@@ -2394,6 +2445,7 @@ namespace TianGongCadSuite {
         }
 
         void TogglePickedRowsSelected() {
+            if (busy) return;
             var picked = CollectPickedRows().Where(r => !r.IsDraftOnly).ToList();
             if (picked.Count == 0) return;
             bool nextSel = picked.Any(r => !r.Bom.Selected);
@@ -2404,6 +2456,7 @@ namespace TianGongCadSuite {
         }
 
         void InvertVisibleSelected() {
+            if (busy) return;
             PushUndo();
             foreach (var r in visibleRows) {
                 if (!r.IsDraftOnly) r.Bom.Selected = !r.Bom.Selected;
@@ -2413,6 +2466,7 @@ namespace TianGongCadSuite {
         }
 
         void SelectMissingDraftOnly() {
+            if (busy) return;
             PushUndo();
             int n = 0;
             foreach (var r in visibleRows) {
@@ -2500,6 +2554,7 @@ namespace TianGongCadSuite {
             preview.Hold(true);
             try {
                 app.Documents.Open(path);
+                propCad.InvalidateOpenCache();
                 SetStatus("已在天工中打开：" + Path.GetFileName(path), Ui.Ok);
             } catch (Exception ex) {
                 Log.Write("WorkbenchOpenInCad", ex);
@@ -2534,10 +2589,9 @@ namespace TianGongCadSuite {
                 if (ask != DialogResult.Yes) return;
             }
 
-            BeginBusy("补出工程图");
+            BeginBusy("补出工程图", true);
             stopRequested = false;
             runBtn.Text = "停止";
-            runBtn.Enabled = true;
             progress.Visible = true;
             progress.Maximum = todo.Count;
             progress.Value = 0;
@@ -2694,6 +2748,7 @@ namespace TianGongCadSuite {
         }
 
         void RevertAllEdits() {
+            if (busy) return;
             int ren = rows.Count(r => r.RenameChanged);
             int prop = rows.Count(r => r.PropDirty);
             if (ren == 0 && prop == 0) { SetStatus("没有待撤销的改名或属性修改。", Ui.Muted); return; }
@@ -2706,6 +2761,7 @@ namespace TianGongCadSuite {
         }
 
         void RemoveSelectedRows() {
+            if (busy) return;
             var toRemove = new HashSet<WorkbenchRow>();
             foreach (DataGridViewCell c in grid.SelectedCells) {
                 var r = grid.Rows[c.RowIndex].Tag as WorkbenchRow;
@@ -2732,18 +2788,62 @@ namespace TianGongCadSuite {
         // ---- 自定义属性列 & 模板设置 ----
 
         void EditPropColumns() {
+            if (busy) return;
             string text = Ui.Prompt(this, "属性卡列设置", "要显示和写入的自定义属性名，用顿号或逗号隔开（留空恢复默认）", PropCardFields.Join(propFields));
             if (text == null) return;
             var next = PropCardFields.Parse(text);
             next = next.Count > 0 ? next : new List<string>(PropCardFields.Default);
+
+            // 检查被移除的扩展属性列上是否有未落盘的编辑：先确认再清理，避免残留不可见的脏标记与隐形写入
+            var nextExtras = new HashSet<string>(WorkbenchRules.ExtraPropFields(next), StringComparer.Ordinal);
+            var lostPerRow = new List<KeyValuePair<WorkbenchRow, List<string>>>();
+            int lostCells = 0;
+            foreach (var r in rows) {
+                var keptKeys = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var cf in WorkbenchRules.CoreSharedPropFields) keptKeys.Add(r.PropKeyFor(cf));
+                foreach (var ef in nextExtras) keptKeys.Add(r.PropKeyFor(ef));
+                List<string> dropped = null;
+                foreach (var k in r.Prop.Edited.Keys) {
+                    if (!keptKeys.Contains(k)) {
+                        if (dropped == null) dropped = new List<string>();
+                        dropped.Add(k);
+                        lostCells++;
+                    }
+                }
+                if (dropped != null) lostPerRow.Add(new KeyValuePair<WorkbenchRow, List<string>>(r, dropped));
+            }
+            if (lostCells > 0) {
+                if (MessageBox.Show(this, "去掉的属性列里有 " + lostCells + " 个格子改过还没写入，去掉列将丢掉这些修改。继续吗？", Title, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+                PushUndo();
+                foreach (var pair in lostPerRow) {
+                    foreach (var k in pair.Value) pair.Key.Prop.Edited.Remove(k);
+                }
+            }
+
             propFields = next;
             try { PropCardFields.Save(SettingsFile.PathOf(PropCardFields.FileName), propFields); } catch (Exception e) { Log.Write("PropCardFieldsSave", e); }
             RebuildGridColumns();
+
+            // 同步清理已不存在列对应的筛选与排序键，避免删列后残留无法清除的隐形筛选
+            var validColKeys = new HashSet<string>(StringComparer.Ordinal);
+            foreach (DataGridViewColumn col in grid.Columns) {
+                string ck = col.Tag as string;
+                if (!string.IsNullOrEmpty(ck)) validColKeys.Add(ck);
+            }
+            foreach (var fk in columnFilters.Keys.ToList()) {
+                if (!validColKeys.Contains(fk)) columnFilters.Remove(fk);
+            }
+            if (sortColKey.Length > 0 && !validColKeys.Contains(sortColKey)) {
+                sortColKey = "";
+                sortDir = 0;
+            }
+
             RebuildGrid();
             SetStatus("已更新属性卡列配置。", Ui.Muted);
         }
 
         void EditTemplates() {
+            if (busy) return;
             using (var dlg = new Form()) {
                 Ui.Shell(dlg, "自定义 Excel 清单模板", 640, 270, 540, 240);
                 dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -2798,10 +2898,17 @@ namespace TianGongCadSuite {
             var changed = batch.Where(r => r.Changed).ToList();
             if (changed.Count == 0) return true;
 
+            // 用反射统一检查原位编辑状态，兼容 PartDocument / SheetMetalDocument / AssemblyDocument
             try {
-                var ip = app == null ? null : app.ActiveDocument as SolidEdgePart.PartDocument;
-                if (ip != null && ip.InPlaceActivated) {
-                    MessageBox.Show(this, "天工正在原位编辑「" + ip.Name + "」，请先退出原位编辑（回到顶层装配）再改名。", Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                object activeDoc = app == null ? null : app.ActiveDocument;
+                bool ipa = false;
+                if (activeDoc != null) {
+                    try { ipa = Convert.ToBoolean(activeDoc.GetType().InvokeMember("InPlaceActivated", System.Reflection.BindingFlags.GetProperty, null, activeDoc, null)); } catch { }
+                }
+                if (ipa) {
+                    string name = "";
+                    try { name = Convert.ToString(activeDoc.GetType().InvokeMember("Name", System.Reflection.BindingFlags.GetProperty, null, activeDoc, null)); } catch { }
+                    MessageBox.Show(this, "天工正在原位编辑「" + name + "」，请先退出原位编辑（回到顶层装配）再改名。", Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return false;
                 }
             } catch { }
@@ -2830,6 +2937,11 @@ namespace TianGongCadSuite {
                 lastPreviewPath = "";
                 preview.Renamed(moved);
                 propCad.RefreshActiveContext();
+                try {
+                    object curDoc = app == null ? null : app.ActiveDocument;
+                    string curPath = curDoc == null ? "" : Convert.ToString(curDoc.GetType().InvokeMember("FullName", System.Reflection.BindingFlags.GetProperty, null, curDoc, null));
+                    if (!string.IsNullOrEmpty(curPath)) renameCad.SetRootPath(curPath);
+                } catch { }
                 ValidateRenames();
                 RebuildGrid();
                 SetStatus(res.Summary(), Ui.Ok);
@@ -2961,10 +3073,9 @@ namespace TianGongCadSuite {
 
             var selectedItems = bomItems.Where(i => i.Selected).ToList();
             SaveRememberedDefaults();
-            BeginBusy("导出加工件清单");
+            BeginBusy("导出加工件清单", true);
             stopRequested = false;
             runBtn.Text = "停止";
-            runBtn.Enabled = true;
             progress.Visible = true;
             progress.Maximum = Math.Max(1, selectedItems.Count);
             progress.Value = 0;
@@ -3004,7 +3115,7 @@ namespace TianGongCadSuite {
         void OpenOutputFolder() {
             string dir = !string.IsNullOrEmpty(lastExportedDir) && Directory.Exists(lastExportedDir) ? lastExportedDir : tbOutput.Text.Trim();
             if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return;
-            try { Process.Start("explorer.exe", dir); } catch { }
+            try { Process.Start("explorer.exe", "\"" + dir + "\""); } catch { }
         }
 
         bool ConfirmDiscard() {
@@ -3015,10 +3126,29 @@ namespace TianGongCadSuite {
                 Title, MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
         }
 
-        void BeginBusy(string what) {
+        void SetInteractiveEnabled(bool enabled) {
+            // 忙态期间禁用周边按钮/侧栏/抽屉，彻底杜绝 Application.DoEvents() 重入中途篡改行列表或列结构；
+            // 注意不可切 grid.ReadOnly（WinForms 置回 false 会清掉只读列的列级 ReadOnly），表格写操作由 CellBeginEdit / OnGridKeyDown / 全部编辑入口的 busy 守卫拦截。
+            if (topDrawer != null) topDrawer.Enabled = enabled;
+            if (toolbarPanel != null) toolbarPanel.Enabled = enabled;
+            if (railTopPanel != null) railTopPanel.Enabled = enabled;
+            if (railFootPanel != null) railFootPanel.Enabled = enabled;
+            if (shell != null && shell.Rail != null) shell.Rail.Enabled = enabled;
+            if (headerActionButtons != null) {
+                for (int i = 0; i < headerActionButtons.Length; i++) {
+                    if (headerActionButtons[i] != null) headerActionButtons[i].Enabled = enabled;
+                }
+            }
+            if (openOutBtn != null) openOutBtn.Enabled = enabled && !string.IsNullOrEmpty(lastExportedDir) && Directory.Exists(lastExportedDir);
+        }
+
+        void BeginBusy(string what, bool allowStop = false) {
+            if (grid.IsCurrentCellInEditMode) { try { grid.EndEdit(); } catch { } }
             busy = true;
+            canStopBusy = allowStop;
             busyWhat = what ?? "处理中";
             stopRequested = false;
+            SetInteractiveEnabled(false);
             preview.Hold(true);
             Cursor = Cursors.WaitCursor;
             UpdateActionButtons();
@@ -3026,6 +3156,8 @@ namespace TianGongCadSuite {
 
         void EndBusy() {
             busy = false;
+            canStopBusy = false;
+            SetInteractiveEnabled(true);
             Cursor = Cursors.Default;
             preview.Hold(false);
             UpdateActionButtons();

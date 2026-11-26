@@ -46,20 +46,31 @@ namespace TianGongCadSuite {
             using (var dstMs = new MemoryStream()) {
                 // 1. 读 sharedStrings（保留模板原有的表头文字与下标）
                 var sst = ReadSharedStrings(zin);
-                // 2. 读 sheet1.xml、workbook.xml、drawing1.xml、drawing1.xml.rels
+                // 2. 读 sheet1.xml、workbook.xml、drawing1.xml、drawing1.xml.rels，以及可能含 calcChain 引用的打包元数据
                 string sheetXml = ReadEntryText(zin, "xl/worksheets/sheet1.xml");
                 string wbXml = ReadEntryText(zin, "xl/workbook.xml");
                 string drawXml = ReadEntryText(zin, "xl/drawings/drawing1.xml");
                 string drawRelsXml = ReadEntryText(zin, "xl/drawings/_rels/drawing1.xml.rels");
+                bool hadCalcChain = FindEntry(zin, "xl/calcChain.xml") != null;
+                string contentTypesXml = ReadEntryText(zin, "[Content_Types].xml");
+                string wbRelsXml = hadCalcChain ? ReadEntryText(zin, "xl/_rels/workbook.xml.rels") : "";
+
+                var existingEntries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var en in zin.Entries) existingEntries.Add(en.FullName.Replace('\\', '/'));
 
                 var thumbEntries = new List<KeyValuePair<string, byte[]>>();
                 int lastRow;
                 sheetXml = PopulateProcessingSheet(sheetXml, sst, header, items, withThumbs, out lastRow);
                 wbXml = UpdateWorkbookPrintArea(wbXml, lastRow, withThumbs);
 
+                bool thumbsAdded = false;
                 if (withThumbs && !string.IsNullOrEmpty(drawXml) && !string.IsNullOrEmpty(drawRelsXml)) {
-                    AppendThumbnails(ref drawXml, ref drawRelsXml, items, thumbEntries);
+                    AppendThumbnails(ref drawXml, ref drawRelsXml, items, thumbEntries, existingEntries);
+                    thumbsAdded = thumbEntries.Count > 0;
                 }
+                bool updateContentTypes = (hadCalcChain || thumbsAdded) && !string.IsNullOrEmpty(contentTypesXml);
+                if (updateContentTypes) contentTypesXml = UpdateContentTypesXml(contentTypesXml, hadCalcChain, thumbsAdded);
+                if (hadCalcChain && !string.IsNullOrEmpty(wbRelsXml)) wbRelsXml = StripCalcChainRel(wbRelsXml);
 
                 // 3. 写出新 zip（保留全部原样部件如 styles / theme / image1 / image2，替换修改过的 XML）
                 using (var zout = new ZipArchive(dstMs, ZipArchiveMode.Create, true)) {
@@ -74,9 +85,13 @@ namespace TianGongCadSuite {
                             WriteEntryText(zout, name, BuildSharedStringsXml(sst));
                         } else if (string.Equals(name, "xl/workbook.xml", StringComparison.OrdinalIgnoreCase)) {
                             WriteEntryText(zout, name, wbXml);
-                        } else if (withThumbs && string.Equals(name, "xl/drawings/drawing1.xml", StringComparison.OrdinalIgnoreCase)) {
+                        } else if (updateContentTypes && string.Equals(name, "[Content_Types].xml", StringComparison.OrdinalIgnoreCase)) {
+                            WriteEntryText(zout, name, contentTypesXml);
+                        } else if (hadCalcChain && !string.IsNullOrEmpty(wbRelsXml) && string.Equals(name, "xl/_rels/workbook.xml.rels", StringComparison.OrdinalIgnoreCase)) {
+                            WriteEntryText(zout, name, wbRelsXml);
+                        } else if (thumbsAdded && string.Equals(name, "xl/drawings/drawing1.xml", StringComparison.OrdinalIgnoreCase)) {
                             WriteEntryText(zout, name, drawXml);
-                        } else if (withThumbs && string.Equals(name, "xl/drawings/_rels/drawing1.xml.rels", StringComparison.OrdinalIgnoreCase)) {
+                        } else if (thumbsAdded && string.Equals(name, "xl/drawings/_rels/drawing1.xml.rels", StringComparison.OrdinalIgnoreCase)) {
                             WriteEntryText(zout, name, drawRelsXml);
                         } else {
                             CopyEntry(entry, zout, name);
@@ -105,6 +120,11 @@ namespace TianGongCadSuite {
                 var sst = ReadSharedStrings(zin);
                 var matMap = ReadLookupSheet(zin, "xl/worksheets/sheet3.xml", sst);
                 var surfMap = ReadLookupSheet(zin, "xl/worksheets/sheet4.xml", sst);
+                bool hadCalcChain = FindEntry(zin, "xl/calcChain.xml") != null;
+                string contentTypesXml = hadCalcChain ? ReadEntryText(zin, "[Content_Types].xml") : "";
+                string wbRelsXml = hadCalcChain ? ReadEntryText(zin, "xl/_rels/workbook.xml.rels") : "";
+                if (hadCalcChain && !string.IsNullOrEmpty(contentTypesXml)) contentTypesXml = UpdateContentTypesXml(contentTypesXml, true, false);
+                if (hadCalcChain && !string.IsNullOrEmpty(wbRelsXml)) wbRelsXml = StripCalcChainRel(wbRelsXml);
 
                 string sheetXml = ReadEntryText(zin, "xl/worksheets/sheet1.xml");
                 sheetXml = PopulateCodeRequestSheet(sheetXml, sst, items, matMap, surfMap);
@@ -119,6 +139,10 @@ namespace TianGongCadSuite {
                             WriteEntryText(zout, name, sheetXml);
                         } else if (string.Equals(name, "xl/sharedStrings.xml", StringComparison.OrdinalIgnoreCase)) {
                             WriteEntryText(zout, name, BuildSharedStringsXml(sst));
+                        } else if (hadCalcChain && !string.IsNullOrEmpty(contentTypesXml) && string.Equals(name, "[Content_Types].xml", StringComparison.OrdinalIgnoreCase)) {
+                            WriteEntryText(zout, name, contentTypesXml);
+                        } else if (hadCalcChain && !string.IsNullOrEmpty(wbRelsXml) && string.Equals(name, "xl/_rels/workbook.xml.rels", StringComparison.OrdinalIgnoreCase)) {
+                            WriteEntryText(zout, name, wbRelsXml);
                         } else {
                             CopyEntry(entry, zout, name);
                         }
@@ -296,19 +320,43 @@ namespace TianGongCadSuite {
                 m => m.Groups[1].Value + target + m.Groups[2].Value, RegexOptions.Singleline);
         }
 
-        static void AppendThumbnails(ref string drawXml, ref string drawRelsXml, IList<BomItem> items, List<KeyValuePair<string, byte[]>> thumbEntries) {
+        static void AppendThumbnails(ref string drawXml, ref string drawRelsXml, IList<BomItem> items,
+            List<KeyValuePair<string, byte[]>> thumbEntries, HashSet<string> existingEntries) {
             var dDoc = new XmlDocument { PreserveWhitespace = false };
             dDoc.LoadXml(drawXml);
             var rDoc = new XmlDocument { PreserveWhitespace = false };
             rDoc.LoadXml(drawRelsXml);
 
+            // 扫描自定义模板里已有的 cNvPr id 与 Relationship Id，避免重号导致 Excel 打开报修复弹窗
             int nextPicId = 2000;
+            foreach (XmlNode n in dDoc.GetElementsByTagName("cNvPr", NsXdr)) {
+                int id;
+                if (int.TryParse(Attr(n, "id"), out id) && id >= nextPicId) nextPicId = id + 1;
+            }
+            var usedRids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (XmlNode n in rDoc.DocumentElement.ChildNodes) {
+                string id = Attr(n, "Id");
+                if (id.Length > 0) usedRids.Add(id);
+            }
+
             for (int i = 0; i < items.Count; i++) {
                 var png = items[i].ThumbnailPng;
                 if (png == null || png.Length == 0) continue;
                 int row0 = 4 + i; // 0-based row (Excel row 5 = 4)
-                string rid = "rIdThumb" + (i + 1).ToString(CultureInfo.InvariantCulture);
-                string mediaName = "thumb_" + (i + 1).ToString(CultureInfo.InvariantCulture) + ".png";
+
+                int ridSeq = i + 1;
+                string rid = "rIdThumb" + ridSeq.ToString(CultureInfo.InvariantCulture);
+                while (!usedRids.Add(rid)) {
+                    ridSeq++;
+                    rid = "rIdThumb" + ridSeq.ToString(CultureInfo.InvariantCulture);
+                }
+
+                int mediaSeq = i + 1;
+                string mediaName = "thumb_" + mediaSeq.ToString(CultureInfo.InvariantCulture) + ".png";
+                while (existingEntries != null && !existingEntries.Add("xl/media/" + mediaName)) {
+                    mediaSeq++;
+                    mediaName = "thumb_" + mediaSeq.ToString(CultureInfo.InvariantCulture) + ".png";
+                }
                 thumbEntries.Add(new KeyValuePair<string, byte[]>("xl/media/" + mediaName, png));
 
                 // drawing1.xml.rels
@@ -378,6 +426,50 @@ namespace TianGongCadSuite {
             var el = doc.CreateElement("xdr", localName, NsXdr);
             el.InnerText = text;
             parent.AppendChild(el);
+        }
+
+        // 同步维护 [Content_Types].xml：删掉被移除的 /xl/calcChain.xml Override，并在嵌入 PNG 缩略图时确保存在 png Default 声明
+        static string UpdateContentTypesXml(string xml, bool removeCalcChain, bool ensurePng) {
+            var doc = new XmlDocument { PreserveWhitespace = false };
+            doc.LoadXml(xml);
+            string ns = doc.DocumentElement != null ? doc.DocumentElement.NamespaceURI : "";
+            var toRemove = new List<XmlNode>();
+            bool hasPng = false;
+            foreach (XmlNode n in doc.DocumentElement.ChildNodes) {
+                if (removeCalcChain && string.Equals(n.LocalName, "Override", StringComparison.Ordinal)
+                    && string.Equals(Attr(n, "PartName"), "/xl/calcChain.xml", StringComparison.OrdinalIgnoreCase)) {
+                    toRemove.Add(n);
+                } else if (ensurePng && string.Equals(n.LocalName, "Default", StringComparison.Ordinal)
+                    && string.Equals(Attr(n, "Extension"), "png", StringComparison.OrdinalIgnoreCase)) {
+                    hasPng = true;
+                }
+            }
+            for (int i = 0; i < toRemove.Count; i++) doc.DocumentElement.RemoveChild(toRemove[i]);
+            if (ensurePng && !hasPng) {
+                var def = doc.CreateElement("Default", ns);
+                def.SetAttribute("Extension", "png");
+                def.SetAttribute("ContentType", "image/png");
+                doc.DocumentElement.PrependChild(def);
+            }
+            return SerializeXml(doc);
+        }
+
+        // 同步清理 xl/_rels/workbook.xml.rels 中指向 calcChain.xml 的悬空关系，避免自定义 Excel 模板打开时弹损坏修复框
+        static string StripCalcChainRel(string xml) {
+            var doc = new XmlDocument { PreserveWhitespace = false };
+            doc.LoadXml(xml);
+            var toRemove = new List<XmlNode>();
+            foreach (XmlNode n in doc.DocumentElement.ChildNodes) {
+                if (!string.Equals(n.LocalName, "Relationship", StringComparison.Ordinal)) continue;
+                string target = Attr(n, "Target");
+                string type = Attr(n, "Type");
+                if (target.EndsWith("calcChain.xml", StringComparison.OrdinalIgnoreCase)
+                    || type.EndsWith("/calcChain", StringComparison.OrdinalIgnoreCase)) {
+                    toRemove.Add(n);
+                }
+            }
+            for (int i = 0; i < toRemove.Count; i++) doc.DocumentElement.RemoveChild(toRemove[i]);
+            return SerializeXml(doc);
         }
 
         // ---- 编码申请表 XML 填充 ----

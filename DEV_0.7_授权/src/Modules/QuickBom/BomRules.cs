@@ -196,13 +196,9 @@ namespace TianGongCadSuite {
                 reason = "外购件 / 标准件";
                 return false;
             }
-            if (StdPartWords.IsMatch(name)) {
-                reason = "外购件 / 标准件";
-                return false;
-            }
-            // 有同名工程图的一律默认是待出清单的加工件
+            // 有同名工程图的一律默认是待出清单的加工件（放在外购词正则之前，避免「气缸支架 / 电机安装板 / 轴承座 / 传感器支架 / 调整垫片」等自制件误判为外购件）
             if (hasDraft) return true;
-            // 有公司图号（如 SK26.01-SD-15-009）默认视为加工件
+            // 有公司图号（如 SK26.01-SD-15-009 气缸支架）默认视为加工件
             string p = ExtractProjectCode(name);
             if (HasCompanyDrawingNumber(name)) {
                 if (!string.IsNullOrEmpty(topProject) && !string.Equals(p, topProject, StringComparison.OrdinalIgnoreCase)) {
@@ -211,12 +207,56 @@ namespace TianGongCadSuite {
                 }
                 return true;
             }
+            if (StdPartWords.IsMatch(name)) {
+                reason = "外购件 / 标准件";
+                return false;
+            }
             if (!string.IsNullOrEmpty(topProject) && p.Length == 0) {
                 reason = "非公司图号";
                 return false;
             }
             reason = "未配对工程图且非标准图号";
             return false;
+        }
+
+        // 从装配直接子项映射（父装配路径 -> 直接可见子实例路径列表，含同层重复实例）按 DAG 递归累乘全树真实总数量。
+        // 例：总装含 4 个子装配 A，每个 A 含 2 个零件 P → P 的总数量 = 4 × 2 = 8。
+        // 同层先汇总局部计数再递归，并用路径 visiting 集防异常循环引用，既保持每个子装配只做一次 COM 遍历又保证数量准确。
+        internal static Dictionary<string, int> ComputeAssemblyCounts(string rootPath, IDictionary<string, List<string>> childrenOf) {
+            var total = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            if (string.IsNullOrEmpty(rootPath) || childrenOf == null) return total;
+            AccumulateAssemblyCounts(rootPath, 1, childrenOf, total, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+            return total;
+        }
+
+        static void AccumulateAssemblyCounts(string asmPath, int multiplier, IDictionary<string, List<string>> childrenOf,
+            Dictionary<string, int> total, HashSet<string> visiting) {
+            if (multiplier <= 0 || !visiting.Add(asmPath)) return;
+            try {
+                List<string> kids;
+                if (!childrenOf.TryGetValue(asmPath, out kids) || kids == null || kids.Count == 0) return;
+                var local = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                for (int i = 0; i < kids.Count; i++) {
+                    string k = kids[i];
+                    if (string.IsNullOrEmpty(k)) continue;
+                    int c;
+                    local.TryGetValue(k, out c);
+                    local[k] = c + 1;
+                }
+                foreach (var kv in local) {
+                    long prod = (long)multiplier * kv.Value;
+                    int added = prod > int.MaxValue ? int.MaxValue : (int)prod;
+                    int prev;
+                    total.TryGetValue(kv.Key, out prev);
+                    long sum = (long)prev + added;
+                    total[kv.Key] = sum > int.MaxValue ? int.MaxValue : (int)sum;
+                    if (childrenOf.ContainsKey(kv.Key)) {
+                        AccumulateAssemblyCounts(kv.Key, added, childrenOf, total, visiting);
+                    }
+                }
+            } finally {
+                visiting.Remove(asmPath);
+            }
         }
 
         public static string PairDraftPath(string modelPath) {

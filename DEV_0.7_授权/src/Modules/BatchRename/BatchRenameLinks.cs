@@ -109,8 +109,16 @@ namespace TianGongCadSuite {
             foreach (var p in parents) {
                 if (!p.Saved) continue;
                 try {
-                    foreach (var e in p.Edits) e.Child.SetPath(e.OldPath);
+                    // 校验每条 SetPath 的返回码（与 Apply 一致），单条失败仍尽力退完该父文件其余链接再判失败，绝不假报成功
+                    string firstErr = null;
+                    foreach (var e in p.Edits) {
+                        int rc = e.Child.SetPath(e.OldPath);
+                        if (rc != 0 && firstErr == null) {
+                            firstErr = "退回链接 " + System.IO.Path.GetFileName(e.OldPath) + " 失败（返回 " + rc + "）";
+                        }
+                    }
                     Check(p.Doc.SaveAllLinks(), "保存");
+                    if (firstErr != null) throw new InvalidOperationException(firstErr);
                     p.Saved = false;
                 } catch (Exception ex) { failed.Add(p.Path); Log.Write("RenameRevert " + p.Path, ex); }
             }

@@ -26,10 +26,12 @@ namespace TianGongCadSuite {
         public const string SaveHint = "提示：已写进 CAD 里打开着的文件，请在 CAD 里保存";
         readonly F.Application app;
         object root;   // 收集时的当前文档（装配 / 工程图 / 零件），写入时用来找已加载的文档
-        Dictionary<string, object> opened;   // 文件路径 → CAD 里打开着的文档（Documents，通常就几个）；第一次写时建
+        Dictionary<string, object> opened;   // 文件路径 → CAD 里打开着的文档（Documents + 工程图 ModelLinks）；每次写会话重建
         // 文件路径 → 装配里引用它的第一个实例。收集时顺手记下（只读文件名，便宜）；
         // 写到哪个文件才取它的 OccurrenceDocument —— 一次把全部实例的文档取一遍，105 个零件的装配要 9 秒（真机）
         readonly Dictionary<string, A.Occurrence> occurrences = new Dictionary<string, A.Occurrence>(StringComparer.OrdinalIgnoreCase);
+        // 扫描 CAD 里所有已打开装配/装配图间接加载着的实例（弥补「扫描文件夹 / 添加文件」时 root 为空导致误写磁盘）
+        Dictionary<string, A.Occurrence> openAsmOccurrences;
 
         public PropCardCad(F.Application application){ app = application; }
 
@@ -47,6 +49,7 @@ namespace TianGongCadSuite {
             root = doc;
             rootPath = doc == null ? "" : FullName(doc);
             opened = null;
+            openAsmOccurrences = null;
             occurrences.Clear(); skippedSubs.Clear();
             if (doc == null) return list;
             var assembly = doc as A.AssemblyDocument;
@@ -101,9 +104,11 @@ namespace TianGongCadSuite {
         // 死了的话记下的"哪些文件在内存里"全作废，写入会退回写磁盘 —— 而这些文件现在又被新打开的装配加载着，
         // 正是 0.8.1 的「加载后已被其他用户修改」对话框。没有收集过文档（只「添加文件」）算活着
         string rootPath = "";
-        // 写之前调：文档死了但用户又把同一个文件打开着（关掉重开过）→ 按新打开的那份重新记一遍"哪些文件在内存里"，表里的修改不动；
+        // 写之前调：每次写会话都先失效已打开文档缓存（防止窗口开着期间用户新打开/重开了文件导致漏判）；
+        // 文档死了但用户又把同一个文件打开着（关掉重开过）→ 按新打开的那份重新记一遍"哪些文件在内存里"，表里的修改不动；
         // 当前文档换成了别的文件 → 返回 false，让用户先切回去
         public bool Rebind(){
+            InvalidateOpenCache();
             if (RootAlive()) return true;
             object doc = null;
             try { doc = app.ActiveDocument; } catch { }
@@ -111,6 +116,10 @@ namespace TianGongCadSuite {
             string ignored;
             Collect(out ignored);
             return true;
+        }
+        public void InvalidateOpenCache(){
+            opened = null;
+            openAsmOccurrences = null;
         }
         public string RootName { get { return Path.GetFileName(rootPath); } }
         public bool RootAlive(){
@@ -123,6 +132,7 @@ namespace TianGongCadSuite {
             root = null;
             rootPath = "";
             opened = null;
+            openAsmOccurrences = null;
             occurrences.Clear();
             skippedSubs.Clear();
         }
@@ -150,6 +160,11 @@ namespace TianGongCadSuite {
 
         public PropCardRow Read(string path){
             var row = new PropCardRow { Path = path };
+            // 已直接打开在 CAD 顶层文档列表（或工程图 ModelLinks）里的文件优先读内存那份，避免读到未 Ctrl+S 存盘的旧磁盘值；
+            // 装配子件不提前取 OccurrenceDocument（105 个零件会耗 9 秒），仅在磁盘属性组件读不了时再退回内存文档。
+            object topDoc = FindDirectOpenedDocument(path);
+            if (topDoc != null && TryReadDocIntoRow(topDoc, row)) return row;
+
             object sets = null;
             try {
                 sets = NewFileProperties();
@@ -161,7 +176,7 @@ namespace TianGongCadSuite {
                     try { row.Material = Convert.ToString(Late.Get(Late.Get(Late.Get(sets, "Item", "MechanicalModeling"), "Item", "材料"), "Value")); } catch { }
                 }
             } catch (Exception e) {
-                // 读不了文件（打开着的加密文件就读不了）：退回已打开的文档
+                // 读不了文件（打开着的加密文件就读不了）：退回已打开的文档（含 Custom 与 Material）
                 var doc = LoadedDocument(path);
                 // 原来显示"读不了：调用的目标发生了异常"（后期绑定的外层异常），10-23 现场 3 个文件其实是装配引用的文件已经不在了（STG_E_FILENOTFOUND）
                 if (doc == null) {
@@ -171,12 +186,32 @@ namespace TianGongCadSuite {
                 }
                 else {
                     try {
-                        var custom = DocCustom(doc);
-                        foreach (var pair in DocNames(custom)) row.Original[pair.Key] = Convert.ToString(custom.Item(pair.Value).get_Value());
+                        ReadDocIntoRow(doc, row);
                     } catch (Exception e2) { row.Problem = "读不了：" + e2.Message; Log.Write("PropCardReadDoc " + path, e2); }
                 }
             } finally { Close(sets); }
             return row;
+        }
+
+        bool TryReadDocIntoRow(object doc, PropCardRow row){
+            try {
+                ReadDocIntoRow(doc, row);
+                return true;
+            } catch {
+                row.Original.Clear();
+                row.Material = "";
+                return false;
+            }
+        }
+
+        void ReadDocIntoRow(object doc, PropCardRow row){
+            Attempt("读内存文档属性", () => {
+                row.Original.Clear();
+                var custom = DocCustom(doc);
+                foreach (var pair in DocNames(custom)) row.Original[pair.Key] = Convert.ToString(custom.Item(pair.Value).get_Value());
+                row.Material = DocMaterial(doc);
+                return true;
+            });
         }
 
         // 下标起点写死，绝不"试一下"：属性组件的集合从 0 数；文档的 Properties 从 1 数，
@@ -208,9 +243,14 @@ namespace TianGongCadSuite {
             if (writes.Count == 0) return "";
             object doc = LoadedDocument(row.Path);
             if (doc != null) {
-                try { PutDoc(DocCustom(doc), writes, row.Edited); return SaveHint; }
-                // 内存那份写不进（比如只读打开）：退回写磁盘，磁盘上的才算数
-                catch (Exception e) { Log.Write("PropCardWriteDoc " + row.Path, e); }
+                try {
+                    Attempt("写内存文档属性", () => { PutDoc(DocCustom(doc), writes, row.Edited); return true; });
+                    return SaveHint;
+                } catch (Exception e) {
+                    // 文件已在 CAD 内存里加载：写内存失败时绝不穿透写磁盘，否则会触发天工「加载后已被其他用户修改」弹窗或造成磁盘与内存撕裂
+                    Log.Write("PropCardWriteDoc " + row.Path, e);
+                    return "文件已在天工中打开，写不进内存文档（未改写磁盘以免冲突）：" + Message(e);
+                }
             }
             object sets = null;
             try {
@@ -260,34 +300,137 @@ namespace TianGongCadSuite {
             return ((F.PropertySets)sets).Item("Custom");
         }
 
-        // 文件在不在 CAD 内存里：打开着的文档、当前工程图引用的模型、当前装配里引用它的实例
+        // 从内存文档安全读取材料（1-based 枚举，避免按名取不存在属性导致原生异常）
+        static string DocMaterial(object doc){
+            try {
+                var sets = (F.PropertySets)doc.GetType().InvokeMember("Properties", BindingFlags.GetProperty, null, doc, null);
+                for (int s = 1; s <= sets.Count; s++) {
+                    var set = sets.Item(s);
+                    string sname = ""; try { sname = set.Name; } catch { }
+                    if (!string.Equals(sname, "MechanicalModeling", StringComparison.OrdinalIgnoreCase)) continue;
+                    for (int j = 1; j <= set.Count; j++) {
+                        try {
+                            var p = set.Item(j);
+                            if (string.Equals(p.Name, "Material", StringComparison.OrdinalIgnoreCase)
+                                || string.Equals(p.Name, "材料", StringComparison.Ordinal)) {
+                                string v = (Convert.ToString(p.get_Value()) ?? "").Trim();
+                                if (v.Length > 0) return v;
+                            }
+                        } catch { }
+                    }
+                }
+            } catch { }
+            return "";
+        }
+
+        void EnsureOpenedIndex(){
+            if (opened != null) return;
+            opened = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            if (app == null) return;
+            try {
+                var docs = app.Documents;
+                for (int i = 1; i <= docs.Count; i++) {
+                    object d = docs.Item(i);
+                    Remember(FullName(d), d);
+                    var dft = d as SolidEdgeDraft.DraftDocument;
+                    if (dft != null) RememberDraftLinks(dft);
+                }
+            } catch (Exception e) { Log.Write("PropCardDocs", e); }
+            if (root is SolidEdgeDraft.DraftDocument) RememberDraftLinks((SolidEdgeDraft.DraftDocument)root);
+        }
+
+        void RememberDraftLinks(SolidEdgeDraft.DraftDocument dft){
+            try {
+                var links = dft.ModelLinks;
+                for (int i = 1; i <= links.Count; i++) {
+                    var link = links.Item(i);
+                    try { Remember(link.FileName, link.ModelDocument); } catch (Exception e) { Log.Write("PropCardModelLink", e); }
+                }
+            } catch (Exception e) { Log.Write("PropCardModelLinks", e); }
+        }
+
+        void EnsureOpenAsmOccurrences(){
+            if (openAsmOccurrences != null) return;
+            openAsmOccurrences = new Dictionary<string, A.Occurrence>(StringComparer.OrdinalIgnoreCase);
+            EnsureOpenedIndex();
+            var seenAsms = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var kv in opened) {
+                var asm = kv.Value as A.AssemblyDocument;
+                if (asm != null && seenAsms.Add(kv.Key)) WalkOpenOccurrences(asm, openAsmOccurrences, seenAsms);
+            }
+        }
+
+        void WalkOpenOccurrences(A.AssemblyDocument asm, Dictionary<string, A.Occurrence> target, HashSet<string> seenAsms){
+            try {
+                foreach (A.Occurrence o in asm.Occurrences) {
+                    string file = null;
+                    try { file = o.OccurrenceFileName; } catch { }
+                    if (string.IsNullOrEmpty(file)) continue;
+                    string k = Key(file);
+                    if (!target.ContainsKey(k)) target[k] = o;
+                    bool sub = false;
+                    try { sub = o.Subassembly; } catch { }
+                    if (sub && seenAsms.Add(k)) {
+                        try {
+                            var oc = o;
+                            var child = Attempt("读打开装配的子装配", () => oc.OccurrenceDocument) as A.AssemblyDocument;
+                            if (child != null) WalkOpenOccurrences(child, target, seenAsms);
+                        } catch { }
+                    }
+                }
+            } catch { }
+        }
+
+        object FindDirectOpenedDocument(string path){
+            if (app == null) return null;
+            EnsureOpenedIndex();
+            object hit;
+            if (opened.TryGetValue(Key(path), out hit) && IsDocAlive(hit)) return hit;
+            return null;
+        }
+
+        static bool IsDocAlive(object doc){
+            if (doc == null) return false;
+            try { return Convert.ToString(doc.GetType().InvokeMember("FullName", BindingFlags.GetProperty, null, doc, null)).Length > 0; }
+            catch { return false; }
+        }
+
+        // 文件在不在 CAD 内存里：打开着的文档、打开着的工程图引用的模型、当前装配及所有已打开装配里引用它的实例
         // （加密文件在内存里时属性组件写不进去，只能写内存里那份 —— 工程图引用的零件就是这样，0.8.0 现场）
         object LoadedDocument(string path){
             if (app == null) return null;
-            if (opened == null) {
-                opened = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-                try {
-                    var docs = app.Documents;
-                    for (int i = 1; i <= docs.Count; i++) { object d = docs.Item(i); Remember(FullName(d), d); }
-                } catch (Exception e) { Log.Write("PropCardDocs", e); }
-                if (root is SolidEdgeDraft.DraftDocument) {
-                    try {
-                        var links = ((SolidEdgeDraft.DraftDocument)root).ModelLinks;
-                        for (int i = 1; i <= links.Count; i++) {
-                            var link = links.Item(i);
-                            try { Remember(link.FileName, link.ModelDocument); } catch (Exception e) { Log.Write("PropCardModelLink", e); }
-                        }
-                    } catch (Exception e) { Log.Write("PropCardModelLinks", e); }
-                }
-            }
+            string k = Key(path);
+            EnsureOpenedIndex();
             object hit;
-            if (opened.TryGetValue(Key(path), out hit)) return hit;
+            if (opened.TryGetValue(k, out hit) && IsDocAlive(hit)) return hit;
             A.Occurrence o;
-            if (!occurrences.TryGetValue(Key(path), out o)) return null;
-            try { return o.OccurrenceDocument; } catch { return null; }
+            if (occurrences.TryGetValue(k, out o)) {
+                try { object d = o.OccurrenceDocument; if (d != null) return d; } catch { }
+            }
+            // 「扫描文件夹 / 添加文件」或用户另行打开了别的装配时，也检查全部已打开装配里的实例，防止误写磁盘触发天工冲突弹窗
+            EnsureOpenAsmOccurrences();
+            if (openAsmOccurrences.TryGetValue(k, out o)) {
+                try { object d = o.OccurrenceDocument; if (d != null) return d; } catch { }
+            }
+            return null;
         }
 
-        void Remember(string file, object doc){ if (!string.IsNullOrEmpty(file) && !opened.ContainsKey(Key(file))) opened[Key(file)] = doc; }
+        T Attempt<T>(string what, Func<T> action){
+            for (int i = 0; ; i++) {
+                try { return action(); }
+                catch (Exception e) {
+                    var ce = e as COMException ?? (e.InnerException as COMException);
+                    if (ce == null) throw;
+                    int hr = ce.ErrorCode;
+                    bool retryable = hr == unchecked((int)0x80010001) || hr == unchecked((int)0x8001010A) || hr == unchecked((int)0x80010100);
+                    if (!retryable || i >= 8) throw;
+                    try { if (app != null) app.DoIdle(); } catch { }
+                    System.Threading.Thread.Sleep(200);
+                }
+            }
+        }
+
+        void Remember(string file, object doc){ if (!string.IsNullOrEmpty(file) && doc != null && !opened.ContainsKey(Key(file))) opened[Key(file)] = doc; }
 
         static string Key(string path){ try { return Path.GetFullPath(path); } catch { return path ?? ""; } }
 

@@ -47,6 +47,8 @@ namespace TianGongCadSuite {
         public readonly List<string> SkippedSubs = new List<string>();
         string rootPath = "";   // 收集时的当前文档：它把整棵装配树都加载着，改名前一定要关
         string activePath = ""; // 点「改名」时的当前文档：改完最后重新打开它，用户回来看到的还是它
+        // 供三合一工作台等外部收集方同步根文档路径，确保嵌套子装配改名时同样关掉顶层装配/工程图
+        public void SetRootPath(string path){ rootPath = string.IsNullOrEmpty(path) ? "" : Full(path); }
         public List<string> Collect(out string source){
             var cad = new PropCardCad(app);
             var list = cad.Collect(out source);
@@ -79,25 +81,39 @@ namespace TianGongCadSuite {
 
         // 用户在表里改名字的时候，后台把改名要用的东西先热起来（真机：设计管理器冷启动 1.8 s → 热 0.9 s，初筛读文件 1.1 s → 0.3 s）：
         // 读一遍表里文件所在文件夹的 .asm / .dft（进磁盘缓存），起一次设计管理器再关掉。只读、不改任何东西。
+        // 支持 CancelWarm 立即中止，防止 Run() 开始时仍持只读句柄撞上 Locked(FileShare.None) 或与 RenameLinkFixer 并发争抢 DesMgr.exe。
         System.Threading.Thread warm;
+        volatile bool warmCancel;
+        readonly object warmDesMgrLock = new object();
+        public void CancelWarm(){ warmCancel = true; }
         public void Warm(IEnumerable<string> paths){
             if (warm != null && warm.IsAlive) return;
+            warmCancel = false;
             var folders = paths.Select(p => Path.GetDirectoryName(p) ?? "").Where(f => f.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).Take(20).ToList();
             var files = paths.ToList();
             warm = new System.Threading.Thread(() => {
                 try {
                     var buffer = new byte[1 << 16];
                     foreach (var f in files.Concat(folders.SelectMany(d => Files(d, "*.dft").Concat(Files(d, "*.asm")))).Take(2000)) {
-                        try { using (var s = new FileStream(f, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) while (s.Read(buffer, 0, buffer.Length) > 0) { } } catch { }
+                        if (warmCancel) return;
+                        try {
+                            using (var s = new FileStream(f, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) {
+                                while (!warmCancel && s.Read(buffer, 0, buffer.Length) > 0) { }
+                            }
+                        } catch { }
                     }
-                    if (Process.GetProcessesByName("DesMgr").Length == 0) {
-                        var type = Type.GetTypeFromProgID("DesignManager.Application");
-                        if (type != null) {
-                            object dm = Activator.CreateInstance(type);
-                            try { type.InvokeMember("Quit", BindingFlags.InvokeMethod, null, dm, null); } catch { }
-                            try { System.Runtime.InteropServices.Marshal.ReleaseComObject(dm); } catch { }
-                            // 等它真退出：还没退时改名会以为是用户自己开着的设计管理器，改完不敢关
-                            for (int i = 0; i < 50 && Process.GetProcessesByName("DesMgr").Length > 0; i++) System.Threading.Thread.Sleep(100);
+                    if (warmCancel) return;
+                    lock (warmDesMgrLock) {
+                        if (warmCancel) return;
+                        if (Process.GetProcessesByName("DesMgr").Length == 0) {
+                            var type = Type.GetTypeFromProgID("DesignManager.Application");
+                            if (type != null) {
+                                object dm = Activator.CreateInstance(type);
+                                try { type.InvokeMember("Quit", BindingFlags.InvokeMethod, null, dm, null); } catch { }
+                                try { System.Runtime.InteropServices.Marshal.ReleaseComObject(dm); } catch { }
+                                // 等它真退出：还没退时改名会以为是用户自己开着的设计管理器，改完不敢关
+                                for (int i = 0; i < 50 && Process.GetProcessesByName("DesMgr").Length > 0; i++) System.Threading.Thread.Sleep(100);
+                            }
                         }
                     }
                 } catch (Exception e) { Log.Write("RenameWarm", e); }
@@ -107,7 +123,8 @@ namespace TianGongCadSuite {
         }
 
         public Result Run(IList<RenameRow> rows, Func<string, string, bool> confirm, Action<string> pulse){
-            // 预热还没完：等它把自己起的设计管理器关掉（否则改名时会以为是用户开着的、改完不敢关）
+            // 立即取消预热：文件读循环毫秒级退出，若已启动 DesMgr 则等它 Quit 完成，绝不与后续 Locked/RenameLinkFixer 竞态
+            warmCancel = true;
             var waited = Stopwatch.StartNew();
             while (warm != null && warm.IsAlive && waited.ElapsedMilliseconds < 15000) { pulse("准备中…"); warm.Join(100); try { System.Windows.Forms.Application.DoEvents(); } catch { } }
             var result = new Result();
@@ -173,10 +190,13 @@ namespace TianGongCadSuite {
             sw.Restart();
             var touched = new HashSet<string>(map.Keys, StringComparer.OrdinalIgnoreCase);
             foreach (var c in candidates) touched.Add(c);
-            // 当前文档（装配）把整棵树都加载着；别的打开着的文档只关真用到的。没关、又占着文件的，第 4 步会查出来
+            // 当前文档（装配）把整棵树都加载着；别的打开着的装配/工程图若间接引用了嵌套子件也要一并关掉，避免顶层文档持锁导致改名失败
             activePath = "";
             try { activePath = Full(FullName(app.ActiveDocument)); } catch { }
-            var toClose = OpenDocuments().Where(d => touched.Contains(d.Key) || string.Equals(d.Key, rootPath, StringComparison.OrdinalIgnoreCase)).ToList();
+            var toClose = OpenDocuments().Where(d =>
+                touched.Contains(d.Key)
+                || (rootPath.Length > 0 && string.Equals(d.Key, rootPath, StringComparison.OrdinalIgnoreCase))
+                || OpenDocUsesAny(d.Value, touched)).ToList();
             var dirty = toClose.Where(d => Dirty(d.Value)).Select(d => "　" + Path.GetFileName(d.Key)).ToArray();
             if (confirm != null && !confirm(string.Join("\r\n", toClose.Select(d => "　" + Path.GetFileName(d.Key)).ToArray()), string.Join("\r\n", dirty))) { result.Error = "已取消"; return result; }
             var closed = new List<string>();
@@ -242,13 +262,24 @@ namespace TianGongCadSuite {
             } catch (Exception e) {
                 Log.Write("RenameRun", e);
                 result.Error = e.Message;
-                // 退回：文件名先改回来，链接再改回来（链接是按原来的路径打开的文件）
+                // 退回：文件名先改回来，链接再改回来（链接是按原来的路径打开的文件）。
+                // 回滚必须尽力退完每一项（--best-effort），不能因为首个文件短暂被占就中止循环、把后面几十个文件遗留在临时名或新名字上。
                 if (journal.Count > 0) {
                     var back = new List<KeyValuePair<string, string>>();
                     for (int i = journal.Count - 1; i >= 0; i--) back.Add(new KeyValuePair<string, string>(journal[i].Value, journal[i].Key));
                     string why2;
-                    int undone = MoveFiles(back, out why2);
-                    for (int i = undone; i < back.Count; i++) result.Warnings.Add("没能改回：" + back[i].Key + " → " + Path.GetFileName(back[i].Value));
+                    Dictionary<int, string> failedSteps;
+                    int undone = MoveFilesBestEffort(back, out failedSteps, out why2);
+                    if (failedSteps != null && failedSteps.Count > 0) {
+                        foreach (var kv in failedSteps.OrderBy(x => x.Key)) {
+                            if (kv.Key >= 0 && kv.Key < back.Count) {
+                                result.Warnings.Add("没能改回：" + back[kv.Key].Key + " → " + Path.GetFileName(back[kv.Key].Value)
+                                    + (string.IsNullOrEmpty(kv.Value) ? "" : "（" + kv.Value + "）"));
+                            }
+                        }
+                    } else if (why2.Length > 0) {
+                        for (int i = undone; i < back.Count; i++) result.Warnings.Add("没能改回：" + back[i].Key + " → " + Path.GetFileName(back[i].Value));
+                    }
                     if (why2.Length > 0) Log.Write("RenameUndoMove", why2);
                 }
                 if (fixer != null) foreach (var f in fixer.Revert()) result.Warnings.Add("引用没能改回：" + f);
@@ -312,6 +343,95 @@ namespace TianGongCadSuite {
                 try { File.Delete(list); } catch { }
                 try { File.Delete(answer); } catch { }
             }
+        }
+
+        // 回滚专用：调用 SuiteRenameWorker.exe --best-effort，单项失败记账但继续执行剩余逆向步骤，防止滞留 ~改名中 临时文件
+        static int MoveFilesBestEffort(List<KeyValuePair<string, string>> steps, out Dictionary<int, string> failedSteps, out string why){
+            failedSteps = new Dictionary<int, string>();
+            why = "";
+            if (steps.Count == 0) return 0;
+            string exe = Path.Combine(Path.GetDirectoryName(typeof(BatchRenameCad).Assembly.Location), "SuiteRenameWorker.exe");
+            if (!File.Exists(exe)) { why = "找不到改名工作器 " + exe + "（安装不完整，请重新安装天工工具箱）"; return 0; }
+            string tmp = Path.Combine(Path.GetTempPath(), "tg-rename-undo-" + Guid.NewGuid().ToString("N"));
+            string list = tmp + ".txt", answer = tmp + ".out";
+            try {
+                File.WriteAllLines(list, steps.Select(s => s.Key + "\t" + s.Value).ToArray(), new UTF8Encoding(false));
+                var psi = new ProcessStartInfo(exe, "--best-effort \"" + list + "\" \"" + answer + "\"") { UseShellExecute = false, CreateNoWindow = true };
+                using (var p = Process.Start(psi)) {
+                    var limit = Stopwatch.StartNew();
+                    while (!p.WaitForExit(100)) {
+                        try { System.Windows.Forms.Application.DoEvents(); } catch { }
+                        if (limit.Elapsed.TotalMinutes > 5) { try { p.Kill(); } catch { } break; }
+                    }
+                }
+                var lines = File.Exists(answer) ? File.ReadAllLines(answer, Encoding.UTF8) : new string[0];
+                int done = 0;
+                var head = lines.Length > 0 ? lines[0].Split(' ') : new string[0];
+                if (head.Length == 2) int.TryParse(head[1], out done);
+                if (head.Length == 2 && head[0] == "OK") return Math.Min(done, steps.Count);
+                if (head.Length == 2 && head[0] == "PARTIAL") {
+                    for (int i = 1; i < lines.Length; i++) {
+                        var parts = lines[i].Split('\t');
+                        int idx;
+                        if (parts.Length >= 3 && parts[0] == "FAIL_IDX" && int.TryParse(parts[1], out idx)) {
+                            failedSteps[idx] = parts[2];
+                        }
+                    }
+                    why = "回滚部分失败（失败 " + failedSteps.Count + " 项）";
+                    return Math.Min(done, steps.Count);
+                }
+                why = "回滚改名失败：" + (lines.Length > 1 ? lines[1] : "改名工作器没有回报结果");
+                return Math.Min(done, steps.Count);
+            } catch (Exception e) {
+                Log.Write("RenameWorkerUndo", e);
+                why = "回滚改名失败：" + e.Message;
+                return 0;
+            } finally {
+                try { File.Delete(list); } catch { }
+                try { File.Delete(answer); } catch { }
+            }
+        }
+
+        // 检查已打开的装配/工程图是否直接或间接加载了 touched 中的任一文件（用于三合一工作台或文件夹模式改嵌套子件时关闭顶层文档）
+        static bool OpenDocUsesAny(object doc, HashSet<string> touched){
+            if (doc == null || touched == null || touched.Count == 0) return false;
+            var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            return DocUsesAny(doc, touched, visited, 0);
+        }
+        static bool DocUsesAny(object doc, HashSet<string> touched, HashSet<string> visited, int depth){
+            if (doc == null || depth > 10) return false;
+            string self = Full(FullName(doc));
+            if (self.Length > 0 && !visited.Add(self)) return false;
+            var dft = doc as SolidEdgeDraft.DraftDocument;
+            if (dft != null) {
+                try {
+                    var links = dft.ModelLinks;
+                    for (int i = 1; i <= links.Count; i++) {
+                        var link = links.Item(i);
+                        string mf = ""; try { mf = Full(link.FileName); } catch { }
+                        if (mf.Length > 0 && touched.Contains(mf)) return true;
+                        object mdoc = null; try { mdoc = link.ModelDocument; } catch { }
+                        if (mdoc != null && DocUsesAny(mdoc, touched, visited, depth + 1)) return true;
+                    }
+                } catch { }
+                return false;
+            }
+            var asm = doc as SolidEdgeAssembly.AssemblyDocument;
+            if (asm != null) {
+                try {
+                    foreach (SolidEdgeAssembly.Occurrence occ in asm.Occurrences) {
+                        string f = ""; try { f = Full(occ.OccurrenceFileName); } catch { }
+                        if (f.Length == 0) continue;
+                        if (touched.Contains(f)) return true;
+                        bool sub = false; try { sub = occ.Subassembly; } catch { }
+                        if (sub && !visited.Contains(f)) {
+                            object child = null; try { child = occ.OccurrenceDocument; } catch { }
+                            if (child != null && DocUsesAny(child, touched, visited, depth + 1)) return true;
+                        }
+                    }
+                } catch { }
+            }
+            return false;
         }
 
         static string TempFor(string path){

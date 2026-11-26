@@ -57,21 +57,25 @@ namespace TianGongCadSuite {
             var dft = doc as D.DraftDocument;
             if (dft != null) {
                 source = "工程图「" + Path.GetFileName(rootFile) + "」";
-                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var seenLinks = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var seenModels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 try {
                     var links = dft.ModelLinks;
                     for (int i = 1; i <= links.Count; i++) {
                         var link = links.Item(i);
                         string mf = ""; try { mf = link.FileName; } catch { }
-                        if (string.IsNullOrEmpty(mf) || !seen.Add(mf)) continue;
+                        if (string.IsNullOrEmpty(mf)) continue;
+                        try { mf = Path.GetFullPath(mf); } catch { }
+                        if (!seenLinks.Add(mf)) continue;
                         A.AssemblyDocument subAsm = null;
                         try { subAsm = link.ModelDocument as A.AssemblyDocument; } catch { }
                         string draftForModel = BomRules.PairDraftPath(mf);
                         if (string.IsNullOrEmpty(draftForModel)) draftForModel = rootFile;
-                        if (subAsm != null && !IsLeafWeldment(subAsm, mf)) {
-                            var subItems = CollectAssemblyTree(subAsm, mf, pulse);
-                            foreach (var si in subItems) if (seen.Add(si.ModelPath)) items.Add(si);
-                        } else {
+                        if (subAsm != null) {
+                            // 统一走递归装配树收集：既能逐层展开中文命名子装配里的全部下层加工件，又能准确识别真正的叶级焊接件并关联当前工程图
+                            var subItems = CollectAssemblyTree(subAsm, mf, pulse, draftForModel);
+                            foreach (var si in subItems) if (seenModels.Add(si.ModelPath)) items.Add(si);
+                        } else if (seenModels.Add(mf)) {
                             object mdoc = null; try { mdoc = link.ModelDocument; } catch { }
                             var it = BuildItem(mf, draftForModel, 1, true, "", mdoc);
                             if (mdoc != null) TryReadOpenMetrics(mdoc, it);
@@ -94,23 +98,23 @@ namespace TianGongCadSuite {
             return items;
         }
 
-        List<BomItem> CollectAssemblyTree(A.AssemblyDocument rootAsm, string rootFile, Action<string> pulse) {
-            var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        List<BomItem> CollectAssemblyTree(A.AssemblyDocument rootAsm, string rootFile, Action<string> pulse, string rootDraftOverride = "") {
+            try { if (!string.IsNullOrEmpty(rootFile)) rootFile = Path.GetFullPath(rootFile); } catch { }
             var order = new List<string>();
+            var discovered = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var walkedAsms = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (!string.IsNullOrEmpty(rootFile)) walkedAsms.Add(rootFile);
             var childrenOf = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             var loadedDocs = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
             loadedDocs[rootFile] = rootAsm;
 
-            WalkAssembly(rootAsm, rootFile, 0, counts, order, childrenOf, loadedDocs, pulse);
+            WalkAssembly(rootAsm, rootFile, 0, discovered, walkedAsms, order, childrenOf, loadedDocs, pulse);
+            // 按 DAG 递归累乘父级实例数，保证多实例子装配下层零件数量 = Σ(父级倍率 × 局部实例数)
+            var counts = BomRules.ComputeAssemblyCounts(rootFile, childrenOf);
 
             // 识别叶级焊接件（本身有同名 .dft，且下面没有带公司图号/工程图的独立加工件）
             var topProject = BomRules.ExtractProjectCode(Path.GetFileNameWithoutExtension(rootFile));
-            if (topProject.Length == 0) {
-                foreach (var f in order) {
-                    string p = BomRules.ExtractProjectCode(Path.GetFileNameWithoutExtension(f));
-                    if (p.Length > 0) { topProject = p; break; }
-                }
-            }
+            if (topProject.Length == 0) topProject = BomRules.PickTopProject(order);
 
             var weldmentRoots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var insideWeldment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -128,9 +132,15 @@ namespace TianGongCadSuite {
             // 根装配本身：若本身就是焊接件（无独立子加工件且有图号/工程图）则默认勾选；
             // 若是总装配（下面有独立子加工件）也收进表里（默认不勾），方便在三合一工作台里同时改总装配的属性卡或文件名。
             bool rootHasCustomChild = HasCustomChild(rootFile, childrenOf, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
-            bool rootIsWeld = !rootHasCustomChild && (BomRules.PairDraftPath(rootFile).Length > 0 || BomRules.HasCompanyDrawingNumber(Path.GetFileNameWithoutExtension(rootFile)));
+            string rootDraft = BomRules.PairDraftPath(rootFile);
+            if (rootDraft.Length == 0 && !string.IsNullOrEmpty(rootDraftOverride)) rootDraft = rootDraftOverride;
+            bool rootIsWeld = !rootHasCustomChild && (rootDraft.Length > 0 || BomRules.HasCompanyDrawingNumber(Path.GetFileNameWithoutExtension(rootFile)));
+            if (rootIsWeld) {
+                // 根装配本身就是叶级焊接件时，把其下属无图号子零件也标为属于该焊接件，避免重复勾选
+                MarkDescendants(rootFile, Path.GetFileNameWithoutExtension(rootFile), childrenOf, insideWeldment, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+            }
             if (!string.IsNullOrEmpty(rootFile) && File.Exists(rootFile)) {
-                var rootItem = BuildItem(rootFile, BomRules.PairDraftPath(rootFile), 1, rootIsWeld, rootIsWeld ? "" : "顶层总装配", rootAsm);
+                var rootItem = BuildItem(rootFile, rootDraft, 1, rootIsWeld, rootIsWeld ? "" : "顶层总装配", rootAsm);
                 TryReadOpenMetrics(rootAsm, rootItem);
                 ApplyAutoCategory(rootItem);
                 items.Add(rootItem);
@@ -174,7 +184,7 @@ namespace TianGongCadSuite {
         }
 
         void WalkAssembly(A.AssemblyDocument asm, string asmPath, int depth,
-            Dictionary<string, int> counts, List<string> order,
+            HashSet<string> discovered, HashSet<string> walkedAsms, List<string> order,
             Dictionary<string, List<string>> childrenOf, Dictionary<string, object> loadedDocs, Action<string> pulse) {
             if (asm == null || depth > 8) return;
             List<string> kids;
@@ -196,21 +206,18 @@ namespace TianGongCadSuite {
                 try { f = Path.GetFullPath(f); } catch { }
 
                 kids.Add(f);
-                int prev;
-                bool first = !counts.TryGetValue(f, out prev);
-                counts[f] = prev + 1;
-                if (first) order.Add(f);
+                if (discovered.Add(f)) order.Add(f);
 
                 bool sub = false;
                 try { sub = occ.Subassembly; } catch { }
-                if (sub && first) {
+                if (sub && walkedAsms.Add(f)) {
                     if (pulse != null) pulse("展开子装配：" + Path.GetFileName(f));
                     try {
                         var oc = occ;
                         var childDoc = Attempt("读子装配文档", () => oc.OccurrenceDocument) as A.AssemblyDocument;
                         if (childDoc != null) {
                             loadedDocs[f] = childDoc;
-                            WalkAssembly(childDoc, f, depth + 1, counts, order, childrenOf, loadedDocs, pulse);
+                            WalkAssembly(childDoc, f, depth + 1, discovered, walkedAsms, order, childrenOf, loadedDocs, pulse);
                         }
                     } catch (Exception e) {
                         Log.Write("BomWalkSub " + f, e);
@@ -242,18 +249,6 @@ namespace TianGongCadSuite {
                 if (!insideWeldment.ContainsKey(k)) insideWeldment[k] = weldmentName;
                 if (k.EndsWith(".asm", StringComparison.OrdinalIgnoreCase)) MarkDescendants(k, weldmentName, childrenOf, insideWeldment, visited);
             }
-        }
-
-        bool IsLeafWeldment(A.AssemblyDocument asm, string asmPath) {
-            if (asm == null) return false;
-            try {
-                foreach (A.Occurrence occ in asm.Occurrences) {
-                    string f = ""; try { f = occ.OccurrenceFileName; } catch { }
-                    if (string.IsNullOrEmpty(f)) continue;
-                    if (BomRules.PairDraftPath(f).Length > 0 || BomRules.HasCompanyDrawingNumber(Path.GetFileNameWithoutExtension(f))) return false;
-                }
-            } catch { }
-            return true;
         }
 
         // 从文件夹扫描模型（自动配对同名 .dft，支持递归遍历子文件夹）
@@ -339,35 +334,37 @@ namespace TianGongCadSuite {
 
             object sets = null;
             bool ok = false;
-            try {
-                sets = Activator.CreateInstance(Type.GetTypeFromProgID("SolidEdge.FileProperties"));
-                LateCall(sets, "Open", item.ModelPath, true);
-                ReadFilePropsSet(sets, "Custom", custom);
-                material = ReadFilePropSingle(sets, "MechanicalModeling", "Material");
-                if (material.Length == 0) material = ReadFilePropSingle(sets, "MechanicalModeling", "材料");
-                summaryAuthor = ReadFilePropSingle(sets, "SummaryInformation", "作者");
-                if (summaryAuthor.Length == 0) summaryAuthor = ReadFilePropSingle(sets, "SummaryInformation", "Author");
-                ok = true;
-            } catch (Exception e) {
-                // 打开着的加密文件 FileProperties 可能打不开：退回已加载的 CAD 文档（带 COM 忙碌重试）
-                object doc = loadedDoc ?? FindOpenDoc(item.ModelPath);
-                if (doc != null) {
-                    try {
-                        string m = "", auth = "";
-                        Attempt("读文档属性", () => { custom.Clear(); m = ""; auth = ""; ReadDocProps(doc, custom, ref m, ref auth); return true; });
-                        material = m;
-                        summaryAuthor = auth;
-                        ok = true;
-                    } catch (Exception e2) {
-                        item.ReadProblem = "读属性失败：" + UnwrapMsg(e2);
-                        Log.Write("BomReadDocProps " + item.ModelPath, e2);
-                    }
-                } else {
+            // 若该文件已作为打开文档或已加载子装配在 CAD 内存中，优先读内存实时属性，避免读到未 Ctrl+S 保存的旧磁盘值
+            object openDoc = loadedDoc ?? FindOpenDoc(item.ModelPath);
+            if (openDoc != null) {
+                try {
+                    string m = "", auth = "";
+                    Attempt("读文档属性", () => { custom.Clear(); m = ""; auth = ""; ReadDocProps(openDoc, custom, ref m, ref auth); return true; });
+                    material = m;
+                    summaryAuthor = auth;
+                    ok = true;
+                } catch {
+                    custom.Clear();
+                    material = "";
+                    summaryAuthor = "";
+                }
+            }
+            if (!ok) {
+                try {
+                    sets = Activator.CreateInstance(Type.GetTypeFromProgID("SolidEdge.FileProperties"));
+                    LateCall(sets, "Open", item.ModelPath, true);
+                    ReadFilePropsSet(sets, "Custom", custom);
+                    material = ReadFilePropSingle(sets, "MechanicalModeling", "Material");
+                    if (material.Length == 0) material = ReadFilePropSingle(sets, "MechanicalModeling", "材料");
+                    summaryAuthor = ReadFilePropSingle(sets, "SummaryInformation", "作者");
+                    if (summaryAuthor.Length == 0) summaryAuthor = ReadFilePropSingle(sets, "SummaryInformation", "Author");
+                    ok = true;
+                } catch (Exception e) {
                     item.ReadProblem = "读属性失败：" + UnwrapMsg(e);
                     Log.Write("BomReadFileProps " + item.ModelPath, e);
+                } finally {
+                    CloseFileProperties(sets);
                 }
-            } finally {
-                CloseFileProperties(sets);
             }
 
             if (!ok) return;
@@ -462,9 +459,7 @@ namespace TianGongCadSuite {
                     } catch (Exception e) {
                         Log.Write("BomMetrics " + item.ModelPath, e);
                     } finally {
-                        if (opened && doc != null) {
-                            try { ((dynamic)doc).Close(false); } catch { }
-                        }
+                        if (opened && doc != null) CloseDocSafe(doc);
                     }
                 }
             } finally {
@@ -596,6 +591,7 @@ namespace TianGongCadSuite {
                 // 1. 先批量复制原三维（.par/.psm/.asm）与 .dft（走非白名单工作器，保持加密头不解密）
                 var copyPairs = new List<KeyValuePair<string, string>>();
                 var copyItemMap = new Dictionary<string, BomItem>(StringComparer.OrdinalIgnoreCase);
+                var skippedExisting = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 foreach (var item in selectedItems) {
                     string safeBase = BomRules.SanitizeFileName(item.DrawingNo);
                     if (options.IncludeNative3d && File.Exists(item.ModelPath)) {
@@ -604,6 +600,7 @@ namespace TianGongCadSuite {
                             copyPairs.Add(new KeyValuePair<string, string>(item.ModelPath, dst3d));
                             copyItemMap[dst3d] = item;
                         } else {
+                            skippedExisting.Add(dst3d);
                             summary.FilesSkipped++;
                         }
                     }
@@ -613,6 +610,7 @@ namespace TianGongCadSuite {
                             copyPairs.Add(new KeyValuePair<string, string>(item.DraftPath, dstDft));
                             copyItemMap[dstDft] = item;
                         } else {
+                            skippedExisting.Add(dstDft);
                             summary.FilesSkipped++;
                         }
                     }
@@ -645,13 +643,15 @@ namespace TianGongCadSuite {
                     if (options.IncludeNative3d) {
                         expectCount++;
                         string dst3d = Path.Combine(options.OutputFolder, safeBase + item.ModelExt);
-                        if (File.Exists(dst3d)) okCount++; else itemNotes.Add("缺原三维");
+                        // 必须以本次真实复制成功（copiedOk）或明确跳过已存在（skippedExisting）为准，不能靠 File.Exists 把失败残留的旧文件误判为完成
+                        if (copiedOk.Contains(dst3d) || skippedExisting.Contains(dst3d)) okCount++;
+                        else itemNotes.Add(File.Exists(item.ModelPath) ? "复制原三维失败" : "缺原三维");
                     }
                     if (options.IncludeDraft) {
                         expectCount++;
                         string dstDft = Path.Combine(options.OutputFolder, safeBase + ".dft");
                         if (!item.HasDraft) itemNotes.Add("无 .dft");
-                        else if (File.Exists(dstDft)) okCount++;
+                        else if (copiedOk.Contains(dstDft) || skippedExisting.Contains(dstDft)) okCount++;
                         else itemNotes.Add("复制 .dft 失败");
                     }
 
@@ -685,9 +685,11 @@ namespace TianGongCadSuite {
                                     string stepLog = Path.ChangeExtension(dstStep, ".log");
                                     bool hadStepLog = File.Exists(stepLog);
                                     try {
+                                        DateTime prevUtc;
+                                        bool hadOld = PrepareOverwriteTarget(dstStep, out prevUtc);
                                         var d3 = (F.SolidEdgeDocument)doc;
                                         Attempt("导出 STEP", () => { d3.SaveCopyAs(dstStep); return true; });
-                                        if (File.Exists(dstStep)) { okCount++; summary.FilesExported++; }
+                                        if (VerifyExportWritten(dstStep, hadOld, prevUtc)) { okCount++; summary.FilesExported++; }
                                         else { summary.FilesFailed++; itemNotes.Add("STEP 未写出"); }
                                     } catch (Exception e) {
                                         summary.FilesFailed++;
@@ -717,7 +719,7 @@ namespace TianGongCadSuite {
                             Log.Write("BomOpen3d " + item.ModelPath, e);
                         } finally {
                             if (opened && doc != null) {
-                                try { ((dynamic)doc).Close(false); } catch { }
+                                CloseDocSafe(doc);
                                 Idle();
                             }
                         }
@@ -751,8 +753,10 @@ namespace TianGongCadSuite {
                             if (dft != null) {
                                 if (needDwg) {
                                     try {
+                                        DateTime prevUtc;
+                                        bool hadOld = PrepareOverwriteTarget(dstDwg, out prevUtc);
                                         Attempt("导出 DWG", () => { dft.SaveCopyAs(dstDwg); return true; });
-                                        if (File.Exists(dstDwg)) { okCount++; summary.FilesExported++; }
+                                        if (VerifyExportWritten(dstDwg, hadOld, prevUtc)) { okCount++; summary.FilesExported++; }
                                         else { summary.FilesFailed++; itemNotes.Add("DWG 未写出"); }
                                     } catch (Exception e) {
                                         summary.FilesFailed++; itemNotes.Add("DWG 失败");
@@ -762,8 +766,10 @@ namespace TianGongCadSuite {
                                 }
                                 if (needPdf) {
                                     try {
+                                        DateTime prevUtc;
+                                        bool hadOld = PrepareOverwriteTarget(dstPdf, out prevUtc);
                                         Attempt("导出 PDF", () => { dft.SaveCopyAs(dstPdf); return true; });
-                                        if (File.Exists(dstPdf)) { okCount++; summary.FilesExported++; }
+                                        if (VerifyExportWritten(dstPdf, hadOld, prevUtc)) { okCount++; summary.FilesExported++; }
                                         else { summary.FilesFailed++; itemNotes.Add("PDF 未写出"); }
                                     } catch (Exception e) {
                                         summary.FilesFailed++; itemNotes.Add("PDF 失败");
@@ -773,7 +779,9 @@ namespace TianGongCadSuite {
                                 }
                                 if (needJpg) {
                                     try {
-                                        if (ExportDraftJpg(dft, dstJpg)) { okCount++; summary.FilesExported++; }
+                                        DateTime prevUtc;
+                                        bool hadOld = PrepareOverwriteTarget(dstJpg, out prevUtc);
+                                        if (ExportDraftJpg(dft, dstJpg) && VerifyExportWritten(dstJpg, hadOld, prevUtc)) { okCount++; summary.FilesExported++; }
                                         else { summary.FilesFailed++; itemNotes.Add("JPG 未写出"); }
                                     } catch (Exception e) {
                                         summary.FilesFailed++; itemNotes.Add("JPG 失败");
@@ -790,7 +798,7 @@ namespace TianGongCadSuite {
                             Log.Write("BomOpenDft " + item.DraftPath, e);
                         } finally {
                             if (opened && doc != null) {
-                                try { ((dynamic)doc).Close(false); } catch { }
+                                CloseDocSafe(doc);
                                 Idle();
                             }
                         }
@@ -996,6 +1004,32 @@ namespace TianGongCadSuite {
 
         // ---------- 辅助 COM / 属性 ----------
 
+        // 覆盖导出前尝试移除旧目标文件；若删不掉则记录旧时间戳，导出后校验确实写出了新文件，避免残留旧文件造成误报完成
+        static bool PrepareOverwriteTarget(string dst, out DateTime prevUtc) {
+            prevUtc = DateTime.MinValue;
+            if (!File.Exists(dst)) return false;
+            try { prevUtc = File.GetLastWriteTimeUtc(dst); } catch { }
+            try { File.Delete(dst); return false; }
+            catch { return true; }
+        }
+
+        static bool VerifyExportWritten(string dst, bool hadUnremovedOld, DateTime prevUtc) {
+            if (!File.Exists(dst)) return false;
+            if (!hadUnremovedOld) return true;
+            try { return File.GetLastWriteTimeUtc(dst) != prevUtc; }
+            catch { return false; }
+        }
+
+        // 关闭批量打开的临时文档时带 COM 忙碌重试并记日志，防止大批量导出遇瞬时忙泄漏文档窗口
+        void CloseDocSafe(object doc) {
+            if (doc == null) return;
+            try {
+                Attempt("关闭临时文档", () => { ((dynamic)doc).Close(false); return true; });
+            } catch (Exception e) {
+                Log.Write("BomCloseDoc " + SafeFullName(doc), e);
+            }
+        }
+
         object FindOpenDoc(string path) {
             if (app == null || string.IsNullOrEmpty(path)) return null;
             try {
@@ -1017,7 +1051,8 @@ namespace TianGongCadSuite {
                         object p = LateGet(set, "Item", i);
                         string name = Convert.ToString(LateGet(p, "Name"));
                         string val = Convert.ToString(LateGet(p, "Value"));
-                        if (!string.IsNullOrEmpty(name) && !string.IsNullOrEmpty(val) && !target.ContainsKey(name)) target[name] = val.Trim();
+                        // 保留值为空字符串的已有属性（例如「补齐缺的属性」写入的空值），否则工作台重载后会误判为「文件里没有该属性」
+                        if (!string.IsNullOrEmpty(name) && !target.ContainsKey(name)) target[name] = (val ?? "").Trim();
                     } catch { }
                 }
             } catch { }
@@ -1050,7 +1085,7 @@ namespace TianGongCadSuite {
                         try {
                             var p = set.Item(j);
                             string val = Convert.ToString(p.get_Value());
-                            if (!string.IsNullOrEmpty(p.Name) && !string.IsNullOrEmpty(val) && !custom.ContainsKey(p.Name)) custom[p.Name] = val.Trim();
+                            if (!string.IsNullOrEmpty(p.Name) && !custom.ContainsKey(p.Name)) custom[p.Name] = (val ?? "").Trim();
                         } catch { }
                     }
                 } else if (string.Equals(sname, "MechanicalModeling", StringComparison.OrdinalIgnoreCase)) {
