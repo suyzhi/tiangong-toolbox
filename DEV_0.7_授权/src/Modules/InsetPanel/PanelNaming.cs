@@ -12,10 +12,16 @@ namespace TianGongCadSuite {
     public static class PanelNaming {
         public const string Prefix = "填充板_";
         public const string BatchPrefix = "自动填充_";
-        // 批次时间戳：同一秒内连点两次由目录名里的随机后缀区分，文件名只需保证"跨批次不重名"。
+        // 批次时间戳：保留两参重载兼容既有单测；实际批量生成用带批次短 token 的三参重载，
+        // 避免同一秒内连点两次生成时不同子目录下出现同名 .par 触发天工 AddByFilename 同名劫持。
         public static string Stamp(DateTime now){ return now.ToString("yyyyMMdd_HHmmss"); }
         public static string BatchDirectoryName(string stamp,string token){ return BatchPrefix + stamp + "_" + token; }
         public static string FileName(string stamp,int index){ return Prefix + stamp + "_" + index.ToString("D3") + ".par"; }
+        public static string FileName(string stamp,string token,int index){
+            if(string.IsNullOrEmpty(token)) return FileName(stamp, index);
+            string tag = token.Length > 4 ? token.Substring(0, 4) : token;
+            return Prefix + stamp + "_" + tag + "_" + index.ToString("D3") + ".par";
+        }
 
         // 这次生成往哪个目录写（0.7.15）。原来 autopanel.tsv 只记一个全局的输出目录：在装配 A 里生成过一次，
         // 换到装配 B 里生成，板子照样写进 A 的目录 —— B 引用着别的项目文件夹里的零件，拷走 / 打包 B 时板子就丢了。

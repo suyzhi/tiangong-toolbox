@@ -16,17 +16,83 @@ namespace TianGongCadSuite {
         const double DepthTol = 0.03;       // 板子中面离框口中面 30mm 以内才算"装在这个框口里"
         const double OverlapMin = 0.5;      // 板子盖住框口面积一半以上
 
-        // 薄板：横截面（垂直于最长直边的两个方向）一边很薄、一边很宽
+        struct P2 {
+            public double X, Y;
+            public P2(double x, double y){ X = x; Y = y; }
+        }
+        // 薄板：在垂直于最长直边 axis 的二维截面上求最小外接矩形厚度与宽度（2D 凸包旋转边法向扫描）。
+        // 不能按世界 X/Y/Z 轴直接投影：斜角/非正交围栏上旋转 ≥2°~45° 的竖立薄板在世界轴上跨度会暴涨，
+        // 误判成直型材塞进 Members 导致整面框口识别崩溃。
         public static bool IsPlate(V3 axis, IList<V3> points){
-            if (points == null || points.Count == 0) return false;
+            if (points == null || points.Count < 2) return false;
             V3 a;
             try { a = axis.Unit(); } catch (ArgumentException) { return false; }
             var world = new[]{ new V3(1, 0, 0), new V3(0, 1, 0), new V3(0, 0, 1) };
             V3 e = world.OrderBy(w => Math.Abs(w.Dot(a))).First();
             V3 b = (e - a * e.Dot(a)).Unit(), c = a.Cross(b).Unit();
-            double eb = Extent(points, b), ec = Extent(points, c);
-            double thin = Math.Min(eb, ec), wide = Math.Max(eb, ec);
-            return thin <= ThinMax && wide >= WideMin && thin <= ThinRatio * wide;
+            var pts = new List<P2>(points.Count);
+            for (int i = 0; i < points.Count; i++) pts.Add(new P2(points[i].Dot(b), points[i].Dot(c)));
+            var hull = ConvexHull2D(pts);
+            if (hull.Count < 2) return false;
+            double bestThin = double.PositiveInfinity, bestWide = 0;
+            if (hull.Count == 2) {
+                double dx = hull[1].X - hull[0].X, dy = hull[1].Y - hull[0].Y;
+                bestThin = 0;
+                bestWide = Math.Sqrt(dx * dx + dy * dy);
+            } else {
+                int m = hull.Count;
+                for (int i = 0; i < m; i++) {
+                    P2 p0 = hull[i], p1 = hull[(i + 1) % m];
+                    double dx = p1.X - p0.X, dy = p1.Y - p0.Y;
+                    double len = Math.Sqrt(dx * dx + dy * dy);
+                    if (len < 1e-12) continue;
+                    double ux = dx / len, uy = dy / len;
+                    double vx = -uy, vy = ux;
+                    double minU = double.PositiveInfinity, maxU = double.NegativeInfinity;
+                    double minV = double.PositiveInfinity, maxV = double.NegativeInfinity;
+                    for (int k = 0; k < m; k++) {
+                        double u = hull[k].X * ux + hull[k].Y * uy;
+                        double v = hull[k].X * vx + hull[k].Y * vy;
+                        if (u < minU) minU = u; if (u > maxU) maxU = u;
+                        if (v < minV) minV = v; if (v > maxV) maxV = v;
+                    }
+                    double eu = maxU - minU, ev = maxV - minV;
+                    double thin = Math.Min(eu, ev), wide = Math.Max(eu, ev);
+                    if (thin < bestThin - 1e-12 || (Math.Abs(thin - bestThin) <= 1e-12 && wide > bestWide)) {
+                        bestThin = thin;
+                        bestWide = wide;
+                    }
+                }
+            }
+            if (double.IsInfinity(bestThin)) return false;
+            return bestThin <= ThinMax && bestWide >= WideMin && bestThin <= ThinRatio * bestWide;
+        }
+        static double Cross2(P2 o, P2 a, P2 b){ return (a.X - o.X) * (b.Y - o.Y) - (a.Y - o.Y) * (b.X - o.X); }
+        static List<P2> ConvexHull2D(List<P2> pts){
+            pts.Sort(delegate(P2 p, P2 q){
+                int cx = p.X.CompareTo(q.X);
+                return cx != 0 ? cx : p.Y.CompareTo(q.Y);
+            });
+            var uniq = new List<P2>(pts.Count);
+            for (int i = 0; i < pts.Count; i++) {
+                if (uniq.Count == 0 || Math.Abs(pts[i].X - uniq[uniq.Count - 1].X) > 1e-12 || Math.Abs(pts[i].Y - uniq[uniq.Count - 1].Y) > 1e-12)
+                    uniq.Add(pts[i]);
+            }
+            if (uniq.Count <= 2) return uniq;
+            var lower = new List<P2>();
+            for (int i = 0; i < uniq.Count; i++) {
+                while (lower.Count >= 2 && Cross2(lower[lower.Count - 2], lower[lower.Count - 1], uniq[i]) <= 1e-15) lower.RemoveAt(lower.Count - 1);
+                lower.Add(uniq[i]);
+            }
+            var upper = new List<P2>();
+            for (int i = uniq.Count - 1; i >= 0; i--) {
+                while (upper.Count >= 2 && Cross2(upper[upper.Count - 2], upper[upper.Count - 1], uniq[i]) <= 1e-15) upper.RemoveAt(upper.Count - 1);
+                upper.Add(uniq[i]);
+            }
+            lower.RemoveAt(lower.Count - 1);
+            upper.RemoveAt(upper.Count - 1);
+            lower.AddRange(upper);
+            return lower;
         }
 
         // 这块板是否已经装在框口里：和框口同向（板厚方向 = 框口法向）、中面靠近、盖住框口一半以上面积

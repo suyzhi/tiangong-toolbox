@@ -23,7 +23,9 @@ namespace TianGongCadSuite {
     // 某一层识别失败（角部没闭合、非矩形……）只记一条说明、跳过这一层，不影响别的平面。
     // 只选了一个平面的型材时，结果和原来直接 Detect 一样。
     public static class FrameGrouping {
-        const double DirTol = 1e-6;     // 方向平行/垂直判定（单位向量点积/叉积）
+        // 与 PanelGeometry.AngularTolerance (1e-7) 严格对齐：避免分组阶段放宽到 1e-6 收进来的成员在下层 FrameDetection 抛角度异常。
+        const double DirTol = PanelGeometry.AngularTolerance;
+        const double AxisClusterTol = PanelGeometry.AngularTolerance * 0.5;
         const double DepthTol = 1e-7;   // 同一层的厚度中心位置（米），和 FrameDetection 的 Tol 一样
 
         public static List<FoundOpening> Detect(IList<FrameMember> members, double thickness, double gap, List<string> notes){
@@ -32,14 +34,21 @@ namespace TianGongCadSuite {
             foreach (var m in members) {
                 V3 a;
                 try { a = m.Axis.Canonical(); } catch { continue; }
-                if (!axes.Any(x => x.Cross(a).Length < DirTol)) axes.Add(a);
+                if (!axes.Any(x => x.Cross(a).Length < AxisClusterTol)) axes.Add(a);
             }
+            // 按 (法向 n, 无序方向对 {u, v}) 去重，不能仅按法向 n 去重：
+            // 同平面内若存在两根互相垂直的 ±45° 斜撑且在输入序列中排在主框架前，仅按 n 去重会吞掉横竖主框架。
             var normals = new List<V3[]>();   // {n, u, v}
             for (int i = 0; i < axes.Count; i++)
                 for (int j = i + 1; j < axes.Count; j++) {
                     if (Math.Abs(axes[i].Dot(axes[j])) > DirTol) continue;
-                    var n = axes[i].Cross(axes[j]).Canonical();
-                    if (!normals.Any(x => x[0].Cross(n).Length < DirTol)) normals.Add(new[]{ n, axes[i], axes[j] });
+                    var u = axes[i];
+                    var v = axes[j];
+                    var n = u.Cross(v).Canonical();
+                    if (!normals.Any(x => x[0].Cross(n).Length < DirTol
+                        && ((x[1].Cross(u).Length < DirTol && x[2].Cross(v).Length < DirTol)
+                            || (x[1].Cross(v).Length < DirTol && x[2].Cross(u).Length < DirTol))))
+                        normals.Add(new[]{ n, u, v });
                 }
             if (normals.Count == 0) throw new ArgumentException(axes.Count <= 1 ? "所选型材均平行，没有闭合矩形框口。" : "所选型材没有互相垂直的，自动模式只支持相互垂直的直型材。");
 
@@ -52,7 +61,7 @@ namespace TianGongCadSuite {
                 foreach (var m in members) {
                     V3 a;
                     try { a = m.Axis.Canonical(); } catch { continue; }
-                    if (a.Cross(u).Length >= DirTol && a.Cross(v).Length >= DirTol) continue;
+                    if (a.Cross(u).Length > DirTol && a.Cross(v).Length > DirTol) continue;
                     if (m.Points.Count == 0) continue;
                     double lo = m.Points.Min(p => p.Dot(n)), hi = m.Points.Max(p => p.Dot(n));
                     double mid = (lo + hi) / 2;
@@ -65,10 +74,14 @@ namespace TianGongCadSuite {
                     planeNo++;
                     string label = "平面 " + planeNo + "（法向 " + AxisName(n) + "）";
                     List<FrameOpening> found;
-                    try { found = FrameDetection.Detect(layer.Value, thickness, gap); }
+                    var layerSkips = new List<string>();
+                    try { found = FrameDetection.Detect(layer.Value, thickness, gap, layerSkips); }
                     catch (ArgumentException e) {
                         if (notes != null) notes.Add(label + "，" + layer.Value.Count + " 根型材：" + e.Message);
                         continue;
+                    }
+                    if (notes != null && layerSkips.Count > 0) {
+                        foreach (var sk in layerSkips) notes.Add(label + " 跳过 1 个异常腔体：" + sk);
                     }
                     foreach (var o in found) {
                         if (result.Any(r => (r.Opening.MidPoint - o.MidPoint).Length < 1e-6)) continue;   // 同一个框口识别两次

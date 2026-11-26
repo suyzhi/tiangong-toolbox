@@ -26,9 +26,11 @@ namespace TianGongCadSuite {
     //   · 子装配里已有的板子（填充板、玻璃板）不当型材，盖住的框口标「已有板」、默认不勾。
     // 生成的板子插在当前打开的装配里（跨子装配时就是顶层装配）。
     public sealed class AutoPanelForm : Form, IBusyTool {
-        // 生成中（会泵消息）点功能区别的命令：不能把这个窗口连同生成到一半的板子一起关掉（见 IBusyTool）
+        // 生成/读取中（会泵消息）点功能区别的命令：不能把这个窗口连同正在处理的操作一起关掉（见 IBusyTool）
         public bool Busy { get { return busy; } }
-        public string BusyWhat { get { return "生成板子"; } }
+        string busyWhat = "生成板子";
+        public string BusyWhat { get { return busyWhat; } }
+        bool initialReadDone;
         protected override void OnFormClosing(FormClosingEventArgs e){
             if (busy && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; return; }
             base.OnFormClosing(e);
@@ -94,10 +96,25 @@ namespace TianGongCadSuite {
             material.Items.AddRange(Materials);
             BuildLayout();
             LoadSettings();
-            debounce.Tick += (s, e) => { debounce.Stop(); Recompute(); };
-            foreach (var n in new[]{ thickness, gap }) n.ValueChanged += (s, e) => { if (!loading) { debounce.Stop(); debounce.Start(); } };
+            debounce.Tick += (s, e) => { debounce.Stop(); if (!IsDisposed && !busy) Recompute(); };
+            foreach (var n in new[]{ thickness, gap }) n.ValueChanged += (s, e) => { if (!loading && !busy) { debounce.Stop(); debounce.Start(); } };
             FormClosed += (s, e) => { debounce.Dispose(); tips.Dispose(); };
-            ReadSelection();
+        }
+
+        // 不在构造函数中同步 ReadSelection（里面会调 Application.DoEvents()）：
+        // 否则 ToolContext.Show 尚未赋值 active = next 且窗口未显示，用户误以为无反应重击功能区按钮会绕过 IBusyTool 造成重入双开。
+        protected override void OnShown(EventArgs e){
+            base.OnShown(e);
+            if (!initialReadDone && !IsDisposed && IsHandleCreated) {
+                try {
+                    BeginInvoke((Action)delegate {
+                        if (!IsDisposed && !initialReadDone) {
+                            initialReadDone = true;
+                            ReadSelection();
+                        }
+                    });
+                } catch { }
+            }
         }
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData){
@@ -168,8 +185,13 @@ namespace TianGongCadSuite {
             openings.CheckOnClick = true; openings.BackColor = Color.White; openings.Font = Ui.F9;
             Ui.EnableDoubleBuffer(openings);
             openings.SelectedIndexChanged += (s, e) => ShowPreview();
-            // ItemCheck 触发时勾选状态还没改，所以延后刷新按钮；批量全选/全不选时屏蔽逐项 BeginInvoke 风暴。
-            openings.ItemCheck += (s, e) => { if (!batchChecking && IsHandleCreated) BeginInvoke((Action)UpdateGenerateButton); };
+            // ItemCheck 触发时勾选状态还没改，所以延后刷新按钮；批量全选/全不选或忙态时屏蔽逐项 BeginInvoke 风暴与重入。
+            openings.ItemCheck += (s, e) => {
+                if (busy) { e.NewValue = e.CurrentValue; return; }
+                if (!batchChecking && !IsDisposed && IsHandleCreated) {
+                    try { BeginInvoke((Action)delegate { if (!IsDisposed) UpdateGenerateButton(); }); } catch { }
+                }
+            };
             listFrame.Controls.Add(openings);
             // 预览控件自己画标题和操作提示，卡片不再写一遍
             var previewCard = Ui.Card("", 0, "");
@@ -254,6 +276,7 @@ namespace TianGongCadSuite {
         }
 
         bool PickOutputDir(){
+            if (busy) return false;
             string picked = FolderPicker.Pick(this, "选择输出目录（每批会建一个子目录，每个框口一个 PAR）", outputDir, "autopanel.output");
             if (string.IsNullOrEmpty(picked)) return false;
             outputDir = picked;
@@ -274,7 +297,8 @@ namespace TianGongCadSuite {
 
         // append=true：这次的选择加到已读的上面（FrameReader 按实例去重，重复选不会算两次）
         internal void ReadSelection(bool append){
-            if (busy) return;   // 读型材 / 生成时泵消息，别再点进来
+            if (busy || IsDisposed) return;   // 读型材 / 生成时泵消息，别再点进来
+            initialReadDone = true;
             var previous = selection; var previousMembers = cachedMembers; var previousPlates = plates; string previousInfo = memberInfo.Text;
             string summary = null;
             try {
@@ -285,18 +309,24 @@ namespace TianGongCadSuite {
                 List<FrameMember> members = null, newPlates = new List<FrameMember>();
                 if (next.Count > 0) {
                     UseWaitCursor = true;
-                    // 读的时候泵消息（整个围栏要读好一阵，原来不泵消息天工被判成"未响应"）；泵消息期间窗口不许关（busy）
+                    // 读的时候禁用窗口并置 busy 再泵消息：防止读取期间点击「更改…」/全选/重入导致模态嵌套或 COM 并发异常。
+                    busyWhat = "读取型材";
                     busy = true;
+                    Enabled = false;
                     var tick = System.Diagnostics.Stopwatch.StartNew();
                     FrameSelection read;
                     try {
                         read = FrameReader.ReadAll(assembly, next, n => {
-                            if (tick.ElapsedMilliseconds < 300) return;
+                            if (IsDisposed || tick.ElapsedMilliseconds < 300) return;
                             tick.Restart();
                             SetStatus("正在读取型材… 已读 " + n + " 个零件", Ui.Accent);
                             try { status.Update(); Application.DoEvents(); } catch { }
                         });
-                    } finally { busy = false; }
+                    } finally {
+                        busy = false;
+                        if (!IsDisposed) Enabled = true;
+                    }
+                    if (IsDisposed) return;
                     summary = read.Summary();
                     tips.SetToolTip(memberInfo, summary + (read.Skipped.Count > 0 ? "\n跳过的零件：" + string.Join("、", read.Skipped.ToArray()) : ""));
                     if (read.Members.Count < 4) throw new ArgumentException("请至少选择围成框口的四根型材，或选择包含它们的框架子装配。");
@@ -307,6 +337,7 @@ namespace TianGongCadSuite {
                 if (!append) generated.Clear();
                 Recompute();
             } catch (Exception e) {
+                if (IsDisposed) return;
                 if (append && previous.Count > 0) {
                     // 追加失败不丢掉已读的：保持上一次的型材和框口
                     selection = previous; cachedMembers = previousMembers; plates = previousPlates; memberInfo.Text = previousInfo;
@@ -317,7 +348,7 @@ namespace TianGongCadSuite {
                 memberInfo.Text = summary ?? Hint;
                 ClearResult(Friendly(e));
                 tips.SetToolTip(status, Friendly(e));
-            } finally { UseWaitCursor = false; }
+            } finally { if (!IsDisposed) UseWaitCursor = false; }
         }
 
         void ClearMembers(){
@@ -416,6 +447,7 @@ namespace TianGongCadSuite {
         }
 
         void SetAllChecked(bool on){
+            if (busy || IsDisposed) return;
             batchChecking = true;
             openings.BeginUpdate();
             try { for (int i = 0; i < openings.Items.Count; i++) openings.SetItemChecked(i, on); }
@@ -437,24 +469,33 @@ namespace TianGongCadSuite {
 
         // ---------------- 生成 ----------------
         void Generate(){
-            if (busy) return;
+            if (busy || IsDisposed) return;
             try {
+                // 生成入口先核对当前活动文档仍为目标顶层可编辑装配，防止切文档后误改后台装配。
+                Context();
                 var pick = openings.CheckedIndices.Cast<int>().Where(i => i < specs.Count).ToList();
                 if (pick.Count == 0) { SetStatus("先勾上要生成的框口。", Ui.Warn); return; }
                 if (outputDir.Length == 0 || !Directory.Exists(outputDir)) { if (!PickOutputDir()) return; }
-                // 生成前按当前选择重读一遍型材（几何可能在窗口开着的时候改过），框口对不上就不生成
-                // 重读同样要泵消息（整个围栏要读好一阵）
+                Context();
+                // 生成前按当前选择重读一遍型材（几何可能在窗口开着的时候改过），框口对不上就不生成；
+                // 重读期间同样禁用窗口防交互重入。
                 FrameSelection reread;
-                busy = true;
+                busyWhat = "核对型材";
+                busy = true; Enabled = false; UseWaitCursor = true;
                 try {
                     var rt = System.Diagnostics.Stopwatch.StartNew();
                     reread = FrameReader.ReadAll(assembly, selection, n => {
-                        if (rt.ElapsedMilliseconds < 300) return;
+                        if (IsDisposed || rt.ElapsedMilliseconds < 300) return;
                         rt.Restart();
                         SetStatus("生成前核对型材… 已读 " + n + " 个零件", Ui.Accent);
                         try { status.Update(); Application.DoEvents(); } catch { }
                     });
-                } finally { busy = false; }
+                } finally {
+                    busy = false;
+                    if (!IsDisposed) { Enabled = true; UseWaitCursor = false; }
+                }
+                if (IsDisposed) return;
+                Context();
                 if (reread.Members.Count < 4) throw new InvalidOperationException("型材在窗口打开期间改过（读到的型材不足 4 根）。请重新选择型材后点「读取当前选择」。");
                 cachedMembers = reread.Members; plates = reread.Plates;
                 double t = (double)thickness.Value / 1000, g = (double)gap.Value / 1000;
@@ -469,20 +510,23 @@ namespace TianGongCadSuite {
                 }
                 debounce.Stop();
 
+                busyWhat = "生成板子";
                 busy = true; Enabled = false; UseWaitCursor = true;
                 SetStatus("正在生成 " + chosen.Count + " 块板子…", Ui.Accent); Application.DoEvents();
                 var props = new PanelProps { Material = material.Text.Trim() };
                 // 一块一块报进度、泵消息（窗口禁用着，点不了）：几十块板要一两分钟，原来整段不泵消息，Windows 把天工判成"未响应"
                 var tick = System.Diagnostics.Stopwatch.StartNew();
                 string dir = BatchPanels.Generate(app, assembly, chosen, outputDir, props, (i, n) => {
-                    if (tick.ElapsedMilliseconds < 300) return;
+                    if (IsDisposed || tick.ElapsedMilliseconds < 300) return;
                     tick.Restart();
                     SetStatus("正在生成第 " + i + " / " + n + " 块板子…", Ui.Accent);
                     try { status.Update(); Application.DoEvents(); } catch { }
                 });
                 for (int i = 0; i < chosen.Count; i++) if (!props.Failed.Contains(i)) generated.Add(Key(chosen[i]));
                 SaveSettings();
-                busy = false; Enabled = true; UseWaitCursor = false;
+                busy = false;
+                if (IsDisposed) return;
+                Enabled = true; UseWaitCursor = false;
                 Recompute();   // 刷新列表：生成过的标出来、取消勾选
                 string msg = "已生成 " + (chosen.Count - props.Failed.Count) + " 块板子" + (props.Failed.Count > 0 ? "（" + props.Failed.Count + " 块没生成，见下面）" : "") + "：" + dir + "　记得保存装配。";
                 if (props.Problems.Count > 0) msg += "　注意：" + string.Join("；", props.Problems.ToArray());
@@ -490,7 +534,9 @@ namespace TianGongCadSuite {
                 tips.SetToolTip(status, msg);
             } catch (Exception e) {
                 Log.Write("AutoGenerate", e);
-                busy = false; Enabled = true; UseWaitCursor = false;
+                busy = false;
+                if (IsDisposed) return;
+                Enabled = true; UseWaitCursor = false;
                 SetStatus(Friendly(e), Ui.Bad);
                 tips.SetToolTip(status, Friendly(e));
                 UpdateGenerateButton();

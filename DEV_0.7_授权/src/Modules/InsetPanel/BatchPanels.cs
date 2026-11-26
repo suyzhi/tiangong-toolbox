@@ -20,10 +20,11 @@ namespace TianGongCadSuite {
         public static string Generate(F.Application app, A.AssemblyDocument assembly, IList<PanelSpec> specs, string parent, PanelProps props, Action<int, int> progress){
             if (specs == null || specs.Count == 0) throw new ArgumentException("没有待生成框口。");
             if (!Directory.Exists(parent)) throw new DirectoryNotFoundException(parent);
-            // 文件名必须带批次时间戳（原因见 PanelNaming 的注释：CAD 会按文件名把装配目录里的旧同名零件插进来）。
+            // 文件名必须带批次时间戳与批次短随机 token（原因见 PanelNaming 的注释：CAD 按文件名查重，同秒两批也必须不同名）。
             string stamp = PanelNaming.Stamp(DateTime.Now);
-            Func<int, string> name = i => PanelNaming.FileName(stamp, i);
-            string directory = Path.Combine(parent, PanelNaming.BatchDirectoryName(stamp, Guid.NewGuid().ToString("N").Substring(0, 8)));
+            string token = Guid.NewGuid().ToString("N").Substring(0, 8);
+            Func<int, string> name = i => PanelNaming.FileName(stamp, token, i);
+            string directory = Path.Combine(parent, PanelNaming.BatchDirectoryName(stamp, token));
             Directory.CreateDirectory(directory);
             var created = new List<Tuple<A.Occurrence, string>>();
             var made = new List<int>();
@@ -46,12 +47,6 @@ namespace TianGongCadSuite {
                 }
                 if (made.Count == 0) throw firstError ?? new InvalidOperationException("一块板都没生成出来。");
                 if (props == null && firstError != null) throw firstError;   // 没地方说"哪块失败了"：照原来整批撤回
-                string material = props == null ? "" : props.Material;
-                File.WriteAllLines(Path.Combine(directory, "尺寸清单.csv"),
-                    new[]{ "文件,宽mm,高mm,厚mm,每边间隙mm,材质" }.Concat(made.Select(i => string.Format(CultureInfo.InvariantCulture,
-                        "{0},{1:R},{2:R},{3:R},{4:R},{5}", name(i + 1), specs[i].Width * 1000, specs[i].Height * 1000, specs[i].Thickness * 1000, specs[i].Gap * 1000, material))),
-                    System.Text.Encoding.UTF8);
-                return directory;
             } catch (Exception original) {
                 var errors = new List<string>();
                 foreach (var item in created.AsEnumerable().Reverse()) {
@@ -64,6 +59,24 @@ namespace TianGongCadSuite {
                     + (errors.Count > 0 ? "\n部分结果未能撤回，请检查：\n" + string.Join("\n", errors) : "\n本批已插入的板子已撤回。")
                     + "\n批次目录：" + directory, original);
             }
+            // 辅助清单写入放在板子回滚 try 块之外：即使清单文件偶发被占用写入失败，绝不把已成功建模并插入的板子全部撤回；
+            // 且对自由文本材质做标准 CSV 转义，避免含逗号/引号时错列。
+            try {
+                string material = props == null ? "" : (props.Material ?? "");
+                File.WriteAllLines(Path.Combine(directory, "尺寸清单.csv"),
+                    new[]{ "文件,宽mm,高mm,厚mm,每边间隙mm,材质" }.Concat(made.Select(i => string.Format(CultureInfo.InvariantCulture,
+                        "{0},{1:R},{2:R},{3:R},{4:R},{5}", Csv(name(i + 1)), specs[i].Width * 1000, specs[i].Height * 1000, specs[i].Thickness * 1000, specs[i].Gap * 1000, Csv(material)))),
+                    System.Text.Encoding.UTF8);
+            } catch (Exception e) {
+                Log.Write("BatchPanelCsv", e);
+                if (props != null) props.Problem("尺寸清单.csv 写入失败（板子本身已生成）：" + e.Message);
+            }
+            return directory;
+        }
+        static string Csv(string value){
+            if (string.IsNullOrEmpty(value)) return "";
+            if (value.IndexOfAny(new[]{ ',', '"', '\r', '\n' }) < 0) return value;
+            return "\"" + value.Replace("\"", "\"\"") + "\"";
         }
     }
 }

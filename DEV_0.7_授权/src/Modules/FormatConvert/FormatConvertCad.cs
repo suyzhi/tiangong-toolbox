@@ -19,17 +19,35 @@ namespace TianGongCadSuite {
         public double BootSeconds {get;private set;}
         // 这次会话里已经存出来的文件（含装配顺带存的零件）：勾了「覆盖」时，轮到这些零件本身别再转一遍（0.10.3）
         readonly HashSet<string> written=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // 平铺输出防跨装配同名错替：记录本会话中每个目标路径对应的真实源路径
+        readonly Dictionary<string,string> writtenTargetSources=new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
         // 这次批次已随装配转换过的源 SolidWorks 文件路径（解决天工因 MRU 自动追加 _0/_5 后缀导致零件重转的问题）
         readonly HashSet<string> writtenSources=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        public bool WroteThisRun(IEnumerable<string> paths){ return WroteThisRun(paths,null); }
-        public bool WroteThisRun(IEnumerable<string> paths,string sourcePath){
+        public bool WroteThisRun(IEnumerable<string> paths){ return WroteThisRun(paths,null,false); }
+        public bool WroteThisRun(IEnumerable<string> paths,string sourcePath){ return WroteThisRun(paths,sourcePath,false); }
+        public bool WroteThisRun(IEnumerable<string> paths,string sourcePath,bool flatOutput){
+            string fullSrc=null;
+            if(!string.IsNullOrEmpty(sourcePath)){
+                try{ fullSrc=Path.GetFullPath(sourcePath); }catch{ fullSrc=sourcePath; }
+                if(writtenSources.Contains(fullSrc))return true;
+            }
+            if(flatOutput){
+                // 平铺输出模式下多个不同目录可能映射为同一个文件名：只认源路径命中或目标路径明确属于同一源文件。
+                if(paths!=null&&fullSrc!=null){
+                    foreach(string p in paths){
+                        try{
+                            string fp=Path.GetFullPath(p);
+                            string owner;
+                            if(writtenTargetSources.TryGetValue(fp,out owner)&&string.Equals(owner,fullSrc,StringComparison.OrdinalIgnoreCase))return true;
+                        }catch{}
+                    }
+                }
+                return ConvertWrittenIndex.ContainsForFlatSource(lockRoot,paths,sourcePath);
+            }
             if(paths!=null){
                 foreach(string p in paths){
                     try{ if(written.Contains(Path.GetFullPath(p)))return true; }catch{}
                 }
-            }
-            if(!string.IsNullOrEmpty(sourcePath)){
-                try{ if(writtenSources.Contains(Path.GetFullPath(sourcePath)))return true; }catch{}
             }
             return ConvertWrittenIndex.ContainsAnyOrSource(lockRoot,paths,sourcePath);
         }
@@ -47,22 +65,28 @@ namespace TianGongCadSuite {
             lockRoot=newLockRoot;
             log=newLog==null?delegate(string s){}:newLog;
             written.Clear();
+            writtenTargetSources.Clear();
             writtenSources.Clear();
         }
         // 批次结束后立刻清理临时暂存目录，避免热驻留空闲期占着磁盘空间。
         public void EndBatch(){
             DropStages();
             written.Clear();
+            writtenTargetSources.Clear();
             writtenSources.Clear();
         }
         public int ProcessId {get;private set;}
+        public long ProcessStartUtcTicks {get;private set;}
         public bool SkippedBecauseEmpty {get;private set;}
 
         static readonly int BusyTimeoutMs=180000;
         public CadConvertSession(Action<string> log,string lockRoot)
-            : this(log,lockRoot,0,null,null){}
+            : this(log,lockRoot,0,null,null,null){}
 
-        public CadConvertSession(Action<string> log,string lockRoot,int rotTarget,HashSet<int> forbiddenPids,string queueDir){
+        public CadConvertSession(Action<string> log,string lockRoot,int rotTarget,HashSet<int> forbiddenPids,string queueDir)
+            : this(log,lockRoot,rotTarget,forbiddenPids,queueDir,null){}
+
+        public CadConvertSession(Action<string> log,string lockRoot,int rotTarget,HashSet<int> forbiddenPids,string queueDir,ICollection<int> prelaunchedPids){
             TianGongCadSuite.Licensing.LicenseGate.Require();
             this.log=log==null?delegate(string s){}:log;
             this.lockRoot=lockRoot;
@@ -70,17 +94,22 @@ namespace TianGongCadSuite {
             var watch=Stopwatch.StartNew();
             // 转换器要独占一个 CAD：下面会隐藏窗口、关掉提示、把撤销步数设成 0，每个文件转完还会**不保存**关掉全部文档。
             // 万一 CreateInstance 连上的是用户正在用的那个天工，这些全落在用户头上。
-            // 预拉起模式下由主控传入启动前已存在的用户 CAD PID（forbiddenPids），允许绑定本批次预拉起的隐藏 CAD；
-            // 传统模式下则在 CreateInstance 前快照当前进程列表。
-            HashSet<int> running;
+            // 关键安全边界：当 rotTarget<=0（非绑定本批预拉起实例，如传统 DCOM 启动、崩溃自愈或 4GB 回收重建）时，
+            // 绝不能只依赖启动时传入的过期 forbiddenPids，必须无条件实时快照当前所有 TianGong/Edge PID 并入禁用集。
+            var running=new HashSet<int>();
             if(forbiddenPids!=null){
-                running=forbiddenPids;
-            } else {
-                running=new HashSet<int>();
+                foreach(int pid in forbiddenPids)running.Add(pid);
+            }
+            if(rotTarget<=0||forbiddenPids==null){
                 try{ foreach(var name in new[]{"TianGong","Edge"})foreach(var p in Process.GetProcessesByName(name)){ running.Add(p.Id); p.Dispose(); } }catch{}
             }
             // 并行预拉起门控：只读等待 ROT 中出现足够多已注册的隐藏天工，绝不提前调 CoCreateInstance 导致 DCOM 额外拉起多余进程。
+            // 动态追踪进入等待时存活的外部 CAD 与本次预拉起进程：任一退出即下调目标阈值，避免用户关 CAD 或预拉起失败触发 75 秒死等。
             if(rotTarget>0){
+                var aliveForbiddenAtEntry=new List<int>();
+                foreach(int pid in running)if(IsPidAlive(pid))aliveForbiddenAtEntry.Add(pid);
+                var trackedPrelaunched=new List<int>();
+                if(prelaunchedPids!=null)foreach(int pid in prelaunchedPids)if(pid>0)trackedPrelaunched.Add(pid);
                 var waitEnd=DateTime.UtcNow.AddSeconds(75);
                 while(DateTime.UtcNow<waitEnd){
                     if(!string.IsNullOrEmpty(queueDir)&&!ConvertQueue.HasPending(queueDir)){
@@ -88,7 +117,13 @@ namespace TianGongCadSuite {
                         BootSeconds=watch.Elapsed.TotalSeconds;
                         return;
                     }
-                    if(CadPrelauncher.CountRotSolidEdge()>=rotTarget)break;
+                    int exitedForbidden=0;
+                    for(int i=0;i<aliveForbiddenAtEntry.Count;i++)if(!IsPidAlive(aliveForbiddenAtEntry[i]))exitedForbidden++;
+                    int deadPrelaunched=0;
+                    for(int i=0;i<trackedPrelaunched.Count;i++)if(!IsPidAlive(trackedPrelaunched[i]))deadPrelaunched++;
+                    if(trackedPrelaunched.Count>0&&deadPrelaunched>=trackedPrelaunched.Count)break;
+                    int effectiveTarget=rotTarget-deadPrelaunched-exitedForbidden;
+                    if(effectiveTarget<=0||CadPrelauncher.CountRotSolidEdge()>=effectiveTarget)break;
                     Thread.Sleep(150);
                 }
                 if(!string.IsNullOrEmpty(queueDir)&&!ConvertQueue.HasPending(queueDir)){
@@ -97,9 +132,14 @@ namespace TianGongCadSuite {
                     return;
                 }
             }
-            // 预拉起就绪后仅在 ~10ms 的 CreateInstance 绑定瞬间串行一下，避免多个 worker 同时争抢同一个 REGCLS_SINGLEUSE 槽位。
-            IDisposable bindScope=rotTarget>0?AcquireNamedMutex("Local\\TianGongFormatConvert.ComBind",90):null;
+            // 所有 COM CreateInstance 统一经由 ComBind 互斥锁串行，防止多 worker 争抢同一个 REGCLS_SINGLEUSE 槽位，
+            // 或 rotTarget==0 重建会话时抢占另一批次正在预拉起的槽位。
+            IDisposable bindScope=AcquireNamedMutex("Local\\TianGongFormatConvert.ComBind",90);
             try{
+                if(rotTarget<=0){
+                    // 拿锁后再刷新一次实时进程，兜住等待锁期间新出现的用户 CAD 或同伴预拉起 CAD
+                    try{ foreach(var name in new[]{"TianGong","Edge"})foreach(var p in Process.GetProcessesByName(name)){ running.Add(p.Id); p.Dispose(); } }catch{}
+                }
                 app=Retry(delegate(){ return (F.Application)Activator.CreateInstance(Type.GetTypeFromProgID("SolidEdge.Application")); },"启动天工CAD",600);
             }finally{
                 if(bindScope!=null)bindScope.Dispose();
@@ -111,7 +151,12 @@ namespace TianGongCadSuite {
                 app=null;
                 throw new InvalidOperationException("没能另起一个天工 CAD（连上的是已经打开的那个）。为免关掉你打开的文件，转换已停止：请先关掉天工 CAD 再转换，或直接用 TianGongConverter.exe。");
             }
+            ProcessStartUtcTicks=WorkerChildren.CaptureStartUtcTicks(ProcessId);
             ConfigureSession();
+        }
+        static bool IsPidAlive(int pid){
+            if(pid<=0)return false;
+            try{ using(var p=Process.GetProcessById(pid)){ return !p.HasExited; } }catch{ return false; }
         }
         void ConfigureSession(){
             Quiet(delegate(){ app.DisplayAlerts=false; },"DisplayAlerts");
@@ -253,13 +298,30 @@ namespace TianGongCadSuite {
             return lower.EndsWith(".par")||lower.EndsWith(".asm")||lower.EndsWith(".psm")||lower.EndsWith(".dft");
         }
 
-        sealed class Node { public F.SolidEdgeDocument Doc; public string SortKey=""; public List<Node> Kids=new List<Node>(); }
+        sealed class Node {
+            public F.SolidEdgeDocument Doc;
+            public string SortKey="";
+            public List<Node> Kids=new List<Node>();
+            public List<Node> Parents=new List<Node>();
+        }
+        static bool IsTransientOrDeadRpc(Exception e){
+            if(e is TimeoutException)return true;
+            var c=e as COMException;
+            if(c==null)return false;
+            int hr=c.ErrorCode;
+            return IsDeadCom(c)
+                ||hr==unchecked((int)0x80010001)
+                ||hr==unchecked((int)0x8001010A)
+                ||hr==unchecked((int)0x80010100)
+                ||hr==unchecked((int)0x80010105);
+        }
         // 单遍扫描装配树（支持深达 32 层嵌套）：
         // 1. 优先通过 OccurrenceFileName 命中 seenByPath 缓存，跳过大装配中数百个重复紧固件的 OccurrenceDocument/FullName/Type 跨进程 COM 往返；
         // 2. 用 kidSet 对子节点去重，避免同一零件 200 个实例往 node.Kids 塞 200 次；
-        // 3. 当 OccurrenceDocument 为空时用 FileMissing() 区分「真缺件」与「被抑制实例」，防止抑制件误触发整项目拷贝重开。
-        static Node BuildNode(F.SolidEdgeDocument doc,int depth,Dictionary<string,Node> seen,Dictionary<string,Node> seenByPath,
-            Action<string> log,ref int missingOccs,ref int emptySubAsms,ref int topOccCount){
+        // 3. Occurrences / OccurrenceDocument 走瞬时 COM 忙重试并显式统计 treeErrors，防止 COM 异常被吞掉后把空壳装配保存并报 ok；
+        // 4. 当 OccurrenceDocument 为空时用 FileMissing() 区分「真缺件」与「被抑制实例」，防止抑制件误触发整项目拷贝重开。
+        Node BuildNode(F.SolidEdgeDocument doc,int depth,Dictionary<string,Node> seen,Dictionary<string,Node> seenByPath,
+            ref int missingOccs,ref int emptySubAsms,ref int topOccCount,ref int treeErrors){
             string full="";
             string key="";
             try{ full=doc.FullName??""; key=full+"|"+doc.Type; }catch{}
@@ -270,40 +332,52 @@ namespace TianGongCadSuite {
             var assembly=doc as A.AssemblyDocument;
             if(assembly!=null&&depth<32){
                 A.Occurrences occurrences=null;
-                try{ occurrences=assembly.Occurrences; }catch(Exception e){ log("读取装配结构失败："+e.Message); }
+                try{ occurrences=Retry(delegate(){ return assembly.Occurrences; },"读取装配结构",60); }
+                catch(Exception e){ treeErrors++; log("读取装配结构失败："+e.Message); }
                 if(occurrences!=null){
-                    int count=0;
-                    try{ count=occurrences.Count; }catch(Exception e){ log("装配实例数读取失败："+e.Message); }
+                    int count=-1;
+                    try{ count=Retry(delegate(){ return occurrences.Count; },"读取装配实例数",60); }
+                    catch(Exception e){ treeErrors++; log("装配实例数读取失败："+e.Message); }
                     if(depth==0)topOccCount=count;
                     if(count==0&&depth>0)emptySubAsms++;
-                    var kidSet=new HashSet<Node>();
-                    for(int i=1;i<=count;i++){
-                        A.Occurrence occ=null;
-                        try{ occ=(A.Occurrence)occurrences.Item(i); }catch{ continue; }
-                        string ofn=null;
-                        try{ ofn=occ.OccurrenceFileName; }catch{}
-                        if(!string.IsNullOrEmpty(ofn)){
-                            Node cached;
-                            if(seenByPath.TryGetValue(ofn,out cached)){
-                                if(kidSet.Add(cached))node.Kids.Add(cached);
+                    if(count>0){
+                        var kidSet=new HashSet<Node>();
+                        for(int i=1;i<=count;i++){
+                            int idx=i;
+                            A.Occurrence occ=null;
+                            try{ occ=Retry(delegate(){ return (A.Occurrence)occurrences.Item(idx); },"读取装配实例",30); }
+                            catch(Exception e){ treeErrors++; log("读取装配实例 #"+idx+" 失败："+e.Message); continue; }
+                            string ofn=null;
+                            try{ ofn=occ.OccurrenceFileName; }catch{}
+                            if(!string.IsNullOrEmpty(ofn)){
+                                Node cached;
+                                if(seenByPath.TryGetValue(ofn,out cached)){
+                                    if(kidSet.Add(cached)){ node.Kids.Add(cached); cached.Parents.Add(node); }
+                                    continue;
+                                }
+                            }
+                            object child=null;
+                            Exception docEx=null;
+                            try{ child=Retry(delegate(){ return occ.OccurrenceDocument; },"读取组件文档",30); }
+                            catch(Exception e){ docEx=e; }
+                            var childDoc=child as F.SolidEdgeDocument;
+                            if(childDoc==null){
+                                bool isMissing=true;
+                                try{ isMissing=occ.FileMissing(); }catch{}
+                                if(isMissing)missingOccs++;
+                                else if(docEx!=null&&IsTransientOrDeadRpc(docEx)){
+                                    treeErrors++;
+                                    log("读取组件文档 COM 异常："+docEx.Message);
+                                }
                                 continue;
                             }
+                            Node childNode=BuildNode(childDoc,depth+1,seen,seenByPath,ref missingOccs,ref emptySubAsms,ref topOccCount,ref treeErrors);
+                            if(!string.IsNullOrEmpty(ofn)&&!seenByPath.ContainsKey(ofn))seenByPath[ofn]=childNode;
+                            if(kidSet.Add(childNode)){ node.Kids.Add(childNode); childNode.Parents.Add(node); }
                         }
-                        object child=null;
-                        try{ child=occ.OccurrenceDocument; }catch{}
-                        var childDoc=child as F.SolidEdgeDocument;
-                        if(childDoc==null){
-                            bool isMissing=true;
-                            try{ isMissing=occ.FileMissing(); }catch{}
-                            if(isMissing)missingOccs++;
-                            continue;
+                        if(node.Kids.Count>1){
+                            node.Kids.Sort(delegate(Node a,Node b){ return string.Compare(a.SortKey,b.SortKey,StringComparison.OrdinalIgnoreCase); });
                         }
-                        Node childNode=BuildNode(childDoc,depth+1,seen,seenByPath,log,ref missingOccs,ref emptySubAsms,ref topOccCount);
-                        if(!string.IsNullOrEmpty(ofn)&&!seenByPath.ContainsKey(ofn))seenByPath[ofn]=childNode;
-                        if(kidSet.Add(childNode))node.Kids.Add(childNode);
-                    }
-                    if(node.Kids.Count>1){
-                        node.Kids.Sort(delegate(Node a,Node b){ return string.Compare(a.SortKey,b.SortKey,StringComparison.OrdinalIgnoreCase); });
                     }
                 }
             }
@@ -319,19 +393,9 @@ namespace TianGongCadSuite {
         // 记录打开源装配前源文件夹里本来就有的 .par/.asm/.psm/.cfg/.log，
         // 转换并关闭文档后仅清理本次 Open() 新生成在源目录里的临时副本（绝不删源目录原有文件，也不删输出目录里的文件）。
         static HashSet<string> SnapshotSourceNativeFiles(string srcDir){
-            var set=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            if(string.IsNullOrEmpty(srcDir)||!Directory.Exists(srcDir))return set;
-            try{
-                foreach(string f in Directory.EnumerateFiles(srcDir)){
-                    string ext=(Path.GetExtension(f)??"").ToLowerInvariant();
-                    if(ext==".par"||ext==".asm"||ext==".psm"||ext==".cfg"||ext==".log"){
-                        try{ set.Add(Path.GetFullPath(f)); }catch{}
-                    }
-                }
-            }catch{}
-            return set;
+            return ConvertSourceBaseline.SnapshotNativeFiles(srcDir);
         }
-        static void CleanupCreatedSourceStubs(IEnumerable<string> candidates,HashSet<string> preExisting,HashSet<string> keptOutputs,bool requireExclusive){
+        static void CleanupCreatedSourceStubs(IEnumerable<string> candidates,HashSet<string> preExisting,HashSet<string> keptOutputs,string outputRoot,bool requireExclusive,DateTime? minCreatedUtc){
             if(candidates==null)return;
             foreach(string raw in candidates){
                 if(string.IsNullOrEmpty(raw))continue;
@@ -339,7 +403,12 @@ namespace TianGongCadSuite {
                     string full=Path.GetFullPath(raw);
                     if(preExisting!=null&&preExisting.Contains(full))continue;
                     if(keptOutputs!=null&&keptOutputs.Contains(full))continue;
+                    if(!string.IsNullOrEmpty(outputRoot)&&ConvertSourceBaseline.IsUnderDir(full,outputRoot))continue;
                     if(!File.Exists(full))continue;
+                    if(minCreatedUtc.HasValue){
+                        var fi=new FileInfo(full);
+                        if(fi.CreationTimeUtc<minCreatedUtc.Value&&fi.LastWriteTimeUtc<minCreatedUtc.Value)continue;
+                    }
                     if(requireExclusive&&!CanOpenExclusive(full))continue;
                     File.Delete(full);
                 }catch{}
@@ -349,6 +418,53 @@ namespace TianGongCadSuite {
             try{
                 using(var fs=new FileStream(path,FileMode.Open,FileAccess.ReadWrite,FileShare.None)){ return true; }
             }catch{ return false; }
+        }
+        static bool SameFileName(string a,string b){
+            if(string.IsNullOrEmpty(a)||string.IsNullOrEmpty(b))return false;
+            try{ return string.Equals(Path.GetFileName(a),Path.GetFileName(b),StringComparison.OrdinalIgnoreCase); }catch{ return false; }
+        }
+        // 平铺输出跨装配防同名不同源错替：在跨进程互斥锁下按「目标路径 -> 源文件」原子占位，
+        // 即使两个并发进程同时撞上不同目录的同名零件，也能确定分配 「名字 (2)」「名字 (3)」…，杜绝覆盖或错替。
+        string ResolveFlatTargetCrossRun(string candidate,string sourceKey,out string crossClash){
+            crossClash=null;
+            if(string.IsNullOrEmpty(candidate)||string.IsNullOrEmpty(sourceKey))return candidate;
+            string normSrc=sourceKey;
+            try{ if(Path.IsPathRooted(sourceKey))normSrc=Path.GetFullPath(sourceKey); }catch{}
+            string dir=Path.GetDirectoryName(candidate),stem=Path.GetFileNameWithoutExtension(candidate),tail=Path.GetExtension(candidate);
+            string claimDir=!string.IsNullOrEmpty(lockRoot)?Path.Combine(lockRoot,"flat-claims"):null;
+            using(AcquireNamedMutex("Local\\TianGongFormatConvert.FlatName",15)){
+                if(claimDir!=null)try{ Directory.CreateDirectory(claimDir); }catch{}
+                string cur=candidate;
+                for(int n=2;;n++){
+                    string fullCur;
+                    try{ fullCur=Path.GetFullPath(cur); }catch{ return cur; }
+                    string owner=null;
+                    if(!writtenTargetSources.TryGetValue(fullCur,out owner)){
+                        owner=ConvertWrittenIndex.GetTargetSource(lockRoot,fullCur);
+                    }
+                    string claimFile=claimDir!=null?Path.Combine(claimDir,Hash(fullCur)+".src"):null;
+                    if(owner==null&&claimFile!=null&&File.Exists(claimFile)){
+                        try{
+                            using(var fs=new FileStream(claimFile,FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete))
+                            using(var sr=new StreamReader(fs,new UTF8Encoding(false))){
+                                string txt=sr.ReadToEnd().Trim();
+                                if(txt.Length>0)owner=txt;
+                            }
+                        }catch{}
+                    }
+                    if(owner==null){
+                        if(claimFile!=null){
+                            try{ File.WriteAllText(claimFile,normSrc,new UTF8Encoding(false)); }catch{}
+                        }
+                        return cur;
+                    }
+                    if(string.Equals(owner,normSrc,StringComparison.OrdinalIgnoreCase)){
+                        return cur;
+                    }
+                    if(crossClash==null)crossClash=owner;
+                    cur=Path.Combine(dir,stem+" ("+n+")"+tail);
+                }
+            }
         }
         static string FormatMissingHint(List<string> missingNames){
             if(missingNames==null||missingNames.Count==0)return "";
@@ -360,17 +476,22 @@ namespace TianGongCadSuite {
         }
 
         public ConvertRow Convert(ConvertItem item,ConvertOptions options){
+            return Convert(item,options,false);
+        }
+        public ConvertRow Convert(ConvertItem item,ConvertOptions options,bool isRetry){
             var row=new ConvertRow();
             row.Index=item.Index;row.Source=item.Source;row.Target=item.Target;row.Worker=item.Worker;
             var total=Stopwatch.StartNew();
+            DateTime openStartUtc=DateTime.UtcNow;
             F.SolidEdgeDocument top=null;
             Dictionary<string,string> staged=null;   // 临时文件夹里的拷贝 → 原文件
             // 提前占住顶层 SolidWorks 目标路径锁：防止其他并发装配把本文件当子装配顺带归一回同一个文件名，
             // 在本进程 SaveAs 或 Verify 重开校验期间发生写冲突（DISP_E_EXCEPTION）。
             string preReservedRootLock=null;
             bool rootSaved=false;
+            string deferredRootMarkTarget=null;
+            string deferredRootMarkSource=null;
             bool isSw=ConvertPlanner.IsSolidWorks(item.Source);
-            bool isSwAsm=isSw&&string.Equals(Path.GetExtension(item.Source),".sldasm",StringComparison.OrdinalIgnoreCase);
             string srcDir=null;
             try{ srcDir=Path.GetDirectoryName(Path.GetFullPath(item.Source)); }catch{}
             bool sameFolderOutput=false;
@@ -378,11 +499,14 @@ namespace TianGongCadSuite {
                 string expectedTopDir=Path.GetDirectoryName(ConvertPlanner.TopTarget(item,options));
                 sameFolderOutput=ConvertPlanner.SameDir(srcDir,expectedTopDir);
             }catch{}
-            HashSet<string> preExistingSrcFiles=!sameFolderOutput?SnapshotSourceNativeFiles(srcDir):null;
+            bool hasBatchBaseline=false;
+            HashSet<string> preExistingSrcFiles=!sameFolderOutput?ConvertSourceBaseline.LoadOrCapture(lockRoot,srcDir,out hasBatchBaseline):null;
             var sourceStubsToClean=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var touchedSrcDirs=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if(!sameFolderOutput&&!string.IsNullOrEmpty(srcDir))touchedSrcDirs.Add(srcDir);
             var writtenThisItem=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            if(isSw&&!string.IsNullOrEmpty(item.Target)){
+            if(isSw&&!string.IsNullOrEmpty(item.Target)&&!isRetry){
                 TryClaimNonBlocking(lockRoot,item.Target,out preReservedRootLock);
             }
             try{
@@ -390,11 +514,12 @@ namespace TianGongCadSuite {
                     log("正在打开大型装配 "+Path.GetFileName(item.Source)+"（"+(item.Size/1048576.0).ToString("F1")+" MB），天工几何转换耗时较长，请稍候…");
                 }
                 PaceOpen();
+                openStartUtc=DateTime.UtcNow;
                 top=Retry(delegate(){ return (F.SolidEdgeDocument)app.Documents.Open(item.Source); },"打开 "+Path.GetFileName(item.Source),7200);
-                int missingOccs=0,emptySubAsms=0,topOccCount=-1;
+                int missingOccs=0,emptySubAsms=0,topOccCount=-1,treeErrors=0;
                 var seenDocs=new Dictionary<string,Node>(StringComparer.OrdinalIgnoreCase);
                 var seenPaths=new Dictionary<string,Node>(StringComparer.OrdinalIgnoreCase);
-                var root=BuildNode(top,0,seenDocs,seenPaths,log,ref missingOccs,ref emptySubAsms,ref topOccCount);
+                var root=BuildNode(top,0,seenDocs,seenPaths,ref missingOccs,ref emptySubAsms,ref topOccCount,ref treeErrors);
                 double firstOpenSec=total.Elapsed.TotalSeconds;
 
                 // 读取天工转换日志里的缺失文件清单（在删除源目录临时日志前先读出）；STEP 也会在源目录留下同名 .log，一并纳入非同目录清理
@@ -403,24 +528,30 @@ namespace TianGongCadSuite {
                     string logFile=Path.Combine(srcDir,Path.GetFileNameWithoutExtension(item.Source)+".log");
                     if(File.Exists(logFile))sourceStubsToClean.Add(logFile);
                     if(isSw){
+                        // 非空 TGImportFile.log 同样由本次导入产生：由批次基线 preExistingSrcFiles 保护原有文件，不再因长度>0而残留。
                         string tgImp=Path.Combine(srcDir,"TGImportFile.log");
-                        if(File.Exists(tgImp))try{ if(new FileInfo(tgImp).Length==0)sourceStubsToClean.Add(tgImp); }catch{}
+                        if(File.Exists(tgImp))sourceStubsToClean.Add(tgImp);
                     }
                 }
 
-                // 0.10.2 / 0.13.9：SolidWorks 装配打开后为空或有缺失实例时的智能暂存：
-                // 关键修复：公司大型站位总装普遍自带 1~20 个缺失的标准件/参考件，绝不能因此丢弃耗时 10~15 分钟的打开结果并盲目拷贝 3000 个无关文件重开！
-                // 仅在满足以下条件时才拷到临时目录重开：
-                // ① 整装完全为空（topOccCount==0），或小型装配（打开 <45 秒）有缺失实例；
-                // ② 且 StageCanSupplyMissing 实查确认 StageFolder 的其他子目录里确实存在至少 1 个缺失文件（或零件）。
-                bool isCompletelyEmpty=(topOccCount==0);
+                // 0.10.2 / 0.13.9：SolidWorks 装配打开后为空（含 0 实例或全部实例缺失）或有缺失实例时的智能暂存：
+                // 仅在整装为空或小型装配（打开 <45 秒）有缺失实例、且 StageCanSupplyMissing 实查确认其他子目录确有缺失件时才暂存重开。
+                bool isAsmDoc=top is A.AssemblyDocument;
+                bool isAllMissing=isAsmDoc&&topOccCount>0&&root.Kids.Count==0&&missingOccs>0;
+                bool isCompletelyEmpty=isAsmDoc&&(topOccCount==0||isAllMissing);
                 bool hasMissing=(missingOccs>0||emptySubAsms>0||(logMissing!=null&&logMissing.Count>0));
                 if(isSw&&(isCompletelyEmpty||(hasMissing&&firstOpenSec<45.0))&&ConvertPlanner.StageCanSupplyMissing(item.Source,item.Root,logMissing)){
                     var st=StageFor(item);
                     if(st!=null){
                         if(!sameFolderOutput){
                             foreach(string p in seenPaths.Keys){
-                                try{ if(ConvertPlanner.SameDir(Path.GetDirectoryName(p),srcDir))sourceStubsToClean.Add(p); }catch{}
+                                try{
+                                    string pdir=Path.GetDirectoryName(p);
+                                    if(!string.IsNullOrEmpty(pdir)&&!ConvertSourceBaseline.IsUnderDir(p,options.OutputRoot)){
+                                        sourceStubsToClean.Add(p);
+                                        touchedSrcDirs.Add(pdir);
+                                    }
+                                }catch{}
                             }
                         }
                         CloseAll(top);top=null;
@@ -428,20 +559,30 @@ namespace TianGongCadSuite {
                         string again=Path.Combine(st.Dir,Path.GetFileName(item.Source));
                         PaceOpen();
                         top=Retry(delegate(){ return (F.SolidEdgeDocument)app.Documents.Open(again); },"打开 "+Path.GetFileName(item.Source),7200);
-                        missingOccs=0;emptySubAsms=0;topOccCount=-1;
+                        missingOccs=0;emptySubAsms=0;topOccCount=-1;treeErrors=0;
                         seenDocs.Clear();seenPaths.Clear();
-                        root=BuildNode(top,0,seenDocs,seenPaths,log,ref missingOccs,ref emptySubAsms,ref topOccCount);
-                        isCompletelyEmpty=(topOccCount==0);
+                        root=BuildNode(top,0,seenDocs,seenPaths,ref missingOccs,ref emptySubAsms,ref topOccCount,ref treeErrors);
+                        isAsmDoc=top is A.AssemblyDocument;
+                        isAllMissing=isAsmDoc&&topOccCount>0&&root.Kids.Count==0&&missingOccs>0;
+                        isCompletelyEmpty=isAsmDoc&&(topOccCount==0||isAllMissing);
                         hasMissing=(missingOccs>0||emptySubAsms>0);
                     }
+                }
+                // COM 读装配结构异常导致顶层实例数不可读或全漏子件：绝不静默保存空壳，抛可重试异常。
+                if(isAsmDoc&&treeErrors>0&&(topOccCount<0||root.Kids.Count==0)){
+                    throw new InvalidOperationException("读取装配结构时发生 COM 异常（"+treeErrors+" 处），已中止保存空壳装配。");
                 }
                 if(isSw&&isCompletelyEmpty){
                     row.NoRetry=true;
                     string hint=FormatMissingHint(logMissing);
                     string msg=string.IsNullOrEmpty(hint)
-                        ?"装配打开后是空的：天工找不到这个 SolidWorks 装配引用的零件（源压缩包或源文件夹本身缺件，或零件放在未选中的其他文件夹里）。"
-                        :"装配打开后是空的：源目录缺少该装配引用的文件（"+hint+"），请确认源压缩包是否完整。";
+                        ?"装配打开后是空的（或全部引用零件缺失）：天工找不到这个 SolidWorks 装配引用的零件（源压缩包或源文件夹本身缺件，或零件放在未选中的其他文件夹里）。"
+                        :"装配打开后是空的（或全部引用零件缺失）：源目录缺少该装配引用的文件（"+hint+"），请确认源压缩包是否完整。";
                     throw new InvalidOperationException(msg);
+                }
+                if(!isSw&&isAsmDoc&&topOccCount==0){
+                    row.NoRetry=true;
+                    throw new InvalidOperationException("STEP 文件导入为空装配（0 个组件），已中止保存空壳装配。");
                 }
                 if(isSw&&hasMissing){
                     string hint=FormatMissingHint(logMissing);
@@ -455,8 +596,30 @@ namespace TianGongCadSuite {
                 if(row.OpenSeconds>=10.0||documents.Count>=30){
                     log("打开完成 "+Path.GetFileName(item.Source)+"（用时 "+row.OpenSeconds.ToString("F1")+" 秒，共 "+documents.Count+" 个文档），开始保存…");
                 }
+                // 预计算每个节点的基准输出目录，供共享子件判断是否与全部父装配同目录（非同目录时必须执行 SaveAs 更新引用路径）。
+                var nodeOutDirs=new Dictionary<Node,string>();
+                foreach(Node nd in documents){
+                    try{
+                        F.DocumentTypeConstants nt=F.DocumentTypeConstants.igUnknownDocument;
+                        try{ nt=nd.Doc.Type; }catch{}
+                        string next=ExtensionFor(nt);
+                        if(nd==root){
+                            nodeOutDirs[nd]=Path.GetDirectoryName(ConvertPlanner.TopTargetFor(item,options,next));
+                        } else {
+                            string ra=SafeFullNameOrNull(nd.Doc);
+                            string aa=staged!=null&&ra!=null?Unstage(ra,staged,item):ra;
+                            string nm=aa!=null?Path.GetFileName(aa):null;
+                            if(string.IsNullOrEmpty(nm)){ try{ nm=nd.Doc.Name; }catch{} }
+                            if(string.IsNullOrEmpty(nm))nm=Path.GetFileNameWithoutExtension(item.Source)+next;
+                            if(!HasNativeExtension(nm))nm=nm+next;
+                            nodeOutDirs[nd]=Path.GetDirectoryName(ConvertPlanner.ComponentTarget(aa,nm,item,options));
+                        }
+                    }catch{}
+                }
+
                 var saveWatch=Stopwatch.StartNew();
-                int failures=0;string firstError=null;
+                int failures=treeErrors;
+                string firstError=treeErrors>0?("遍历装配树时有 "+treeErrors+" 处 COM 读取异常"):null;
                 bool anyDeadCom=false;
                 var writtenFrom=new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);   // 输出路径 → 源文件
                 int docIdx=0;
@@ -473,32 +636,27 @@ namespace TianGongCadSuite {
                     string rawAssigned=SafeFullNameOrNull(doc);
                     if(isSw&&!sameFolderOutput&&rawAssigned!=null&&staged==null){
                         try{
-                            if(ConvertPlanner.SameDir(Path.GetDirectoryName(rawAssigned),srcDir))sourceStubsToClean.Add(rawAssigned);
+                            if(!ConvertSourceBaseline.IsUnderDir(rawAssigned,options.OutputRoot)){
+                                sourceStubsToClean.Add(rawAssigned);
+                                string rdir=Path.GetDirectoryName(rawAssigned);
+                                if(!string.IsNullOrEmpty(rdir))touchedSrcDirs.Add(rdir);
+                            }
                         }catch{}
                     }
                     string assigned=rawAssigned;
                     if(staged!=null&&assigned!=null)assigned=Unstage(assigned,staged,item);   // 临时拷贝 → 按原文件的位置放输出（镜像目录照常）
-                    // The CAD renames repeat components of one session to "Part_1", "Part_2"... Using the
-                    // assigned source name instead keeps the output deterministic and collapses those
-                    // duplicates onto a single file, exactly like the source project is organised.
                     if(assigned!=null)name=Path.GetFileName(assigned);
                     string finalName=name;
                     if(finalName==null||finalName.Length==0)finalName=Path.GetFileNameWithoutExtension(item.Source)+ext;
                     if(!HasNativeExtension(finalName))finalName=finalName+ext;
-                    // The top-level extension follows the document the CAD actually produced: a .stp can
-                    // import as a part or as an assembly, and a SolidWorks part can arrive as sheet metal.
                     string target;
                     string trueSource=null;
                     string preClaimedLock=null;
                     if(node==root){
                         target=ConvertPlanner.TopTargetFor(item,options,ext);
-                        item.Target=target;row.Target=target;
                         if(isSw)trueSource=item.Source;
                     } else {
                         target=ConvertPlanner.ComponentTarget(assigned,finalName,item,options);
-                        // SolidWorks 源主干归一与去重：若天工因 MRU 自动追加了 _0/_5 后缀（磁盘上无带后缀源文件、只有原主干 .sldprt），
-                        // 首个拿到该零件的进程归一回干净原名（Out\Part.par），后续其他装配并发遇到同名件时保留后缀避免锁冲突与断链，
-                        // 同时均以真实源路径写入 ConvertWrittenIndex，使后续独立 .sldprt 条目毫秒级跳过、不再重复转换。
                         if(isSw&&assigned!=null){
                             bool wasSuffixed;
                             trueSource=ConvertPlanner.ResolveSolidWorksSource(assigned,out wasSuffixed);
@@ -517,10 +675,23 @@ namespace TianGongCadSuite {
                             }
                         }
                     }
-                    // 0.10.2：只有"同一个源文件"才并。原来按输出路径判：不镜像目录（平铺输出）时，两个文件夹里各有一个
-                    // 「零件1.par」（不同零件），第二个被当成"重复实例"直接丢掉，输出的装配两处都引用了第一个 —— 零件悄悄错了
+                    string sourceKey=trueSource??assigned??finalName;
+                    if(options.FlatOutput){
+                        string flatClash;
+                        string flatResolved=ResolveFlatTargetCrossRun(target,sourceKey,out flatClash);
+                        if(!string.Equals(flatResolved,target,StringComparison.OrdinalIgnoreCase)){
+                            if(preClaimedLock!=null){ try{ if(File.Exists(preClaimedLock))File.Delete(preClaimedLock); }catch{} preClaimedLock=null; }
+                            log("平铺输出跨装配同名冲突："+finalName+" 与其他目录零件重名（"+flatClash+"），本件另存为 "+Path.GetFileName(flatResolved)+"。");
+                            target=flatResolved;
+                            finalName=Path.GetFileName(flatResolved);
+                        }
+                    }
+                    if(node==root){
+                        item.Target=target;row.Target=target;
+                    }
+                    // 0.10.2：只有"同一个源文件"才并。
                     string clash;
-                    string claimed=ConvertPlanner.ClaimTarget(writtenFrom,target,assigned??finalName,out clash);
+                    string claimed=ConvertPlanner.ClaimTarget(writtenFrom,target,sourceKey,out clash);
                     if(claimed==null){
                         if(preClaimedLock!=null)try{ if(File.Exists(preClaimedLock))File.Delete(preClaimedLock); }catch{}
                         log("同一零件的重复实例，已并入 "+finalName+"。");
@@ -532,6 +703,7 @@ namespace TianGongCadSuite {
                         preClaimedLock=null;
                     }
                     target=claimed;
+                    if(node==root){ item.Target=target; row.Target=target; }
                     if(target.Length>259){
                         if(preClaimedLock!=null)try{ if(File.Exists(preClaimedLock))File.Delete(preClaimedLock); }catch{}
                         failures++;
@@ -550,8 +722,27 @@ namespace TianGongCadSuite {
                     try{
                         Directory.CreateDirectory(Path.GetDirectoryName(target));
                         string fullTarget=Path.GetFullPath(target);
-                        if(node!=root&&preClaimedLock==null&&written.Contains(fullTarget)){ log(finalName+" 这次前面已经存过，不再重存。"); continue; }
-                        if(node!=root&&preClaimedLock==null&&!TryClaim(lockRoot,target,out claimLockFile)){
+                        // 仅当不是重试、且该子件与所有引用它的父装配处于同一输出目录、且文件名未改变时，
+                        // 才可安全跳过重复 SaveAs（同目录回落可解析）；若子件位于子/兄弟目录或已改名，或正在重试，
+                        // 必须执行 SaveAs 将内存文档路径重定向到输出位置，避免父装配落盘后仍指向源目录形成断链。
+                        bool sameDirAsAllParents=true;
+                        if(node!=root){
+                            string myDir=Path.GetDirectoryName(fullTarget);
+                            if(node.Parents.Count==0)sameDirAsAllParents=false;
+                            for(int pi=0;pi<node.Parents.Count;pi++){
+                                string pdir;
+                                if(!nodeOutDirs.TryGetValue(node.Parents[pi],out pdir)||!ConvertPlanner.SameDir(myDir,pdir)){
+                                    sameDirAsAllParents=false;
+                                    break;
+                                }
+                            }
+                        }
+                        bool canSkipAlreadySaved=!isRetry&&sameDirAsAllParents&&SameFileName(rawAssigned,fullTarget);
+                        if(node!=root&&preClaimedLock==null&&canSkipAlreadySaved&&written.Contains(fullTarget)){
+                            log(finalName+" 这次前面已经存过，不再重存。");
+                            continue;
+                        }
+                        if(node!=root&&preClaimedLock==null&&canSkipAlreadySaved&&!TryClaim(lockRoot,target,out claimLockFile)){
                             log("另一个进程已生成 "+finalName+"，本次跳过写入。");
                             continue;
                         }
@@ -561,7 +752,7 @@ namespace TianGongCadSuite {
                         // 同目录输出优化：天工 Open() 阶段对子装配通常已落盘且 Dirty==false，
                         // 当 doc.FullName 恰好就是目标路径且文件已存在非空且未脏时，免重复 SaveAs（省去几十秒并避免锁碰撞）。
                         bool alreadySavedInPlace=false;
-                        if(node!=root&&rawAssigned!=null&&SamePath(rawAssigned,fullTarget)){
+                        if(node!=root&&!isRetry&&rawAssigned!=null&&SamePath(rawAssigned,fullTarget)){
                             bool isDirty=true;
                             try{ isDirty=doc.Dirty; }catch{}
                             if(!isDirty&&File.Exists(fullTarget)){
@@ -576,11 +767,17 @@ namespace TianGongCadSuite {
                         }
                         if(node==root)rootSaved=true;
                         writtenThisItem.Add(fullTarget);
-                        written.Add(fullTarget);
-                        ConvertWrittenIndex.Mark(lockRoot,fullTarget);
-                        if(trueSource!=null){
-                            try{ writtenSources.Add(Path.GetFullPath(trueSource)); }catch{}
-                            ConvertWrittenIndex.MarkSource(lockRoot,trueSource);
+                        if(node!=root||(failures==0&&!options.VerifyReopen)){
+                            written.Add(fullTarget);
+                            RecordTargetSource(fullTarget,sourceKey);
+                            ConvertWrittenIndex.MarkTargetWithSource(lockRoot,fullTarget,sourceKey);
+                            if(trueSource!=null){
+                                try{ writtenSources.Add(Path.GetFullPath(trueSource)); }catch{}
+                                ConvertWrittenIndex.MarkSource(lockRoot,trueSource);
+                            }
+                        } else if(node==root&&failures==0&&options.VerifyReopen){
+                            deferredRootMarkTarget=fullTarget;
+                            deferredRootMarkSource=trueSource??sourceKey;
                         }
                     }catch(Exception e){
                         if(claimLockFile!=null)try{ if(File.Exists(claimLockFile))File.Delete(claimLockFile); }catch{}
@@ -593,13 +790,15 @@ namespace TianGongCadSuite {
                 if(failures>0){
                     row.Status="fail";
                     row.Error=(rootSaved?"顶层装配已保存，但有 ":"")+failures+" 个文档保存失败；首个："+firstError;
-                    if(rootSaved&&row.OpenSeconds>=60.0&&!anyDeadCom)row.NoRetry=true;
+                    if(rootSaved&&row.OpenSeconds>=60.0&&!anyDeadCom){
+                        row.NoRetry=true;
+                        // 虽已保存顶层装配但子件不完整：必须保留 .tgconvert-pending，避免下次续跑静默跳过损坏装配。
+                        row.KeepPending=true;
+                    }
                 }
                 else row.Status="ok";
             }catch(Exception e){
                 row.Status="fail";row.Error=FriendlyError(e);
-                // 0.10.2：SolidWorks 工程图天工打不开（宝马托盘里试了一张零件图、一张装配图，都是一打开就 E_FAIL）。
-                // 原来每张报一句"未指定的错误"、再白重试一遍；这里说清楚、不重试
                 if(top==null&&string.Equals(Path.GetExtension(item.Source),".slddrw",StringComparison.OrdinalIgnoreCase)){
                     row.Error="天工打不开这张 SolidWorks 工程图（.slddrw）：天工的 SolidWorks 转换只认零件和装配。工程图请对转好的模型在天工里重新出图，或者在 SolidWorks 里另存为 DWG / DXF 再导入天工。";
                     row.NoRetry=true;
@@ -607,13 +806,37 @@ namespace TianGongCadSuite {
                 log("转换失败 "+Path.GetFileName(item.Source)+"："+FriendlyError(e));
             }finally{
                 CloseAll(top);
-                if(!sameFolderOutput&&sourceStubsToClean.Count>0){
-                    CleanupCreatedSourceStubs(sourceStubsToClean,preExistingSrcFiles,writtenThisItem,false);
-                }
-                // 大装配 Open() 还会把被抑制/未展开子件的 .par 写到源目录（它们不在 BuildNode 文档树里）。
-                // 关闭文档后对比打开前快照，只清理本次新生成且未被其他进程占用的源目录临时副本，确保源目录零残留。
-                if(isSwAsm&&!sameFolderOutput&&!string.IsNullOrEmpty(srcDir)){
-                    CleanupCreatedSourceStubs(SnapshotSourceNativeFiles(srcDir),preExistingSrcFiles,writtenThisItem,true);
+                // 按目录逐个对照各自批次启动前基线快照清理（禁止用 srcDir 的基线去清理其他子目录的 stub，免误删子目录原有文件）；
+                // 全程使用 requireExclusive=true，确保非串行并发小装配不会误删同伴进程正在使用的临时副本。
+                if(!sameFolderOutput){
+                    foreach(string c in sourceStubsToClean){
+                        try{
+                            string cdir=Path.GetDirectoryName(Path.GetFullPath(c));
+                            if(!string.IsNullOrEmpty(cdir))touchedSrcDirs.Add(cdir);
+                        }catch{}
+                    }
+                    foreach(string dir in touchedSrcDirs){
+                        if(string.IsNullOrEmpty(dir)||ConvertSourceBaseline.IsUnderDir(dir,options.OutputRoot))continue;
+                        HashSet<string> baseSnap=ConvertPlanner.SameDir(dir,srcDir)
+                            ?preExistingSrcFiles
+                            :ConvertSourceBaseline.TryLoadExisting(lockRoot,dir);
+                        var dirStubs=new List<string>();
+                        foreach(string c in sourceStubsToClean){
+                            try{ if(ConvertPlanner.SameDir(Path.GetDirectoryName(c),dir))dirStubs.Add(c); }catch{}
+                        }
+                        if(baseSnap!=null){
+                            DateTime? minUtc=(ConvertPlanner.SameDir(dir,srcDir)&&!hasBatchBaseline)?(DateTime?)openStartUtc.AddSeconds(-2):null;
+                            if(dirStubs.Count>0){
+                                CleanupCreatedSourceStubs(dirStubs,baseSnap,writtenThisItem,options.OutputRoot,true,minUtc);
+                            }
+                            if(isSw){
+                                CleanupCreatedSourceStubs(SnapshotSourceNativeFiles(dir),baseSnap,writtenThisItem,options.OutputRoot,true,minUtc);
+                            }
+                        } else if(dirStubs.Count>0){
+                            // 未在批次前基线内的外部目录：仅清理明确属于本次 Open 时间之后产生的临时副本。
+                            CleanupCreatedSourceStubs(dirStubs,null,writtenThisItem,options.OutputRoot,true,openStartUtc.AddSeconds(-2));
+                        }
+                    }
                 }
                 if(!rootSaved&&preReservedRootLock!=null){
                     try{ if(File.Exists(preReservedRootLock))File.Delete(preReservedRootLock); }catch{}
@@ -621,7 +844,22 @@ namespace TianGongCadSuite {
                 row.TotalSeconds=total.Elapsed.TotalSeconds;
             }
             if(row.Status=="ok"&&options.VerifyReopen)Verify(item,row);
+            if(row.Status=="ok"&&deferredRootMarkTarget!=null){
+                written.Add(deferredRootMarkTarget);
+                RecordTargetSource(deferredRootMarkTarget,deferredRootMarkSource);
+                ConvertWrittenIndex.MarkTargetWithSource(lockRoot,deferredRootMarkTarget,deferredRootMarkSource);
+                if(isSw&&!string.IsNullOrEmpty(item.Source)){
+                    try{ writtenSources.Add(Path.GetFullPath(item.Source)); }catch{}
+                    ConvertWrittenIndex.MarkSource(lockRoot,item.Source);
+                }
+            }
             return row;
+        }
+        void RecordTargetSource(string fullTarget,string sourceKey){
+            if(string.IsNullOrEmpty(fullTarget)||string.IsNullOrEmpty(sourceKey))return;
+            string norm=sourceKey;
+            try{ if(Path.IsPathRooted(sourceKey))norm=Path.GetFullPath(sourceKey); }catch{}
+            if(!writtenTargetSources.ContainsKey(fullTarget))writtenTargetSources[fullTarget]=norm;
         }
         // 「拷到一起再开」的临时文件夹（0.10.3）：同一个项目（StageFolder）整批只拷一次，后面的装配接着用，会话结束才删。
         // 0.10.2 是每个装配各拷一次再删：零件 / 装配分文件夹的大项目（几百个装配、几千个零件、几个 GB）每个装配都把整个项目拷一遍，转一晚上也转不完、C 盘塞满
@@ -641,16 +879,16 @@ namespace TianGongCadSuite {
                 // 重试时又拿到拷了一半的临时文件夹，报"装配打开后是空的"
                 int skipped=0;string firstSkip=null;
                 foreach(string f in files){
-                    try{ string copy=Path.Combine(st.Dir,Path.GetFileName(f)); File.Copy(f,copy,true); st.Map[StemKey(copy)]=f; }
+                    try{ string copy=Path.Combine(st.Dir,Path.GetFileName(f)); File.Copy(f,copy,true); st.Map[StageKey(copy)]=f; }
                     catch(Exception e){ skipped++; if(firstSkip==null)firstSkip=Path.GetFileName(f)+"："+e.Message; }
                 }
-                if(skipped>0)log("有 "+skipped+" 个 SolidWorks 文件没能拷到临时文件夹（路径太长或打不开），用到它们的装配会缺这些件。首个："+firstSkip);   // 导入后文档叫「临时文件夹\名字.par」，按文件夹 + 主文件名对
+                if(skipped>0)log("有 "+skipped+" 个 SolidWorks 文件没能拷到临时文件夹（路径太长或打不开），用到它们的装配会缺这些件。首个："+firstSkip);   // 导入后文档叫「临时文件夹\名字.par」，按类型 + 文件夹 + 主文件名对
                 log("「"+Path.GetFileName(item.Source)+"」打开后（或它的子装配）是空的：它用到的零件不在装配所在的文件夹，天工找不到。已把同一项目里的 "+files.Count+" 个 SolidWorks 文件拷到临时文件夹再打开（这一批里同项目的其他装配接着用，不再重拷）。");
             }
             if(st==null)return null;
             // 项目里有同名文件时临时文件夹里只放了第一个：轮到的这个装配自己必须是它本身
             string mine=Path.Combine(st.Dir,Path.GetFileName(item.Source)),have;
-            if(!st.Map.TryGetValue(StemKey(mine),out have)||!string.Equals(have,item.Source,StringComparison.OrdinalIgnoreCase)){ File.Copy(item.Source,mine,true); st.Map[StemKey(mine)]=item.Source; }
+            if(!st.Map.TryGetValue(StageKey(mine),out have)||!string.Equals(have,item.Source,StringComparison.OrdinalIgnoreCase)){ File.Copy(item.Source,mine,true); st.Map[StageKey(mine)]=item.Source; }
             return st;
         }
         void DropStages(){
@@ -674,20 +912,32 @@ namespace TianGongCadSuite {
                 }
             }catch{}
         }
-        // 临时文件夹里的文档 → 原文件所在位置（0.10.3 真机 NOK_Drawer3：没对上的全落进「_外部\Users_…_stage-xxxx」）：
-        //   · 同一个零件这次前面已经转过，天工给后来的那份起名「名字_0」—— 去掉 _数字 再对；
+        // 临时文件夹里的文档 → 原文件所在位置（按装配/零件类型 + 主文件名精确映射，防止同名 .sldasm + .sldprt 互相覆盖串号）：
+        //   · 同一个零件这次前面已经转过，天工给后来的那份起名「名字_0」—— 去掉 _数字 再按同类型对；
         //   · SolidWorks 的虚拟零件（「零件^装配」，只存在装配里、项目里没有单独的文件）—— 放在这个装配原来所在的文件夹
         static string Unstage(string assigned,Dictionary<string,string> staged,ConvertItem item){
             string original;
-            if(staged.TryGetValue(StemKey(assigned),out original))return Path.Combine(Path.GetDirectoryName(original),Path.GetFileName(assigned));
+            if(staged.TryGetValue(StageKey(assigned),out original))return Path.Combine(Path.GetDirectoryName(original),Path.GetFileName(assigned));
             string dir=Path.GetDirectoryName(assigned)??"",stem=Path.GetFileNameWithoutExtension(assigned);
+            string kind=StageKind(assigned);
             var m=System.Text.RegularExpressions.Regex.Match(stem,@"^(.*)_\d+$");
-            if(m.Success&&staged.TryGetValue(Path.Combine(dir,m.Groups[1].Value),out original))return Path.Combine(Path.GetDirectoryName(original),Path.GetFileName(assigned));
+            if(m.Success&&staged.TryGetValue(kind+"|"+Path.Combine(dir,m.Groups[1].Value),out original))return Path.Combine(Path.GetDirectoryName(original),Path.GetFileName(assigned));
             bool inStage=false;
-            foreach(string v in staged.Keys){ inStage=string.Equals(Path.GetDirectoryName(v),dir,StringComparison.OrdinalIgnoreCase); break; }
+            foreach(string v in staged.Keys){
+                int sep=v.IndexOf('|');
+                string rawKey=sep>=0?v.Substring(sep+1):v;
+                inStage=string.Equals(Path.GetDirectoryName(rawKey),dir,StringComparison.OrdinalIgnoreCase);
+                break;
+            }
             return inStage?Path.Combine(Path.GetDirectoryName(item.Source),Path.GetFileName(assigned)):assigned;
         }
-        static string StemKey(string path){ return Path.Combine(Path.GetDirectoryName(path)??"",Path.GetFileNameWithoutExtension(path)); }
+        static string StageKind(string path){
+            string ext=(Path.GetExtension(path)??"").ToLowerInvariant();
+            if(ext==".sldasm"||ext==".asm")return "A";
+            if(ext==".sldprt"||ext==".par"||ext==".psm")return "P";
+            return "O";
+        }
+        static string StageKey(string path){ return StageKind(path)+"|"+Path.Combine(Path.GetDirectoryName(path)??"",Path.GetFileNameWithoutExtension(path)); }
         static string SafeFullNameOrNull(F.SolidEdgeDocument doc){
             try{ string full=doc.FullName; if(full!=null&&Path.IsPathRooted(full))return full; }catch{}
             return null;
@@ -775,18 +1025,27 @@ namespace TianGongCadSuite {
                 Directory.CreateDirectory(directory);
                 path=Path.Combine(directory,Hash(targetPath)+".lock");
             }catch{ return true; }
-            // Wait for the owning worker to finish. Poll at 150ms for faster hand-off; take over if stale.
-            for(int attempt=0;attempt<400;attempt++){
+            // 等待持锁进程真正完成 SaveAs 并落盘 ConvertWrittenIndex 完成标记（禁止仅凭 File.Exists&&Length>0 提前放行半截大文件）；
+            // 轮询上限与 180 秒过期阈值对齐，接管过期锁时刷新时间戳防第三进程同时抢写。
+            var waitDeadline=DateTime.UtcNow.AddSeconds(185);
+            while(DateTime.UtcNow<waitDeadline){
                 try{
                     using(var stream=new FileStream(path,FileMode.CreateNew,FileAccess.Write,FileShare.None)){ stream.WriteByte(1); }
                     lockPath=path;
                     return true;
                 }catch(IOException){
-                    if(File.Exists(targetPath)&&new FileInfo(targetPath).Length>0)return false;
-                    try{ if(DateTime.UtcNow-new FileInfo(path).LastWriteTimeUtc>TimeSpan.FromSeconds(180)){ lockPath=path; return true; } }catch{}
+                    if(ConvertWrittenIndex.Contains(lockRoot,targetPath))return false;
+                    try{
+                        if(DateTime.UtcNow-new FileInfo(path).LastWriteTimeUtc>TimeSpan.FromSeconds(180)){
+                            try{ File.SetLastWriteTimeUtc(path,DateTime.UtcNow); }catch{}
+                            lockPath=path;
+                            return true;
+                        }
+                    }catch{}
                     Thread.Sleep(150);
                 }catch{ return true; }
             }
+            lockPath=path;
             return true;
         }
         static string Hash(string value){

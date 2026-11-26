@@ -135,7 +135,11 @@ namespace TianGongCadSuite {
         public void MouseDblClick(short b,short s,double x,double y,double z,object w,int k,object g){}
         public void MouseDrag(short b,short s,double x,double y,double z,object w,short ds,int k,object g){}
         void F.ISECommandEvents.Activate(){}void F.ISECommandEvents.Deactivate(){}
-        public void Terminate(){if(!closing&&!busy)BeginInvoke((Action)(()=>Close()));}
+        public void Terminate(){
+            if(!closing&&!busy&&!IsDisposed&&IsHandleCreated){
+                try{ BeginInvoke((Action)(()=>{ if(!closing&&!IsDisposed)Close(); })); }catch{}
+            }
+        }
         public void Idle(int n,out bool more){more=false;}
         public new void KeyDown(ref short key,short shift){if(key==27)Close();}public new void KeyPress(ref short key){}public new void KeyUp(ref short key,short shift){}
     }

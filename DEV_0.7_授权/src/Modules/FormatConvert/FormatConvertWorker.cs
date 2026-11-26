@@ -56,7 +56,11 @@ namespace TianGongCadSuite {
                         ConvertLog.Append(statusFile,ConvertProtocol.Line(ConvertProtocol.Exit,"0"));
                         return 0;
                     }
-                    ConvertLog.Append(statusFile,ConvertProtocol.Line(ConvertProtocol.Ready,ConvertProtocol.Number(session.BootSeconds),session.ProcessId.ToString(CultureInfo.InvariantCulture)));
+                    ConvertLog.Append(statusFile,ConvertProtocol.Line(ConvertProtocol.Ready,
+                        ConvertProtocol.Number(session.BootSeconds),
+                        session.ProcessId.ToString(CultureInfo.InvariantCulture),
+                        "cold",
+                        session.ProcessStartUtcTicks.ToString(CultureInfo.InvariantCulture)));
 
                     int restarts=0;
                     Action<int> onDeferredHeavy=delegate(int waitSec){
@@ -126,10 +130,14 @@ namespace TianGongCadSuite {
                 ConvertLog.Append(statusFile,ConvertProtocol.Line(ConvertProtocol.End,item.Index.ToString(CultureInfo.InvariantCulture),"fail",item.Source,"0","0","0","0",item.Target??"",workerId.ToString(CultureInfo.InvariantCulture),tooLong));
                 return;
             }
-            // 这次前面任意进程转装配时已经把它一起转好存出来了（含按源主干去重，覆盖/续跑模式均跳过，杜绝重复转换；即使当前已释放空闲 CAD 也能 0 秒跳过）
+            // 这次前面任意进程转装配时已经把它一起转好存出来了（含按源主干去重，覆盖/续跑模式均跳过，杜绝重复转换；
+            // 平铺输出模式下严查源路径匹配，避免不同子文件夹同名零件被误跳过）。
+            var candidateTargets=ConvertPlanner.CandidateTargets(item,options);
             bool wroteAlready=session!=null
-                ?session.WroteThisRun(ConvertPlanner.CandidateTargets(item,options),item.Source)
-                :ConvertWrittenIndex.ContainsAnyOrSource(lockRoot,ConvertPlanner.CandidateTargets(item,options),item.Source);
+                ?session.WroteThisRun(candidateTargets,item.Source,options.FlatOutput)
+                :(options.FlatOutput
+                    ?ConvertWrittenIndex.ContainsForFlatSource(lockRoot,candidateTargets,item.Source)
+                    :ConvertWrittenIndex.ContainsAnyOrSource(lockRoot,candidateTargets,item.Source));
             if(wroteAlready){
                 ConvertLog.Append(statusFile,ConvertProtocol.Line(ConvertProtocol.End,item.Index.ToString(CultureInfo.InvariantCulture),"skip",item.Source,"0","0","0","0",item.Target,workerId.ToString(CultureInfo.InvariantCulture),"这次已随装配一起转好"));
                 return;
@@ -150,7 +158,11 @@ namespace TianGongCadSuite {
             if(session==null||!session.IsAlive()){
                 try{ if(session!=null)session.Dispose(); }catch{}
                 session=new CadConvertSession(emitLog,lockRoot,0,forbiddenPids,null);
-                ConvertLog.Append(statusFile,ConvertProtocol.Line(ConvertProtocol.Ready,ConvertProtocol.Number(session.BootSeconds),session.ProcessId.ToString(CultureInfo.InvariantCulture)));
+                ConvertLog.Append(statusFile,ConvertProtocol.Line(ConvertProtocol.Ready,
+                    ConvertProtocol.Number(session.BootSeconds),
+                    session.ProcessId.ToString(CultureInfo.InvariantCulture),
+                    "cold",
+                    session.ProcessStartUtcTicks.ToString(CultureInfo.InvariantCulture)));
             }
             ConvertLog.Append(statusFile,ConvertProtocol.Line(ConvertProtocol.Begin,item.Index.ToString(CultureInfo.InvariantCulture),item.Source));
             // Marker first: if this item fails or the worker dies, the next resume must not
@@ -158,7 +170,7 @@ namespace TianGongCadSuite {
             try{ ConvertPlanner.MarkPending(item,options); }
             catch(Exception e){ ConvertLog.Append(statusFile,ConvertProtocol.Line("LOG","无法写入续做标记："+e.Message)); }
 
-            ConvertRow row=session.Convert(item,options);
+            ConvertRow row=session.Convert(item,options,false);
             if(row.Status=="fail"&&!row.NoRetry){
                 // 会话自愈：若隐藏天工进程在单个异常模型上崩溃断开，自动拉起新会话再重试一次，避免后续所有任务连坐失败。
                 if(!session.IsAlive()&&restarts<3){
@@ -166,12 +178,18 @@ namespace TianGongCadSuite {
                     ConvertLog.Append(statusFile,ConvertProtocol.Line("LOG","检测到隐藏 CAD 会话异常退出，正在自动重建会话（第 "+restarts+" 次）…"));
                     try{ session.Dispose(); }catch{}
                     session=new CadConvertSession(emitLog,lockRoot,0,forbiddenPids,null);
-                    ConvertLog.Append(statusFile,ConvertProtocol.Line(ConvertProtocol.Ready,ConvertProtocol.Number(session.BootSeconds),session.ProcessId.ToString(CultureInfo.InvariantCulture)));
+                    ConvertLog.Append(statusFile,ConvertProtocol.Line(ConvertProtocol.Ready,
+                        ConvertProtocol.Number(session.BootSeconds),
+                        session.ProcessId.ToString(CultureInfo.InvariantCulture),
+                        "cold",
+                        session.ProcessStartUtcTicks.ToString(CultureInfo.InvariantCulture)));
                 }
                 ConvertLog.Append(statusFile,ConvertProtocol.Line("LOG","重试 "+item.Source));
-                row=session.Convert(item,options);
+                row=session.Convert(item,options,true);
             }
-            if(row.Status=="ok"||row.NoRetry){   // NoRetry：根本没写出东西（打不开的工程图），续做标记留着只会在输出文件夹里多一堆 .tgconvert-pending
+            // 仅在真正成功，或 NoRetry 且未落盘不完整顶层文件（!KeepPending，如工程图/空壳装配）时才清续做标记；
+            // 大装配部分子件失败但保留顶层 .asm 时必须保留 .tgconvert-pending，避免下次续跑把损坏装配静默跳过。
+            if(row.Status=="ok"||(row.NoRetry&&!row.KeepPending)){
                 try{ ConvertPlanner.ClearPending(item,options); }
                 catch(Exception e){ ConvertLog.Append(statusFile,ConvertProtocol.Line("LOG","无法清除续做标记："+e.Message)); }
             }
@@ -203,12 +221,14 @@ namespace TianGongCadSuite {
             HashSet<int> forbiddenPids=ParsePids(args[4]);
             int.TryParse(args[5],NumberStyles.Integer,CultureInfo.InvariantCulture,out idleSec);
             int.TryParse(args[6],NumberStyles.Integer,CultureInfo.InvariantCulture,out parentPid);
+            HashSet<int> prelaunchedPids=args.Length>7?ParsePids(args[7]):null;
             if(idleSec<30)idleSec=30;
 
             string slotPrefix=Path.Combine(poolDir,"slot-"+slotId.ToString(CultureInfo.InvariantCulture));
             string readyFile=slotPrefix+".ready";
             string goFile=slotPrefix+".go";
             string busyFile=slotPrefix+".busy";
+            string exitingFile=slotPrefix+".exiting";
             string stopFile=slotPrefix+".stop";
             string fatalFile=slotPrefix+".fatal";
             string shutdownFlag=Path.Combine(poolDir,"shutdown.flag");
@@ -224,17 +244,45 @@ namespace TianGongCadSuite {
             try{
                 using(new OleFilter()){
                     Action<string> noopLog=delegate(string m){};
-                    session=new CadConvertSession(noopLog,null,rotTarget,forbiddenPids,null);
-                    WriteSmallFile(readyFile,session.ProcessId.ToString(CultureInfo.InvariantCulture)+"\t"+ConvertProtocol.Number(session.BootSeconds));
+                    // 预读首发任务队列目录，使扩容新槽位在旧热池已跑空队列时能立刻空队短路，无需苦等预拉起 CAD 启动。
+                    string initialQueueDir=PeekGoQueueDir(goFile);
+                    session=new CadConvertSession(noopLog,null,rotTarget,forbiddenPids,initialQueueDir,prelaunchedPids);
+                    if(session.SkippedBecauseEmpty){
+                        NotifyPendingGoExit(goFile,"0");
+                        return 0;
+                    }
+                    WriteSmallFile(readyFile,session.ProcessId.ToString(CultureInfo.InvariantCulture)+"\t"+ConvertProtocol.Number(session.BootSeconds)+"\t"+session.ProcessStartUtcTicks.ToString(CultureInfo.InvariantCulture));
 
                     bool isWarm=false;
                     DateTime lastActive=DateTime.UtcNow;
                     while(true){
                         if(File.Exists(shutdownFlag)||File.Exists(stopFile))break;
                         if(parentPid>0&&!IsProcessAlive(parentPid))break;
-                        if((DateTime.UtcNow-lastActive).TotalSeconds>=idleSec)break;
 
+                        // 先查 .go 再判 300s 空闲超时，并通过槽位互斥锁 + .exiting 握手与 Dispatch 串行，
+                        // 彻底消除空闲临界点刚派发新批次时 worker 自行退出致整批 pending 的竞态。
                         if(!File.Exists(goFile)){
+                            if((DateTime.UtcNow-lastActive).TotalSeconds>=idleSec){
+                                bool shouldExit=false;
+                                System.Threading.Mutex slotMutex=null;
+                                bool owned=false;
+                                try{
+                                    slotMutex=new System.Threading.Mutex(false,WarmConvertPool.SlotMutexName(poolDir,slotId));
+                                    try{ owned=slotMutex.WaitOne(5000); }
+                                    catch(System.Threading.AbandonedMutexException){ owned=true; }
+                                }catch{}
+                                try{
+                                    if(!File.Exists(goFile)){
+                                        WriteSmallFile(exitingFile,"1");
+                                        shouldExit=true;
+                                    }
+                                }finally{
+                                    if(owned&&slotMutex!=null)try{ slotMutex.ReleaseMutex(); }catch{}
+                                    if(slotMutex!=null)try{ slotMutex.Dispose(); }catch{}
+                                }
+                                if(shouldExit)break;
+                                continue;
+                            }
                             Thread.Sleep(80);
                             continue;
                         }
@@ -264,7 +312,7 @@ namespace TianGongCadSuite {
                                 if(session==null||!session.IsAlive()){
                                     try{ if(session!=null)session.Dispose(); }catch{}
                                     session=new CadConvertSession(emitLog,workRoot,0,forbiddenPids,null);
-                                    WriteSmallFile(readyFile,session.ProcessId.ToString(CultureInfo.InvariantCulture)+"\t"+ConvertProtocol.Number(session.BootSeconds));
+                                    WriteSmallFile(readyFile,session.ProcessId.ToString(CultureInfo.InvariantCulture)+"\t"+ConvertProtocol.Number(session.BootSeconds)+"\t"+session.ProcessStartUtcTicks.ToString(CultureInfo.InvariantCulture));
                                     isWarm=false;
                                 }
                                 session.BeginBatch(workRoot,emitLog);
@@ -272,7 +320,8 @@ namespace TianGongCadSuite {
                                 ConvertLog.Append(statusFile,ConvertProtocol.Line(ConvertProtocol.Ready,
                                     ConvertProtocol.Number(reportBoot),
                                     session.ProcessId.ToString(CultureInfo.InvariantCulture),
-                                    isWarm?"warm":"cold"));
+                                    isWarm?"warm":"cold",
+                                    session.ProcessStartUtcTicks.ToString(CultureInfo.InvariantCulture)));
 
                                 int restarts=0;
                                 Action<int> onDeferredHeavy=delegate(int waitSec){
@@ -299,11 +348,12 @@ namespace TianGongCadSuite {
                                 }
                                 if(session!=null){
                                     session.EndBatch();
-                                    WriteSmallFile(readyFile,session.ProcessId.ToString(CultureInfo.InvariantCulture)+"\t"+ConvertProtocol.Number(session.BootSeconds));
+                                    WriteSmallFile(readyFile,session.ProcessId.ToString(CultureInfo.InvariantCulture)+"\t"+ConvertProtocol.Number(session.BootSeconds)+"\t"+session.ProcessStartUtcTicks.ToString(CultureInfo.InvariantCulture));
                                     isWarm=true;
                                     ConvertLog.Append(statusFile,ConvertProtocol.Line(ConvertProtocol.Exit,"0"));
                                 } else {
                                     // 本槽位在等待重型装配期间已释放 CAD，且后续剩余条目已全部 0 秒跳过（无需再起 CAD）：干净退出让热池回收槽位
+                                    WriteSmallFile(exitingFile,"1");
                                     ConvertLog.Append(statusFile,ConvertProtocol.Line(ConvertProtocol.Exit,"0"));
                                     break;
                                 }
@@ -334,6 +384,26 @@ namespace TianGongCadSuite {
                 try{ if(File.Exists(readyFile))File.Delete(readyFile); }catch{}
                 if(session!=null)try{ session.Dispose(); }catch{}
             }
+        }
+        static string PeekGoQueueDir(string goFile){
+            try{
+                if(!File.Exists(goFile))return null;
+                string spec=File.ReadAllText(goFile,new UTF8Encoding(false)).Trim();
+                string[] fields=spec.Split('\t');
+                if(fields.Length>=1&&Directory.Exists(fields[0]))return fields[0];
+            }catch{}
+            return null;
+        }
+        static void NotifyPendingGoExit(string goFile,string code){
+            try{
+                if(!File.Exists(goFile))return;
+                string spec=File.ReadAllText(goFile,new UTF8Encoding(false)).Trim();
+                string[] fields=spec.Split('\t');
+                if(fields.Length>=2){
+                    ConvertLog.Append(fields[1],ConvertProtocol.Line(ConvertProtocol.Exit,code));
+                }
+                File.Delete(goFile);
+            }catch{}
         }
         static void NotifyPendingGoFatal(string goFile,string detail){
             try{

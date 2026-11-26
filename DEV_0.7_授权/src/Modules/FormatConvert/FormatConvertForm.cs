@@ -350,14 +350,15 @@ namespace TianGongCadSuite {
         }
         int EffectiveWorkers(ConvertOptions options){
             if(!autoWorkers.Checked)return (int)workers.Value;
-            if(items.Count>0)return ConvertPlanner.SuggestedWorkers(items,Environment.ProcessorCount,(long)AvailableMemoryMb());
+            if(items.Count>0)return ConvertPlanner.SuggestedWorkers(items,Environment.ProcessorCount,(long)AvailableMemoryMb(),options);
             return ConvertPlanner.SuggestedWorkers(Math.Max(1,sources.Count),Environment.ProcessorCount,(long)AvailableMemoryMb());
         }
         void UpdateEstimate(){
             int cores=Environment.ProcessorCount;
             long mem=(long)AvailableMemoryMb();
+            var previewOpts=new ConvertOptions{ OutputRoot=output.Text.Trim(), FlatOutput=!mirror.Checked };
             int suggested=items.Count>0
-                ?ConvertPlanner.SuggestedWorkers(items,cores,mem)
+                ?ConvertPlanner.SuggestedWorkers(items,cores,mem,previewOpts)
                 :ConvertPlanner.SuggestedWorkers(8,cores,mem);
             string mode=autoWorkers.Checked
                 ?("当前模式：自动并发（按本机 "+cores+" 核 / 可用内存 "+mem+" MB，多模型自动建议 "+suggested+" 进程；单文件或小批次自动降为 1 进程）。")
@@ -437,6 +438,14 @@ namespace TianGongCadSuite {
             if(problem!=null){ MessageBox.Show(this,problem,"天工格式转换"); return; }
             if(items.Count==0||force.Checked||verify.Checked)ScanInputs(true);
             if(items.Count==0)return;
+            // 用户先扫描再切页修改输出目录时，必须按当前 options 重算所有条目的 Target 并复查超长路径，
+            // 否则预跳过项与 pending 项在 CSV 报告里会写入旧路径或空路径。
+            for(int i=0;i<items.Count;i++){
+                try{ items[i].Target=ConvertPlanner.TopTarget(items[i],options); }
+                catch(PathTooLongException){ items[i].Target=null; }
+            }
+            string pathWarn=LongPathWarning(options);
+            if(pathWarn!=null)AppendLog(pathWarn);
 
             processes.Clear();statusFiles.Clear();finishedStatusFiles.Clear();offsets.Clear();rows.Clear();
             totalPlanned=items.Count;
@@ -457,23 +466,32 @@ namespace TianGongCadSuite {
                 return;
             }
 
+            // 插件模式下当前进程是 TianGong.exe，绝不能回退 Application.ExecutablePath 拉起报错的天工 GUI 本体。
+            string self=ConverterHost.Resolve();
+            if(self==null){
+                string hostExe=Path.GetFileName(Application.ExecutablePath??"");
+                if(string.Equals(hostExe,ConverterHost.ExeName,StringComparison.OrdinalIgnoreCase)){
+                    self=Application.ExecutablePath;
+                } else {
+                    MessageBox.Show(this,"找不到独立转换器 "+ConverterHost.ExeName+"，无法启动后台转换进程。\n请确认插件安装目录完整或未被安全软件隔离后重试。","天工格式转换",MessageBoxButtons.OK,MessageBoxIcon.Error);
+                    return;
+                }
+            }
+
             int cores=Environment.ProcessorCount;
             long availMb=(long)AvailableMemoryMb();
             int count=autoWorkers.Checked
-                ?ConvertPlanner.SuggestedWorkers(pending,cores,availMb)
+                ?ConvertPlanner.SuggestedWorkers(pending,cores,availMb,options)
                 :Math.Max(1,Math.Min((int)workers.Value,pending.Count));
             count=Math.Max(1,Math.Min(count,pending.Count));
             options.Workers=count;
 
-            workRoot=Path.Combine(Path.GetTempPath(),"TianGongConverter",DateTime.Now.ToString("yyyyMMdd-HHmmss"));
+            workRoot=Path.Combine(Path.GetTempPath(),"TianGongConverter",DateTime.Now.ToString("yyyyMMdd-HHmmss")+"-"+Guid.NewGuid().ToString("N").Substring(0,6));
             Directory.CreateDirectory(workRoot);
+            // 启动任何 worker 之前一次性采集所有源目录（含子/兄弟目录）基线快照，杜绝并发小装配清理竞态与子目录残留。
+            ConvertSourceBaseline.CaptureForBatch(workRoot,items,options);
             string queueDir=Path.Combine(workRoot,"queue");
             ConvertQueue.Write(queueDir,pending,options);
-
-            // 插件模式下当前进程是 TianGong.exe，Application.ExecutablePath 指向 CAD 本体，
-            // 用它当 worker 会再拉起一个天工CAD（"找不到文件 --worker"）。必须解析转换器自身。
-            string self=ConverterHost.Resolve();
-            if(self==null)self=Application.ExecutablePath;
 
             List<string> activeStatus;
             List<Process> activeProcs;
@@ -552,6 +570,22 @@ namespace TianGongCadSuite {
             }
             status.Text="进度 "+rows.Count+" / "+totalPlanned+"　成功 "+done+"　失败 "+failed+"　累计单件 "+seconds.ToString("F1")+" 秒　已用 "+elapsed.ToString("F1")+" 秒"+rateText;
             if(!running){
+                // 进程退出前最后写出 END/FATAL/EXIT 可能落在本轮 ReadStatus 与 HasExited 之间，进入 Finish 前必须补读一遍。
+                deferLog=true;
+                try{
+                    foreach(string statusFile in statusFiles)ReadStatus(statusFile);
+                }finally{
+                    deferLog=false;
+                    FlushPendingLog();
+                }
+                done=0;failed=0;skipped=0;seconds=0;
+                foreach(ConvertRow row in rows.Values){
+                    if(row.Status=="ok"){done++;seconds+=row.TotalSeconds;}
+                    else if(row.Status=="fail")failed++;
+                    else if(row.Status=="skip")skipped++;
+                }
+                progress.Value=Math.Min(progress.Maximum,rows.Count);
+                statDone.Set(rows.Count+" / "+totalPlanned,Ui.Text);statOk.Set(done.ToString(),Ui.Ok);statFail.Set(failed.ToString(),failed>0?Ui.Bad:Ui.Text);statSkip.Set(skipped.ToString(),Ui.Text);
                 timer.Stop();
                 Finish();
             }
@@ -593,7 +627,12 @@ namespace TianGongCadSuite {
                     else AppendLog("失败 "+Path.GetFileName(row.Source)+"："+row.Error);
                 }
             }else if(parts[0]==ConvertProtocol.Ready){
-                int pid;if(parts.Length>2&&int.TryParse(parts[2],out pid)&&pid>0)warmPool.RecordCadPid(pid);
+                int pid;
+                if(parts.Length>2&&int.TryParse(parts[2],out pid)&&pid>0){
+                    long startTicks=0L;
+                    if(parts.Length>4)long.TryParse(parts[4],NumberStyles.Integer,CultureInfo.InvariantCulture,out startTicks);
+                    warmPool.RecordCadPid(pid,startTicks);
+                }
                 bool warm=parts.Length>3&&parts[3]=="warm";
                 AppendLog(warm?"工作进程就绪（热池复用，0.00 秒）。":"工作进程就绪（CAD 启动 "+(parts.Length>1?parts[1]:"?")+" 秒）。");
             }else if(parts[0]==ConvertProtocol.Exit){
@@ -667,6 +706,14 @@ namespace TianGongCadSuite {
             }else{
                 logBox.AppendText(chunk);
             }
+        }
+        // 宿主加载项卸载/退出时静默回收热池并关闭窗口（不弹模态确认框阻塞 CAD 退出）
+        internal void ForceCloseForHostDispose(){
+            try{ timer.Stop(); }catch{}
+            try{ poolWatch.Stop(); }catch{}
+            try{ warmPool.Shutdown(true,null); }catch{}
+            try{ if(!IsDisposed)Close(); }catch{}
+            try{ if(!IsDisposed)Dispose(); }catch{}
         }
         protected override void OnFormClosing(FormClosingEventArgs e){
             if(timer.Enabled){

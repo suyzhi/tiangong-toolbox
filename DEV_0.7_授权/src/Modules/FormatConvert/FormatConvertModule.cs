@@ -66,6 +66,12 @@ namespace TianGongCadSuite {
             form.FormClosed+=delegate{ if(open==form)open=null; };
             form.Show(new CadOwner(context.Application.ActiveFramehWnd));
         }
-        public void Dispose(){}
+        public void Dispose(){
+            // 转换窗口不归 ToolContext 托管：卸载加载项或主框架退出时必须主动关闭窗口并回收热池与作业对象，避免孤儿 CAD 残留。
+            var form=open;
+            open=null;
+            if(form==null||form.IsDisposed)return;
+            try{ form.ForceCloseForHostDispose(); }catch{}
+        }
     }
 }
