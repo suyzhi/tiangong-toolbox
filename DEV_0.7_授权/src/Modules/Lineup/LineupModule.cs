@@ -73,8 +73,10 @@ namespace TianGongCadSuite {
             EnsureDocument();string number=fields[0].Text.Trim();if(number.Length==0)throw new InvalidOperationException("编号不能为空。");
             if(project.Records.Any(x=>x!=editing&&string.Equals((x.Number??"").Trim(),number,StringComparison.OrdinalIgnoreCase)))throw new InvalidOperationException("编号重复。");
             var r=new LineupRecord{Id=editing==null?Guid.NewGuid().ToString("N"):editing.Id,Number=number,Category=Convert.ToString(category.SelectedItem),Address=fields[1].Text,Parameters=fields[2].Text,Description=fields[3].Text,Model=fields[4].Text,Brand=fields[5].Text,Home=fields[6].Text,Mounting=fields[7].Text,Mechanism=fields[8].Text,Connector=fields[9].Text,Notes=fields[10].Text,IslandId=LinkId(fields[11].Text,"阀岛"),ValveId=LinkId(fields[12].Text,"阀片"),CylinderId=editing==null?"":editing.CylinderId,Position=editing==null?"":editing.Position,SourceFile=binding.SourceFile,ReferenceKey=binding.ReferenceKey,InstancePath=binding.InstancePath};
-            var next=new LineupProject{AssemblyFile=assemblyFile,Records=new List<LineupRecord>(project.Records)};
-            if(editing==null)next.Records.Add(r);else next.Records[next.Records.IndexOf(editing)]=r;
+            // 基于现有项目深拷贝保存，避免旧窗体保存时清空新版 Islands/CadPages/ChangeLogs 及项目抬头字段
+            var next=project.Copy();next.AssemblyFile=assemblyFile;
+            if(editing==null)next.Records.Add(r);
+            else{int idx=next.Records.FindIndex(x=>x.Id==editing.Id);if(idx>=0)next.Records[idx]=r;else next.Records.Add(r);}
             var errors=next.Validate();if(errors.Count>0)throw new InvalidOperationException(string.Join("；",errors));
             next.Save(store);project=next;editing=r;binding=r;RefreshRecords(r);status.Text="已保存："+store;return r;
         }

@@ -27,7 +27,12 @@ namespace TianGongCadSuite {
             if (exportXlsxFn != null) {
                 var btnExp = Ui.Primary("导出标准 Excel (.xlsx)", 168, 36);
                 btnExp.Click += (s, e) => {
-                    try { exportXlsxFn(this); studio.SyncFromProject(true); }
+                    try {
+                        // 导出前先刷盘，避免刚点选箭头仍在 450ms 防抖窗口内被漏导
+                        studio.FlushPendingSave();
+                        exportXlsxFn(this);
+                        studio.SyncFromProject(true);
+                    }
                     catch (Exception ex) { MessageBox.Show(this, ex.Message, "导出", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
                 };
                 footer.AddRight(btnExp);
@@ -41,6 +46,8 @@ namespace TianGongCadSuite {
                 },
                 msg => { footer.Status.Text = msg; });
             studio.Padding = Ui.SPad(16, 8, 16, 8);
+            // 关闭窗口前主动提交未落盘防抖修改，避免仅依赖 Dispose 刷盘触发异常漏释放
+            FormClosing += (s, e) => { try { studio.FlushPendingSave(); } catch { } };
 
             Controls.Add(studio);
             Controls.Add(footer);

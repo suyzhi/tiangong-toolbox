@@ -3,6 +3,8 @@ using System.IO;
 using System.Linq;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Text;
+using System.Xml;
 using System.Xml.Serialization;
 using System.Windows.Forms;
 using F=SolidEdgeFramework;
@@ -86,25 +88,42 @@ namespace TianGongCadSuite {
             return true;
         }
 
-        // 从 3D 包围盒投影后的 2D 点（8 角点 + 中心点）判断是否在画面内并计算落点
+        // 从 3D 包围盒投影后的 2D 点（8 角点 + 中心点）判断是否在画面内并计算落点（保留原签名兼容外部调用与纯逻辑单测）
         public static bool SelectProjectedBoxAnchor(IList<PointF> cornersAndCenter,out double normX,out double normY){
             normX=0;normY=0;
             if(cornersAndCenter==null||cornersAndCenter.Count==0)return false;
+            var corners=new List<PointF>(cornersAndCenter.Count);
+            for(int i=0;i<cornersAndCenter.Count-1;i++)corners.Add(cornersAndCenter[i]);
+            return SelectProjectedBoxAnchor(corners,cornersAndCenter[cornersAndCenter.Count-1],out normX,out normY);
+        }
+
+        // 显式区分包围盒角点与中心点：透视模式下若中心位于相机背面（center == null），
+        // 绝不把最后一个角点误当中心，而是退回到可视角点裁切后的画面内中心
+        public static bool SelectProjectedBoxAnchor(IList<PointF> corners,PointF? center,out double normX,out double normY){
+            normX=0;normY=0;
             double minX=double.PositiveInfinity,minY=double.PositiveInfinity;
             double maxX=double.NegativeInfinity,maxY=double.NegativeInfinity;
             int valid=0;
-            for(int i=0;i<cornersAndCenter.Count;i++){
-                var p=cornersAndCenter[i];
-                if(!IsFinite(p.X)||!IsFinite(p.Y))continue;
+            if(corners!=null){
+                for(int i=0;i<corners.Count;i++){
+                    var p=corners[i];
+                    if(!IsFinite(p.X)||!IsFinite(p.Y))continue;
+                    valid++;
+                    if(p.X<minX)minX=p.X;if(p.X>maxX)maxX=p.X;
+                    if(p.Y<minY)minY=p.Y;if(p.Y>maxY)maxY=p.Y;
+                }
+            }
+            if(center.HasValue&&IsFinite(center.Value.X)&&IsFinite(center.Value.Y)){
+                var c=center.Value;
                 valid++;
-                if(p.X<minX)minX=p.X;if(p.X>maxX)maxX=p.X;
-                if(p.Y<minY)minY=p.Y;if(p.Y>maxY)maxY=p.Y;
+                if(c.X<minX)minX=c.X;if(c.X>maxX)maxX=c.X;
+                if(c.Y<minY)minY=c.Y;if(c.Y>maxY)maxY=c.Y;
             }
             if(valid==0||maxX<0.0||minX>1.0||maxY<0.0||minY>1.0)return false;
-            var center=cornersAndCenter[cornersAndCenter.Count-1];
-            if(IsFinite(center.X)&&IsFinite(center.Y)&&center.X>=0.0&&center.X<=1.0&&center.Y>=0.0&&center.Y<=1.0){
-                normX=Math.Max(0.002,Math.Min(0.998,center.X));
-                normY=Math.Max(0.002,Math.Min(0.998,center.Y));
+            if(center.HasValue&&IsFinite(center.Value.X)&&IsFinite(center.Value.Y)
+                &&center.Value.X>=0.0&&center.Value.X<=1.0&&center.Value.Y>=0.0&&center.Value.Y<=1.0){
+                normX=Math.Max(0.002,Math.Min(0.998,center.Value.X));
+                normY=Math.Max(0.002,Math.Min(0.998,center.Value.Y));
                 return true;
             }
             double cx=(Math.Max(0.0,minX)+Math.Min(1.0,maxX))*0.5;
@@ -473,19 +492,82 @@ namespace TianGongCadSuite {
 
             // 2. 回退到 3D 包围盒 8 角点 + 中心投影（柔性子装配、大型子装配或无实体面片件）
             if(hasRange){
-                var pts=new List<PointF>(9);
+                var pts=new List<PointF>(8);
                 double[] xs={rx0,rx1},ys={ry0,ry1},zs={rz0,rz1};
                 foreach(double x in xs)foreach(double y in ys)foreach(double z in zs){
                     double px,py;if(cam.Project(x,y,z,out px,out py))pts.Add(new PointF((float)px,(float)py));
                 }
                 double cx2,cy2;
-                if(cam.Project(rcx,rcy,rcz,out cx2,out cy2))pts.Add(new PointF((float)cx2,(float)cy2));
+                PointF? centerPt=cam.Project(rcx,rcy,rcz,out cx2,out cy2)?(PointF?)new PointF((float)cx2,(float)cy2):null;
                 double ax,ay;
-                if(SelectProjectedBoxAnchor(pts,out ax,out ay))
-                    return new LineupLocationPoint{State="ok",Method="3d-range-projection",X=ax,Y=ay,Pixels=pts.Count};
+                if(SelectProjectedBoxAnchor(pts,centerPt,out ax,out ay))
+                    return new LineupLocationPoint{State="ok",Method="3d-range-projection",X=ax,Y=ay,Pixels=pts.Count+(centerPt.HasValue?1:0)};
                 return new LineupLocationPoint{State="unresolved",Reason="该模型在当前视角画面之外，请调整视角重拍或在图上手动点选"};
             }
             return null;
+        }
+
+        // 校验当前天工 CAD 激活窗口确实属于目标装配，避免切到其他零件/装配/工程图时抓错图、改错相机或抛底层异常
+        internal static void EnsureActiveAssemblyWindow(F.Application app,A.AssemblyDocument doc){
+            if(app==null||doc==null)throw new InvalidOperationException("当前未连接天工 CAD 装配。");
+            string expected=LineupCad.AssemblyFile(doc);
+            string active="";
+            try{
+                object actDoc=app.ActiveDocument;
+                if(actDoc!=null)active=Convert.ToString(((dynamic)actDoc).FullName)??"";
+            }catch{}
+            if(string.IsNullOrEmpty(active)||!Path.IsPathRooted(active)||!string.Equals(Path.GetFullPath(active),expected,StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("请先在天工 CAD 中激活本清单所属装配，再执行位置图截图。");
+        }
+
+        // 清除 XML 1.0 禁止的控制字符（保留 \t \r \n），避免 locations.xml 写出 &#xB; 等非法字符导致后续反序列化报错
+        static string CleanXml10(string text){
+            if(string.IsNullOrEmpty(text))return text??"";
+            StringBuilder sb=null;
+            for(int i=0;i<text.Length;i++){
+                char c=text[i];
+                if(char.IsHighSurrogate(c)){
+                    if(i+1<text.Length&&char.IsLowSurrogate(text[i+1])){
+                        if(sb!=null){sb.Append(c);sb.Append(text[i+1]);}
+                        i++;
+                        continue;
+                    }
+                    if(sb==null){sb=new StringBuilder(text.Length);sb.Append(text,0,i);}
+                    continue;
+                }
+                if(char.IsLowSurrogate(c)){
+                    if(sb==null){sb=new StringBuilder(text.Length);sb.Append(text,0,i);}
+                    continue;
+                }
+                bool valid=c=='\t'||c=='\r'||c=='\n'||(c>=0x20&&c<=0xD7FF)||(c>=0xE000&&c<=0xFFFD);
+                if(!valid){
+                    if(sb==null){sb=new StringBuilder(text.Length);sb.Append(text,0,i);}
+                    continue;
+                }
+                if(sb!=null)sb.Append(c);
+            }
+            return sb==null?text:sb.ToString();
+        }
+
+        static void SanitizePackage(LineupLocationPackage pack){
+            if(pack==null)return;
+            pack.AssemblyFile=CleanXml10(pack.AssemblyFile);
+            pack.Image=CleanXml10(pack.Image);
+            if(pack.Points==null)return;
+            for(int i=0;i<pack.Points.Count;i++){
+                var pt=pack.Points[i];
+                if(pt==null)continue;
+                pt.Id=CleanXml10(pt.Id);
+                pt.Number=CleanXml10(pt.Number);
+                pt.Model=CleanXml10(pt.Model);
+                pt.Category=CleanXml10(pt.Category);
+                pt.State=CleanXml10(pt.State);
+                pt.Reason=CleanXml10(pt.Reason);
+                pt.Method=CleanXml10(pt.Method);
+                pt.Side=CleanXml10(pt.Side);
+                pt.Tag=CleanXml10(pt.Tag);
+                pt.Description=CleanXml10(pt.Description);
+            }
         }
 
         public static LineupLocationPackage Export(F.Application app,A.AssemblyDocument doc,LineupProject project,IEnumerable<string> ids,string directory){
@@ -495,6 +577,7 @@ namespace TianGongCadSuite {
 
         // 新版多页 CAD 位置图抓图：支持「等轴测」或「保持当前 CAD 视角」，自动清理临时差分图，结果直接存入 .lineup.cad
         public static LineupCadPage CapturePage(F.Application app,A.AssemblyDocument doc,LineupProject project,IEnumerable<string> ids,string pageName,bool useIsometric,bool zoomToTargets,bool autoDetect,Action<string> progress){
+            EnsureActiveAssemblyWindow(app,doc);
             string assets=LineupProject.CadAssetsDir(project.AssemblyFile);
             Directory.CreateDirectory(assets);
             string fileName="page-"+DateTime.Now.ToString("yyyyMMdd-HHmmss-fff")+".png";
@@ -511,11 +594,16 @@ namespace TianGongCadSuite {
         }
 
         static LineupLocationPackage CaptureCore(F.Application app,A.AssemblyDocument doc,LineupProject project,IEnumerable<string> ids,string directory,string imageName,bool useIsometric,bool zoomToTargets,bool cleanupTemp,Action<string> progress,bool autoDetect=true){
+            EnsureActiveAssemblyWindow(app,doc);
             var idSet=new HashSet<string>(ids??Enumerable.Empty<string>());
             var targetRecords=project.Records.Where(r=>idSet.Contains(r.Id)).ToList();
             var package=new LineupLocationPackage{AssemblyFile=project.AssemblyFile,Image=imageName};
-            dynamic win=app.ActiveWindow;
-            dynamic view=win.View;
+            dynamic win=null,view=null;
+            try{
+                win=app.ActiveWindow;
+                view=win!=null?win.View:null;
+            }catch{}
+            if(win==null||view==null)throw new InvalidOperationException("当前激活窗口不是三维装配视图，请切回装配三维视图后重试。");
             var selected=new List<object>();for(int i=1;i<=doc.SelectSet.Count;i++)selected.Add(doc.SelectSet.Item(i));
             string imgPath=Path.Combine(directory,imageName);
             string tempDir=cleanupTemp?Path.Combine(Path.GetTempPath(),"tg-lineup-cap-"+Guid.NewGuid().ToString("N")):directory;
@@ -541,7 +629,7 @@ namespace TianGongCadSuite {
                 // 紧接基准截图后立刻快照相机投影参数（零多余截图、免疫鼠标悬停预高亮、毫秒级精准映射）
                 var cam=autoDetect?CameraProjector.TryCreate(win,view,package.Width,package.Height):null;
                 var facetCache=new Dictionary<string,float[]>(StringComparer.OrdinalIgnoreCase);
-                bool usedPixelFallback=false;
+                var fallbackPoints=new List<LineupLocationPoint>();
 
                 int idx=0;
                 foreach(var r in targetRecords){
@@ -560,8 +648,8 @@ namespace TianGongCadSuite {
                                 point=projected;
                             }else{
                                 // 极端兜底：仅在 3D 投影接口不可用时才退回到高亮差分
-                                usedPixelFallback=true;
                                 point=FallbackDetectByHighlight(app,doc,view,target,r.Id,imgPath,tempDir);
+                                fallbackPoints.Add(point);
                             }
                         }catch(Exception ex){point.Reason=ex.Message;}
                     }
@@ -569,27 +657,34 @@ namespace TianGongCadSuite {
                     package.Points.Add(point);
                 }
 
-                if(usedPixelFallback&&autoDetect&&targetRecords.Any(r=>!string.IsNullOrEmpty(r.ReferenceKey))){
+                // 仅作废像素差分兜底产出的点位，绝不误清前面已通过基准相机快照精确投影的 3D 点
+                if(fallbackPoints.Count>0&&autoDetect&&targetRecords.Any(r=>!string.IsNullOrEmpty(r.ReferenceKey))){
                     string checkFile=Path.Combine(tempDir,"view-check.png");Capture(app,view,checkFile);
                     using(var a=new Bitmap(imgPath))using(var b=new Bitmap(checkFile)){
                         int changed=0,total=0;for(int y=0;y<a.Height;y+=5)for(int x=0;x<a.Width;x+=5){total++;var c=a.GetPixel(x,y);var d=b.GetPixel(x,y);if(Math.Abs(c.R-d.R)+Math.Abs(c.G-d.G)+Math.Abs(c.B-d.B)>60)changed++;}
-                        if(changed>total*.002)foreach(var point in package.Points){point.State="unresolved";point.Reason="截图前后视图发生变化，请保持视角不动重新导出";point.X=point.Y=0;}
+                        if(changed>total*.002)foreach(var point in fallbackPoints){point.State="unresolved";point.Reason="截图前后视图发生变化，请保持视角不动重新导出";point.X=point.Y=0;}
                     }
                 }
                 if(!cleanupTemp){
-                    using(var stream=File.Create(Path.Combine(directory,"locations.xml")))new XmlSerializer(typeof(LineupLocationPackage)).Serialize(stream,package);
+                    SanitizePackage(package);
+                    var ws=new XmlWriterSettings{Encoding=new UTF8Encoding(false),Indent=true,CheckCharacters=true};
+                    using(var writer=XmlWriter.Create(Path.Combine(directory,"locations.xml"),ws))new XmlSerializer(typeof(LineupLocationPackage)).Serialize(writer,package);
                     var rows=new List<string[]>{new[]{"编号","型号","状态","原因","X比例","Y比例"}};rows.AddRange(package.Points.Select(p=>new[]{p.Number,p.Model,p.State,p.Reason,p.X.ToString(System.Globalization.CultureInfo.InvariantCulture),p.Y.ToString(System.Globalization.CultureInfo.InvariantCulture)}));File.WriteAllText(Path.Combine(directory,"locations.csv"),LineupCsv.Write(rows),new System.Text.UTF8Encoding(true));
                 }
                 return package;
             }finally{
                 if(cleanupTemp)try{Directory.Delete(tempDir,true);}catch{}
                 foreach(var item in selected)try{doc.SelectSet.Add(item);}catch{}
-                view.Update();
+                try{view.Update();}catch{}
             }
         }
 
         static LineupLocationPoint FallbackDetectByHighlight(F.Application app,A.AssemblyDocument doc,dynamic view,object target,string recId,string imgPath,string tempDir){
             var point=new LineupLocationPoint{State="unresolved"};
+            if(!IsTargetVisible(target)){
+                point.Reason="该模型在装配中已隐藏，请显示后重拍或在图上手动点选";
+                return point;
+            }
             dynamic highlight=null;
             try{
                 highlight=doc.HighlightSets.Add();highlight.Color=0x00FFFF;highlight.AddItem(LineupCad.HighlightTarget(target));highlight.Draw();view.Update();
@@ -601,21 +696,44 @@ namespace TianGongCadSuite {
                 }
                 if(point.State!="ok"){
                     highlight.Delete();highlight=null;dynamic occurrence=target;bool visible=occurrence.Visible;
-                    if(visible)try{
-                        occurrence.Visible=false;
-                        string hide1=Path.Combine(tempDir,recId+"-hide1.png"),hide2=Path.Combine(tempDir,recId+"-hide2.png");Capture(app,view,hide1);Capture(app,view,hide2);
-                        using(var a=new Bitmap(hide1))using(var b=new Bitmap(hide2))using(var bg=new Bitmap(imgPath))point=DetectDifference(bg,a,b);
-                        if(point.State=="ok")point.Method="stable-visibility-difference";
-                    }finally{occurrence.Visible=visible;view.Update();}
+                    if(visible){
+                        bool restored=false;
+                        try{
+                            occurrence.Visible=false;
+                            string hide1=Path.Combine(tempDir,recId+"-hide1.png"),hide2=Path.Combine(tempDir,recId+"-hide2.png");Capture(app,view,hide1);Capture(app,view,hide2);
+                            using(var a=new Bitmap(hide1))using(var b=new Bitmap(hide2))using(var bg=new Bitmap(imgPath))point=DetectDifference(bg,a,b);
+                            if(point.State=="ok")point.Method="stable-visibility-difference";
+                        }finally{
+                            // 显隐差分后多次重试恢复可见状态，防止 COM 忙导致零件被留在隐藏态
+                            for(int retry=0;retry<3&&!restored;retry++){
+                                try{occurrence.Visible=visible;restored=true;}
+                                catch{System.Threading.Thread.Sleep(80);}
+                            }
+                            if(!restored){
+                                Log.Write("LineupLocationRestoreVisible","未能恢复模型可见性："+recId);
+                                if(string.IsNullOrEmpty(point.Reason))point.Reason="警告：显隐探测后未能自动恢复该零件可见性，请在装配树中手动显示";
+                            }
+                            try{view.Update();}catch{}
+                        }
+                    }
                 }
             }catch(Exception ex){point.Reason=ex.Message;}
-            finally{if(highlight!=null)try{highlight.Delete();}catch{}view.Update();}
+            finally{if(highlight!=null)try{highlight.Delete();}catch{}try{view.Update();}catch{}}
             return point;
         }
     }
     public sealed partial class LineupTableForm {
         void ExportLocationDialog(){
-            SaveDraft();var ids=SelectedIds();if(ids.Count==0)throw new InvalidOperationException("请选择本张位置图需要标注的清单行；可跨类别多选。");
+            if(app==null||assembly==null)throw new InvalidOperationException("当前未连接天工 CAD 装配。");
+            SaveDraft();
+            List<string> ids;
+            if(activeViewMode==0&&pneumaticPanel!=null&&pneumaticPanel.Visible){
+                int ignoredCol;
+                ids=pneumaticPanel.SelectedPrimaryIdsForMove(out ignoredCol);
+            }else{
+                ids=SelectedIds();
+            }
+            if(ids.Count==0)throw new InvalidOperationException("请选择本张位置图需要标注的清单行；可跨类别多选。");
             string picked=FolderPicker.Pick(this,"选择位置图包保存目录（会新建带时间的子目录）",Path.GetDirectoryName(file),"lineup.location");
             if(!string.IsNullOrEmpty(picked)){
                 string folder=Path.Combine(picked,"Lineup位置图-"+DateTime.Now.ToString("yyyyMMdd-HHmmss-fff"));ClearHighlight();Hide();

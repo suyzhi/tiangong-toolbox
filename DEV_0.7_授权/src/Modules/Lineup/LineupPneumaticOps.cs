@@ -233,7 +233,9 @@ namespace TianGongCadSuite {
 
             var cyls = records
                 .Where(r => LineupTableData.Category(r.Category) == "气缸"
-                    && (BelongsToIsland(r, islandKey, islandRecId) || (!string.IsNullOrEmpty(r.ValveId) && valveIds.Contains(r.ValveId))))
+                    && (BelongsToIsland(r, islandKey, islandRecId)
+                        // 若气缸自身编号已明确归属其他阀岛，绝不再被旧 ValveId 拉回本岛造成跨岛双倍统计
+                        || (LineupNumbering.IslandKey(r.Number).Length == 0 && !string.IsNullOrEmpty(r.ValveId) && valveIds.Contains(r.ValveId))))
                 .OrderBy(r => ExtractSlotSortKey(r.Number))
                 .ThenBy(r => r.Number ?? "", StringComparer.OrdinalIgnoreCase)
                 .ToList();
@@ -329,6 +331,7 @@ namespace TianGongCadSuite {
             var map = new Dictionary<string, List<LineupRecord>>(StringComparer.Ordinal);
             var cylByNum = new Dictionary<string, LineupRecord>(StringComparer.OrdinalIgnoreCase);
             var cylIdSet = new HashSet<string>(cyls.Select(c => c.Id), StringComparer.Ordinal);
+            var allCylIdSet = new HashSet<string>(all.Where(r => LineupTableData.Category(r.Category) == "气缸").Select(c => c.Id), StringComparer.Ordinal);
             foreach (var c in cyls) {
                 map[c.Id] = new List<LineupRecord>();
                 string cn = (c.Number ?? "").Trim();
@@ -336,8 +339,9 @@ namespace TianGongCadSuite {
             }
             foreach (var s in all.Where(r => LineupTableData.Category(r.Category) == "气缸传感器")) {
                 string targetId = "";
-                if (!string.IsNullOrEmpty(s.CylinderId) && cylIdSet.Contains(s.CylinderId)) {
-                    targetId = s.CylinderId;
+                // 若磁开已显式指向项目内某支真实气缸（例如在另一阀岛），则只归属该气缸，不再按编号兜底导致跨岛重复计入
+                if (!string.IsNullOrEmpty(s.CylinderId) && allCylIdSet.Contains(s.CylinderId)) {
+                    if (cylIdSet.Contains(s.CylinderId)) targetId = s.CylinderId;
                 } else {
                     var m = Regex.Match((s.Number ?? "").Trim(), @"^(.+?)([HWM][0-9]*)$", RegexOptions.IgnoreCase);
                     LineupRecord c;
@@ -408,6 +412,10 @@ namespace TianGongCadSuite {
             string delPre; int delNum;
             ParseIslandKey(islandKey, out delPre, out delNum);
 
+            var islandRecIds = new HashSet<string>(
+                p.Records.Where(r => r.Category == "阀岛" && string.Equals((r.Number ?? "").Trim(), islandKey, StringComparison.OrdinalIgnoreCase)).Select(r => r.Id),
+                StringComparer.Ordinal);
+
             var channels = BuildChannelRows(p, islandKey);
             var childIds = new HashSet<string>(StringComparer.Ordinal);
             foreach (var ch in channels) {
@@ -415,17 +423,34 @@ namespace TianGongCadSuite {
                 if (ch.Cylinder != null) childIds.Add(ch.Cylinder.Id);
                 foreach (var s in ch.Sensors) childIds.Add(s.Id);
             }
+            // 一并清理仍挂在该阀岛下（编号或 IslandId 指向本岛）的无主气缸传感器，避免顺排后悬空关联或撞号
+            foreach (var r in p.Records) {
+                if (LineupTableData.Category(r.Category) != "气缸传感器") continue;
+                if (string.Equals(LineupNumbering.IslandKey(r.Number), islandKey, StringComparison.OrdinalIgnoreCase)
+                    || (!string.IsNullOrEmpty(r.IslandId) && islandRecIds.Contains(r.IslandId)))
+                    childIds.Add(r.Id);
+            }
             if (childIds.Count > 0 && !deleteChildren)
                 throw new InvalidOperationException("阀岛 " + islandKey + " 下仍有 " + childIds.Count + " 条关联记录，请确认是否一并删除。");
 
             var removedIds = new HashSet<string>(childIds, StringComparer.Ordinal);
-            foreach (var r in p.Records.Where(r => r.Category == "阀岛" && string.Equals((r.Number ?? "").Trim(), islandKey, StringComparison.OrdinalIgnoreCase)))
-                removedIds.Add(r.Id);
+            foreach (string id in islandRecIds) removedIds.Add(id);
+
+            // 同步删除曾由本阀岛同步到「其他电气件 E**」的本体记录，防止顺排后续阀岛时出现两条同称 Y* 阀岛本体的幽灵电气件
+            bool removedSyncedElec = false;
+            foreach (var r in p.Records) {
+                if (LineupTableData.Category(r.Category) == "其他电气件"
+                    && string.Equals((r.Notes ?? "").Trim(), (islandKey ?? "").Trim(), StringComparison.OrdinalIgnoreCase)) {
+                    removedIds.Add(r.Id);
+                    removedSyncedElec = true;
+                }
+            }
 
             if (removedIds.Count > 0) p.Records.RemoveAll(r => removedIds.Contains(r.Id));
             if (p.Islands != null) p.Islands.RemoveAll(i => string.Equals(i.Key, islandKey, StringComparison.OrdinalIgnoreCase));
 
             if (delPre.Length > 0) LineupNumbering.CompactIslands(p, delPre);
+            if (removedSyncedElec) LineupNumbering.CompactLinearCategory(p, "其他电气件");
             LineupNumbering.SyncCadPageNumbers(p, removedIds);
 
             var remaining = ListIslands(p);
@@ -564,13 +589,8 @@ namespace TianGongCadSuite {
                 if (valve.Notes == "预留位") valve.Notes = "";
             }
 
-            // 把已经按编号归属此阀片但 ValveId 为空的气缸先绑定进来，确保多缸计数准确
-            foreach (var c in p.Records.Where(r => LineupTableData.Category(r.Category) == "气缸" && string.IsNullOrEmpty(r.ValveId))) {
-                if (string.Equals(LineupNumbering.ValveNumberForCylinder(c.Number), (valve.Number ?? "").Trim(), StringComparison.OrdinalIgnoreCase)) {
-                    c.ValveId = valve.Id;
-                    if (!string.IsNullOrEmpty(valve.IslandId)) c.IslandId = valve.IslandId;
-                }
-            }
+            // 把已经按编号归属此阀片的气缸及其隐式 H/W 磁开先补绑进来，确保多缸重编不漏磁开
+            LinkImplicitChildren(p, valve);
 
             var sibling = p.Records.LastOrDefault(r => LineupTableData.Category(r.Category) == "气缸" && r.ValveId == valve.Id);
             var cyl = new LineupRecord {
@@ -594,7 +614,7 @@ namespace TianGongCadSuite {
             }
             p.Records.Add(cyl);
 
-            // 联动重编号：1 支气缸 → Y1C01；多支气缸 → Y1C01-1 / Y1C01-2，并同步原气缸的 H/W 传感器
+            // 联动重编号：1 支气缸 → Y1C01；多支气缸 → Y1C01-1 / Y1C01-2，并同步原气缸的 H/W 传感器与 CAD 位置图标注号
             LineupHierarchy.RenumberChildren(p, valve);
 
             var res = new LineupBundleResult { ValveId = valve.Id, CylinderId = cyl.Id };
@@ -610,6 +630,7 @@ namespace TianGongCadSuite {
                 }
             }
             LineupTableData.RejectDuplicates(p.Records);
+            LineupNumbering.SyncCadPageNumbers(p, null);
             return res;
         }
 
@@ -635,15 +656,27 @@ namespace TianGongCadSuite {
             if (pairCount == 0) {
                 var ids = new HashSet<string>(existing.Select(s => s.Id), StringComparer.Ordinal);
                 p.Records.RemoveAll(r => ids.Contains(r.Id));
+                LineupNumbering.SyncCadPageNumbers(p, ids);
                 return existing.Count;
             }
-            // 先移除与目标套数冲突的旧模式（如 1 组 H/W 升级到 2 组 H1/W1/H2/W2，或反向降级）
+            // 先规范化导入/手工磁开的 CylinderId 与 Position（兼容 Position 为空的旧数据），防止切换模式时漏删或被 SensorPairsMulti 误报重号
+            foreach (var s in existing) {
+                if (string.IsNullOrEmpty(s.CylinderId)) s.CylinderId = cyl.Id;
+                if (string.IsNullOrEmpty(s.ValveId) && !string.IsNullOrEmpty(cyl.ValveId)) s.ValveId = cyl.ValveId;
+                if (string.IsNullOrEmpty(s.IslandId) && !string.IsNullOrEmpty(cyl.IslandId)) s.IslandId = cyl.IslandId;
+                string pos = ExtractSensorPosSuffix(s);
+                if (pos.Length > 0) s.Position = pos;
+            }
+
+            // 移除与目标套数冲突的旧模式（如 1 组 H/W 升级到 2 组 H1/W1/H2/W2，或反向降级）
             bool isSingleMode = pairCount == 1;
             var removeIds = new HashSet<string>(
-                existing.Where(s => isSingleMode
-                    ? Regex.IsMatch((s.Position ?? "").Trim(), @"^[HW][0-9]+$", RegexOptions.IgnoreCase)
-                    : Regex.IsMatch((s.Position ?? "").Trim(), @"^[HW]$", RegexOptions.IgnoreCase))
-                .Select(s => s.Id), StringComparer.Ordinal);
+                existing.Where(s => {
+                    string pos = ExtractSensorPosSuffix(s);
+                    return isSingleMode
+                        ? Regex.IsMatch(pos, @"^[HW][0-9]+$", RegexOptions.IgnoreCase)
+                        : Regex.IsMatch(pos, @"^[HW]$", RegexOptions.IgnoreCase);
+                }).Select(s => s.Id), StringComparer.Ordinal);
             if (removeIds.Count > 0) p.Records.RemoveAll(r => removeIds.Contains(r.Id));
 
             var before = new HashSet<string>(p.Records.Select(r => r.Id), StringComparer.Ordinal);
@@ -654,6 +687,7 @@ namespace TianGongCadSuite {
                 if (!string.IsNullOrWhiteSpace(sample.Connector)) s.Connector = sample.Connector;
             }
             LineupTableData.RejectDuplicates(p.Records);
+            if (removeIds.Count > 0) LineupNumbering.SyncCadPageNumbers(p, removeIds);
             return added;
         }
 
@@ -726,12 +760,31 @@ namespace TianGongCadSuite {
             return removeIds.Count;
         }
 
+        // 9b. 仅删除指定的气缸传感器记录并同步清理 CAD 位置图对应点位（供磁开明细子页右键单删/多删使用）
+        public static int DeleteSensorItems(LineupProject p, IEnumerable<string> sensorIds) {
+            if (p == null || p.Records == null || sensorIds == null) return 0;
+            var targets = new HashSet<string>(sensorIds.Where(id => !string.IsNullOrEmpty(id)), StringComparer.Ordinal);
+            if (targets.Count == 0) return 0;
+            var removeIds = new HashSet<string>(
+                p.Records.Where(r => LineupTableData.Category(r.Category) == "气缸传感器" && targets.Contains(r.Id)).Select(r => r.Id),
+                StringComparer.Ordinal);
+            if (removeIds.Count == 0) return 0;
+            p.Records.RemoveAll(r => removeIds.Contains(r.Id));
+            LineupNumbering.SyncCadPageNumbers(p, removeIds);
+            return removeIds.Count;
+        }
+
         // 10. 将选中阀片（及其气缸与 H/W）移动到目标阀岛，自动顺延槽位编号并级联重编
         public static int MoveValvesToIsland(LineupProject p, IEnumerable<string> valveIds, string targetIslandKey) {
             string pre; int num;
             if (!ParseIslandKey(targetIslandKey, out pre, out num)) throw new InvalidOperationException("目标阀岛编号无效。");
             var cfg = LineupNumbering.IslandEntry(p, targetIslandKey);
-            if (cfg == null) throw new InvalidOperationException("目标阀岛 " + targetIslandKey + " 不存在。");
+            if (cfg == null) {
+                // 允许移入由记录推导出的阀岛（侧栏和换岛下拉框均展示它们），自动补建显式阀岛配置
+                bool inferredExists = ListIslands(p).Any(x => string.Equals(x.Key, targetIslandKey, StringComparison.OrdinalIgnoreCase));
+                if (!inferredExists) throw new InvalidOperationException("目标阀岛 " + targetIslandKey + " 不存在。");
+                LineupNumbering.SetIsland(p, pre, num, "", "阀岛");
+            }
 
             var targets = p.Records.Where(r => valveIds.Contains(r.Id) && LineupTableData.Category(r.Category) == "阀片").ToList();
             if (targets.Count == 0) throw new InvalidOperationException("请先选择要换岛的阀片。");
@@ -750,6 +803,7 @@ namespace TianGongCadSuite {
                 moved++;
             }
             LineupTableData.RejectDuplicates(p.Records);
+            LineupNumbering.SyncCadPageNumbers(p, null);
             return moved;
         }
 
@@ -763,40 +817,71 @@ namespace TianGongCadSuite {
 
             var ids = new HashSet<string>(recordIds, StringComparer.Ordinal);
             var picked = p.Records.Where(r => ids.Contains(r.Id)).ToList();
-            var assignedCylIds = new List<string>();
+            var pickedValves = picked.Where(r => LineupTableData.Category(r.Category) == "阀片").ToList();
+            var pickedCyls = picked.Where(r => LineupTableData.Category(r.Category) == "气缸").ToList();
+
+            // 改号前先按旧编号快照每个孤立气缸的隐式磁开，并补绑孤立阀片的隐式下级，防止先覆盖 r.Number 后找不到旧磁开
+            var sensorsByCyl = new Dictionary<string, List<LineupRecord>>(StringComparer.Ordinal);
+            foreach (var c in pickedCyls) {
+                sensorsByCyl[c.Id] = FindSensorsOfCylinder(p, c);
+            }
+            foreach (var v in pickedValves) {
+                LinkImplicitChildren(p, v);
+            }
+
+            var handledCylIds = new HashSet<string>(StringComparer.Ordinal);
+            var cylIdsNeedValve = new List<string>();
+            var cylIdsNeedSensor = new List<string>();
             int count = 0;
 
-            foreach (var r in picked) {
-                string cat = LineupTableData.Category(r.Category);
-                if (cat != "气缸" && cat != "阀片") continue;
+            // 先归属孤立阀片并级联重编其已关联气缸，避免同批气缸又被二次改号导致阀缸槽位错位
+            foreach (var v in pickedValves) {
                 int slot = NextSlotNumber(p, targetIslandKey);
-                r.Number = targetIslandKey + (cat == "气缸" ? "C" : "V") + slot.ToString("D2");
-                r.IslandId = owner.Id;
-                if (cat == "气缸") {
-                    assignedCylIds.Add(r.Id);
-                    foreach (var s in FindSensorsOfCylinder(p, r)) {
-                        s.IslandId = owner.Id;
-                        if (!string.IsNullOrWhiteSpace(s.Position)) s.Number = r.Number + s.Position;
-                    }
-                } else {
-                    LineupHierarchy.RenumberChildren(p, r);
+                v.Number = targetIslandKey + "V" + slot.ToString("D2");
+                v.IslandId = owner.Id;
+                LineupHierarchy.RenumberChildren(p, v);
+                foreach (var c in p.Records.Where(r => LineupTableData.Category(r.Category) == "气缸" && r.ValveId == v.Id)) {
+                    handledCylIds.Add(c.Id);
+                    if (ids.Contains(c.Id)) cylIdsNeedSensor.Add(c.Id);
                 }
                 count++;
             }
-            if (assignedCylIds.Count > 0) {
-                if (generateValves) LineupNumbering.GenerateValves(p, assignedCylIds);
-                if (generateSensors) {
-                    var before = new HashSet<string>(p.Records.Select(r => r.Id), StringComparer.Ordinal);
-                    LineupNumbering.SensorPairs(p, assignedCylIds);
-                    var sample = FindDefaultSensorSpec(p);
-                    foreach (var s in p.Records.Where(r => !before.Contains(r.Id))) {
-                        if (!string.IsNullOrWhiteSpace(sample.Model)) s.Model = sample.Model;
-                        if (!string.IsNullOrWhiteSpace(sample.Brand)) s.Brand = sample.Brand;
-                        if (!string.IsNullOrWhiteSpace(sample.Connector)) s.Connector = sample.Connector;
+
+            foreach (var r in pickedCyls) {
+                if (handledCylIds.Contains(r.Id)) { count++; continue; }
+                int slot = NextSlotNumber(p, targetIslandKey);
+                r.Number = targetIslandKey + "C" + slot.ToString("D2");
+                r.IslandId = owner.Id;
+                cylIdsNeedValve.Add(r.Id);
+                cylIdsNeedSensor.Add(r.Id);
+                List<LineupRecord> oldSens;
+                if (sensorsByCyl.TryGetValue(r.Id, out oldSens)) {
+                    foreach (var s in oldSens) {
+                        s.CylinderId = r.Id;
+                        s.IslandId = owner.Id;
+                        string pos = ExtractSensorPosSuffix(s);
+                        if (pos.Length > 0) {
+                            s.Position = pos;
+                            s.Number = r.Number + pos;
+                        }
                     }
+                }
+                count++;
+            }
+
+            if (cylIdsNeedValve.Count > 0 && generateValves) LineupNumbering.GenerateValves(p, cylIdsNeedValve);
+            if (cylIdsNeedSensor.Count > 0 && generateSensors) {
+                var before = new HashSet<string>(p.Records.Select(r => r.Id), StringComparer.Ordinal);
+                LineupNumbering.SensorPairs(p, cylIdsNeedSensor);
+                var sample = FindDefaultSensorSpec(p);
+                foreach (var s in p.Records.Where(r => !before.Contains(r.Id))) {
+                    if (!string.IsNullOrWhiteSpace(sample.Model)) s.Model = sample.Model;
+                    if (!string.IsNullOrWhiteSpace(sample.Brand)) s.Brand = sample.Brand;
+                    if (!string.IsNullOrWhiteSpace(sample.Connector)) s.Connector = sample.Connector;
                 }
             }
             LineupTableData.RejectDuplicates(p.Records);
+            LineupNumbering.SyncCadPageNumbers(p, null);
             return count;
         }
 
@@ -885,7 +970,7 @@ namespace TianGongCadSuite {
             return moved;
         }
 
-        static bool MoveSlotUnitGroup(LineupProject p, string canonicalKey, List<SlotMoveUnit> units, HashSet<string> selSet, int direction, int fallbackBaseSlot) {
+        static bool MoveSlotUnitGroup(LineupProject p, string canonicalKey, List<SlotMoveUnit> units, HashSet<string> selSet, int direction, int fallbackBaseSlot, HashSet<int> occupiedOtherSlots) {
             if (units.Count <= 1) return false;
             var selIdx = new HashSet<int>();
             for (int i = 0; i < units.Count; i++) if (units[i].ContainsAny(selSet)) selIdx.Add(i);
@@ -912,9 +997,18 @@ namespace TianGongCadSuite {
 
             bool origSlotsClean = units.All(u => u.OrigSlot > 0 && u.OrigSlot < 999999)
                 && units.Select(u => u.OrigSlot).Distinct().Count() == units.Count;
-            int[] targetSlots = origSlotsClean
-                ? units.Select(u => u.OrigSlot).OrderBy(x => x).ToArray()
-                : Enumerable.Range(fallbackBaseSlot, units.Count).ToArray();
+            int[] targetSlots;
+            if (origSlotsClean) {
+                targetSlots = units.Select(u => u.OrigSlot).OrderBy(x => x).ToArray();
+            } else {
+                // 回退重排槽号时主动避开另一组（无阀气缸或阀片）已占用的槽号，避免中间夹着无阀气缸时撞号抛 RejectDuplicates
+                targetSlots = new int[units.Count];
+                int curSlot = Math.Max(1, fallbackBaseSlot);
+                for (int i = 0; i < units.Count; i++) {
+                    while (occupiedOtherSlots != null && occupiedOtherSlots.Contains(curSlot)) curSlot++;
+                    targetSlots[i] = curSlot++;
+                }
+            }
 
             var orderedValves = new List<string>();
             var orderedCyls = new List<string>();
@@ -1075,8 +1169,14 @@ namespace TianGongCadSuite {
                 }
             }
 
-            bool movedValves = MoveSlotUnitGroup(p, canonicalKey, valveUnits, selSet, dir, 1);
-            bool movedUnattached = MoveSlotUnitGroup(p, canonicalKey, unattachedUnits, selSet, dir, Math.Max(1, maxValveSlot + 1));
+            var unattachedSlots = new HashSet<int>(unattachedUnits.Where(u => u.OrigSlot > 0 && u.OrigSlot < 999999).Select(u => u.OrigSlot));
+            bool movedValves = MoveSlotUnitGroup(p, canonicalKey, valveUnits, selSet, dir, 1, unattachedSlots);
+            var valveSlotsNow = new HashSet<int>();
+            foreach (var u in valveUnits) {
+                int vs = u.Valve != null ? ExtractSlotSortKey(u.Valve.Number) : u.OrigSlot;
+                if (vs > 0 && vs < 999999) { valveSlotsNow.Add(vs); if (vs > maxValveSlot) maxValveSlot = vs; }
+            }
+            bool movedUnattached = MoveSlotUnitGroup(p, canonicalKey, unattachedUnits, selSet, dir, Math.Max(1, maxValveSlot + 1), valveSlotsNow);
             if (!movedValves && !movedUnattached) {
                 message = dir < 0 ? "选中行已到最顶部" : "选中行已到最底部";
                 return false;
@@ -1163,13 +1263,13 @@ namespace TianGongCadSuite {
             foreach (var c in p.Records.Where(r => LineupTableData.Category(r.Category) == "气缸")) {
                 if (c.ValveId == valve.Id || (string.IsNullOrEmpty(c.ValveId) && string.Equals(LineupNumbering.ValveNumberForCylinder(c.Number), vn, StringComparison.OrdinalIgnoreCase))) {
                     c.ValveId = valve.Id;
+                    if (!string.IsNullOrEmpty(valve.IslandId)) c.IslandId = valve.IslandId;
                     foreach (var s in FindSensorsOfCylinder(p, c)) {
                         s.CylinderId = c.Id;
                         s.ValveId = valve.Id;
-                        if (string.IsNullOrWhiteSpace(s.Position)) {
-                            var m = Regex.Match((s.Number ?? "").Trim(), @"([HWM][0-9]*)$", RegexOptions.IgnoreCase);
-                            if (m.Success) s.Position = m.Groups[1].Value.ToUpperInvariant();
-                        }
+                        if (!string.IsNullOrEmpty(valve.IslandId)) s.IslandId = valve.IslandId;
+                        string pos = ExtractSensorPosSuffix(s);
+                        if (pos.Length > 0) s.Position = pos;
                     }
                 }
             }

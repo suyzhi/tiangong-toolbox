@@ -203,15 +203,23 @@ namespace TianGongCadSuite {
             FitPGridColumns();
         }
 
+        static void FitButtonExact(Button b, int minLogicalW) {
+            if (b == null) return;
+            int need = TextRenderer.MeasureText(b.Text ?? "", b.Font ?? Ui.F9).Width + Ui.S(20);
+            int target = Math.Max(Ui.S(minLogicalW), need);
+            if (b.Width != target) b.Width = target;
+        }
+
         void UpdateSidebarFooterCompact() {
             if (sidebarCard == null) return;
             bool compact = sidebarCard.Width < Ui.S(236);
             var cur = islands.FirstOrDefault(x => string.Equals(x.Key, selectedIslandKey, StringComparison.OrdinalIgnoreCase));
             btnEditIsland.Text = compact ? "编辑" : "编辑阀岛";
             btnBindIsland3D.Text = (cur != null && cur.Has3DBind) ? (compact ? "定位" : "定位 3D") : "绑 3D";
-            Ui.FitButton(btnEditIsland);
-            Ui.FitButton(btnBindIsland3D);
-            Ui.FitButton(btnDeleteIsland);
+            // 按当前文本实测重设宽度（允许回缩），避免窄侧栏下旧宽按钮把「删除」挤出右缘
+            FitButtonExact(btnEditIsland, 46);
+            FitButtonExact(btnBindIsland3D, 46);
+            FitButtonExact(btnDeleteIsland, 46);
         }
 
         protected override void Dispose(bool disposing) {
@@ -249,6 +257,8 @@ namespace TianGongCadSuite {
             get {
                 if (viewingOrphans) {
                     if (orphanGrid.CurrentRow == null) return null;
+                    string tagId = orphanGrid.CurrentRow.Tag as string;
+                    if (!string.IsNullOrEmpty(tagId)) return tagId;
                     int idx = orphanGrid.CurrentRow.Index;
                     return idx >= 0 && idx < orphans.Count ? orphans[idx].Id : null;
                 }
@@ -398,8 +408,11 @@ namespace TianGongCadSuite {
                 g.ColumnHeadersHeight = hdrH;
                 foreach (DataGridViewRow r in g.Rows) if (r.Height != rowH) r.Height = rowH;
                 if (adjustColWidth) {
+                    // 孤立件表使用独立键前缀并跳过 Fill 列，防止与 pGrid 各子页同名列（编号/描述/型号/品牌）互相污染宽度
+                    string keyPrefix = g == orphanGrid ? "orphan:" : (activeSubTab + ":");
                     foreach (DataGridViewColumn col in g.Columns) {
-                        string key = activeSubTab + ":" + col.Name;
+                        if (col.AutoSizeMode == DataGridViewAutoSizeColumnMode.Fill) continue;
+                        string key = keyPrefix + col.Name;
                         int bw;
                         if (!baseWidths.TryGetValue(key, out bw)) { bw = col.Width; baseWidths[key] = bw; }
                         col.Width = Math.Max(Ui.S(52), (int)Math.Round(bw * scale));
@@ -873,12 +886,13 @@ namespace TianGongCadSuite {
             StyleGrid(orphanGrid);
             orphanGrid.ReadOnly = true;
             orphanGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
-            orphanGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "类别", HeaderText = "类别", Width = Ui.S(86) });
-            orphanGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "编号", HeaderText = "当前编号", Width = Ui.S(136) });
-            orphanGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "描述", HeaderText = "描述", Width = Ui.S(210) });
-            orphanGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "型号", HeaderText = "型号", Width = Ui.S(200) });
-            orphanGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "品牌", HeaderText = "品牌", Width = Ui.S(96) });
-            orphanGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "绑定", HeaderText = "3D 绑定", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill });
+            // 禁止点击表头自动排序（并配合 Row.Tag 存 Record.Id），避免排序后视图行号与 orphans 列表错位
+            orphanGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "类别", HeaderText = "类别", Width = Ui.S(86), SortMode = DataGridViewColumnSortMode.NotSortable });
+            orphanGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "编号", HeaderText = "当前编号", Width = Ui.S(136), SortMode = DataGridViewColumnSortMode.NotSortable });
+            orphanGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "描述", HeaderText = "描述", Width = Ui.S(210), SortMode = DataGridViewColumnSortMode.NotSortable });
+            orphanGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "型号", HeaderText = "型号", Width = Ui.S(200), SortMode = DataGridViewColumnSortMode.NotSortable });
+            orphanGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "品牌", HeaderText = "品牌", Width = Ui.S(96), SortMode = DataGridViewColumnSortMode.NotSortable });
+            orphanGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "绑定", HeaderText = "3D 绑定", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, SortMode = DataGridViewColumnSortMode.NotSortable });
             orphanGrid.MouseWheel += HandleGridWheel;
         }
 
@@ -932,9 +946,24 @@ namespace TianGongCadSuite {
             }
         }
 
+        // 直接在控件命令键阶段响应 Alt+↑ / Alt+↓，配合 CadKeyShield 确保所有气动子视图快捷键立即可用
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData) {
+            if (!IsEditing && !viewingOrphans && pGrid.Visible && OnMoveSelectedRows != null
+                && (keyData == (Keys.Alt | Keys.Up) || keyData == (Keys.Alt | Keys.Down))) {
+                int dir = keyData == (Keys.Alt | Keys.Up) ? -1 : 1;
+                Try(() => OnMoveSelectedRows(dir));
+                return true;
+            }
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
         void OnPGridKeyDown(object sender, KeyEventArgs e) {
             if (pGrid.IsCurrentCellInEditMode) return;
-            if (e.KeyCode == Keys.Delete) {
+            if (e.Alt && !e.Control && !e.Shift && (e.KeyCode == Keys.Up || e.KeyCode == Keys.Down)) {
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                if (OnMoveSelectedRows != null) Try(() => OnMoveSelectedRows(e.KeyCode == Keys.Up ? -1 : 1));
+            } else if (e.KeyCode == Keys.Delete) {
                 e.SuppressKeyPress = true;
                 Try(ClearSelectedPGridCells);
             } else if (e.Control && e.KeyCode == Keys.D) {
@@ -945,7 +974,8 @@ namespace TianGongCadSuite {
                 Try(CopySelectedPGridCells);
             } else if (e.Control && e.KeyCode == Keys.V) {
                 e.SuppressKeyPress = true;
-                Try(() => PasteSelectedPGridCells(Clipboard.GetText()));
+                // 统一经 ClipboardUtil 重试读取，规避 DLP / Excel 瞬时锁剪贴板导致的 ExternalException
+                Try(() => PasteSelectedPGridCells(ClipboardUtil.GetText()));
             }
         }
 
@@ -1006,6 +1036,7 @@ namespace TianGongCadSuite {
                         var row = new DataGridViewRow();
                         row.CreateCells(orphanGrid, r.Category, r.Number, r.Description, r.Model, r.Brand, bindShort);
                         row.Height = rowH;
+                        row.Tag = r.Id;
                         batch[i] = row;
                     }
                     orphanGrid.Rows.AddRange(batch);
@@ -1070,7 +1101,7 @@ namespace TianGongCadSuite {
                 ((FlatButton)btnSubQuickAction).SetFore(Ui.Accent);
                 tips.SetToolTip(btnSubQuickAction, "从型号库挑选一款磁开（型号/品牌/接口），一键填满本岛全部气缸传感器");
             }
-            Ui.FitButton(btnSubQuickAction);
+            FitButtonExact(btnSubQuickAction, 64);
             if (btnSubQuickAction.Parent != null) btnSubQuickAction.Parent.Width = btnSubQuickAction.Width + Ui.S(4);
         }
 
@@ -1658,12 +1689,18 @@ namespace TianGongCadSuite {
             }
         }
 
+        static bool IsNumberColumn(string colName) {
+            return colName == "编号" || colName == "阀片号" || colName == "气缸号";
+        }
+
         void PasteSelectedPGridCells(string text) {
             if (string.IsNullOrEmpty(text) || pGrid.CurrentCell == null) return;
             var block = LineupTableData.ReadDelimited(text, '\t');
             if (block.Count == 0) return;
             var editableTargets = pGrid.SelectedCells.Cast<DataGridViewCell>().Where(c => c.RowIndex >= 0 && !c.ReadOnly).ToList();
             if (block.Count == 1 && block[0].Length == 1 && editableTargets.Count > 1) {
+                if (editableTargets.Any(c => IsNumberColumn(pGrid.Columns[c.ColumnIndex].Name)))
+                    throw new InvalidOperationException("编号列不支持批量填入相同值。");
                 foreach (var c in editableTargets) {
                     c.Value = block[0][0];
                     CommitCellEdit(c.RowIndex, c.ColumnIndex, block[0][0]);
@@ -1674,6 +1711,37 @@ namespace TianGongCadSuite {
             int top = pGrid.CurrentCell.RowIndex;
             int start = visCols.IndexOf(pGrid.CurrentCell.OwningColumn);
             if (start < 0) return;
+
+            // 若粘贴块触及「编号」列，先做原子重号预检，避免半途写入重复编号导致自动保存失败且无法回滚
+            var pendingNumberUpdates = new Dictionary<string, string>(StringComparer.Ordinal);
+            for (int y = 0; y < block.Count && top + y < pGrid.Rows.Count; y++) {
+                for (int x = 0; x < block[y].Length && start + x < visCols.Count; x++) {
+                    var col = visCols[start + x];
+                    var cell = pGrid.Rows[top + y].Cells[col.Index];
+                    if (cell.ReadOnly || !IsNumberColumn(col.Name)) continue;
+                    int ri = cell.RowIndex;
+                    if (ri < 0 || ri >= rowMetas.Count || rowMetas[ri].Primary == null) continue;
+                    string nv = (block[y][x] ?? "").Trim();
+                    if (nv.Length == 0) throw new InvalidOperationException("编号列不能为空，已取消粘贴。");
+                    pendingNumberUpdates[rowMetas[ri].Primary.Id] = nv;
+                }
+            }
+            if (pendingNumberUpdates.Count > 0) {
+                var usedNums = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var proj = GetProject != null ? GetProject() : null;
+                if (proj != null && proj.Records != null) {
+                    foreach (var r in proj.Records) {
+                        if (pendingNumberUpdates.ContainsKey(r.Id)) continue;
+                        string rn = (r.Number ?? "").Trim();
+                        if (rn.Length > 0) usedNums.Add(rn);
+                    }
+                }
+                foreach (var kv in pendingNumberUpdates) {
+                    if (!usedNums.Add(kv.Value))
+                        throw new InvalidOperationException("粘贴包含重复编号：" + kv.Value + "，已取消此次粘贴。");
+                }
+            }
+
             for (int y = 0; y < block.Count && top + y < pGrid.Rows.Count; y++) {
                 for (int x = 0; x < block[y].Length && start + x < visCols.Count; x++) {
                     var cell = pGrid.Rows[top + y].Cells[visCols[start + x].Index];
@@ -1685,8 +1753,11 @@ namespace TianGongCadSuite {
         }
 
         void ClearSelectedPGridCells() {
-            var cells = pGrid.SelectedCells.Cast<DataGridViewCell>().Where(c => c.RowIndex >= 0 && !c.ReadOnly).ToList();
-            if (cells.Count == 0) return;
+            var allEditable = pGrid.SelectedCells.Cast<DataGridViewCell>().Where(c => c.RowIndex >= 0 && !c.ReadOnly).ToList();
+            if (allEditable.Count == 0) return;
+            var cells = allEditable.Where(c => !IsNumberColumn(pGrid.Columns[c.ColumnIndex].Name)).ToList();
+            if (cells.Count == 0)
+                throw new InvalidOperationException("编号列不支持直接清空，请双击修改或右键删除整行。");
             foreach (var c in cells) {
                 c.Value = "";
                 CommitCellEdit(c.RowIndex, c.ColumnIndex, "");
@@ -1793,18 +1864,31 @@ namespace TianGongCadSuite {
 
             rowMenu.Items.Add(new ToolStripSeparator());
             var selRowIndices = SelectedPGridRowIndices();
-            if (selRowIndices.Count > 1) {
+            if (activeSubTab == 3) {
+                // 气缸传感器子页优先提供删除选中磁开，避免右键磁开行误删整条气缸与阀片
+                var sensorIds = selRowIndices.Count > 0
+                    ? selRowIndices.Select(i => rowMetas[i].SensorId).Where(id => !string.IsNullOrEmpty(id)).Distinct(StringComparer.Ordinal).ToList()
+                    : (string.IsNullOrEmpty(meta.SensorId) ? new List<string>() : new List<string> { meta.SensorId });
+                if (sensorIds.Count > 1) {
+                    add("删除选中的 " + sensorIds.Count + " 条磁开", () => DeleteRowSensors(sensorIds), "danger", true);
+                } else if (sensorIds.Count == 1) {
+                    add("删除此磁开", () => DeleteRowSensors(sensorIds), "danger", true);
+                }
+                if (selRowIndices.Count <= 1 && !string.IsNullOrEmpty(meta.CylinderId)) {
+                    add("仅删除所属气缸与全部磁开（保留空阀片）", () => DeleteRowChannel(meta, false), "danger", true);
+                }
+            } else if (selRowIndices.Count > 1) {
                 var selMetas = selRowIndices.Select(i => rowMetas[i]).ToList();
-                add("删除选中的 " + selMetas.Count + " 条阀路（阀片 + 气缸 + 磁开，自动重排）", () => DeleteRowChannels(selMetas, true), "danger", true);
+                add("删除选中的 " + selMetas.Count + " 条阀路（阀片 + 气缸 + 磁开，自动重排）", () => DeleteWholeRowChannels(selMetas), "danger", true);
                 if (selMetas.Any(m => !string.IsNullOrEmpty(m.CylinderId) && !string.IsNullOrEmpty(m.ValveId)))
                     add("仅删除选中气缸与磁开（保留空阀片）", () => DeleteRowChannels(selMetas, false), "danger", true);
             } else if (!string.IsNullOrEmpty(meta.CylinderId) && !string.IsNullOrEmpty(meta.ValveId) && !meta.IsContinuation) {
-                add("删除整条阀路（阀片 + 气缸 + 磁开）", () => DeleteRowChannel(meta, true), "danger", true);
+                add("删除整条阀路（阀片 + 气缸 + 磁开）", () => DeleteWholeRowChannels(new[] { meta }), "danger", true);
                 add("仅删除气缸与磁开（保留空阀片）", () => DeleteRowChannel(meta, false), "danger", true);
             } else if (!string.IsNullOrEmpty(meta.CylinderId)) {
                 add("删除此气缸及关联磁开", () => DeleteRowChannel(meta, false), "danger", true);
             } else if (!string.IsNullOrEmpty(meta.ValveId)) {
-                add("删除此阀片", () => DeleteRowChannel(meta, true), "danger", true);
+                add("删除此阀片", () => DeleteWholeRowChannels(new[] { meta }), "danger", true);
             }
             Ui.StyleMenu(rowMenu);
         }
@@ -1902,6 +1986,25 @@ namespace TianGongCadSuite {
             DeleteRowChannels(new[] { meta }, deleteValveWhenLast);
         }
 
+        // 删除整条阀路（含一阀控多缸下的全部气缸、磁开及阀片本身）：对含阀片行显式传入 (ValveId, "") 以触发整阀级联删除
+        void DeleteWholeRowChannels(IList<GridRowMeta> metas) {
+            if (metas == null || metas.Count == 0) return;
+            var targets = new List<KeyValuePair<string, string>>();
+            var seenValves = new HashSet<string>(StringComparer.Ordinal);
+            var seenUnattachedCyls = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var m in metas) {
+                if (m == null) continue;
+                if (!string.IsNullOrEmpty(m.ValveId)) {
+                    if (seenValves.Add(m.ValveId)) targets.Add(new KeyValuePair<string, string>(m.ValveId, ""));
+                } else if (!string.IsNullOrEmpty(m.CylinderId)) {
+                    if (seenUnattachedCyls.Add(m.CylinderId)) targets.Add(new KeyValuePair<string, string>("", m.CylinderId));
+                }
+            }
+            if (targets.Count == 0) return;
+            RunProjectMutation(next => LineupPneumaticOps.DeleteChannelItems(next, targets, true),
+                null, "已删除选中整条阀路，剩余编号已自动顺延重排（支持撤销）");
+        }
+
         void DeleteRowChannels(IList<GridRowMeta> metas, bool deleteValveWhenLast) {
             if (metas == null || metas.Count == 0) return;
             var targets = metas.Select(m => new KeyValuePair<string, string>(m.ValveId ?? "", m.CylinderId ?? "")).ToList();
@@ -1909,25 +2012,48 @@ namespace TianGongCadSuite {
                 null, "已删除选中气动项，剩余编号已自动顺延重排（支持撤销）");
         }
 
+        void DeleteRowSensors(IList<string> sensorIds) {
+            if (sensorIds == null || sensorIds.Count == 0) return;
+            RunProjectMutation(next => LineupPneumaticOps.DeleteSensorItems(next, sensorIds),
+                null, "已删除选中的 " + sensorIds.Count + " 条磁开（支持撤销）");
+        }
+
         void CompleteMissingForCurrentIsland() {
+            EndEdit();
             var cylIds = currentChannels.Where(c => c.Cylinder != null && !c.IsSpare && !string.IsNullOrWhiteSpace(c.Cylinder.Number))
                 .Select(c => c.Cylinder.Id).ToList();
             if (cylIds.Count == 0) throw new InvalidOperationException("本阀岛暂无已编号气缸。");
-            int vAdd = 0, sAdd = 0;
-            RunProjectMutation(next => {
-                vAdd = LineupNumbering.GenerateValves(next, cylIds);
-                var normalCyls = currentChannels.Where(c => c.Cylinder != null && !c.IsSpare && !c.IsBlowOrVacuum).Select(c => c.Cylinder.Id).ToList();
+            // 同步过滤已编号气缸，避免无编号气缸让 SensorPairs 抛异常打断整批补齐
+            var normalCyls = currentChannels
+                .Where(c => c.Cylinder != null && !c.IsSpare && !c.IsBlowOrVacuum && !string.IsNullOrWhiteSpace(c.Cylinder.Number))
+                .Select(c => c.Cylinder.Id).ToList();
+
+            Action<LineupProject, Action<int, int>> applyComplete = (target, report) => {
+                int v = LineupNumbering.GenerateValves(target, cylIds);
+                int s = 0;
                 if (normalCyls.Count > 0) {
-                    var before = new HashSet<string>(next.Records.Select(r => r.Id), StringComparer.Ordinal);
-                    sAdd = LineupNumbering.SensorPairs(next, normalCyls);
-                    var sample = next.Records.FirstOrDefault(r => before.Contains(r.Id) && r.Category == "气缸传感器" && !string.IsNullOrWhiteSpace(r.Model));
+                    var before = new HashSet<string>(target.Records.Select(r => r.Id), StringComparer.Ordinal);
+                    s = LineupNumbering.SensorPairs(target, normalCyls);
+                    var sample = target.Records.FirstOrDefault(r => before.Contains(r.Id) && r.Category == "气缸传感器" && !string.IsNullOrWhiteSpace(r.Model));
                     if (sample != null) {
-                        foreach (var s in next.Records.Where(r => !before.Contains(r.Id))) {
-                            s.Model = sample.Model; s.Brand = sample.Brand; s.Connector = sample.Connector;
+                        foreach (var sen in target.Records.Where(r => !before.Contains(r.Id))) {
+                            sen.Model = sample.Model; sen.Brand = sample.Brand; sen.Connector = sample.Connector;
                         }
                     }
                 }
-            }, null, "本阀岛已补齐：阀片 " + vAdd + " 条，H/W 传感器 " + sAdd + " 条");
+                if (report != null) report(v, s);
+            };
+
+            // RunProjectMutation 接收 string 实参会先于 lambda 求值；先在纯内存拷贝预演拿到真实新增条数，避免提示恒报 0 条或空压撤销栈
+            int vAdd = 0, sAdd = 0;
+            var probe = LineupEntry.Clone(GetProject());
+            applyComplete(probe, (v, s) => { vAdd = v; sAdd = s; });
+            if (vAdd == 0 && sAdd == 0) {
+                if (OnNotifyStatus != null) OnNotifyStatus("本阀岛已编号气缸均已配齐阀片与 H/W，无需补齐");
+                return;
+            }
+            RunProjectMutation(next => applyComplete(next, null),
+                null, "本阀岛已补齐：阀片 " + vAdd + " 条，H/W 传感器 " + sAdd + " 条");
         }
 
         void OnBindOrLocateIslandClick() {
@@ -1947,9 +2073,19 @@ namespace TianGongCadSuite {
 
         void SyncSelectedIslandToElectrical() {
             if (string.IsNullOrEmpty(selectedIslandKey)) return;
-            int added = 0;
-            RunProjectMutation(next => { added = LineupPneumaticOps.SyncIslandsToElectrical(next, selectedIslandKey); },
-                null, added > 0 ? "已将 " + selectedIslandKey + " 本体加入「其他电气件 E**」" : selectedIslandKey + " 已在「其他电气件」中，未重复添加");
+            EndEdit();
+            var probe = LineupEntry.Clone(GetProject());
+            int added = LineupPneumaticOps.SyncIslandsToElectrical(probe, selectedIslandKey);
+            if (added <= 0) {
+                var cur = islands.FirstOrDefault(x => string.Equals(x.Key, selectedIslandKey, StringComparison.OrdinalIgnoreCase));
+                string msg = cur != null && cur.Kind == "单片阀"
+                    ? selectedIslandKey + " 为单片阀，无需同步阀岛本体到「其他电气件」"
+                    : selectedIslandKey + " 已在「其他电气件」中，未重复添加";
+                if (OnNotifyStatus != null) OnNotifyStatus(msg);
+                return;
+            }
+            RunProjectMutation(next => LineupPneumaticOps.SyncIslandsToElectrical(next, selectedIslandKey),
+                null, "已将 " + selectedIslandKey + " 本体加入「其他电气件 E**」");
         }
 
         // ==================== 新建 / 编辑 / 删除 / 换岛 对话框 ====================
@@ -2129,7 +2265,11 @@ namespace TianGongCadSuite {
                 if (islands.Count == 0) return;
             }
             var targetIds = orphanGrid.SelectedRows.Count > 0
-                ? orphanGrid.SelectedRows.Cast<DataGridViewRow>().Select(r => orphans[r.Index].Id).ToList()
+                ? orphanGrid.SelectedRows.Cast<DataGridViewRow>()
+                    .Select(r => (r.Tag as string) ?? (r.Index >= 0 && r.Index < orphans.Count ? orphans[r.Index].Id : ""))
+                    .Where(id => !string.IsNullOrEmpty(id))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToList()
                 : orphans.Select(r => r.Id).ToList();
 
             using (var d = new Form()) {

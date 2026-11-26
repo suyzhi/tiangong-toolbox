@@ -35,6 +35,7 @@ namespace TianGongCadSuite {
         RectangleF canvasPageRect;
         float canvasScale = 1f;
         bool syncing;
+        bool capturing;
         readonly Timer saveDebounce = new Timer { Interval = 450 };
         bool hasPendingSave;
         string pendingSaveMsg = "";
@@ -77,6 +78,7 @@ namespace TianGongCadSuite {
 
         sealed class PointListEntry {
             public LineupLocationPoint Point;
+            public string Number = "";
             public string Description = "";
         }
 
@@ -125,7 +127,8 @@ namespace TianGongCadSuite {
 
         protected override void Dispose(bool disposing) {
             if (disposing) {
-                FlushPendingSave();
+                // 销毁阶段刷盘必须容错，防止文件被占或装配已关闭导致抛异常跳过位图/定时器/菜单释放
+                try { FlushPendingSave(); } catch { }
                 saveDebounce.Dispose();
                 DisposeImage();
                 newPageMenu.Dispose();
@@ -442,7 +445,8 @@ namespace TianGongCadSuite {
             int tx = cx + ds + Ui.S(8);
             int rightPad = Ui.S(34);
             string sideText = pt.Side == "left" ? "左" : pt.Side == "right" ? "右" : "";
-            string title = (pt.Number ?? "") + (string.IsNullOrWhiteSpace(pt.Tag) ? "" : " [" + pt.Tag.Trim() + "]");
+            string numText = !string.IsNullOrWhiteSpace(entry.Number) ? entry.Number : (pt.Number ?? "");
+            string title = numText + (string.IsNullOrWhiteSpace(pt.Tag) ? "" : " [" + pt.Tag.Trim() + "]");
             string sub = string.IsNullOrWhiteSpace(entry.Description)
                 ? (pt.State == "ok" ? "已定位" : "点左图设置箭头")
                 : entry.Description;
@@ -551,9 +555,18 @@ namespace TianGongCadSuite {
             }
         }
 
+        Dictionary<string, LineupRecord> BuildRecordMapById() {
+            var byId = new Dictionary<string, LineupRecord>(StringComparer.Ordinal);
+            if (project != null && project.Records != null) {
+                foreach (var r in project.Records)
+                    if (r != null && !string.IsNullOrEmpty(r.Id) && !byId.ContainsKey(r.Id)) byId[r.Id] = r;
+            }
+            return byId;
+        }
+
         void RefreshPoints(string selectId) {
             var pg = CurrentPage();
-            var byId = project.Records.ToDictionary(r => r.Id);
+            var byId = BuildRecordMapById();
             pointList.BeginUpdate();
             pointList.Items.Clear();
             int ok = 0, total = 0;
@@ -562,8 +575,12 @@ namespace TianGongCadSuite {
                 foreach (var pt in pg.Points) {
                     if (pt.State == "ok") ok++;
                     LineupRecord rec;
-                    string desc = byId.TryGetValue(pt.Id ?? "", out rec) ? rec.Description : (pt.Description ?? "");
-                    pointList.Items.Add(new PointListEntry { Point = pt, Description = desc });
+                    bool hasRec = byId.TryGetValue(pt.Id ?? "", out rec);
+                    // 同步 BOM 最新编号与描述，避免重编号/换岛/一阀多缸后画布显示新号而右侧列表仍留旧号
+                    string num = hasRec && !string.IsNullOrWhiteSpace(rec.Number) ? rec.Number.Trim() : (pt.Number ?? "").Trim();
+                    if (num.Length > 0) pt.Number = num;
+                    string desc = hasRec ? (rec.Description ?? "") : (pt.Description ?? "");
+                    pointList.Items.Add(new PointListEntry { Point = pt, Number = num, Description = desc });
                 }
             }
             pointList.EndUpdate();
@@ -597,7 +614,7 @@ namespace TianGongCadSuite {
             var pg = CurrentPage();
             if (pg == null || pg.Points == null) { host.Visible = false; return; }
             var existingIds = new HashSet<string>(pg.Points.Select(p => p.Id));
-            var byId = project.Records.ToDictionary(r => r.Id);
+            var byId = BuildRecordMapById();
             var sensors = project.Records.Where(r => LineupTableData.Category(r.Category) == "气缸传感器" && !existingIds.Contains(r.Id)).ToList();
             bool hasCandidate = false;
             if (sensors.Count > 0) {
@@ -644,19 +661,25 @@ namespace TianGongCadSuite {
         }
 
         void UpdateCanvasHint() {
-            var pt = CurrentPoint();
+            var entry = pointList.SelectedItem as PointListEntry;
+            var pt = entry == null ? null : entry.Point;
+            string num = entry != null && !string.IsNullOrWhiteSpace(entry.Number) ? entry.Number : (pt == null ? "" : (pt.Number ?? ""));
             if (CurrentPage() == null) {
                 canvasHint.Text = "点击右上角「+ 新建图页 ▾」截取当前 CAD 视角或导入图片。";
             } else if (pt == null) {
                 canvasHint.Text = "本页还没有器件，点击右侧「选器件…」勾选要标注的 BOM 项。";
             } else if (pt.State == "ok") {
-                canvasHint.Text = "已定位「" + pt.Number + "」 · 左键点三维图可微调箭头起点 · 右键文字行可换左右栏或填备忘";
+                canvasHint.Text = "已定位「" + num + "」 · 左键点三维图可微调箭头起点 · 右键文字行可换左右栏或填备忘";
             } else {
-                canvasHint.Text = "待定位「" + pt.Number + "」 · 直接在下方三维图上左键点一下它所在的位置（箭头从图指向单元格，点完自动跳下一条）";
+                canvasHint.Text = "待定位「" + num + "」 · 直接在下方三维图上左键点一下它所在的位置（箭头从图指向单元格，点完自动跳下一条）";
             }
         }
 
         void Persist(string msg) {
+            // 即时保存前先取消尚未触发的防抖定时器，防止 450ms 内再触发二次落盘、压入重复撤销栈并覆盖状态栏
+            saveDebounce.Stop();
+            hasPendingSave = false;
+            pendingSaveMsg = "";
             if (commitProject != null) commitProject(LineupEntry.Clone(project), msg);
             NotifySummary(msg);
         }
@@ -664,7 +687,19 @@ namespace TianGongCadSuite {
         void NotifySummary(string msg) {
             if (reportStatus == null || project == null) return;
             var pages = project.CadPages ?? new List<LineupCadPage>();
-            var covered = new HashSet<string>(pages.SelectMany(pg => pg.Points ?? new List<LineupLocationPoint>()).Select(pt => (pt.Number ?? "").Trim()).Where(s => s.Length > 0), StringComparer.OrdinalIgnoreCase);
+            var byId = BuildRecordMapById();
+            var covered = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var pg in pages) {
+                if (pg == null || pg.Points == null) continue;
+                foreach (var pt in pg.Points) {
+                    if (pt == null) continue;
+                    LineupRecord rec;
+                    string num = (!string.IsNullOrEmpty(pt.Id) && byId.TryGetValue(pt.Id, out rec) && !string.IsNullOrWhiteSpace(rec.Number))
+                        ? rec.Number.Trim()
+                        : (pt.Number ?? "").Trim();
+                    if (num.Length > 0) covered.Add(num);
+                }
+            }
             int totalBom = project.Records.Count(r => LineupTableData.Categories.Contains(LineupTableData.Category(r.Category)) && !string.IsNullOrWhiteSpace(r.Number));
             reportStatus(msg + " · 共 " + pages.Count + " 页位置图 · 已标 " + covered.Count + " / " + totalBom + " 项");
         }
@@ -709,7 +744,9 @@ namespace TianGongCadSuite {
                 + (string.IsNullOrWhiteSpace(sta) ? "" : sta + " · ")
                 + (string.IsNullOrWhiteSpace(project.LineCode) ? "" : project.LineCode + " · ")
                 + (currentPlan.Page.Name ?? "总图");
-            using (var fnt = new Font(Ui.Family, Math.Max(7f, Math.Min(10.5f, 9.5f * canvasScale * 14000f)), FontStyle.Bold)) {
+            // 画布坐标按物理像素缩放，字体显式使用 GraphicsUnit.Pixel，避免 125%/150% 高 DPI 下被系统按 Point 二次放大裁切
+            float hdrFontPx = Math.Max(9f, Math.Min(14f, hdrH * 0.32f));
+            using (var fnt = new Font(Ui.Family, hdrFontPx, FontStyle.Bold, GraphicsUnit.Pixel)) {
                 var br = Ui.CachedBrush(Color.Black);
                 g.DrawString(titleInfo, fnt, br, new RectangleF(imgColL, oy, imgColR - imgColL, hdrH), SfCenter);
                 g.DrawString("名称/描述  |  IO点位  |  SK编号", fnt, br, new RectangleF(ox, oy, imgColL - ox, hdrH), SfCenter);
@@ -734,7 +771,7 @@ namespace TianGongCadSuite {
                     }
                     scaledImageSize = new Size(tw, th);
                 }
-                g.DrawImageUnscaled(scaledImage, (int)Math.Round(ix), (int)Math.Round(iy));
+                g.DrawImage(scaledImage, (int)Math.Round(ix), (int)Math.Round(iy), tw, th);
             } else {
                 g.FillRectangle(Ui.CachedBrush(Color.FromArgb(0xF8, 0xFA, 0xFC)), canvasImageRect);
                 g.DrawString("（底图文件缺失，可在右上角「管理本页 ▾ → 重拍底图」）", Ui.F9, Ui.CachedBrush(Ui.Muted), canvasImageRect, SfCenter);
@@ -744,10 +781,11 @@ namespace TianGongCadSuite {
 
             // 左右标注行 + 红色箭头（Start = 三维图落点，End = 单元格边缘，箭头指向单元格；所有 GDI+ Pen / Cap 严格释放）
             var selectedPt = CurrentPoint();
-            float fontSize = Math.Max(6.5f, Math.Min(9.5f, LineupCadLayout.RowHeightEmu(3) * canvasScale * 0.56f));
+            float rowPx = LineupCadLayout.RowHeightEmu(3) * canvasScale;
+            float fontPx = Math.Max(6f, Math.Min(13f, rowPx * 0.72f));
             var gridPen = Ui.CachedPen(Color.FromArgb(0xD4, 0xD4, 0xD8), 1f);
-            using (var rowFont = new Font(Ui.Family, fontSize, FontStyle.Regular))
-            using (var numFont = new Font(Ui.Family, fontSize, FontStyle.Bold))
+            using (var rowFont = new Font(Ui.Family, fontPx, FontStyle.Regular, GraphicsUnit.Pixel))
+            using (var numFont = new Font(Ui.Family, fontPx, FontStyle.Bold, GraphicsUnit.Pixel))
             using (var arrowPen = new Pen(Color.FromArgb(0xE0, 0x00, 0x00), 1.8f))
             using (var selArrowPen = new Pen(Ui.Accent, 2.4f))
             using (var selRingPen = new Pen(Ui.Accent, 2.0f))
@@ -852,10 +890,15 @@ namespace TianGongCadSuite {
 
         // ==================== 页面操作 ====================
         void CreateNewPage(bool useIsometric) {
-            if (app == null || assembly == null) throw new InvalidOperationException("当前未连接天工 CAD 装配。");
+            if (capturing) return;
+            LineupLocation.EnsureActiveAssemblyWindow(app, assembly);
             var picked = PromptNewPageOptions(useIsometric);
             if (picked == null) return;
 
+            // 抓图前先刷掉待落盘的防抖改动，防止 CapturePage 期间 Application.DoEvents 重入触发旧状态刷盘
+            FlushPendingSave();
+            LineupLocation.EnsureActiveAssemblyWindow(app, assembly);
+            capturing = true;
             if (suspendOwner != null) suspendOwner(true);
             try {
                 var page = LineupLocation.CapturePage(
@@ -867,6 +910,7 @@ namespace TianGongCadSuite {
                 Persist("已新建位置图「" + page.Name + "」（识别 " + page.Points.Count(p => p.State == "ok") + "/" + page.Points.Count + "）");
                 RefreshView();
             } finally {
+                capturing = false;
                 if (suspendOwner != null) suspendOwner(false);
             }
         }
@@ -901,25 +945,62 @@ namespace TianGongCadSuite {
         }
 
         void RecaptureCurrentPage() {
+            if (capturing) return;
             var pg = CurrentPage();
             if (pg == null) throw new InvalidOperationException("请先选择一页位置图。");
-            if (app == null || assembly == null) throw new InvalidOperationException("当前未连接天工 CAD 装配。");
+            LineupLocation.EnsureActiveAssemblyWindow(app, assembly);
             var ask = MessageBox.Show(FindForm(),
                 "用当前 CAD 画面重拍「" + pg.Name + "」并重新识别各件位置吗？\n\n· 选「是」：重拍并自动重新识别坐标\n· 选「否」：仅更换底图，保留已有手动箭头",
                 "重拍底图", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
             if (ask == DialogResult.Cancel) return;
             bool redetect = (ask == DialogResult.Yes);
+            FlushPendingSave();
+            LineupLocation.EnsureActiveAssemblyWindow(app, assembly);
+            capturing = true;
             if (suspendOwner != null) suspendOwner(true);
             try {
-                var ids = pg.Points.Select(p => p.Id).ToList();
+                var oldPts = pg.Points ?? new List<LineupLocationPoint>();
+                var ids = oldPts.Select(p => p.Id).ToList();
                 var captured = LineupLocation.CapturePage(app, assembly, project, ids, pg.Name, false, false, redetect, null);
                 pg.ImageFile = captured.ImageFile;
                 pg.Width = captured.Width;
                 pg.Height = captured.Height;
-                if (redetect) pg.Points = captured.Points;
+                if (redetect) {
+                    // 重识别后按 Id（兜底按 Number）保留原有手工指定的左/右栏位与备忘标签，并保留未关联 BOM Id 的手工点
+                    var oldById = new Dictionary<string, LineupLocationPoint>(StringComparer.Ordinal);
+                    var oldByNum = new Dictionary<string, LineupLocationPoint>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var op in oldPts) {
+                        if (op == null) continue;
+                        if (!string.IsNullOrEmpty(op.Id) && !oldById.ContainsKey(op.Id)) oldById[op.Id] = op;
+                        string on = (op.Number ?? "").Trim();
+                        if (on.Length > 0 && !oldByNum.ContainsKey(on)) oldByNum[on] = op;
+                    }
+                    var matchedOld = new HashSet<LineupLocationPoint>();
+                    foreach (var np in captured.Points) {
+                        LineupLocationPoint prev = null;
+                        if (!string.IsNullOrEmpty(np.Id)) oldById.TryGetValue(np.Id, out prev);
+                        if (prev == null && !string.IsNullOrWhiteSpace(np.Number)) oldByNum.TryGetValue(np.Number.Trim(), out prev);
+                        if (prev != null) {
+                            np.Side = prev.Side ?? "";
+                            np.Tag = prev.Tag ?? "";
+                            matchedOld.Add(prev);
+                        }
+                    }
+                    foreach (var op in oldPts) {
+                        if (op != null && !matchedOld.Contains(op)) {
+                            var keep = op.Copy();
+                            keep.State = "unresolved";
+                            keep.X = 0; keep.Y = 0; keep.Method = "";
+                            keep.Reason = "重拍后未自动匹配到 BOM 项，请重新点选箭头位置";
+                            captured.Points.Add(keep);
+                        }
+                    }
+                    pg.Points = captured.Points;
+                }
                 Persist("已重拍「" + pg.Name + "」底图");
                 RefreshView();
             } finally {
+                capturing = false;
                 if (suspendOwner != null) suspendOwner(false);
             }
         }
@@ -961,7 +1042,9 @@ namespace TianGongCadSuite {
             var currentIds = new HashSet<string>(pg.Points.Select(p => p.Id));
             var selected = PickBomRecordsDialog("勾选「" + pg.Name + "」要标注的器件", currentIds);
             if (selected == null) return;
-            var existingById = pg.Points.ToDictionary(p => p.Id);
+            var existingById = new Dictionary<string, LineupLocationPoint>(StringComparer.Ordinal);
+            foreach (var p in pg.Points)
+                if (p != null && !string.IsNullOrEmpty(p.Id) && !existingById.ContainsKey(p.Id)) existingById[p.Id] = p;
             var nextPts = new List<LineupLocationPoint>();
             foreach (var r in project.Records.Where(x => selected.Contains(x.Id))) {
                 LineupLocationPoint old;
@@ -1001,7 +1084,7 @@ namespace TianGongCadSuite {
             var existingIds = new HashSet<string>(pg.Points.Select(p => p.Id));
             var existingNums = new HashSet<string>(pg.Points.Select(p => (p.Number ?? "").Trim()).Where(s => s.Length > 0), StringComparer.OrdinalIgnoreCase);
             var sensors = project.Records.Where(r => LineupTableData.Category(r.Category) == "气缸传感器").ToList();
-            var byId = project.Records.ToDictionary(r => r.Id);
+            var byId = BuildRecordMapById();
             var nextPts = new List<LineupLocationPoint>();
             int added = 0;
             foreach (var pt in pg.Points) {

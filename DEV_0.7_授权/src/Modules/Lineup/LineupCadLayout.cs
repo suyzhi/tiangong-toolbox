@@ -310,10 +310,10 @@ namespace TianGongCadSuite {
                 int avg = (int)Math.Round(b[2] / b[1]);
                 for (int k = 0; k < cnt; k++) res[s + k] = avg + s + k;
             }
-            // 边界夹紧并保持严格递增
+            // 边界夹紧并保持严格递增：顶部越界仅局部向下顺推碰撞行，避免把下方空隙充足的无关行整体推歪
             if (res[0] < minRow) {
-                int shift = minRow - res[0];
-                for (int i = 0; i < n; i++) res[i] += shift;
+                res[0] = minRow;
+                for (int i = 1; i < n; i++) if (res[i] <= res[i - 1]) res[i] = res[i - 1] + 1;
             }
             if (res[n - 1] > maxRow) {
                 res[n - 1] = maxRow;
@@ -335,6 +335,9 @@ namespace TianGongCadSuite {
             return null;
         }
 
-        static double Clamp01(double v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
+        static double Clamp01(double v) {
+            if (double.IsNaN(v) || double.IsInfinity(v)) return 0.5;
+            return v < 0 ? 0 : (v > 1 ? 1 : v);
+        }
     }
 }
