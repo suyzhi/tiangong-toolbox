@@ -36,19 +36,31 @@ namespace TianGongCadSuite {
         public static TargetFace AnchorToActivePart(TargetFace target){
             if(target==null||target.Part==null)return target;
             P.PartDocument active=null;
-            try{active=target.Part.Application.ActiveDocument as P.PartDocument;}catch(Exception e){Log.Write("AnchorFaceApp",e);return target;}
+            try{active=target.Part.Application.ActiveDocument as P.PartDocument;TrackApp(target.Part);}
+            catch(Exception e){
+                // 进原位后 target.Part 可能已断开：回退用缓存的 LastApp 取当前正在编辑的零件文档
+                Log.Write("AnchorFaceApp",e);
+                try{if(LastApp!=null)active=LastApp.ActiveDocument as P.PartDocument;}catch{}
+            }
             if(active==null)return target;                                   // 活动文档不是零件：维持原样（装配上下文）
+            TrackApp(active);
             string activeName=Name(active), targetName=Name(target.Part);
-            if(string.IsNullOrEmpty(activeName)||string.IsNullOrEmpty(targetName))return target;
-            if(!string.Equals(activeName,targetName,StringComparison.OrdinalIgnoreCase))return target;
+            if(string.IsNullOrEmpty(activeName))return target;
+            if(!string.IsNullOrEmpty(targetName)){
+                if(!string.Equals(activeName,targetName,StringComparison.OrdinalIgnoreCase))return target;
+            }else{
+                string activeShort=""; try{activeShort=active.Name??"";}catch{}
+                if(string.IsNullOrEmpty(target.PartName)||!string.Equals(activeShort,target.PartName,StringComparison.OrdinalIgnoreCase))return target;
+            }
             try{
                 if(active.Models.Count<1)return target;
-                ModelFor(target);                                            // 没认过实体的现在认（记进 target.Body）
+                if(target.Body<1&&TargetFace.PartAlive(target.Part))ModelFor(target); // 没认过实体的现在认（记进 target.Body）
                 int bodyIndex=Math.Max(1,target.Body);
                 var model=PartBodies.Model(active,bodyIndex);   // 同一个零件文件，实体的序号不变
+                if(model==null)return target;
                 V3 localPoint=target.Placement.InversePoint(target.Plane.Point);
                 V3 localNormal=target.Placement.InverseNormal(target.Plane.Normal).Unit();
-                G.Face face=null;double best=double.MaxValue;
+                G.Face face=null;double best=double.MaxValue;int bestRank=-1;V3 bestNormal=localNormal;
                 foreach(G.Face candidate in (G.Faces)((G.Body)model.Body).get_Faces(G.FeatureTopologyQueryTypeConstants.igQueryAll)){
                     var plane=candidate.Geometry as G.Plane;
                     if(plane==null)continue;
@@ -57,14 +69,24 @@ namespace TianGongCadSuite {
                     V3 candidateNormal=V3.From(normal).Unit();
                     if(Math.Abs(candidateNormal.Dot(localNormal))<0.999)continue;
                     double distance=Math.Abs((V3.From(point)-localPoint).Dot(localNormal));
-                    if(distance<best){best=distance;face=candidate;}
+                    if(distance>1e-6)continue;
+                    // 优先按 FaceId 和包围盒匹配，防止 U 型件/双翼缘共面多面片错锚定
+                    int rank=0;
+                    if(InFaceBox(candidate,localPoint))rank+=2;
+                    if(!string.IsNullOrEmpty(target.FaceId)){
+                        try{if(candidate.ID.ToString(CultureInfo.InvariantCulture)==target.FaceId)rank+=4;}catch{}
+                    }
+                    if(rank>bestRank||(rank==bestRank&&distance<best)){bestRank=rank;best=distance;face=candidate;bestNormal=candidateNormal;}
                 }
                 if(face==null||best>1e-6){                                   // 找不到同一张面：别硬换
-                    Info("原位编辑：在「"+targetName+"」实体 "+bodyIndex+"/"+PartBodies.Count(active)+" 里找不到所选的面（最近 "+(face==null?"无":(best*1000.0).ToString("0.###")+"mm")+"），沿用装配里的面");
+                    Info("原位编辑：在「"+(targetName??target.PartName)+"」实体 "+bodyIndex+"/"+PartBodies.Count(active)+" 里找不到所选的面（最近 "+(face==null?"无":(best*1000.0).ToString("0.###")+"mm")+"），沿用装配里的面");
                     return target;
                 }
                 var anchored=new TargetFace();
-                anchored.Plane=target.Plane;
+                // 若活动文档上面片几何法向相对旧 Plane 翻号，同步更新 Plane 法向，使其与 anchored.Face.IsParamReversed 保持配对
+                anchored.Plane=bestNormal.Dot(localNormal)<0
+                    ? new PlaneInput(target.Plane.Point, target.Placement.Normal(bestNormal), target.Plane.Label)
+                    : target.Plane;
                 anchored.Face=face;
                 anchored.Part=active;
                 anchored.Placement=target.Placement;
@@ -88,6 +110,7 @@ namespace TianGongCadSuite {
             target = AnchorToActivePart(target);   // 原位编辑时把面锚定到正在编辑的文档（见上）
             result.Requested = requests.Count;
             var part = target.Part;
+            TrackApp(part);
             // 零件对象已经断开（刚进出过原位编辑、天工把它重新加载了）：原来往下走拿不到模型，报一句"目标零件没有可用的实体模型"（10-23 现场），不知所云
             if (!TargetFace.PartAlive(part)) throw new InvalidOperationException(TargetFace.DeadPartMessage(target.PartName));
             P.Model model = ModelFor(target);
@@ -153,12 +176,19 @@ namespace TianGongCadSuite {
                 //    0.8.4：挂不上原生关联的孔改写插件关联记录（Link），也照样合进多孔特征 —— 真机 LinkGroupProbe U1～U3：
                 //    多孔特征的输入孔能挂属性、改它轮廓的孔心 + 重算就能单独挪（种子孔也行），「同步孔位」照样挪得动。
                 bool combinable = CombineHoles && todo.Count >= 2;
+                string combineFailWhy = null;
                 if (combinable) {
                     var locals = new List<V3>(); var anchors = new List<NativeAnchor>();
                     foreach (int i in todo) { locals.Add(madeLocal[i]); anchors.Add(requests[i].Anchor); }
                     List<P.Hole> inputs; string why; bool touched;
                     P.UserDefinedPattern multi = null;
-                    try { multi = HoleCombine.Build(part, model, plane, locals, anchors, data, depth, SideOrder(plane), out inputs, out why, out touched); }
+                    Func<P.RefPlane> rebuildForCombine = () => {
+                        DropCache(part);
+                        try { model = ModelFor(target) ?? model; } catch (Exception ex) { Log.Write("HoleCombineModel", ex); }
+                        try { plane = FindOrCreatePlane(part, target) ?? plane; } catch (Exception ex) { Log.Write("HoleCombinePlane", ex); }
+                        return plane;
+                    };
+                    try { multi = HoleCombine.Build(part, model, plane, locals, anchors, data, depth, SideOrder(plane), out inputs, out why, out touched, rebuildForCombine); }
                     catch (Exception e) { Log.Write("AutoHoleCombine", e); inputs = null; why = Friendly(e); touched = true; }
                     if (multi != null) {
                         multis[key] = multi;
@@ -171,12 +201,15 @@ namespace TianGongCadSuite {
                             if (anchors[j] != null) { requests[i].NativeLinked = true; result.NativeLinked++; }
                             else if (requests[i].Anchor != null) { result.NativeMissed++; requests[i].LinkWhy = MissedWhy(requests[i].Anchor); }
                         }
-                        string note = inputs.Count > 0 ? Audit(inputs[0], spec) : "";
-                        if (note.Length > 0 && !result.Audit.Contains(note)) result.Audit = result.Audit.Length == 0 ? note : result.Audit + "；" + note;
+                        // 逐孔自检，避免同批多个孔中非首孔参数异常被漏检
+                        for (int j = 0; j < inputs.Count && j < todo.Count; j++) {
+                            string note = Audit(inputs[j], requests[todo[j]].Spec);
+                            if (note.Length > 0 && !result.Audit.Contains(note)) result.Audit = result.Audit.Length == 0 ? note : result.Audit + "；" + note;
+                        }
                         continue;
                     }
                     Log.Write("HoleCombine", "直接合成没成功，逐个打：" + why);
-                    result.Notes.Add(todo.Count + " 个「" + HoleNaming.Short(spec) + "」没能合成一个孔特征（" + why + "），已按单孔打好。");
+                    combineFailWhy = why;
                     // 合成失败时删过特征：CAD 可能把手里的模型/基准面对象一起作废了（一张面上的孔全删光时连基准面一起删，真机 J9），重取
                     if (touched) {
                         DropCache(part);
@@ -188,12 +221,18 @@ namespace TianGongCadSuite {
                 // ③ 逐个打（合不成、只有 1 个孔、要靠属性集关联的孔）
                 for (int round = 1; round <= Rounds; round++) {
                     if (round > 1) {
-                        Info("整轮重试第 " + round + " 轮（重建基准面后重来）");
+                        Info("整轮重试第 " + round + " 轮（重建基准面与孔数据后重来）");
                         DropCache(part);
+                        dataBySpec.Remove(key);
                         try {
                             plane = FindOrCreatePlane(part, target);
                             model = ModelFor(target) ?? model;
-                        } catch (Exception e) { Info("重建基准面失败：" + Friendly(e)); }
+                            data = DataFor(part, spec, dataBySpec, methods);
+                        } catch (Exception e) {
+                            Info("重建基准面或孔数据失败：" + Friendly(e));
+                            continue;
+                        }
+                        if (plane == null || model == null) { Info("重建基准面或模型为空，跳过本轮"); continue; }
                     }
                     bool anyLeft = false;
                     foreach (int i in todo) {
@@ -217,6 +256,14 @@ namespace TianGongCadSuite {
                         anyLeft = true;
                     }
                     if (!anyLeft) break;
+                }
+                if (combineFailWhy != null) {
+                    int fallbackOk = 0;
+                    foreach (int i in todo) if (done[i]) fallbackOk++;
+                    string tail = fallbackOk == todo.Count ? "已按单孔打好。"
+                                : fallbackOk > 0 ? "已改按单孔打孔（成功 " + fallbackOk + " 个，失败 " + (todo.Count - fallbackOk) + " 个）。"
+                                : "改按单孔打孔也未成功。";
+                    result.Notes.Add(todo.Count + " 个「" + HoleNaming.Short(spec) + "」没能合成一个孔特征（" + combineFailWhy + "），" + tail);
                 }
             }
             for (int i = 0; i < requests.Count; i++) {
@@ -258,9 +305,12 @@ namespace TianGongCadSuite {
                 var sp = requests[i].Spec;
                 if (made[i] == null || sp == null) continue;
                 // 沉孔比板还深：沉头那一段直接切穿，整个成了 Φ沉孔 的通孔，螺钉头卡不住（5 厚板上 M6 沉孔深 6.8）
+                // 按有效圆柱段 [倒角轴深, 沉孔深] 检索，避免带孔口倒角的通沉孔在 ChamferDepMm 处的倒角底圆误报切穿
                 if (sp.Kind == HoleKind.Counterbore && sp.CounterboreDepth > 0) {
                     if (after == null) after = ScanSpots(model);
-                    double cbExit = after.ExitDepth(madeLocal[i], n, sp.CounterboreDiameter / 2000.0, sp.CounterboreDepth / 1000.0);   // 沉孔底那一圈正好在沉孔深处，不算
+                    double cbMin, cbMax;
+                    HoleSpots.ExitDepthRange(sp, true, out cbMin, out cbMax);
+                    double cbExit = after.ExitDepth(madeLocal[i], n, sp.CounterboreDiameter / 2000.0, cbMin, cbMax);
                     if (cbExit > 0) {
                         string cb = "沉孔深 " + sp.CounterboreDepth.ToString("0.##") + "mm 比这里的板厚（" + (cbExit * 1000).ToString("0.##") + "mm）还深，整个打成了 Φ" + sp.CounterboreDiameter.ToString("0.##") + " 的通孔，螺钉头卡不住 —— 请换孔型（过孔 / 锥形沉孔）或改小沉孔深度";
                         if (seen.Add(cb)) result.Notes.Add(cb);
@@ -270,7 +320,10 @@ namespace TianGongCadSuite {
                 }
                 if (sp.Through) continue;
                 if (after == null) after = ScanSpots(model);
-                double exit = after.ExitDepth(madeLocal[i], n, sp.HoleDiameter / 2000.0, sp.Depth / 1000.0);
+                // 跳过倒角底圆、沉孔/锥座交界圆以及 V 型底柱锥交界圆，避免厚板上的 V 底/倒角/盲沉/盲锥沉误报打穿
+                double minM, maxM;
+                HoleSpots.ExitDepthRange(sp, false, out minM, out maxM);
+                double exit = after.ExitDepth(madeLocal[i], n, sp.HoleDiameter / 2000.0, minM, maxM);
                 if (exit <= 0) continue;
                 string note = "盲孔深 " + sp.Depth.ToString("0.##") + "mm 比这里的材料还深（" + (exit * 1000).ToString("0.##") + "mm 处就穿出去了），打出来是通孔 —— 要盲孔请把深度改小（「改孔型」或撤销重打）";
                 if (seen.Add(note)) result.Notes.Add(note);
@@ -386,6 +439,15 @@ namespace TianGongCadSuite {
 
         // 多孔合一的开关（测试里关掉可以走回 0.7.8 的单孔 + 编组）
         public static bool CombineHoles = true;
+
+        // 零件里全部实体的已有孔特征名 + 特征组名 + 阵列名（多实体零件改孔型/重命名防跨实体撞名）
+        internal static HashSet<string> ExistingFeatureNamesInPart(P.PartDocument part){
+            var set = new HashSet<string>(StringComparer.Ordinal);
+            if (part == null) return set;
+            foreach (var m in PartBodies.All(part))
+                foreach (var name in ExistingFeatureNames(m)) set.Add(name);
+            return set;
+        }
 
         // 零件里已有的孔特征名 + 特征组名 + 阵列名：新名字要避开它们（第二批同规格孔接着往下编号）
         internal static HashSet<string> ExistingFeatureNames(P.Model model){

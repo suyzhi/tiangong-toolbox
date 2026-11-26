@@ -258,7 +258,16 @@ namespace TianGongCadSuite {
             try { face += "@" + ((G.Body)((dynamic)h.SourceFace).Body).Tag; } catch { }
             var ci = System.Globalization.CultureInfo.InvariantCulture;
             var m = h.Placement.M;
-            return doc + "|" + face + "|" + m[12].ToString("0.######", ci) + "," + m[13].ToString("0.######", ci) + "," + m[14].ToString("0.######", ci);
+            // 带上全部 16 项变换矩阵（含旋转/镜像分量）：同一参考零件在同原点处绕轴旋转多个实例时不能撞键共用引用
+            var sb = new System.Text.StringBuilder(doc.Length + face.Length + 128);
+            sb.Append(doc).Append('|').Append(face).Append('|');
+            for (int i = 0; i < 16; i++) {
+                if (i > 0) sb.Append(',');
+                double v = Math.Round(m[i], 6);
+                if (Math.Abs(v) < 1e-12) v = 0.0;
+                sb.Append(v.ToString("0.######", ci));
+            }
+            return sb.ToString();
         }
         static bool SameFeature(P.InterpartConstruction a, P.InterpartConstruction b){
             try { return string.Equals(a.SystemName, b.SystemName, StringComparison.Ordinal); } catch { return ReferenceEquals(a, b); }

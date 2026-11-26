@@ -46,10 +46,11 @@ namespace TianGongCadSuite {
             return Clip(name);
         }
 
-        public static string Group(HoleSpec s, int count){ return Clip(Short(s) + " ×" + count); }
-        public static string Member(HoleSpec s, int index){ return Clip(Short(s) + "-" + index); }
+        public static string Group(HoleSpec s, int count){ return WithSuffix(Short(s), " ×" + count.ToString(CultureInfo.InvariantCulture)); }
+        // 成员名：先给前缀留出后缀长度再截断，避免长规格名把 "-序号" 切掉导致 Members 空转 10 万次并越界
+        public static string Member(HoleSpec s, int index){ return WithSuffix(Short(s), "-" + index.ToString(CultureInfo.InvariantCulture)); }
         // 批量排孔的阵列特征（种子孔照常叫「…-1」，阵列出来的其余孔都在这个特征里）
-        public static string PatternName(HoleSpec s){ return Clip(Short(s) + " 阵列"); }
+        public static string PatternName(HoleSpec s){ return WithSuffix(Short(s), " 阵列"); }
 
         // 孔位链接组（0.8.4）：一张面这次打的关联孔 + 它们的孔位链接。名字说清楚"是什么孔、跟着谁"：
         //   一种规格：「关联孔 M6 螺纹孔（螺纹全长） ×4（跟随 支撑条）」
@@ -114,16 +115,44 @@ namespace TianGongCadSuite {
                 used.Add(n);
                 result.Add(n);
             }
+            while (result.Count < count) {
+                string n = WithSuffix(Short(s), "-" + Guid.NewGuid().ToString("N").Substring(0, 6));
+                if (used.Add(n)) result.Add(n);
+            }
             return result;
         }
 
-        // 同规格判定用的键：规格短名 + 会影响几何、但短名里没写的那几项（孔底、倒角角度）。
+        // 同规格判定用的技术键：与展示短名 Short(s) 解耦且不截断，显式包含全部影响几何/孔标准的字段并保留 4 位小数。
+        // 避免带 ThreadSize 的螺纹孔省略 HoleDiameter 或 "0.##" 舍入导致同面不同孔径发生键碰撞、复用错误 HoleData。
         public static string SpecKey(HoleSpec s){
             if (s == null) return "";
-            return Short(s) + "|" + s.Bottom + "|" + N(s.BottomAngle) + "|" + N(s.ChamferAngle);
+            var sb = new System.Text.StringBuilder();
+            sb.Append(s.Kind).Append('|')
+              .Append((s.ThreadSize ?? "").Trim().ToUpperInvariant()).Append('|')
+              .Append(K(s.HoleDiameter)).Append('|')
+              .Append(s.Through ? "T" : "B" + K(s.Depth));
+            if (s.Kind == HoleKind.Counterbore)
+                sb.Append("|CB:").Append(K(s.CounterboreDiameter)).Append(',').Append(K(s.CounterboreDepth));
+            else if (s.Kind == HoleKind.Countersink)
+                sb.Append("|CS:").Append(K(s.CountersinkDiameter)).Append(',').Append(K(s.CountersinkAngle));
+            else if (s.Kind == HoleKind.Tapped)
+                sb.Append("|TP:").Append(s.ThreadFull ? "F" : K(s.ThreadDepth));
+            if (!s.Through) {
+                sb.Append('|').Append(s.Bottom);
+                if (s.Bottom == HoleBottom.VBottom) sb.Append(':').Append(K(s.BottomAngle));
+            }
+            if (s.Chamfer && s.Kind != HoleKind.Countersink)
+                sb.Append("|CH:").Append(K(s.ChamferSetback)).Append(',').Append(K(s.ChamferAngle));
+            return sb.ToString();
         }
 
+        static string WithSuffix(string head, string suffix){
+            int maxHead = MaxLength - suffix.Length;
+            if (maxHead <= 0) return Clip(suffix);
+            return (head.Length <= maxHead ? head : head.Substring(0, maxHead)) + suffix;
+        }
         static string Clip(string s){ return s.Length <= MaxLength ? s : s.Substring(0, MaxLength); }
         static string N(double v){ return v.ToString("0.##", CultureInfo.InvariantCulture); }
+        static string K(double v){ return v.ToString("0.####", CultureInfo.InvariantCulture); }
     }
 }

@@ -91,7 +91,11 @@ namespace TianGongCadSuite {
             for (int i = 1; i <= hc; i++) {
                 P.Hole h = null;
                 try { h = model.Holes.Item(i); } catch { }
-                if (h != null && Owns(h, c, ax)) return At(Fill(new EditableHole { Part = part, Hole = h }, model), sh);
+                if (h != null && Owns(h, c, ax)) {
+                    // 点中阵列种子孔时一并挂上其阵列，后续校验、改名与孔数统计才不漏掉阵列实例
+                    var pats = PatternsOf(model, h);
+                    return At(Fill(new EditableHole { Part = part, Hole = h, Pattern = pats.Count > 0 ? pats[0] : null }, model), sh);
+                }
             }
             int pc = 0; try { pc = model.Patterns.Count; } catch { }
             for (int i = 1; i <= pc; i++) {
@@ -122,7 +126,11 @@ namespace TianGongCadSuite {
                     ModelOf(kv.Key);
                     foreach (var model in PartBodies.All(kv.Key)) {   // 多实体零件：刚打的孔可能在第 2 个以后的实体上
                         var h = FindHole(model, kv.Value);
-                        if (h != null) { list.Add(Fill(new EditableHole { Part = kv.Key, Hole = h }, model)); break; }
+                        if (h != null) {
+                            var pats = PatternsOf(model, h);
+                            list.Add(Fill(new EditableHole { Part = kv.Key, Hole = h, Pattern = pats.Count > 0 ? pats[0] : null }, model));
+                            break;
+                        }
                         var p = FindPattern(model, kv.Value);
                         var seed = p == null ? null : SeedOf(p);
                         if (seed != null) { list.Add(Fill(new EditableHole { Part = kv.Key, Hole = seed, Pattern = p }, model)); break; }
@@ -195,6 +203,16 @@ namespace TianGongCadSuite {
                 v.ThreadDepthMethod = Str(() => d.ThreadDepthMethod.ToString());
                 v.ThreadDepth = Num(() => d.ThreadDepth) / MmToM;
                 v.BottomAngle = Num(() => d.BottomAngle);
+                // 回读孔口起始倒角（保留原孔倒角参数，改孔型窗口显示与撤销恢复时不丢倒角）
+                int chOn = 0; double chSetback = 0, chAngle = 0;
+                try {
+                    d.GetStartChamfer(out chOn, out chSetback, out chAngle);
+                    if (chOn != 0 && chSetback > 0) {
+                        v.Chamfer = true;
+                        v.ChamferSetback = chSetback / MmToM;
+                        v.ChamferAngle = chAngle;
+                    }
+                } catch { }
             }
             return HoleSpecRead.From(v);
         }
@@ -295,16 +313,59 @@ namespace TianGongCadSuite {
             RecomputeAll(part, model);
 
             // 重算后逐个看状态：失败的退回原样（孔型改错了不能留一个坏特征给用户）
+            // 跨全零件所有实体检查受影响的阵列与多孔特征（覆盖 wholeGroup 组内未直接点中的成员及 Body>=2）
             var failed = new List<P.Hole>();
-            foreach (var h in changed) if (!FeatureOk(h)) failed.Add(h);
-            foreach (var t in targets) if (t.Pattern != null && !FeatureOk(t.Pattern) && !failed.Contains(t.Hole) && changed.Contains(t.Hole)) failed.Add(t.Hole);
-            foreach (var t in targets) if (t.Multi != null && !FeatureOk(t.Multi)) foreach (var x in HoleCombine.Inputs(t.Multi)) if (!failed.Contains(x) && changed.Contains(x)) failed.Add(x);
+            var failedSys = new HashSet<string>(StringComparer.Ordinal);
+            var changedBySys = new Dictionary<string, P.Hole>(StringComparer.Ordinal);
+            foreach (var h in changed) {
+                string s = HoleGrouping.Sys(h);
+                if (s.Length > 0 && !changedBySys.ContainsKey(s)) changedBySys[s] = h;
+            }
+            Action<P.Hole> markFailed = h => {
+                string s = HoleGrouping.Sys(h);
+                if (s.Length > 0 && changedBySys.ContainsKey(s) && failedSys.Add(s)) failed.Add(changedBySys[s]);
+            };
+            foreach (var h in changed) if (!FeatureOk(h)) markFailed(h);
+            var checkedPats = new HashSet<string>(StringComparer.Ordinal);
+            var checkedMultis = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var t in targets) {
+                if (t.Pattern != null && checkedPats.Add(HoleGrouping.Sys(t.Pattern)) && !FeatureOk(t.Pattern)) markFailed(t.Hole);
+                if (t.Multi != null && checkedMultis.Add(HoleGrouping.Sys(t.Multi)) && !FeatureOk(t.Multi))
+                    foreach (var x in HoleCombine.Inputs(t.Multi)) markFailed(x);
+            }
+            foreach (var h in changed) {
+                foreach (var p in PatternsOf(part, h))
+                    if (checkedPats.Add(HoleGrouping.Sys(p)) && !FeatureOk(p)) markFailed(h);
+                var mu = MultiOf(part, h);
+                if (mu != null && checkedMultis.Add(HoleGrouping.Sys(mu)) && !FeatureOk(mu))
+                    foreach (var x in HoleCombine.Inputs(mu)) markFailed(x);
+            }
+            // 多孔特征任一输入孔失败，整组输入孔一起回滚，不能只回滚一半
+            for (int i = 0; i < failed.Count; i++) {
+                var mu = MultiOf(part, failed[i]);
+                if (mu != null) foreach (var x in HoleCombine.Inputs(mu)) markFailed(x);
+            }
             if (failed.Count > 0) {
-                foreach (var h in failed) {
+                // 逆序回滚：多孔特征种子孔最后恢复；原螺纹孔种子孔走 RestoreSeed 做完整二次恢复（见 HoleEditUndo.Run）
+                var failedSeeds = new List<P.Hole>();
+                var failedSeedSys = new HashSet<string>(StringComparer.Ordinal);
+                for (int i = failed.Count - 1; i >= 0; i--) {
+                    var h = failed[i];
                     o.Notes.Add(partName + "：「" + HoleGrouping.NameOf(h) + "」改成" + HoleNaming.Short(spec) + "后 CAD 报特征失败，已恢复原样。");
-                    o.Undo.RestoreOne(part, h);
-                    changed.Remove(h);
+                    var mu = MultiOf(part, h);
+                    if (mu != null && HoleGrouping.Sys(HoleCombine.SeedOf(mu)) == HoleGrouping.Sys(h)) {
+                        if (failedSeedSys.Add(HoleGrouping.Sys(h))) failedSeeds.Add(h);
+                        continue;
+                    }
+                    try { o.Undo.RestoreOne(part, h); } catch (Exception ex) { Log.Write("HoleEditRollback", ex); }
                 }
+                if (failedSeeds.Count > 0) {
+                    RecomputeAll(part, model);
+                    foreach (var seed in failedSeeds) {
+                        try { o.Undo.RestoreSeed(part, seed); } catch (Exception ex) { Log.Write("HoleEditRollbackSeed", ex); }
+                    }
+                }
+                changed.RemoveAll(x => failedSys.Contains(HoleGrouping.Sys(x)));
                 RecomputeAll(part, model);
                 o.Failed += failed.Count;
             }
@@ -319,10 +380,15 @@ namespace TianGongCadSuite {
             foreach (var h in changed) {
                 int extra = 0;
                 P.UserDefinedPattern multi = null;
-                foreach (var t in targets) if (t.Pattern != null && ReferenceEquals(t.Hole, h)) extra = HoleGrouping.PatternExtra(t.Pattern);
-                foreach (var p in PatternsOf(model, h)) extra = Math.Max(extra, HoleGrouping.PatternExtra(p));
-                foreach (var t in targets) if (t.Multi != null && HoleCombine.Inputs(t.Multi).Contains(h)) multi = t.Multi;
-                if (multi == null) multi = MultiOf(model, h);
+                string hs = HoleGrouping.Sys(h);
+                foreach (var t in targets) if (t.Pattern != null && HoleGrouping.Sys(t.Hole) == hs) extra = HoleGrouping.PatternExtra(t.Pattern);
+                foreach (var p in PatternsOf(part, h)) extra = Math.Max(extra, HoleGrouping.PatternExtra(p));
+                foreach (var t in targets) {
+                    if (t.Multi == null) continue;
+                    foreach (var x in HoleCombine.Inputs(t.Multi)) if (HoleGrouping.Sys(x) == hs) { multi = t.Multi; break; }
+                    if (multi != null) break;
+                }
+                if (multi == null) multi = MultiOf(part, h);
                 if (multi != null) {
                     if (!counted.Add(HoleGrouping.Sys(multi))) continue;   // 多孔特征的每个输入孔都换过，只算一次
                     int n = HoleCombine.CountOf(multi);
@@ -375,7 +441,9 @@ namespace TianGongCadSuite {
         static void Rename(P.Model model, P.PartDocument part, List<EditableHole> targets, List<P.Hole> changed, HoleSpec spec, bool wholeGroup, Outcome o){
             if (changed.Count == 0) return;
             string key = HoleNaming.SpecKey(spec);
-            var taken = AutoHoleWriter.ExistingFeatureNames(model);
+            var taken = AutoHoleWriter.ExistingFeatureNamesInPart(part);
+            var changedSys = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var h in changed) changedSys.Add(HoleGrouping.Sys(h));
             var done = new HashSet<string>(StringComparer.Ordinal);
             foreach (var t in targets) {
                 if (wholeGroup && t.Group != null) {
@@ -383,8 +451,9 @@ namespace TianGongCadSuite {
                     if (!done.Add(gs)) continue;
                     var members = Members(t.Group);
                     bool allChanged = true;
-                    foreach (var m in members) { var mh = m as P.Hole; if (mh != null && !changed.Contains(mh)) allChanged = false; }
-                    foreach (var m in members) { var mu = m as P.UserDefinedPattern; if (mu != null) foreach (var x in HoleCombine.Inputs(mu)) if (!changed.Contains(x)) allChanged = false; }
+                    foreach (var m in members) { var mh = m as P.Hole; if (mh != null && !changedSys.Contains(HoleGrouping.Sys(mh))) allChanged = false; }
+                    foreach (var m in members) { var mu = m as P.UserDefinedPattern; if (mu != null) foreach (var x in HoleCombine.Inputs(mu)) if (!changedSys.Contains(HoleGrouping.Sys(x))) allChanged = false; }
+                    foreach (var m in members) { var mp = m as P.Pattern; if (mp != null) { var s = SeedOf(mp); if (s != null && !changedSys.Contains(HoleGrouping.Sys(s))) allChanged = false; } }
                     if (!allChanged) { o.Notes.Add("「" + t.GroupName + "」里有孔没改成，组名和孔名保持原样。"); continue; }
                     if (HoleGrouping.ReadTag(t.Group).Length == 0) {
                         foreach (var m in members) RecordAndTag(o, part, m, key);
@@ -409,7 +478,8 @@ namespace TianGongCadSuite {
                     if (HoleGrouping.TryName(t.Group, gname)) taken.Add(gname);
                     HoleGrouping.Tag(t.Group, key);
                 } else {
-                    if (!changed.Contains(t.Hole) || !done.Add(HoleGrouping.Sys(t.Hole))) continue;
+                    string ts = HoleGrouping.Sys(t.Hole);
+                    if (!changedSys.Contains(ts) || !done.Add(ts)) continue;
                     if (t.Multi != null) {
                         // 多孔特征整个换了规格：特征名「规格 ×N」、输入孔「规格-序号」都按新规格重起（用户自己起的名字不动）
                         if (HoleGrouping.ReadTag(t.Multi).Length > 0) {
@@ -423,12 +493,15 @@ namespace TianGongCadSuite {
                         continue;
                     }
                     var feats = new List<object>{ t.Hole };
-                    if (t.Pattern != null) feats.Add(t.Pattern);
+                    var featSys = new HashSet<string>(StringComparer.Ordinal){ ts };
+                    if (t.Pattern != null && featSys.Add(HoleGrouping.Sys(t.Pattern))) feats.Add(t.Pattern);
+                    foreach (var p in PatternsOf(part, t.Hole)) if (featSys.Add(HoleGrouping.Sys(p))) feats.Add(p);
+                    bool hasPattern = t.Pattern != null || feats.Count > 1;
                     foreach (var f in feats) {
                         if (HoleGrouping.ReadTag(f).Length == 0) continue;
                         o.Undo.Named(part, f);
                         taken.Remove(HoleGrouping.NameOf(f));
-                        string want = f is P.Pattern ? HoleNaming.PatternName(spec) : (t.Group == null && t.Pattern == null ? HoleNaming.Short(spec) : HoleNaming.Members(spec, 1, taken)[0]);
+                        string want = f is P.Pattern ? HoleNaming.PatternName(spec) : (t.Group == null && !hasPattern ? HoleNaming.Short(spec) : HoleNaming.Members(spec, 1, taken)[0]);
                         want = HoleNaming.Unique(want, taken);
                         if (HoleGrouping.TryName(f, want)) taken.Add(want);
                         HoleGrouping.Tag(f, key);
@@ -458,9 +531,35 @@ namespace TianGongCadSuite {
             for (int i = 1; i <= n; i++) { try { var h = model.Holes.Item(i); if (HoleGrouping.Sys(h) == sys) return h; } catch { } }
             return null;
         }
+        // 多实体零件全实体查找孔特征（同时覆盖多孔特征的输入孔，免得实体 2+ 或合并输入孔在撤销兜底时找丢）
+        internal static P.Hole FindHoleInPart(P.PartDocument part, string sys){
+            if (part == null || string.IsNullOrEmpty(sys)) return null;
+            foreach (var m in PartBodies.All(part)) {
+                var h = FindHole(m, sys);
+                if (h != null) return h;
+                int uc = 0; try { uc = m.UserDefinedPatterns.Count; } catch { }
+                for (int i = 1; i <= uc; i++) {
+                    try {
+                        var u = m.UserDefinedPatterns.Item(i);
+                        foreach (var x in HoleCombine.Inputs(u)) if (HoleGrouping.Sys(x) == sys) return x;
+                    } catch { }
+                }
+            }
+            return null;
+        }
         internal static P.Pattern FindPattern(P.Model model, string sys){
             int n = 0; try { n = model.Patterns.Count; } catch { }
             for (int i = 1; i <= n; i++) { try { var p = model.Patterns.Item(i); if (HoleGrouping.Sys(p) == sys) return p; } catch { } }
+            return null;
+        }
+        internal static P.Pattern FindPatternInPart(P.PartDocument part, string sys){
+            if (part == null || string.IsNullOrEmpty(sys)) return null;
+            foreach (var m in PartBodies.All(part)) { var p = FindPattern(m, sys); if (p != null) return p; }
+            return null;
+        }
+        internal static P.UserDefinedPattern FindMultiInPart(P.PartDocument part, string sys){
+            if (part == null || string.IsNullOrEmpty(sys)) return null;
+            foreach (var m in PartBodies.All(part)) { var u = HoleUndo.FindMulti(m, sys); if (u != null) return u; }
             return null;
         }
         internal static P.FeatureGroup FindGroup(P.Model model, string sys){
@@ -485,6 +584,12 @@ namespace TianGongCadSuite {
             }
             return null;
         }
+        // 多实体零件跨所有实体查 hole 所属的多孔特征（撤销二次恢复种子孔与失败回滚时不能漏掉 Body>=2）
+        internal static P.UserDefinedPattern MultiOf(P.PartDocument part, P.Hole hole){
+            if (part == null || hole == null) return null;
+            foreach (var m in PartBodies.All(part)) { var u = MultiOf(m, hole); if (u != null) return u; }
+            return null;
+        }
         // 以 hole 为种子的阵列
         static List<P.Pattern> PatternsOf(P.Model model, P.Hole hole){
             var list = new List<P.Pattern>();
@@ -492,6 +597,15 @@ namespace TianGongCadSuite {
             int n = 0; try { n = model.Patterns.Count; } catch { }
             for (int i = 1; i <= n; i++) {
                 try { var p = model.Patterns.Item(i); var s = SeedOf(p); if (s != null && HoleGrouping.Sys(s) == sys) list.Add(p); } catch { }
+            }
+            return list;
+        }
+        static List<P.Pattern> PatternsOf(P.PartDocument part, P.Hole hole){
+            var list = new List<P.Pattern>();
+            if (part == null || hole == null) return list;
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var m in PartBodies.All(part)) {
+                foreach (var p in PatternsOf(m, hole)) if (seen.Add(HoleGrouping.Sys(p))) list.Add(p);
             }
             return list;
         }
@@ -542,7 +656,7 @@ namespace TianGongCadSuite {
                     if (cn.StartsWith("孔位链接-", StringComparison.Ordinal)) refs.Add(cn.Substring(5));
                 }
                 if (!touched) continue;
-                var taken = AutoHoleWriter.ExistingFeatureNames(model);
+                var taken = AutoHoleWriter.ExistingFeatureNamesInPart(part);
                 taken.Remove(old);
                 string want = HoleNaming.Unique(HoleNaming.LinkGroup(specs, refs, HoleNaming.SideIn(old)), taken);
                 if (want == old) continue;

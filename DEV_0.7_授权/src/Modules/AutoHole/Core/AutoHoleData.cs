@@ -111,7 +111,7 @@ namespace TianGongCadSuite {
         public string ThreadProblem {
             get {
                 if (Kind != HoleKind.Tapped || ThreadFull) return "";
-                if (!(ThreadDepth > 0)) return "螺纹深度必须大于 0";
+                if (double.IsNaN(ThreadDepth) || double.IsInfinity(ThreadDepth) || !(ThreadDepth > 0)) return "螺纹深度必须大于 0";
                 if (!Through && ThreadDepth > Depth + 1e-9)
                     return "螺纹深度 " + N(ThreadDepth) + " 超过了孔深 " + N(Depth) + "（要攻到底请选「全长」）";
                 return "";
@@ -119,17 +119,40 @@ namespace TianGongCadSuite {
         }
 
         // 规格本身就打不出来的情况（打之前就该挡住，别等每个孔都撞一次 CAD 的错误）：
-        // 螺纹深度超过孔深、沉孔/锥孔直径不大于孔径、沉孔深度为 0（CAD 侧 BuildHoleData 也会拒绝，只是那时已经进过原位、建过关联了）
+        // 非正/NaN 孔径、盲孔沉孔/锥座深度超过孔深、非法锥角/V底角/倒角、螺纹深度超过孔深、沉孔/锥孔直径不大于孔径、沉孔深度为 0
         public string SpecProblem {
             get {
+                if (double.IsNaN(HoleDiameter) || double.IsInfinity(HoleDiameter) || !(HoleDiameter > 0))
+                    return "孔径必须大于 0";
+                if (double.IsNaN(Depth) || double.IsInfinity(Depth) || Depth < 0)
+                    return "孔深不能为负数或无效数字";
                 string tp = ThreadProblem;
                 if (tp.Length > 0) return tp;
                 if (Kind == HoleKind.Counterbore) {
-                    if (!(CounterboreDiameter > HoleDiameter + 1e-9)) return "沉孔直径 Φ" + N(CounterboreDiameter) + " 必须大于孔径 Φ" + N(HoleDiameter);
-                    if (!(CounterboreDepth > 0)) return "沉孔深度必须大于 0";
+                    if (double.IsInfinity(CounterboreDiameter) || !(CounterboreDiameter > HoleDiameter + 1e-9))
+                        return "沉孔直径 Φ" + N(CounterboreDiameter) + " 必须大于孔径 Φ" + N(HoleDiameter);
+                    if (double.IsInfinity(CounterboreDepth) || !(CounterboreDepth > 0))
+                        return "沉孔深度必须大于 0";
+                    if (!Through && CounterboreDepth >= Depth - 1e-9)
+                        return "沉孔深度 " + N(CounterboreDepth) + " 必须小于盲孔深度 " + N(Depth);
                 }
-                if (Kind == HoleKind.Countersink && !(CountersinkDiameter > HoleDiameter + 1e-9))
-                    return "锥孔直径 Φ" + N(CountersinkDiameter) + " 必须大于孔径 Φ" + N(HoleDiameter);
+                if (Kind == HoleKind.Countersink) {
+                    if (double.IsInfinity(CountersinkDiameter) || !(CountersinkDiameter > HoleDiameter + 1e-9))
+                        return "锥孔直径 Φ" + N(CountersinkDiameter) + " 必须大于孔径 Φ" + N(HoleDiameter);
+                    if (!(CountersinkAngle > 0 && CountersinkAngle < 180))
+                        return "锥角必须在 0～180° 之间";
+                    if (!Through) {
+                        double csDepth = (CountersinkDiameter - HoleDiameter) / (2.0 * Math.Tan(CountersinkAngle * Math.PI / 360.0));
+                        if (csDepth >= Depth - 1e-9)
+                            return "锥形沉孔锥座深度 " + N(csDepth) + " 必须小于盲孔深度 " + N(Depth);
+                    }
+                }
+                if (!Through && Bottom == HoleBottom.VBottom && !(BottomAngle > 0 && BottomAngle < 180))
+                    return "V 型孔底角度必须在 0～180° 之间";
+                if (Chamfer && Kind != HoleKind.Countersink) {
+                    if (double.IsInfinity(ChamferSetback) || !(ChamferSetback > 0)) return "孔口倒角尺寸必须大于 0";
+                    if (!(ChamferAngle > 0 && ChamferAngle < 90)) return "孔口倒角角度必须在 0～90° 之间";
+                }
                 return "";
             }
         }
@@ -337,7 +360,7 @@ namespace TianGongCadSuite {
         public static string StatusLine(HoleMatch m){
             if (m == null) return "";
             if (!m.HasRow) return "参考孔直径：" + N(m.ReferenceDiameter) + "　未匹配到标准规格";
-            string kind = m.Target.Kind == HoleKind.Counterbore ? "沉孔" : (m.Target.Kind == HoleKind.Tapped ? "螺纹孔" : "通孔");
+            string kind = m.Target.Kind == HoleKind.Counterbore ? "沉孔" : HoleSpec.KindName(m.Target.Kind);
             string line = "参考孔直径：" + N(m.ReferenceDiameter) + "　已匹配到 " + m.Target.ThreadSize + " " + kind + "！";
             if (m.Ambiguous)
                 line += "　⚠ " + AmbiguousHint + "：也可能是 " + m.AmbiguousWith

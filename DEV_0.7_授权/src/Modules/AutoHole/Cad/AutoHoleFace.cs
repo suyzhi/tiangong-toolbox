@@ -118,8 +118,9 @@ namespace TianGongCadSuite {
         public sealed class FaceBounds {
             public V3 BasePoint; public V3 U; public V3 V;
             public double MinU, MaxU, MinV, MaxV;
-            public double PlanePointDot;      // 缓存键：平面点沿法向的投影
-            public double PlaneNormalKey;
+            public double PlanePointDot;      // 缓存键：平面点沿法向的投影（与 BoundsKey 同样取整到 9 位）
+            public double PlaneNormalKey;     // 缓存键：法向 X（与 BoundsKey 同样取整到 9 位，避免斜面未取整对比 < 1e-12 恒失配）
+            public double PlaneNormalY, PlaneNormalZ;
             public bool Any;                  // 有没有读到过边
             // 0.8.5：面的实际形状（面内 (u,v) 三角形，每 6 个数一个）+ 面上圆边（孔口，u,v,r）。
             // 只用包围盒时 L 形面、开了窗的面、两块分开的面上，落在空处的孔心也算"在面内"，
@@ -142,8 +143,11 @@ namespace TianGongCadSuite {
             if (cached != null && SameKey(cached, key)) return cached;
 
             var b = new FaceBounds { BasePoint = target.Plane.Point, Any = false };
-            b.PlanePointDot = (double)((object[])key)[0];
-            b.PlaneNormalKey = n.X;
+            var keyArr = (object[])key;
+            b.PlanePointDot = (double)keyArr[0];
+            b.PlaneNormalKey = (double)keyArr[1];
+            b.PlaneNormalY = (double)keyArr[2];
+            b.PlaneNormalZ = (double)keyArr[3];
             var seed = Math.Abs(n.X) < 0.9 ? new V3(1,0,0) : new V3(0,1,0);
             b.U = n.Cross(seed).Unit();
             b.V = n.Cross(b.U).Unit();
@@ -204,7 +208,10 @@ namespace TianGongCadSuite {
 
         static bool SameKey(FaceBounds b, object key){
             var k = (object[])key;
-            return Math.Abs(b.PlanePointDot - (double)k[0]) < 1e-12 && Math.Abs(b.PlaneNormalKey - (double)k[1]) < 1e-12;
+            return Math.Abs(b.PlanePointDot - (double)k[0]) < 1e-12
+                && Math.Abs(b.PlaneNormalKey - (double)k[1]) < 1e-12
+                && Math.Abs(b.PlaneNormalY - (double)k[2]) < 1e-12
+                && Math.Abs(b.PlaneNormalZ - (double)k[3]) < 1e-12;
         }
 
         // 孔心是否落在打孔面内：先看"面内 (u,v) 包围盒"，再看面的实际形状（面片三角形，0.8.5，见 FaceBounds.Tris）。

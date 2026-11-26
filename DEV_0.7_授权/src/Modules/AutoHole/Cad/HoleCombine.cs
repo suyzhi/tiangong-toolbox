@@ -29,6 +29,11 @@ namespace TianGongCadSuite {
         public static P.UserDefinedPattern Build(P.PartDocument part, P.Model model, P.RefPlane plane, IList<V3> locals, IList<NativeAnchor> anchors,
                                                  P.HoleData data, double depthMm, IList<P.FeaturePropertyConstants> sides,
                                                  out List<P.Hole> inputs, out string why, out bool touched){
+            return Build(part, model, plane, locals, anchors, data, depthMm, sides, out inputs, out why, out touched, null);
+        }
+        public static P.UserDefinedPattern Build(P.PartDocument part, P.Model model, P.RefPlane plane, IList<V3> locals, IList<NativeAnchor> anchors,
+                                                 P.HoleData data, double depthMm, IList<P.FeaturePropertyConstants> sides,
+                                                 out List<P.Hole> inputs, out string why, out bool touched, Func<P.RefPlane> rebuildPlane){
             inputs = null; why = ""; touched = false;
             int n = locals.Count;
             if (n < 2) { why = "不到 2 个孔"; return null; }
@@ -37,9 +42,22 @@ namespace TianGongCadSuite {
                 P.ProfileSet set; List<P.Profile> profiles;
                 if (!SharedProfiles(part, plane, locals, anchors, out set, out profiles, out why)) return null;
                 Mark(sw, "轮廓");
-                // 种子孔：拆出来的第 1 个轮廓。只能试一次 —— 这一侧打不成时 CAD 把轮廓作废，删掉这套轮廓、换另一侧重建
-                var seed = AutoHoleWriter.DrillOnProfile(part, model, profiles[0], data, depthMm, side);
-                if (seed == null) { DeleteSet(set); why = "种子孔打不成"; continue; }
+                // 种子孔：拆出来的第 1 个轮廓。只能试一次 —— 这一侧打不成时 CAD 把轮廓作废，删掉这套轮廓、换另一侧重建；
+                // 若建出失败孔并删除过，CAD 可能连基准面一起删掉（真机 J9），必须置 touched=true 并在试另一侧前重建基准面。
+                bool seedDeleted;
+                var seed = AutoHoleWriter.DrillOnProfile(part, model, profiles[0], data, depthMm, side, out seedDeleted);
+                if (seed == null) {
+                    DeleteSet(set);
+                    why = "种子孔打不成";
+                    if (seedDeleted || !AutoHoleWriter.PlaneUsable(plane)) {
+                        touched = true;
+                        if (rebuildPlane != null) {
+                            try { var np = rebuildPlane(); if (np != null) plane = np; }
+                            catch (Exception e) { Log.Write("HoleCombineRebuildPlane", e); }
+                        }
+                    }
+                    continue;
+                }
                 AutoHoleWriter.Learned(plane, side);
                 Mark(sw, "种子孔");
                 P.UserDefinedPattern u = null;

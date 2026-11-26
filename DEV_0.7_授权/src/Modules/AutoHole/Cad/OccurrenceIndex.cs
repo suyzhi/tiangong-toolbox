@@ -10,9 +10,11 @@ namespace TianGongCadSuite {
     public sealed class OccurrenceNode {
         public string Path = "";        // "子装配.asm:1/板A.par:1"
         public string Name = "";
-        public string FullName = "";    // 零件文件全路径
+        public string FullName = "";    // 零件或钣金件文件全路径
         public string FileName = "";
-        public P.PartDocument Part;     // 子装配节点为 null
+        public P.PartDocument Part;     // 子装配与钣金件节点为 null（打孔目标仍仅支持 .par）
+        public object Document;         // 零件（.par）或钣金件（.psm）文档，供参考孔关联与同步定位
+        public bool HasDoc { get { return Part != null || Document != null; } }
         public Transform Raw;           // 实例自己 GetMatrix 读到的
         public Transform Composed;      // 从顶层逐级乘下来的
         public Transform Placement(string mode){ return mode == "C" ? Composed : Raw; }
@@ -115,10 +117,11 @@ namespace TianGongCadSuite {
 
         static void Fill(OccurrenceNode node, object doc){
             var part = doc as P.PartDocument;
+            var sheet = doc as P.SheetMetalDocument;
             node.Part = part;
-            if (part == null) return;
-            try { node.FullName = part.FullName ?? ""; } catch { }
-            if (node.FullName.Length == 0) { try { node.FullName = part.Name ?? ""; } catch { } }
+            node.Document = (object)part ?? sheet;
+            if (node.Document == null) return;
+            node.FullName = DocName(node.Document);
             node.FileName = System.IO.Path.GetFileName(node.FullName);
         }
 
@@ -137,22 +140,33 @@ namespace TianGongCadSuite {
             return true;
         }
 
-        static string DocName(P.PartDocument part){
-            string s = "";
-            try { s = part.FullName ?? ""; } catch { }
-            if (s.Length == 0) { try { s = part.Name ?? ""; } catch { } }
-            return s;
+        static string DocName(object doc){
+            var part = doc as P.PartDocument;
+            if (part != null) {
+                string s = "";
+                try { s = part.FullName ?? ""; } catch { }
+                if (s.Length == 0) { try { s = part.Name ?? ""; } catch { } }
+                return s;
+            }
+            var sheet = doc as P.SheetMetalDocument;
+            if (sheet != null) {
+                string s = "";
+                try { s = sheet.FullName ?? ""; } catch { }
+                if (s.Length == 0) { try { s = sheet.Name ?? ""; } catch { } }
+                return s;
+            }
+            return "";
         }
 
-        // 选择引用（零件文档 + 零件局部→装配的变换）对应哪个实例。mode 返回矩阵取法。
+        // 选择引用（零件或钣金件文档 + 局部→装配的变换）对应哪个实例。mode 返回矩阵取法。
         public OccurrenceNode Locate(object partDocument, Transform placement, out string mode){
             mode = "R";
-            var part = partDocument as P.PartDocument;
-            if (part == null) return null;
-            string full = DocName(part);
+            if (!(partDocument is P.PartDocument) && !(partDocument is P.SheetMetalDocument)) return null;
+            string full = DocName(partDocument);
+            if (full.Length == 0) return null;
             OccurrenceNode only = null; int same = 0;
             foreach (var n in Nodes) {
-                if (n.Part == null || !string.Equals(n.FullName, full, StringComparison.OrdinalIgnoreCase)) continue;
+                if (!n.HasDoc || !string.Equals(n.FullName, full, StringComparison.OrdinalIgnoreCase)) continue;
                 same++; only = n;
                 if (Same(n.Raw, placement)) { mode = "R"; return n; }
                 if (Same(n.Composed, placement)) { mode = "C"; return n; }
@@ -164,11 +178,11 @@ namespace TianGongCadSuite {
         // 同步时按记下的路径找回实例；路径变了（实例改名、删了重插）就按文件名兜底，但必须唯一。
         public OccurrenceNode Find(string path, string fileName){
             if (!string.IsNullOrEmpty(path))
-                foreach (var n in Nodes) if (n.Part != null && n.Path == path) return n;
+                foreach (var n in Nodes) if (n.HasDoc && n.Path == path) return n;
             if (string.IsNullOrEmpty(fileName)) return null;
             OccurrenceNode only = null; int count = 0;
             foreach (var n in Nodes) {
-                if (n.Part == null) continue;
+                if (!n.HasDoc) continue;
                 if (string.Equals(n.FileName, fileName, StringComparison.OrdinalIgnoreCase)) { only = n; count++; }
             }
             return count == 1 ? only : null;

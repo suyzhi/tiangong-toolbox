@@ -62,10 +62,19 @@ namespace TianGongCadSuite {
             return false;
         }
 
-        // 盲孔打穿了没有（0.8.5）：孔心 localCentre（孔口）沿轴线、孔口以下 (0.05mm, maxDepthM) 之间有没有同样大小的同轴圆 ——
-        // 有就是孔从那里穿出去了（板比孔深薄），返回穿出的深度（米）；没有返回 0。
+        // 盲孔打穿了没有（0.8.5）：孔心 localCentre（孔口）沿轴线、有效圆柱段 (minDepthM, maxDepthM) 之间
+        // 有没有同样大小的同轴圆 —— 有就是孔从那里穿出去了（板比孔深薄），返回穿出的深度（米）；没有返回 0。
         // 现场：10 厚的板上打"盲孔 深15"，CAD 照样打成通孔，结果里还写"盲孔 深15"
         public double ExitDepth(V3 localCentre, V3 normal, double radiusM, double maxDepthM){
+            return ExitDepth(localCentre, normal, radiusM, 0, maxDepthM);
+        }
+
+        // minDepthM / maxDepthM：跳过孔自身内部特征交界圆（倒角底圆、沉孔台阶圆、锥座收口圆、V 型底柱锥交界圆），
+        // 避免 V 型底/倒角/沉孔/锥沉在厚板上被误报成「打穿了 / 沉孔切穿了板」。
+        public double ExitDepth(V3 localCentre, V3 normal, double radiusM, double minDepthM, double maxDepthM){
+            double lo = Math.Max(0.00005, minDepthM + 0.00005);
+            double hi = maxDepthM - 0.00005;
+            if (hi <= lo) return 0;
             V3 n = normal.Length > 1e-12 ? normal.Unit() : new V3(0, 0, 1);
             double best = 0;
             foreach (var c in circles) {
@@ -73,9 +82,34 @@ namespace TianGongCadSuite {
                 V3 delta = c.Centre - localCentre;
                 double axial = Math.Abs(delta.Dot(n));
                 if ((delta - n * delta.Dot(n)).Length >= RadialTolM) continue;
-                if (axial > 0.00005 && axial < maxDepthM - 0.00005 && (best == 0 || axial < best)) best = axial;
+                if (axial > lo && axial < hi && (best == 0 || axial < best)) best = axial;
             }
             return best;
+        }
+
+        // 按孔规格算出检测"是否穿出"时的有效圆柱段深度范围（米），排除孔内必然存在的特征交界圆：
+        //   forCounterbore=true  → 沉孔段 [倒角轴深, 沉孔深]（排掉带倒角通沉孔在 ChamferDepMm 处的倒角底圆）
+        //   forCounterbore=false → 主孔盲段 [max(倒角轴深, 沉孔深/锥座深), 盲孔深 - V底钻尖高]
+        public static void ExitDepthRange(HoleSpec sp, bool forCounterbore, out double minDepthM, out double maxDepthM){
+            minDepthM = 0; maxDepthM = 0;
+            if (sp == null) return;
+            double chamferMm = sp.Chamfer && sp.Kind != HoleKind.Countersink
+                ? HoleShapeBuilder.ChamferDepthMm(sp.ChamferSetback, sp.ChamferAngle)
+                : 0;
+            if (forCounterbore) {
+                minDepthM = Math.Max(0, chamferMm) * 0.001;
+                maxDepthM = Math.Max(0, sp.CounterboreDepth) * 0.001;
+                return;
+            }
+            double minMm = chamferMm;
+            if (sp.Kind == HoleKind.Counterbore) minMm = Math.Max(minMm, sp.CounterboreDepth);
+            else if (sp.Kind == HoleKind.Countersink)
+                minMm = Math.Max(minMm, HoleShapeBuilder.CountersinkDepthMm(sp.CountersinkDiameter / 2.0, sp.HoleDiameter / 2.0, sp.CountersinkAngle));
+            double maxMm = sp.Depth;
+            if (!sp.Through && sp.Bottom == HoleBottom.VBottom)
+                maxMm = Math.Max(0, sp.Depth - HoleShapeBuilder.TipHeightMm(sp.HoleDiameter / 2.0, sp.BottomAngle));
+            minDepthM = Math.Max(0, minMm) * 0.001;
+            maxDepthM = Math.Max(0, maxMm) * 0.001;
         }
 
         // 把找到的孔心（found，读不出的为 null）一一配给想要的孔位（wanted）：每个孔位取离它最近、还没配出去的那个，

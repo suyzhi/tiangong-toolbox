@@ -23,6 +23,10 @@ namespace TianGongCadSuite {
         // 而另一侧拿的也是同一个死轮廓 —— 本来换一侧就能打成的孔也跟着失败。
         // 现在：断开/未注册一律不重试，交给 DrillOne 换新轮廓、换一侧再建（见 DrillOne）。
         static F.Application LastApp;
+        internal static void TrackApp(P.PartDocument part){
+            if (part == null) return;
+            try { var a = part.Application; if (a != null) LastApp = a; } catch { }
+        }
 
         static bool Busy(Exception e){
             int hr = e.HResult;
@@ -143,6 +147,7 @@ namespace TianGongCadSuite {
 
         internal static P.RefPlane FindOrCreatePlane(P.PartDocument part, TargetFace target){
             if (target == null) throw new ArgumentNullException("target");
+            TrackApp(part);
             V3 fpt = new V3(), fnv = new V3(0, 0, 1); bool havePlane = false;
             try {
                 if (target.Plane != null) {
@@ -187,14 +192,22 @@ namespace TianGongCadSuite {
             //   3) 还不行就用这个位置的**已知答案**（第一次成功时记下来的）。
             bool reversed = false, knowReversed = false;
             G.Face planeFace = target.Face;
+            V3 faceGeoNormal = fnv;
             knowReversed = ParamReversed(planeFace, out reversed);
-            if (!knowReversed) {
-                var fresh = FindModelFace(ModelFor(target), fpt, fnv);
-                if (fresh != null) { planeFace = fresh; knowReversed = ParamReversed(fresh, out reversed); }
+            if (knowReversed) {
+                // 外法向必须用同一张面片自己的几何法向配它的 IsParamReversed，避免旧 Plane 法向与新面片参数化反号
+                try {
+                    var pl = planeFace.Geometry as G.Plane;
+                    if (pl != null) { Array fp = new double[3], fn = new double[3]; pl.GetPlaneData(ref fp, ref fn); faceGeoNormal = V3.From(fn).Unit(); }
+                } catch { }
+            } else {
+                V3 freshNormal;
+                var fresh = FindModelFace(ModelFor(target), fpt, fnv, target.FaceId, out freshNormal);
+                if (fresh != null) { planeFace = fresh; faceGeoNormal = freshNormal; knowReversed = ParamReversed(fresh, out reversed); }
             }
             V3 outward = fnv;
             if (knowReversed) {
-                outward = reversed ? fnv * -1.0 : fnv;
+                outward = reversed ? faceGeoNormal * -1.0 : faceGeoNormal;
                 OutwardCache[key] = outward;
             } else {
                 V3 learned;
@@ -244,41 +257,41 @@ namespace TianGongCadSuite {
                 }
             } catch (Exception e) { Log.Write("AutoHolePlaneByFace", e); }
 
-            // ④ 兜底：与目标面平行的已有基准面 + 偏移新建（不碰面片，面片失效时也能建）。
+            // ④ 兜底：遍历所有与目标面平行且不共面的已有基准面 + 偏移新建（优先法向朝外的参照面，不碰面片）。
             //
             // 偏移有两个方向，而且实测**两边建出来的法向可能一模一样**（都继承参照面的法向），
             // 所以方向不能靠"比法向"猜，只能按位置算、按位置验收：
             //   参照面根点 r0、法向 n（|n·fnv|≈1）；两个候选面在 r0 ± mag·n；
             //   要的是轴向坐标 = fpt·fnv 的那一张 → 偏移走 +n 还是 -n 由 (fpt-r0)·n 的符号定。
             // 实测约定：igNormalSide = 沿参照面法向 +n 偏，igReverseNormalSide = 沿 -n 偏。
-            // 位置对、但朝向反的（参照面本身朝材料里，本零件就是）一律不用 —— 用了孔照样建不出来。
-            var parallel = FindParallel(part, fnv, fpt);
-            if (parallel != null) {
+            // 位置对、但朝向反的（参照面本身朝材料里，本零件就是）一律不用 —— 尝试下一个平行基准面。
+            var parallels = AllParallel(part, fnv, fpt, outward);
+            foreach (var parallel in parallels) {
                 double mag = Math.Abs((fpt - parallel.Item1).Dot(fnv));
-                if (mag > PlaneOnTolM) {
-                    bool forward = (fpt - parallel.Item1).Dot(parallel.Item3) > 0;
-                    var first  = forward ? P.ReferenceElementConstants.igNormalSide : P.ReferenceElementConstants.igReverseNormalSide;
-                    var second = forward ? P.ReferenceElementConstants.igReverseNormalSide : P.ReferenceElementConstants.igNormalSide;
-                    foreach (var sd in new[]{ first, second }) {
-                        try {
-                            var sdLocal = sd;
-                            var np = Attempt("建基准面(平行)", () => part.RefPlanes.AddParallelByDistance(parallel.Item2, mag, sdLocal, M, M, M, M));
-                            if (np == null) continue;
-                            if (!usable(np)) {   // 位置或朝向不对：不是我们要的那张，删掉，别留在零件里
-                                Info("平行基准面建的候选不合格（位置偏 " + (PlaneGap(np, fpt) * 1000.0).ToString("0.###")
-                                   + "mm，法向·外法向 = " + PlaneDot(np, outward).ToString("0.###") + "），弃用");
-                                TryDeletePlane(np);
-                                continue;
-                            }
-                            PlaneCache[key] = np;
-                            return np;
-                        } catch (Exception e) { Log.Write("AutoHolePlaneByRef", e); }
-                    }
+                if (mag <= PlaneOnTolM) continue;
+                bool forward = (fpt - parallel.Item1).Dot(parallel.Item3) > 0;
+                var first  = forward ? P.ReferenceElementConstants.igNormalSide : P.ReferenceElementConstants.igReverseNormalSide;
+                var second = forward ? P.ReferenceElementConstants.igReverseNormalSide : P.ReferenceElementConstants.igNormalSide;
+                foreach (var sd in new[]{ first, second }) {
+                    try {
+                        var sdLocal = sd;
+                        var refPlane = parallel.Item2;
+                        var np = Attempt("建基准面(平行)", () => part.RefPlanes.AddParallelByDistance(refPlane, mag, sdLocal, M, M, M, M));
+                        if (np == null) continue;
+                        if (!usable(np)) {   // 位置或朝向不对：不是我们要的那张，删掉，别留在零件里
+                            Info("平行基准面建的候选不合格（位置偏 " + (PlaneGap(np, fpt) * 1000.0).ToString("0.###")
+                               + "mm，法向·外法向 = " + PlaneDot(np, outward).ToString("0.###") + "），弃用");
+                            TryDeletePlane(np);
+                            continue;
+                        }
+                        PlaneCache[key] = np;
+                        return np;
+                    } catch (Exception e) { Log.Write("AutoHolePlaneByRef", e); }
                 }
             }
             Info("建不出基准面：零件 " + SafeName(part) + " 实体 " + target.Body + "/" + PartBodies.Count(part)
                  + "，面(局部) " + fpt + " 法向 " + fnv + "，外法向 " + outward + (knowReversed ? "" : "（问不出，猜的）")
-                 + "，平行基准面 " + (parallel == null ? "无" : "有") + "，基准面共 " + SafeCount(part) + " 张（与面重合 "
+                 + "，可用平行基准面 " + parallels.Count + " 张，基准面共 " + SafeCount(part) + " 张（与面重合 "
                  + CountCoplanar(part, fpt, fnv) + " 张）");
             throw new InvalidOperationException("无法在所选面上建立打孔基准面（位置/朝向都不对）。请重新点一次这个面再打。");
         }
@@ -362,7 +375,8 @@ namespace TianGongCadSuite {
         }
 
         // 基准面对象还活着吗？随便读一个轻量属性，死了会抛 COM 异常。
-        static bool PlaneUsable(P.RefPlane plane){
+        internal static bool PlaneUsable(P.RefPlane plane){
+            if (plane == null) return false;
             try { Array n = new double[3]; plane.GetNormal(ref n); return true; }
             catch { return false; }
         }
@@ -384,6 +398,7 @@ namespace TianGongCadSuite {
         const int PlaneCacheLimit = 256;
         static void TrimCache(){
             try { if (PlaneCache.Count > PlaneCacheLimit) PlaneCache.Clear(); } catch { }
+            try { if (OutwardCache.Count > PlaneCacheLimit) OutwardCache.Clear(); } catch { }
         }
 
         static void DropCacheByDocKey(string doc){
@@ -394,6 +409,12 @@ namespace TianGongCadSuite {
                 else if (kv.Key.IndexOf("|" + doc + "|", StringComparison.Ordinal) >= 0) dead.Add(kv.Key);
             }
             foreach (var k in dead) PlaneCache.Remove(k);
+            dead.Clear();
+            foreach (var kv in OutwardCache) {
+                if (kv.Key.StartsWith(doc + "|", StringComparison.Ordinal)) dead.Add(kv.Key);
+                else if (kv.Key.IndexOf("|" + doc + "|", StringComparison.Ordinal) >= 0) dead.Add(kv.Key);
+            }
+            foreach (var k in dead) OutwardCache.Remove(k);
         }
 
         public static int PlaneCacheCount { get { return PlaneCache.Count; } }
@@ -429,10 +450,13 @@ namespace TianGongCadSuite {
             } catch (Exception e) { Log.Write("AutoHolePruneCache", e); }
         }
 
-        // 缓存键 = 文档 + "|" + 法向 + "|" + 偏移；文档名本身可能含 '|'，所以从右边切两段。
-        static string DocKeyOfCacheKey(string key){
+        // 缓存键 = 文档 + "|" + 法向 + "|" + 偏移 [+ "|体N"]；文档名本身可能含 '|'，先剥掉多实体尾缀再从右边切两段。
+        internal static string DocKeyOfCacheKey(string key){
             if (string.IsNullOrEmpty(key)) return "";
-            int i = key.LastIndexOf('|');
+            int end = key.Length;
+            int last = key.LastIndexOf('|');
+            if (last > 0 && last + 2 <= end && key[last + 1] == '体') end = last;
+            int i = key.LastIndexOf('|', end - 1);
             if (i <= 0) return "";
             int j = key.LastIndexOf('|', i - 1);
             if (j <= 0) return "";
@@ -483,18 +507,25 @@ namespace TianGongCadSuite {
             return null;
         }
 
-        // 找一个与目标面平行的基准面，返回它的(根点, 对象, 法向)
-        static Tuple<V3, P.RefPlane, V3> FindParallel(P.PartDocument part, V3 normal, V3 point){
+        // 找所有与目标面平行且不共面的已有基准面，法向与 outward 一致的排在前面（偏移新建会继承参照面法向）。
+        static List<Tuple<V3, P.RefPlane, V3>> AllParallel(P.PartDocument part, V3 normal, V3 point, V3 outward){
+            var same = new List<Tuple<V3, P.RefPlane, V3>>();
+            var other = new List<Tuple<V3, P.RefPlane, V3>>();
             foreach (var rp in AllPlanes(part)) {
                 try {
                     Array rn = new double[3], rr = new double[3];
                     rp.GetNormal(ref rn); rp.GetRootPoint(ref rr);
                     var rnv = V3.From(rn).Unit();
                     if (Math.Abs(Math.Abs(rnv.Dot(normal)) - 1) > 1e-6) continue;
-                    return Tuple.Create(V3.From(rr), rp, rnv);
+                    var root = V3.From(rr);
+                    if (Math.Abs((point - root).Dot(normal)) <= PlaneOnTolM) continue;
+                    var item = Tuple.Create(root, rp, rnv);
+                    if (rnv.Dot(outward) > 0.99) same.Add(item);
+                    else other.Add(item);
                 } catch { }
             }
-            return null;
+            same.AddRange(other);
+            return same;
         }
 
         const double PlaneOnTolM = 1e-6;   // 0.001mm，和 FindCoplanar 的共面容差同一个量级
@@ -527,13 +558,14 @@ namespace TianGongCadSuite {
             try { reversed = face.IsParamReversed; return true; } catch { return false; }
         }
 
-        // 按平面数据（点 + 法向，零件局部）在实体现有面里找回同一张平面面。
-        // 用途：用户点的面片对象打完孔以后会失效，但外法向/建面都还需要一张能用的面片。
-        static G.Face FindModelFace(P.Model model, V3 point, V3 normal){
+        // 按平面数据（点 + 法向，零件局部）在实体现有面里找回同一张平面面，同时返回该面片自身的几何法向。
+        // 优先匹配相同 FaceId 和包围盒包含 point 的面，避免 U 型件/双翼缘上共面多面片找错张。
+        static G.Face FindModelFace(P.Model model, V3 point, V3 normal, string faceId, out V3 faceNormal){
+            faceNormal = normal;
             try {
                 if (model == null) return null;
                 var body = (G.Body)model.Body;
-                G.Face best = null; double bestD = PlaneOnTolM;
+                G.Face best = null; double bestD = PlaneOnTolM; int bestRank = -1;
                 foreach (G.Face f in (G.Faces)body.get_Faces(G.FeatureTopologyQueryTypeConstants.igQueryAll)) {
                     var pl = f.Geometry as G.Plane;
                     if (pl == null) continue;
@@ -542,10 +574,29 @@ namespace TianGongCadSuite {
                     var nv = V3.From(n).Unit();
                     if (Math.Abs(Math.Abs(nv.Dot(normal)) - 1) > 1e-6) continue;      // 不平行
                     double d = Math.Abs((V3.From(p) - point).Dot(normal));            // 共面程度
-                    if (d <= bestD) { bestD = d; best = f; }
+                    if (d > PlaneOnTolM) continue;
+                    int rank = 0;
+                    if (InFaceBox(f, point)) rank += 2;
+                    if (!string.IsNullOrEmpty(faceId)) {
+                        try { if (f.ID.ToString(CultureInfo.InvariantCulture) == faceId) rank += 4; } catch { }
+                    }
+                    if (rank > bestRank || (rank == bestRank && d < bestD)) {
+                        bestRank = rank; bestD = d; best = f; faceNormal = nv;
+                    }
                 }
                 return best;
             } catch (Exception e) { Log.Write("AutoHoleFindModelFace", e); return null; }
+        }
+        internal static bool InFaceBox(G.Face f, V3 point){
+            try {
+                Array lo = new double[3], hi = new double[3];
+                f.GetRange(ref lo, ref hi);
+                V3 a = V3.From(lo), b = V3.From(hi);
+                const double tol = 1e-5;
+                return point.X >= a.X - tol && point.X <= b.X + tol
+                    && point.Y >= a.Y - tol && point.Y <= b.Y + tol
+                    && point.Z >= a.Z - tol && point.Z <= b.Z + tol;
+            } catch { return false; }
         }
 
         // 基准面的法向是不是背对材料（= 面片的外法向）。

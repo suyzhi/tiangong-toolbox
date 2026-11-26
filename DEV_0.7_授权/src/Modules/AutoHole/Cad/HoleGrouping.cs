@@ -180,6 +180,8 @@ namespace TianGongCadSuite {
         static string Merge(P.Model model, HoleSpec spec, string key, Batch old, IList<object> fresh, int freshCount, HashSet<string> taken, List<string> notes, HoleUndo undo, P.PartDocument part){
             var all = new List<object>(old.Members);
             all.AddRange(fresh);
+            // 散组前先记下旧组 SystemName（Ungroup 后 COM 对象即失效，无法再读）
+            string oldGroupSys = old.Group != null ? Sys(old.Group) : "";
             if (old.Group != null) {
                 try { old.Group.Ungroup(); }
                 catch (Exception e) { Log.Write("HoleGroupingUngroup", e); return ""; }   // 散不了：旧组没动，新孔单独成组
@@ -191,7 +193,7 @@ namespace TianGongCadSuite {
                 if (g.Count != all.Count) { try { g.Ungroup(); } catch { } throw new InvalidOperationException("重编后的组只有 " + g.Count + " 个成员"); }
                 if (undo != null) {
                     undo.Group(part, g);
-                    if (old.Group != null) undo.GroupDissolved(part, old.GroupName, key, old.Members);
+                    if (old.Group != null) undo.GroupDissolved(part, old.GroupName, key, old.Members, oldGroupSys);
                 }
                 try { g.Name = groupName; } catch (Exception e) { Log.Write("HoleGroupingName", e); }
                 Tag(g, key);
@@ -208,7 +210,7 @@ namespace TianGongCadSuite {
                         taken.Add(old.GroupName);
                     } catch (Exception e2) {
                         Log.Write("HoleGroupingRestore", e2);
-                        if (undo != null) undo.GroupDissolved(part, old.GroupName, key, old.Members);   // 撤销时再试一次
+                        if (undo != null) undo.GroupDissolved(part, old.GroupName, key, old.Members, oldGroupSys);   // 撤销时再试一次
                         notes.Add("之前的特征组「" + old.GroupName + "」散开后没能恢复，组里的孔都还在，只是不再成组。");
                     }
                 }

@@ -15,6 +15,8 @@ namespace TianGongCadSuite {
         public string ThreadDepthMethod = ""; // igThroughAll / igFinite
         public double ThreadDepth;
         public double BottomAngle;           // 盲孔孔底角度（度），平底为 0
+        public bool Chamfer;                 // 孔口起始倒角（撤销改孔型时保住原倒角）
+        public double ChamferSetback, ChamferAngle;
     }
 
     // 「改孔型」窗口打开时，按选中的孔现在是什么来填界面；改完以后按规格重新命名。
@@ -42,6 +44,11 @@ namespace TianGongCadSuite {
             if (s.Kind == HoleKind.Tapped) {
                 s.ThreadFull = v.ThreadDepthMethod != "igFinite";
                 s.ThreadDepth = s.ThreadFull ? HoleSpec.DefaultThreadDepth(s.ThreadSize) : Round(v.ThreadDepth);
+            }
+            if (v.Chamfer && s.Kind != HoleKind.Countersink && v.ChamferSetback > 0) {
+                s.Chamfer = true;
+                s.ChamferSetback = Round(v.ChamferSetback);
+                s.ChamferAngle = v.ChamferAngle > 0 && v.ChamferAngle < 90 ? Round(v.ChamferAngle) : 45;
             }
             return s;
         }

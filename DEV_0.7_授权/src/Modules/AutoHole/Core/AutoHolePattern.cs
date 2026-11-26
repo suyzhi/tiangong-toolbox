@@ -33,20 +33,25 @@ namespace TianGongCadSuite {
             if (double.IsNaN(lengthMm) || double.IsInfinity(lengthMm) || lengthMm <= Tol)
                 throw new ArgumentException("排孔方向的长度必须大于 0。");
             double a = spec.EdgeMm, b = spec.EndEdge;
+            if (double.IsNaN(a) || double.IsInfinity(a) || double.IsNaN(b) || double.IsInfinity(b))
+                throw new ArgumentException("边距不是有效数字。");
             if (a < 0 || b < 0) throw new ArgumentException("边距不能为负数。");
-            if (a + b >= lengthMm - Tol) throw new ArgumentException("边距过大，排孔方向剩余长度不足。");
             double usable = lengthMm - a - b;
+            if (usable < -Tol) throw new ArgumentException("边距过大，排孔方向剩余长度不足。");
 
             if (spec.Kind == HolePatternKind.Divide) {
                 if (spec.Count < 1) throw new ArgumentException("孔数必须至少为 1。");
-                if (spec.Count == 1) return new double[]{ a + usable / 2 };
+                if (spec.Count == 1) return new double[]{ a + Math.Max(0, usable) / 2 };
+                // 多孔等分要求起末端边距之间有正的剩余长度，否则孔位重合
+                if (usable <= Tol) throw new ArgumentException("边距过大，排孔方向剩余长度不足。");
                 var r = new double[spec.Count];
                 for (int i = 0; i < spec.Count; i++) r[i] = a + usable * i / (spec.Count - 1);
                 return r;
             }
             if (spec.Kind == HolePatternKind.Pitch) {
-                if (double.IsNaN(spec.PitchMm) || spec.PitchMm <= Tol) throw new ArgumentException("间距必须大于 0。");
-                int n = (int)Math.Floor(usable / spec.PitchMm + Tol) + 1;
+                if (double.IsNaN(spec.PitchMm) || double.IsInfinity(spec.PitchMm) || spec.PitchMm <= Tol)
+                    throw new ArgumentException("间距必须大于 0。");
+                int n = (int)Math.Floor(Math.Max(0, usable) / spec.PitchMm + Tol) + 1;
                 if (n < 1) n = 1;
                 if (n > 500) throw new ArgumentException("按此间距会排出超过 500 个孔，请加大间距或减小边距。");
                 var r = new double[n];
@@ -70,6 +75,7 @@ namespace TianGongCadSuite {
         public static double[] Angles(HolePatternSpec spec){
             if (spec == null) throw new ArgumentNullException("spec");
             if (spec.Kind != HolePatternKind.Circular) throw new ArgumentException("该排布不是圆周均布。");
+            if (double.IsNaN(spec.StartAngleDeg) || double.IsInfinity(spec.StartAngleDeg)) throw new ArgumentException("起始角不是有效数字。");
             if (spec.Count < 2) throw new ArgumentException("圆周均布至少需要 2 个孔。");
             if (spec.Count > 720) throw new ArgumentException("圆周孔数过多（上限 720）。");
             var r = new double[spec.Count];
@@ -78,12 +84,16 @@ namespace TianGongCadSuite {
             return r;
         }
 
-        // 定距模式实际会排几个孔——界面用它做实时预览。
+        // 定距模式实际会排几个孔——界面用它做实时预览（与 Offsets 的合法性边界保持一致）。
         public static int PitchCount(double lengthMm, HolePatternSpec spec){
             if (spec == null || spec.Kind != HolePatternKind.Pitch) return 0;
-            double usable = lengthMm - spec.EdgeMm - spec.EndEdge;
-            if (usable < -Tol || spec.PitchMm <= Tol) return 0;
-            return (int)Math.Floor(usable / spec.PitchMm + Tol) + 1;
+            if (double.IsNaN(lengthMm) || double.IsInfinity(lengthMm) || lengthMm <= Tol) return 0;
+            double a = spec.EdgeMm, b = spec.EndEdge;
+            if (double.IsNaN(a) || double.IsInfinity(a) || double.IsNaN(b) || double.IsInfinity(b) || a < 0 || b < 0) return 0;
+            if (double.IsNaN(spec.PitchMm) || double.IsInfinity(spec.PitchMm) || spec.PitchMm <= Tol) return 0;
+            double usable = lengthMm - a - b;
+            if (usable < -Tol) return 0;
+            return (int)Math.Floor(Math.Max(0, usable) / spec.PitchMm + Tol) + 1;
         }
 
         public static string Describe(double lengthMm, HolePatternSpec spec){

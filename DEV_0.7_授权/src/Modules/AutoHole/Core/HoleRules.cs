@@ -160,14 +160,29 @@ namespace TianGongCadSuite {
             kind = HoleKind.Through; return false;
         }
 
-        // 插件里用：从用户目录读一次（读不到/坏了就用默认，不打扰用户）
+        // 插件里用：从用户目录读一次（读不到/坏了就用默认，不打扰用户）。
+        // 仅在读盘确实完成（文件不存在、读出规则、或文件可读但为空）后才置 loaded=true：
+        // 若首次读盘因文件被 Excel 占用失败（SettingsFile 会把路径记入 unreadable），保持 loaded=false，
+        // 这样用户关掉 Excel 重开窗口时能再次触发 SettingsFile.Read 解封保存，不会整会话永久锁死。
         static bool loaded;
         public static void LoadFromDisk(){
             if (loaded) return;
-            loaded = true;
             try {
-                var s = Load(SettingsFile.PathOf(FileName));
-                if (s != null && s.Problem().Length == 0) current = s;
+                string path = SettingsFile.PathOf(FileName);
+                bool existed = System.IO.File.Exists(path);
+                var s = Load(path);
+                if (s != null) {
+                    if (s.Problem().Length == 0) current = s;
+                    loaded = true;
+                } else if (!existed) {
+                    loaded = true;
+                } else {
+                    try {
+                        using (new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite | System.IO.FileShare.Delete)) { }
+                        loaded = true;
+                    } catch (System.IO.IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                }
             } catch (Exception e) { Log.Write("HoleRulesLoad", e); }
         }
         public static void SaveToDisk(HoleRuleSet set){

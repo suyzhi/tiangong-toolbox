@@ -27,6 +27,7 @@ namespace TianGongCadSuite {
             if (centres == null || centres.Count < 2) return Fallback(target, spec, centres, null);
             target = AutoHoleWriter.AnchorToActivePart(target);
             var part = target.Part;
+            AutoHoleWriter.TrackApp(part);
             P.Model model = AutoHoleWriter.ModelFor(target);   // 多实体零件：目标面所在的实体（PartBodies；阵列在指定实体上实测能建）
             if (model == null) throw new InvalidOperationException("目标零件没有可用的实体模型。");
             P.RefPlane plane = AutoHoleWriter.FindOrCreatePlane(part, target);

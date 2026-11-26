@@ -237,11 +237,13 @@ namespace TianGongCadSuite {
             why = "";
             if (s == null || s.Assembly == null) { why = "没有装配"; return null; }
             var refPart = r == null ? null : r.Owner as P.PartDocument;
-            if (refPart == null || r.Placement == null) { why = "参考孔读不到所在零件"; return null; }
+            var refSheet = r == null ? null : r.Owner as P.SheetMetalDocument;
+            object refDoc = (object)refPart ?? refSheet;
+            if (refDoc == null || r.Placement == null) { why = "参考孔读不到所在零件"; return null; }
             if (t == null || t.Part == null || t.Placement == null) { why = "打孔面读不到所在零件"; return null; }
             // 只认这两个实例（0.8.4，见 OccurrenceIndex.ForChain）：不再为写一条关联记录把整个装配加载一遍
             string rmode, tmode, cwhy;
-            var refNode = Locate(s, r.Pick, refPart, r.Placement, out rmode, out cwhy);
+            var refNode = Locate(s, r.Pick, refDoc, r.Placement, out rmode, out cwhy);
             if (refNode == null) { why = "认不出参考孔在装配里是哪个零件实例" + (cwhy.Length > 0 ? "（" + cwhy + "）" : ""); return null; }
             var tgtNode = Locate(s, t.Pick, t.Part, t.Placement, out tmode, out cwhy);
             if (tgtNode == null) { why = "认不出打孔面在装配里是哪个零件实例" + (cwhy.Length > 0 ? "（" + cwhy + "）" : ""); return null; }
@@ -253,38 +255,47 @@ namespace TianGongCadSuite {
                 RefCenter = rc, RefAxis = ra, RefDiameterMm = r.DiameterMm,
                 TgtOcc = tgtNode.Path, TgtDoc = tgtNode.FileName, TgtMode = tmode
             };
-            // 参考孔是不是某个孔特征打出来的：是的话记下特征的 SystemName，参考孔在零件里被挪了也能跟上
-            try {
-                List<HoleFeatures.Entry> holes;
-                string key = refNode.FullName.Length > 0 ? refNode.FullName : refNode.Path;
-                if (!s.RefHoles.TryGetValue(key, out holes)) { holes = HoleFeatures.Read(refPart); s.RefHoles[key] = holes; }
-                var f = HoleFeatures.OnAxis(holes, rc, ra);
-                if (f != null) link.RefFeature = f.SystemName;
-            } catch (Exception e) { Log.Write("HoleLinkRefFeature", e); }
+            // 参考孔是不是某个孔特征打出来的（仅普通零件 .par 支持回读孔特征表；钣金件 .psm 仍可跟随实例整体移动）
+            if (refPart != null) {
+                try {
+                    List<HoleFeatures.Entry> holes;
+                    string key = refNode.FullName.Length > 0 ? refNode.FullName : refNode.Path;
+                    if (!s.RefHoles.TryGetValue(key, out holes)) { holes = HoleFeatures.Read(refPart); s.RefHoles[key] = holes; }
+                    var f = HoleFeatures.OnAxis(holes, rc, ra);
+                    if (f != null) link.RefFeature = f.SystemName;
+                } catch (Exception e) { Log.Write("HoleLinkRefFeature", e); }
+            }
             return link;
         }
 
-        static OccurrenceNode Locate(Session s, object pick, P.PartDocument part, Transform placement, out string mode, out string why){
+        static OccurrenceNode Locate(Session s, object pick, object doc, Transform placement, out string mode, out string why){
             mode = "R"; why = "";
             // 一批孔大多是同一个参考零件、同一个打孔零件：认过的实例直接用（ChainOf 要沿实例链读矩阵，几十个孔各认一遍白花时间）
-            string full = ""; try { full = part.FullName ?? ""; } catch { }
+            string full = DocFullName(doc);
             var sb = new System.Text.StringBuilder(full);
             foreach (var v in placement.M) sb.Append('|').Append(Math.Round(v, 7).ToString(CultureInfo.InvariantCulture));
             string memo = sb.ToString();
             KeyValuePair<OccurrenceNode, string> hit;
             if (s.Located.TryGetValue(memo, out hit)) { mode = hit.Value; if (hit.Key == null) why = "认不出这个零件实例"; return hit.Key; }
-            var node = LocateFresh(s, pick, part, placement, out mode, out why);
+            var node = LocateFresh(s, pick, doc, placement, out mode, out why);
             s.Located[memo] = new KeyValuePair<OccurrenceNode, string>(node, mode);
             return node;
         }
-        static OccurrenceNode LocateFresh(Session s, object pick, P.PartDocument part, Transform placement, out string mode, out string why){
+        static string DocFullName(object doc){
+            var part = doc as P.PartDocument;
+            if (part != null) { try { return part.FullName ?? ""; } catch { return ""; } }
+            var sheet = doc as P.SheetMetalDocument;
+            if (sheet != null) { try { return sheet.FullName ?? ""; } catch { return ""; } }
+            return "";
+        }
+        static OccurrenceNode LocateFresh(Session s, object pick, object doc, Transform placement, out string mode, out string why){
             mode = "R";
-            var chain = NativeHoleLink.ChainOf(s.Assembly, pick, part, placement, out why);
+            var chain = NativeHoleLink.ChainOf(s.Assembly, pick, doc, placement, out why);
             if (chain == null) return null;
             string key = chain.Key;
             OccurrenceIndex idx;
             if (!s.Chains.TryGetValue(key, out idx)) { idx = OccurrenceIndex.ForChain(chain); s.Chains[key] = idx; }
-            var node = idx.Locate(part, placement, out mode);
+            var node = idx.Locate(doc, placement, out mode);
             if (node == null) why = "实例链上的矩阵对不上";
             return node;
         }

@@ -97,13 +97,15 @@ namespace TianGongCadSuite {
             } catch { }
         }
 
-        // 参考孔（零件局部的孔心 + 轴线）是哪个孔特征打出来的：孔特征的某个孔心落在这根轴线上（径向 ≤0.02mm）。
+        // 参考孔（零件局部的孔心 + 轴线）是哪个孔特征打出来的：孔特征的轴线与参考轴线平行且某个孔心落在这根轴线上（径向 ≤0.02mm）。
         public static Entry OnAxis(List<Entry> entries, V3 center, V3 axis){
             if (entries == null) return null;
             V3 a;
             try { a = axis.Unit(); } catch { return null; }
             Entry best = null; double bestR = 0.00002;
             foreach (var e in entries) {
+                // 必须校验轴线平行：否则块件上与参考孔正交的侧孔若孔心恰落在轴线上会被误匹配，进而覆盖 refAxis 导致同步失败
+                if (e.HasNormal && Math.Abs(e.Normal.Dot(a)) < 0.99) continue;
                 foreach (var c in e.Centers) {
                     var d = c - center;
                     double radial = (d - a * d.Dot(a)).Length;

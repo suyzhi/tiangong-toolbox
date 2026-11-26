@@ -35,7 +35,7 @@ namespace TianGongCadSuite {
 
     public sealed class HoleUndo {
         sealed class GroupRestore {
-            public string Name = "", Key = "";
+            public string Sys = "", Name = "", Key = "";
             public readonly List<string> Members = new List<string>();
         }
         sealed class Entry {
@@ -108,17 +108,24 @@ namespace TianGongCadSuite {
             e.Renames.Add(new KeyValuePair<string, string>(s, oldName));
         }
         public void GroupDissolved(P.PartDocument part, string oldName, string key, IList<object> members){
-            var r = new GroupRestore { Name = oldName ?? "", Key = key ?? "" };
+            GroupDissolved(part, oldName, key, members, "");
+        }
+        public void GroupDissolved(P.PartDocument part, string oldName, string key, IList<object> members, string oldGroupSys){
+            var e = For(part);
+            // 同一批打孔里刚建的中间组随后又被二次并组散掉：撤销时不应把它当作打孔前的旧组恢复
+            if (!string.IsNullOrEmpty(oldGroupSys) && e.Groups.Contains(oldGroupSys)) return;
+            var r = new GroupRestore { Sys = oldGroupSys ?? "", Name = oldName ?? "", Key = key ?? "" };
             foreach (var m in members) { string s = HoleGrouping.Sys(m); if (s.Length > 0) r.Members.Add(s); }
-            For(part).Restores.Add(r);
+            e.Restores.Add(r);
         }
 
         // 这一批新建的孔特征和阵列（零件 + SystemName）：「改孔型」把刚打的这批孔直接带过去
+        // 阵列先于单孔输出：批量排孔时种子孔同时出现在 Holes 与 Patterns，按种子孔去重时让带 Pattern 的条目胜出
         public List<KeyValuePair<P.PartDocument, string>> Created(){
             var list = new List<KeyValuePair<P.PartDocument, string>>();
             foreach (var e in entries) {
-                foreach (var s in e.Holes) list.Add(new KeyValuePair<P.PartDocument, string>(e.Part, Current(e.Part, s)));
                 foreach (var s in e.Patterns) list.Add(new KeyValuePair<P.PartDocument, string>(e.Part, s));
+                foreach (var s in e.Holes) list.Add(new KeyValuePair<P.PartDocument, string>(e.Part, Current(e.Part, s)));
                 foreach (var s in e.Multis) list.Add(new KeyValuePair<P.PartDocument, string>(e.Part, CurrentMulti(e.Part, s)));
             }
             return list;
@@ -131,10 +138,15 @@ namespace TianGongCadSuite {
             foreach (var kv in other.multiRefs) multiRefs[kv.Key] = kv.Value;
             foreach (var o in other.entries) {
                 var e = For(o.Part);
+                // 跨面/多段并组时，后一段散掉的可能是前一段刚建的中间组：过滤掉，免得撤销时重复编组失败
+                foreach (var r in o.Restores) {
+                    if (r.Sys.Length > 0 && e.Groups.Contains(r.Sys)) continue;
+                    e.Restores.Add(r);
+                }
                 e.Holes.AddRange(o.Holes); e.Cutouts.AddRange(o.Cutouts); e.Groups.AddRange(o.Groups); e.Copies.AddRange(o.Copies);
                 e.Patterns.AddRange(o.Patterns); e.PatternHoles += o.PatternHoles;
                 e.Multis.AddRange(o.Multis); e.MultiHoles += o.MultiHoles;
-                e.Restores.AddRange(o.Restores); e.Renames.AddRange(o.Renames);
+                e.Renames.AddRange(o.Renames);
             }
         }
 
@@ -209,13 +221,21 @@ namespace TianGongCadSuite {
                     if (h == null) continue;
                     try { h.Name = kv.Value; } catch (Exception ex) { Log.Write("HoleUndoRename", ex); }
                 }
-                // ⑤ 并组时散掉的旧组：按原成员、原名字编回去
+                // ⑤ 并组时散掉的旧组：按原成员、原名字编回去（记录已归组成员，防重复编组报错）
+                var regrouped = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var r in e.Restores) {
                     var members = new List<object>();
-                    foreach (string s in r.Members) { object m = (object)InAny(e.Part, model, x => FindHole(x, s)) ?? (object)InAny(e.Part, model, x => FindPattern(x, s)) ?? InAny(e.Part, model, x => FindMulti(x, s)); if (m != null) members.Add(m); }
+                    var memberSys = new List<string>();
+                    foreach (string s in r.Members) {
+                        if (regrouped.Contains(s)) continue;
+                        object m = (object)InAny(e.Part, model, x => FindHole(x, s)) ?? (object)InAny(e.Part, model, x => FindPattern(x, s)) ?? InAny(e.Part, model, x => FindMulti(x, s));
+                        if (m != null) { members.Add(m); memberSys.Add(s); }
+                    }
                     if (members.Count < 2) continue;
-                    try { HoleGrouping.Regroup(model, members, r.Name, r.Key); }
-                    catch (Exception ex) {
+                    try {
+                        HoleGrouping.Regroup(model, members, r.Name, r.Key);
+                        foreach (string s in memberSys) regrouped.Add(s);
+                    } catch (Exception ex) {
                         Log.Write("HoleUndoRegroup", ex);
                         o.Notes.Add(e.PartName + "：之前的特征组「" + r.Name + "」没能恢复成组（孔都在，只是不再成组）。");
                     }

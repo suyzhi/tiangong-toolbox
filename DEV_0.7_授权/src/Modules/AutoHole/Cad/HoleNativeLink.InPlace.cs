@@ -37,6 +37,9 @@ namespace TianGongCadSuite {
                 for (int i = 1; i <= n; i++) {
                     A.Occurrence occ = null; try { occ = top.Occurrences.Item(i); } catch { }
                     if (occ == null) continue;
+                    // 引用路径读不到时的兜底：子装配节点也要纳入候选，Walk 才会递归进子装配找目标零件
+                    bool sub = false; try { sub = occ.Subassembly; } catch { }
+                    if (sub) { candidates.Add(occ); continue; }
                     string fn = ""; try { fn = occ.OccurrenceFileName ?? ""; } catch { }
                     if (string.Equals(fn, full, StringComparison.OrdinalIgnoreCase)) candidates.Add(occ);
                 }
@@ -111,7 +114,8 @@ namespace TianGongCadSuite {
         static string FullName(object doc){ try { return (string)((dynamic)doc).FullName ?? ""; } catch { return ""; } }
         static object SafeActive(F.Application app){ try { return app.ActiveDocument; } catch { return null; } }
         static bool IsActive(F.Application app, string full){
-            try { return string.Equals(FullName(app.ActiveDocument), full, StringComparison.OrdinalIgnoreCase); } catch { return false; }
+            if (string.IsNullOrEmpty(full)) return false;
+            try { return NativeLinkMath.SamePath(FullName(app.ActiveDocument), full); } catch { return false; }
         }
 
         // 实例链上的子装配 / 零件在别的窗口（标签页）里作为顶层文档开着：返回它的文件名，没有返回 ""。
@@ -124,10 +128,14 @@ namespace TianGongCadSuite {
             if (app == null || chain == null) return "";
             var open = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             try {
+                string topFull = FullName(top);
                 foreach (object d in app.Documents) {
                     if (ReferenceEquals(d, top)) continue;
                     string fn = FullName(d);
-                    if (fn.Length > 0 && !NativeLinkMath.SamePath(fn, FullName(top))) open.Add(System.IO.Path.GetFullPath(fn));
+                    if (fn.Length == 0 || NativeLinkMath.SamePath(fn, topFull)) continue;
+                    // 单条未保存/非常规路径异常单独兜底，不能中断整轮检查导致漏放跨窗口原位编辑
+                    try { open.Add(System.IO.Path.GetFullPath(fn)); }
+                    catch { open.Add(fn); }
                 }
             } catch (Exception e) { Log.Write("NativeOpenElsewhere", e.Message); return ""; }
             if (open.Count == 0) return "";
@@ -177,41 +185,102 @@ namespace TianGongCadSuite {
             return s;
         }
 
-        // 原位编辑打孔面所在的零件（= 在装配里双击它）。已经在原位编辑它了就不再进（Levels=0，退出时也不退）；
-        // 正在原位编辑别的零件时不动（那是用户自己的状态）。
+        // 原位编辑打孔面所在的零件（= 在装配里双击它）。已经在原位编辑**同一个实例**了就不再进（Levels=0，退出时也不退）；
+        // 正在原位编辑别的零件或同一零件的另一个实例时不动（那是用户自己的状态，复用会导致零件间复制错到另一实例位姿上）。
         public static InPlace EnterTarget(F.Application app, A.AssemblyDocument top, TargetFace t, out string why){
             why = "";
             if (app == null || top == null || t == null || t.Part == null) { why = "读不到打孔零件"; return null; }
-            if (IsActive(app, FullName(t.Part)) && InPlaceUnder(t.Part, top)) return new InPlace { Levels = 0, Part = app.ActiveDocument as P.PartDocument };
+            var activePart = SafeActive(app) as P.PartDocument;
+            string targetFull = FullName(t.Part);
+            bool sameDoc = activePart != null && (
+                (targetFull.Length > 0 && NativeLinkMath.SamePath(FullName(activePart), targetFull))
+                || (targetFull.Length == 0 && !string.IsNullOrEmpty(t.PartName) && string.Equals(SafeName(activePart), t.PartName, StringComparison.OrdinalIgnoreCase)));
+            if (sameDoc && InPlaceUnder(activePart, top, t.Placement)) return new InPlace { Levels = 0, Part = activePart };
             object active = null; try { active = app.ActiveDocument; } catch { }
-            if (!ReferenceEquals(active, top) && !NativeLinkMath.SamePath(FullName(active), FullName(top))) { why = "现在正在原位编辑别的零件，没法原位编辑「" + SafeName(t.Part) + "」"; return null; }
+            if (!ReferenceEquals(active, top) && !NativeLinkMath.SamePath(FullName(active), FullName(top))) {
+                string tn = SafeName(t.Part);
+                if (tn.Length == 0) tn = t.PartName ?? "";
+                why = "现在正在原位编辑别的零件或同零件的另一实例，没法原位编辑「" + tn + "」";
+                return null;
+            }
             var chain = ChainOf(top, t.Pick, t.Part, t.Placement, out why);
             if (chain == null) { why = "打孔面：" + why; return null; }
             var s = Enter(app, top, chain, out why);
             if (s == null) { why = "没能原位编辑「" + SafeName(t.Part) + "」：" + why; return null; }
             // 活动文档是这个零件还不够：现场 0.7.11 进原位"成功"后建零件间复制 E_UNEXPECTED（真机表：不在原位时就是这个错）。
-            // 问天工它是不是真的在原位编辑、顶层是不是这个装配；不是就等一会儿再问，还不是就退出来报错。
-            if (!Pump(app, () => InPlaceUnder(s.Part, top), 10000)) {
+            // 问天工它是不是真的在原位编辑、顶层是不是这个装配且实例位姿对得上；不是就等一会儿再问，还不是就退出来报错。
+            if (!Pump(app, () => InPlaceUnder(s.Part, top, t.Placement), 10000)) {
                 object topDoc = null, occ = null;
                 try { s.Part.GetTopDocumentAndSubOccurrenceOfIPADoc(out topDoc, out occ); } catch { }
-                Log.Write("NativeEnter", "活动文档是「" + SafeName(s.Part) + "」但天工不认为它在「" + SafeName(top) + "」里原位编辑（InPlaceActivated=" + InPlaceFlag(s.Part)
+                Log.Write("NativeEnter", "活动文档是「" + SafeName(s.Part) + "」但天工不认为它在「" + SafeName(top) + "」的目标实例里原位编辑（InPlaceActivated=" + InPlaceFlag(s.Part)
                           + "，天工说顶层是「" + SafeName(topDoc) + "」）");
-                why = "没能原位编辑「" + SafeName(t.Part) + "」：天工没有进入原位编辑状态";
+                why = "没能原位编辑「" + SafeName(t.Part) + "」：天工没有进入目标实例的原位编辑状态";
                 Leave(app, s);
                 return null;
             }
             return s;
         }
 
-        // 零件正在原位编辑、而且顶层文档就是 top
-        static bool InPlaceUnder(P.PartDocument part, A.AssemblyDocument top){
+        // 零件正在原位编辑、顶层文档是 top，且（若能读出当前原位编辑实例）该实例的装配位姿与 wantPlacement 一致
+        static bool InPlaceUnder(P.PartDocument part, A.AssemblyDocument top, Transform wantPlacement){
             if (part == null || top == null) return false;
             try {
                 if (!part.InPlaceActivated) return false;
                 object topDoc = null, occ = null;
                 part.GetTopDocumentAndSubOccurrenceOfIPADoc(out topDoc, out occ);
-                return ReferenceEquals(topDoc, top) || NativeLinkMath.SamePath(FullName(topDoc), FullName(top));
+                if (!ReferenceEquals(topDoc, top) && !NativeLinkMath.SamePath(FullName(topDoc), FullName(top))) return false;
+                if (wantPlacement == null || occ == null) return true;
+                return SameOccurrencePlacement(occ, wantPlacement);
             } catch (Exception e) { Log.Write("NativeInPlaceState", e.Message); return true; }   // 问不出来就不拦（老版本天工可能没有这两个接口）
+        }
+        static bool SameOccurrencePlacement(object occ, Transform want){
+            if (occ == null || want == null) return true;
+            var viaRef = TryReferenceMatrix(occ);
+            if (viaRef != null) return NativeLinkMath.Same(viaRef, want);
+            var raw = TryDirectMatrix(occ);
+            if (raw != null && NativeLinkMath.Same(raw, want)) return true;
+            var composed = TryComposedSubMatrix(occ as A.SubOccurrence);
+            if (composed != null) return NativeLinkMath.Same(composed, want);
+            if (raw != null) return false;
+            return true;
+        }
+        static Transform TryReferenceMatrix(object occ){
+            try {
+                var r = occ as F.Reference;
+                if (r == null) {
+                    var so = occ as A.SubOccurrence;
+                    if (so != null) r = so.Reference as F.Reference;
+                }
+                if (r == null) return null;
+                Array m = new double[16];
+                r.GetMatrix(ref m);
+                return new Transform(m);
+            } catch { return null; }
+        }
+        static Transform TryDirectMatrix(object occ){
+            try {
+                var o = occ as A.Occurrence;
+                if (o != null) { Array m = new double[16]; o.GetMatrix(ref m); return new Transform(m); }
+                var so = occ as A.SubOccurrence;
+                if (so != null) { Array m = new double[16]; so.GetMatrix(ref m); return new Transform(m); }
+            } catch { }
+            return null;
+        }
+        static Transform TryComposedSubMatrix(A.SubOccurrence so){
+            if (so == null) return null;
+            var chain = new List<Transform>();
+            object cur = so;
+            for (int depth = 0; depth < 12 && cur != null; depth++) {
+                var m = TryDirectMatrix(cur);
+                if (m == null) break;
+                chain.Add(m);
+                if (cur is A.Occurrence) break;
+                try { cur = ((A.SubOccurrence)cur).Parent; } catch { break; }
+            }
+            if (chain.Count < 2) return null;
+            Transform total = chain[chain.Count - 1];
+            for (int i = chain.Count - 2; i >= 0; i--) total = NativeLinkMath.Compose(total, chain[i]);
+            return total;
         }
         static string InPlaceFlag(P.PartDocument part){ try { return part.InPlaceActivated.ToString(); } catch (Exception e) { return "?" + e.Message; } }
 

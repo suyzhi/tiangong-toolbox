@@ -137,6 +137,12 @@ namespace TianGongCadSuite {
 
         // 在已经建好的轮廓上按指定的一侧打一个孔（多孔合一的种子孔，见 HoleCombine）。只能试一次 —— 建孔失败时 CAD 把轮廓一起作废。
         internal static P.Hole DrillOnProfile(P.PartDocument part, P.Model model, P.Profile prof, P.HoleData data, double depthMm, P.FeaturePropertyConstants side){
+            bool deleted;
+            return DrillOnProfile(part, model, prof, data, depthMm, side, out deleted);
+        }
+        // deleted=true 表示建出了失败特征并执行过 Delete（实测删光基准面上唯一的孔时 CAD 可能连基准面一起作废，调用方需重建基准面）
+        internal static P.Hole DrillOnProfile(P.PartDocument part, P.Model model, P.Profile prof, P.HoleData data, double depthMm, P.FeaturePropertyConstants side, out bool deleted){
+            deleted = false;
             P.Hole h = null;
             var addClock = System.Diagnostics.Stopwatch.StartNew();
             try {
@@ -149,6 +155,7 @@ namespace TianGongCadSuite {
             if (h == null) return null;
             object desc = null;
             if ((int)h.GetStatusEx(out desc) == (int)P.FeatureStatusConstants.igFeatureOK) return h;
+            deleted = true;
             try { h.Delete(); } catch (Exception e) { Log.Write("AutoHoleSeedDelete", e); }
             return null;
         }
@@ -215,11 +222,13 @@ namespace TianGongCadSuite {
         //    时沉孔会被切到材料内部、表面上看不到沉孔（切除体积只剩通孔那一段）。
         internal static P.HoleData BuildHoleData(P.PartDocument part, HoleSpec spec, DrillResult result){
             double dia = spec.HoleDiameter * MmToM;
-            if (dia <= 0) throw new ArgumentException("孔径必须大于 0。");
-            double bottom = spec.Bottom == HoleBottom.Flat ? 0.0 : spec.BottomAngle;
-            var vd = spec.Bottom == HoleBottom.Flat
-                ? P.FeaturePropertyConstants.igVBottomDimToFlat
-                : P.FeaturePropertyConstants.igVBottomDimToV;
+            if (double.IsNaN(dia) || double.IsInfinity(dia) || !(dia > 0)) throw new ArgumentException("孔径必须大于 0。");
+            bool vBottom = !spec.Through && spec.Bottom == HoleBottom.VBottom;
+            if (vBottom && !(spec.BottomAngle > 0 && spec.BottomAngle < 180)) throw new ArgumentException("V 型孔底角度必须在 0～180° 之间。");
+            double bottom = vBottom ? spec.BottomAngle : 0.0;
+            var vd = vBottom
+                ? P.FeaturePropertyConstants.igVBottomDimToV
+                : P.FeaturePropertyConstants.igVBottomDimToFlat;
             var none = P.FeaturePropertyConstants.igNone;
             // 标准 / 子类型 / 大小 / 配合：尺寸正好是天工孔标准表（GB Metric）里某一行的，就把那一行写进去，
             // 天工自带的孔命令打开时才认得出是标准孔；原来写 "ISO Metric" + 子类型/大小/配合全空，
@@ -235,8 +244,9 @@ namespace TianGongCadSuite {
             switch (spec.Kind) {
                 case HoleKind.Counterbore: {
                     double cd = spec.CounterboreDiameter * MmToM, cdep = spec.CounterboreDepth * MmToM;
-                    if (cd <= dia) throw new ArgumentException("沉孔直径必须大于通孔直径。");
-                    if (cdep <= 0) throw new ArgumentException("沉孔深度必须大于 0。");
+                    if (double.IsNaN(cd) || double.IsInfinity(cd) || !(cd > dia)) throw new ArgumentException("沉孔直径必须大于通孔直径。");
+                    if (double.IsNaN(cdep) || double.IsInfinity(cdep) || !(cdep > 0)) throw new ArgumentException("沉孔深度必须大于 0。");
+                    if (!spec.Through && spec.CounterboreDepth >= spec.Depth - 1e-9) throw new ArgumentException("沉孔深度必须小于盲孔深度。");
                     d = part.HoleDataCollection.AddEx(P.FeaturePropertyConstants.igCounterboreHole,
                         std, sub, stdSize, fit, dia,                              // 1-5 标准/子类型/大小/配合/孔径
                         cd, cdep, 0.0, 0.0, bottom,                               // 6-10 沉孔尺寸 + 孔底角度
@@ -248,8 +258,8 @@ namespace TianGongCadSuite {
                 }
                 case HoleKind.Countersink: {
                     double csd = spec.CountersinkDiameter * MmToM;
-                    if (csd <= dia) throw new ArgumentException("锥形沉孔直径必须大于通孔直径。");
-                    if (spec.CountersinkAngle <= 0 || spec.CountersinkAngle >= 180) throw new ArgumentException("锥角必须在 0～180° 之间。");
+                    if (double.IsNaN(csd) || double.IsInfinity(csd) || !(csd > dia)) throw new ArgumentException("锥形沉孔直径必须大于通孔直径。");
+                    if (!(spec.CountersinkAngle > 0 && spec.CountersinkAngle < 180)) throw new ArgumentException("锥角必须在 0～180° 之间。");
                     d = part.HoleDataCollection.AddEx(P.FeaturePropertyConstants.igCountersinkHole,
                         std, sub, stdSize, fit, dia,                              // 1-5 标准/子类型/大小/配合/孔径
                         0.0, 0.0, csd, spec.CountersinkAngle, bottom,             // 6-10 锥孔尺寸 + 锥角
@@ -381,8 +391,8 @@ namespace TianGongCadSuite {
                     else if (Off(csa, spec.CountersinkAngle, 1.0))
                         msgs.Add("锥角回读 " + N(csa) + "°（要求 " + N(spec.CountersinkAngle) + "°）");
                 }
-                // 孔底角度：只有显式要了 V 型底才比对，平底回读 0 是正常的
-                if (spec.Bottom == HoleBottom.VBottom) {
+                // 孔底角度：只有盲孔且显式要了 V 型底才比对，贯通孔或平底回读 0 是正常的
+                if (!spec.Through && spec.Bottom == HoleBottom.VBottom) {
                     double ba = Read(d, x => x.BottomAngle);
                     if (Off(ba, spec.BottomAngle, 1.0))
                         msgs.Add("孔底角度回读 " + N(ba) + "°（要求 " + N(spec.BottomAngle) + "°）");

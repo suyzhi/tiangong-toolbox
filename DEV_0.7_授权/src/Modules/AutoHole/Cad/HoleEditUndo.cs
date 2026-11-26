@@ -55,6 +55,18 @@ namespace TianGongCadSuite {
             Restore(h, s);
             holes.Remove(s);
         }
+        // 多孔特征失败回滚时种子孔专用：先完整恢复一次；若原规格是螺纹孔则重算后再完整恢复一次，
+        // 避免 EditUndoProbe 中「种子孔几何停留在改坏前孔径上」的问题
+        internal void RestoreSeed(P.PartDocument part, P.Hole h){
+            var s = Find(part, h);
+            if (s == null) return;
+            Restore(h, s);
+            if (s.Spec != null && s.Spec.Kind == HoleKind.Tapped) {
+                HoleEditCad.RecomputeAll(s.Part, HoleEditCad.ModelOf(s.Part));
+                Restore(h, s);
+            }
+            holes.Remove(s);
+        }
 
         public sealed class Result {
             public int Restored, Missing, Failed;
@@ -76,7 +88,7 @@ namespace TianGongCadSuite {
             foreach (var s in holes) {
                 P.Model model = null;
                 try { model = HoleEditCad.ModelOf(s.Part); } catch (Exception e) { r.Failed++; r.Notes.Add(e.Message); continue; }
-                var h = Alive(s.Ref) ? s.Ref : HoleEditCad.FindHole(model, s.Sys);
+                var h = Alive(s.Ref) ? s.Ref : HoleEditCad.FindHoleInPart(s.Part, s.Sys);
                 if (h == null) { r.Missing++; continue; }
                 todo.Add(new KeyValuePair<HoleState, P.Hole>(s, h));
                 if (!parts.Exists(p => SamePart(p, s.Part))) parts.Add(s.Part);
@@ -105,8 +117,7 @@ namespace TianGongCadSuite {
             foreach (var kv in todo) {
                 if (bad.Contains(kv.Key)) continue;
                 try {
-                    var model = HoleEditCad.ModelOf(kv.Key.Part);
-                    var u = HoleEditCad.MultiOf(model, kv.Value);
+                    var u = HoleEditCad.MultiOf(kv.Key.Part, kv.Value);
                     if (u == null || HoleGrouping.Sys(HoleCombine.SeedOf(u)) != HoleGrouping.Sys(kv.Value)) continue;
                     Restore(kv.Value, kv.Key);
                 } catch (Exception e) { Log.Write("HoleEditUndoSeed", e); }
@@ -115,7 +126,10 @@ namespace TianGongCadSuite {
                 try {
                     var model = HoleEditCad.ModelOf(n.Part);
                     object f = HoleGrouping.Sys(n.Ref).Length > 0 ? n.Ref
-                             : (object)HoleEditCad.FindHole(model, n.Sys) ?? (object)HoleEditCad.FindPattern(model, n.Sys) ?? HoleEditCad.FindGroup(model, n.Sys);
+                             : (object)HoleEditCad.FindHoleInPart(n.Part, n.Sys)
+                            ?? (object)HoleEditCad.FindPatternInPart(n.Part, n.Sys)
+                            ?? (object)HoleEditCad.FindMultiInPart(n.Part, n.Sys)
+                            ?? HoleEditCad.FindGroup(model, n.Sys);
                     if (f == null) continue;
                     HoleGrouping.TryName(f, n.Name);
                     if (n.Tag.Length > 0) HoleGrouping.Tag(f, n.Tag);
