@@ -5,10 +5,11 @@ import getpass
 import json
 import os
 import re
+import secrets
+import shutil
 import sys
 import time
 from datetime import datetime
-from http.server import ThreadingHTTPServer
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -26,6 +27,7 @@ from .codec import (
     parse_code,
     parse_date,
     parse_payload,
+    stamp,
     unmask,
 )
 from .crypto import (
@@ -40,7 +42,7 @@ from .crypto import (
     slot_source,
     verify_p1363,
 )
-from .http_server import make_handler
+from .http_server import BoundedThreadingHTTPServer, make_handler
 from .ledger import Ledger, expiry_day
 from .service import Service
 from .updates import Updates
@@ -107,7 +109,7 @@ def cmd_serve(a):
             max_issue_per_day=a.max_issue_per_day,
         )
     host, _, port = a.listen.rpartition(":")
-    httpd = ThreadingHTTPServer((host or "127.0.0.1", int(port)), make_handler(service, admin))
+    httpd = BoundedThreadingHTTPServer((host or "127.0.0.1", int(port)), make_handler(service, admin))
     print("授权服务已启动：http://%s/api/v1/license  台账 %s  默认换机次数 %d" % (a.listen, a.db, a.default_quota), flush=True)
     if admin:
         print(
@@ -146,7 +148,8 @@ def cmd_set_password(a):
     ledger = Ledger(a.db, a.default_quota)
     a._ledger = ledger
     ledger.set_setting("admin_password", hash_password(first))
-    ledger.set_setting("session_epoch", str(int(time.time())))  # 改口令让所有已登录会话失效
+    # 保留完整浮点时间戳，避免 int() 截断导致同一秒内刚签发的会话逃逸失效
+    ledger.set_setting("session_epoch", repr(time.time()))
     ledger.audit("cli", "set-password")
     print("口令已设置。正在运行的服务会在下一次请求时让旧会话全部失效。")
 
@@ -232,31 +235,36 @@ def cmd_show(a):
 def cmd_revoke(a):
     ledger = open_ledger(a)
     cid, _ = require_row(ledger, a.code, create=True)  # 没见过的码也能提前作废
-    ledger.db.execute("UPDATE codes SET revoked=1, note=COALESCE(?, note) WHERE code_id=?", (a.note, cid))
+    ledger.execute("UPDATE codes SET revoked=1, note=COALESCE(?, note) WHERE code_id=?", (a.note, cid))
+    ledger.audit("cli", "revoke", cid, a.note)
     print("已作废 %s：已激活的机器最迟在下一次联网复核（约 1 天内）时失效" % display_id(cid))
 
 
 def cmd_unrevoke(a):
     ledger = open_ledger(a)
     cid, _ = require_row(ledger, a.code)
-    ledger.db.execute("UPDATE codes SET revoked=0 WHERE code_id=?", (cid,))
+    ledger.execute("UPDATE codes SET revoked=0 WHERE code_id=?", (cid,))
+    ledger.audit("cli", "unrevoke", cid)
     print("已恢复 %s" % display_id(cid))
 
 
 def cmd_unbind(a):
     ledger = open_ledger(a)
-    cid, _ = require_row(ledger, a.code)
-    ledger.db.execute("UPDATE codes SET machine=NULL, bound_at=NULL WHERE code_id=?", (cid,))
-    print("已解绑 %s：下一台输入这个码的机器直接绑定，不占换机次数" % display_id(cid))
+    cid, row = require_row(ledger, a.code)
+    before = row["machine"]
+    ledger.execute("UPDATE codes SET machine=NULL, bound_at=NULL, unbound_at=? WHERE code_id=?", (stamp(), cid))
+    ledger.audit("cli", "unbind", cid, before)
+    print("已解绑 %s：下一台输入这个码的机器直接绑定，不占换机次数；旧机器下次复核后停用" % display_id(cid))
 
 
 def cmd_quota(a):
     ledger = open_ledger(a)
     cid, _ = require_row(ledger, a.code)
     if a.reset:
-        ledger.db.execute("UPDATE codes SET rebinds_used=0 WHERE code_id=?", (cid,))
+        ledger.execute("UPDATE codes SET rebinds_used=0 WHERE code_id=?", (cid,))
     if a.count is not None:
-        ledger.db.execute("UPDATE codes SET quota=? WHERE code_id=?", (a.count, cid))
+        ledger.execute("UPDATE codes SET quota=? WHERE code_id=?", (a.count, cid))
+    ledger.audit("cli", "quota", cid, json.dumps({"quota": a.count, "reset": bool(a.reset)}))
     print(describe(ledger, ledger.row(cid)))
 
 
@@ -283,13 +291,20 @@ def cmd_publish(a):
     if a.notes_file:
         with open(a.notes_file, encoding="utf-8-sig") as f:
             notes = f.read()
-    with open(a.zip, "rb") as f:
-        data = f.read()
     updates = Updates(a.updates, load_server_key(a.key), sign_p1363)
+    tmp = os.path.join(updates.folder, ".cli-upload-%d-%s.tmp" % (os.getpid(), secrets.token_hex(4)))
     try:
-        m = updates.publish(data, os.path.basename(a.zip), a.version, notes, by="cli")
+        # 拷贝到临时副本后再走流式 publish_file，避免把大包整包读入内存且不移动源文件
+        shutil.copyfile(a.zip, tmp)
+        m = updates.publish_file(tmp, os.path.basename(a.zip), a.version, notes, by="cli")
     except ValueError as e:
         sys.exit("发布失败：" + str(e))
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
     print("已发布 %s（%s，%.1f MB，sha256 %s…）。插件下次启动后检查更新就会提示。" % (
         m["version"], m["file"], m["size"] / 1048576.0, m["sha256"][:12]
     ))

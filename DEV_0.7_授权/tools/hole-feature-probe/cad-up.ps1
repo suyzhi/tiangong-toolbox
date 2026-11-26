@@ -1,4 +1,4 @@
-# 在私有桌面 TGWork 上起一个 CAD（不收尾），再跑一次探针 exe 的某个模式（例如 U = 建板留着开）
+﻿# 在私有桌面 TGWork 上起一个 CAD（不收尾），再跑一次探针 exe 的某个模式（例如 U = 建板留着开）
 param([string]$Mode = 'U', [string]$Tag = 'ui')
 $root = 'C:\Users\admin\Documents\ChatGPT\天工CAD型材内嵌玻璃板插件\DEV_0.7_授权'
 . (Join-Path $root 'tools\desk-lib.ps1')

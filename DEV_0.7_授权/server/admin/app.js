@@ -245,17 +245,29 @@
     if (m && !$("release-version").value) $("release-version").value = m[1];
   });
 
+  function utf8ToBase64(text) {
+    var bytes = new TextEncoder().encode(text || "");
+    var bin = "";
+    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
+  }
+
   $("release-form").addEventListener("submit", function (e) {
     e.preventDefault();
     var f = $("release-file").files[0], ver = $("release-version").value.trim(), btn = $("release-btn");
     if (!f) return;
     if (!confirm("发布 " + ver + "？\n大家下次打开天工就会收到更新提示。")) return;
     btn.disabled = true; btn.classList.add("busy");
-    var q = "?name=" + encodeURIComponent(f.name) + "&version=" + encodeURIComponent(ver) + "&notes=" + encodeURIComponent($("release-notes").value);
+    // 更新说明改走 X-TG-Notes 请求头（UTF-8 Base64），避免长中文说明超出 URL 长度限制或写进反代访问日志
+    var q = "?name=" + encodeURIComponent(f.name) + "&version=" + encodeURIComponent(ver);
+    var headers = { "Content-Type": "application/zip", "X-TG-CSRF": state.csrf || "" };
+    var notesVal = $("release-notes").value || "";
+    if (notesVal) headers["X-TG-Notes"] = utf8ToBase64(notesVal);
     fetch("/admin/api/updates" + q, { method: "POST", credentials: "same-origin",
-      headers: { "Content-Type": "application/zip", "X-TG-CSRF": state.csrf || "" }, body: f })
+      headers: headers, body: f })
       .then(function (res) {
         return res.json().catch(function () { return {}; }).then(function (data) {
+          if (res.status === 401) { showLogin(); throw new Error(data.error || "请先登录"); }
           if (!res.ok) throw new Error(data.error || ("发布失败（" + res.status + "）"));
           renderReleases(data); toast("已发布 " + ver); $("release-form").reset();
         });
@@ -386,11 +398,21 @@
   $("scrim").addEventListener("click", closeDrawer);
   document.addEventListener("keydown", function (e) { if (e.key === "Escape" && !$("drawer").hidden) closeDrawer(); });
 
+  var actionBusy = false;
   function act(action, body, confirmText) {
+    if (actionBusy || !state.current) return;
     if (confirmText && !confirm(confirmText)) return;
+    actionBusy = true;
+    var dr = $("drawer");
+    var btns = dr ? Array.prototype.slice.call(dr.querySelectorAll("button")) : [];
+    btns.forEach(function (b) { b.dataset.prevDisabled = b.disabled ? "1" : ""; b.disabled = true; });
     api("POST", "/admin/api/codes/" + state.current.id + "/" + action, body || {})
       .then(function (d) { renderDrawer(d); toast("已保存"); return load(); })
-      .catch(function (e) { toast(e.message, true); });
+      .catch(function (e) {
+        btns.forEach(function (b) { if (b.isConnected) b.disabled = b.dataset.prevDisabled === "1"; });
+        toast(e.message, true);
+      })
+      .then(function () { actionBusy = false; });
   }
 
   function renderDrawer(d) {

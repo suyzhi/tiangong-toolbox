@@ -10,6 +10,7 @@ namespace TianGongCadSuite {
     public static class Choices {
         const string FileName = "choices.tsv";
         static readonly object sync = new object();
+        static readonly object writeSync = new object();
         static Dictionary<string, string> cache;
         static System.Threading.Timer flushTimer;
         static bool dirty;
@@ -25,10 +26,19 @@ namespace TianGongCadSuite {
             }
         }
         static Dictionary<string, string> All(){
-            if (cache != null) return cache;
+            string path = SettingsFile.PathOf(FileName);
+            if (cache != null && !SettingsFile.IsUnreadable(path)) return cache;
             var loaded = new Dictionary<string, string>(StringComparer.Ordinal);
-            try { foreach (var r in SettingsFile.Read(SettingsFile.PathOf(FileName))) if (r.Length >= 2) loaded[r[0]] = r[1]; }
+            try { foreach (var r in SettingsFile.Read(path)) if (r.Length >= 2) loaded[r[0]] = r[1]; }
             catch (Exception e) { Log.Write("ChoicesLoad", e.Message); }
+            if (SettingsFile.IsUnreadable(path)) {
+                // 文件暂时被占用（如 Excel 打开）时不要把空字典锁死进 cache，解锁后下次读写可自动重读恢复。
+                return cache ?? loaded;
+            }
+            if (cache != null) {
+                // 若此前在锁定期间内存里有新增改动，合并到重读结果中，避免覆盖原文件或丢失本次操作。
+                foreach (var kv in cache) loaded[kv.Key] = kv.Value;
+            }
             cache = loaded;
             return cache;
         }
@@ -47,6 +57,7 @@ namespace TianGongCadSuite {
                 string cur;
                 if (all.TryGetValue(key, out cur) && string.Equals(cur, next, StringComparison.Ordinal)) return;
                 all[key] = next;
+                if (cache == null) cache = all;
                 dirty = true;
                 if (!exitHooked) {
                     exitHooked = true;
@@ -57,16 +68,22 @@ namespace TianGongCadSuite {
             }
         }
         public static void Flush(){
-            List<string[]> rows;
-            lock (sync) {
-                if (!dirty || cache == null) return;
-                dirty = false;
-                rows = new List<string[]>(cache.Count);
-                foreach (var kv in cache) rows.Add(new[]{ kv.Key, kv.Value });
+            // 串行化落盘并按最新快照写入，防止定时器线程与 OnDisconnection/ProcessExit 并发写出旧快照覆盖新快照。
+            lock (writeSync) {
+                List<string[]> rows;
+                lock (sync) {
+                    if (!dirty || cache == null) return;
+                    dirty = false;
+                    rows = new List<string[]>(cache.Count);
+                    foreach (var kv in cache) rows.Add(new[]{ kv.Key, kv.Value });
+                }
+                try {
+                    SettingsFile.Write(SettingsFile.PathOf(FileName), rows, "天工工具箱 · 各窗口记住的勾选（每行：窗口.名字<TAB>值）。删掉本文件恢复默认。");
+                } catch (Exception e) {
+                    lock (sync) dirty = true;
+                    Log.Write("ChoicesSave", e.Message);
+                }
             }
-            try {
-                SettingsFile.Write(SettingsFile.PathOf(FileName), rows, "天工工具箱 · 各窗口记住的勾选（每行：窗口.名字<TAB>值）。删掉本文件恢复默认。");
-            } catch (Exception e) { Log.Write("ChoicesSave", e.Message); }
         }
 
         // 勾选框：按记下的值设好；用户点它时存

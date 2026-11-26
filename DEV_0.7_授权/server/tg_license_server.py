@@ -67,7 +67,7 @@ from tg_license.crypto import (
     slot_source,
     verify_p1363,
 )
-from tg_license.http_server import make_handler
+from tg_license.http_server import BoundedThreadingHTTPServer, make_handler
 from tg_license.ledger import CODE_COLUMNS, SCHEMA, Ledger, expiry_day
 from tg_license.service import HEX, MAX_BODY, Service
 from tg_license.updates import MAX_ZIP as UPDATE_MAX_ZIP, Updates
@@ -76,7 +76,7 @@ __all__ = [
     "ALPHABET", "BODY_GROUPS", "CHECK_SALT", "CODE_CHARS", "CODE_COLUMNS",
     "EPOCH", "HEX", "LETTER_OF", "MAX_BODY", "PAYLOAD_SIZE", "PLAN_LETTERS",
     "PLANS", "SCHEMA", "TGKEY_MAGIC", "UPDATE_MAX_ZIP",
-    "Ledger", "Service", "Updates",
+    "BoundedThreadingHTTPServer", "Ledger", "Service", "Updates",
     "build_parser", "cmd_events", "cmd_extend", "cmd_import_ledger",
     "cmd_import_master", "cmd_keygen", "cmd_keygen_master", "cmd_list",
     "cmd_publish", "cmd_quota", "cmd_releases", "cmd_revoke", "cmd_serve",

@@ -65,6 +65,40 @@ namespace TianGongCadSuite.Licensing {
         static DateTime cachedScanTime = DateTime.MinValue;
         static int cachedScanOverride = -2;
 
+        // 有效授权结论的短时内存缓存（10 秒）：避免单次点命令里反复 DPAPI 读盘与 8 次 ECDSA 验签；
+        // 同时比对激活文件时间戳/大小与注册表水位，外部一旦改动立刻失效，开发测试钩子开启时不缓存。
+        static readonly object reportCacheSync = new object();
+        static LicenseReport cachedReport;
+        static ActivationRecord cachedRecord;
+        static DateTime cachedReportAt = DateTime.MinValue;
+        static string cachedReportKey;
+
+        static bool HasActiveTestHook(){
+#if TG_DEV_BUILD
+            return LicenseTestHooks.TodayOverride >= 0 || LicenseTestHooks.GuardOverride >= 0
+                || LicenseTestHooks.GateOverride >= 0 || LicenseTestHooks.CodeOverride != null
+                || LicenseTestHooks.RevokedOverride != null || LicenseTestHooks.OnlineTransport != null
+                || LicenseTestHooks.ServerKeyOverride != null || LicenseTestHooks.OnlineSynchronous
+                || LicenseTestHooks.FingerprintOverride != null || LicenseTestHooks.MachineCodeOverride != null;
+#else
+            return false;
+#endif
+        }
+
+        internal static void InvalidateReportCache(){
+            lock(reportCacheSync){ cachedReport = null; cachedRecord = null; cachedReportKey = null; cachedReportAt = DateTime.MinValue; }
+        }
+
+        static LicenseReport CloneReport(LicenseReport src){
+            return new LicenseReport {
+                Status = src.Status, Detail = src.Detail, PlanName = src.PlanName,
+                ExpiryDate = src.ExpiryDate, DaysLeft = src.DaysLeft,
+                MachineCode = src.MachineCode, CodeId = src.CodeId, Notice = src.Notice
+            };
+        }
+
+        internal static void ResetCache(){ cachedScan = -1; InvalidateReportCache(); LicenseOnline.ResetThrottle(); }
+
         internal static int Today { get { return LicenseTestHooks.TodayOverride >= 0 ? LicenseTestHooks.TodayOverride : LicenseTime.Today; } }
 
         internal static byte[] MachineShort { get { return LicenseMachine.ShortBytes(); } }
@@ -79,8 +113,6 @@ namespace TianGongCadSuite.Licensing {
             cachedScanTime = DateTime.UtcNow;
             return cachedScan;
         }
-
-        internal static void ResetCache(){ cachedScan = -1; LicenseOnline.ResetThrottle(); }
 
         // 解析激活码。开发密钥模式（%ProgramData% 里放了 license-dev.key，本机自带签发权）
         // 只编译进开发构建（build.ps1 -DevBuild）；正式构建只认内嵌公钥验签。
@@ -120,9 +152,28 @@ namespace TianGongCadSuite.Licensing {
         }
 
         public static LicenseReport Current(){
+            ActivationRecord unused;
+            return EvaluateCurrent(out unused);
+        }
+
+        static LicenseReport EvaluateCurrent(out ActivationRecord loadedRecord){
+            loadedRecord = null;
+            bool canCache = !HasActiveTestHook();
+            int scan = ScanBits();
+            int todayNow = Today;
+            string cacheKey = null;
+            if(canCache){
+                cacheKey = todayNow + "|" + scan + "|" + LicenseStore.StorageVersionStamp() + "|" + LicenseStore.HighWaterTicks() + "|" + LicenseStore.Counter();
+                lock(reportCacheSync){
+                    if(cachedReport != null && cachedReportKey == cacheKey && (DateTime.UtcNow - cachedReportAt).TotalSeconds < 10){
+                        loadedRecord = cachedRecord;
+                        return CloneReport(cachedReport);
+                    }
+                }
+            }
+
             LicenseReport report = new LicenseReport();
             report.MachineCode = MachineCodeForDisplay();
-            int scan = ScanBits();
 
             ActivationRecord record = LicenseStore.Load();
             if(record == null){
@@ -130,6 +181,7 @@ namespace TianGongCadSuite.Licensing {
                 report.Detail = LicenseGuard.Describe(scan);
                 return report;
             }
+            loadedRecord = record;
 
             bool signed;
             LicenseCode code = Resolve(record, out signed);
@@ -161,7 +213,7 @@ namespace TianGongCadSuite.Licensing {
                 return report;
             }
 
-            int today = Today;
+            int today = todayNow;
             // 时间回调必须最先判定：把系统时间调回去会让"签发日在未来"，
             // 如果先判未来日期就会把回调误报成无效码。
             long high = LicenseStore.HighWaterTicks();
@@ -191,11 +243,18 @@ namespace TianGongCadSuite.Licensing {
                 report.Detail = "系统时间早于授权时间基准，已按时间基准计算";
             }
 
+            // 本次校验内只解验一次已存储的服务端回执，避免同一轮 Current 重复跑 4 次 ECDSA-P256 验签。
+            LicenseReceipt storedReceipt = LicenseOnline.Stored(record, code);
+
             // 到期日以服务器回执为准（管理员延长 / 缩短，0.9.1）；本机算出已到期时先问一次服务器，可能刚被延长
-            int expiryDay = LicenseOnline.ExpiryDay(record, code);
+            int expiryDay = LicenseOnline.ExpiryDay(record, code, storedReceipt);
             if(expiryDay <= today){
                 int renewed = LicenseOnline.ExpiryAfterRefresh(code);
-                if(renewed > 0)expiryDay = renewed;
+                if(renewed > 0){
+                    expiryDay = renewed;
+                    ActivationRecord reloaded = LicenseStore.Load();
+                    if(reloaded != null){ record = reloaded; loadedRecord = reloaded; storedReceipt = LicenseOnline.Stored(record, code); }
+                }
             }
             report.ExpiryDate = LicenseTime.FromDayOffset(expiryDay);
             report.DaysLeft = expiryDay - today;
@@ -212,25 +271,38 @@ namespace TianGongCadSuite.Licensing {
 
             // 联网这一关：回执验签、宽限期、服务器下发的作废 / 转出结论。
             string onlineDetail;
-            LicenseStatus online = LicenseOnline.Evaluate(record, code, out onlineDetail);
+            bool refreshedOnline;
+            LicenseStatus online = LicenseOnline.Evaluate(record, code, storedReceipt, out onlineDetail, out refreshedOnline);
             if(online != LicenseStatus.Valid){
                 report.Status = online;
                 report.Detail = onlineDetail;
                 return report;
             }
-            // 上面这一关可能刚复核过、换了一张新回执（管理员延长 / 缩短过）：按新回执的到期日重算
-            ActivationRecord latest = LicenseStore.Load();
-            int checkedExpiry = LicenseOnline.ExpiryDay(latest != null ? latest : record, code);
-            if(checkedExpiry > 0 && checkedExpiry != expiryDay){
-                expiryDay = checkedExpiry;
-                report.ExpiryDate = LicenseTime.FromDayOffset(expiryDay);
-                report.DaysLeft = expiryDay - today;
-                if(report.DaysLeft <= 0){ report.Status = LicenseStatus.Expired; return report; }
+            // 仅当上面这一关刚同步复核换过新回执时才重读一次文件与到期日。
+            if(refreshedOnline){
+                ActivationRecord latest = LicenseStore.Load();
+                if(latest != null){ record = latest; loadedRecord = latest; }
+                int checkedExpiry = LicenseOnline.ExpiryDay(record, code);
+                if(checkedExpiry > 0 && checkedExpiry != expiryDay){
+                    expiryDay = checkedExpiry;
+                    report.ExpiryDate = LicenseTime.FromDayOffset(expiryDay);
+                    report.DaysLeft = expiryDay - today;
+                    if(report.DaysLeft <= 0){ report.Status = LicenseStatus.Expired; return report; }
+                }
             }
 
             LicenseStore.Touch(record);
             if(report.DaysLeft <= WarnDays)report.Status = LicenseStatus.ExpiringSoon;
             else report.Status = LicenseStatus.Valid;
+            if(canCache){
+                string freshKey = todayNow + "|" + scan + "|" + LicenseStore.StorageVersionStamp() + "|" + LicenseStore.HighWaterTicks() + "|" + LicenseStore.Counter();
+                lock(reportCacheSync){
+                    cachedReport = CloneReport(report);
+                    cachedRecord = record;
+                    cachedReportKey = freshKey;
+                    cachedReportAt = DateTime.UtcNow;
+                }
+            }
             return report;
         }
 
@@ -265,7 +337,10 @@ namespace TianGongCadSuite.Licensing {
         // 供业务代码取用的幂等令牌：混入了到期日与机器指纹。
         // 破解者就算把上面的分支改掉，也拿不到同样的令牌，下游校验会失败。
         internal static int Token(){
-            ActivationRecord record = LicenseStore.Load();
+            return Token(LicenseStore.Load());
+        }
+
+        internal static int Token(ActivationRecord record){
             if(record == null)return 0;
             LicenseCode code = LicenseCodec.Parse(record.Code);
             if(code == null || code.Plan == null)return 0;
@@ -281,11 +356,12 @@ namespace TianGongCadSuite.Licensing {
             }
         }
 
-        // 业务入口守卫：命令执行前调用。返回 null 表示拒绝。
+        // 业务入口守卫：命令执行前调用。返回 false 表示拒绝。
         internal static bool Gate(){
-            LicenseReport report = Current();
+            ActivationRecord record;
+            LicenseReport report = EvaluateCurrent(out record);
             if(!report.Usable)return false;
-            int token = Token();
+            int token = Token(record);
             if(token == 0)return false;
             return (token ^ 0x5F3759DF) != 0;
         }
@@ -343,31 +419,37 @@ namespace TianGongCadSuite.Licensing {
                 return Rejected(code,receipt.RejectMessage(code), out message);
 
             // 同一个码在本机重复输入：算已完成，不重复计数，也不当成失败（顺带刷新联网回执）。
+            // 与后台 Persist 共用同一把锁，避免并发写入把刚激活的新码回写覆盖为旧码。
             string canonical = LicenseCodec.Canonical(code.Payload.ToBytes(), code.Signature);
-            ActivationRecord existing = LicenseStore.Load();
-            if(existing != null && string.Equals(existing.Code, canonical, StringComparison.OrdinalIgnoreCase)
-                && FingerprintMatches(existing.MachineFingerprint)){
-                existing.Receipt = receipt.Raw;
-                existing.ReceiptSignature = receipt.Signature;
-                LicenseStore.Save(existing);
-                ResetCache();
+            bool alreadyActive = false;
+            bool saved = LicenseOnline.SaveWithPersistLock(delegate(){
+                ActivationRecord existing = LicenseStore.Load();
+                if(existing != null && string.Equals(existing.Code, canonical, StringComparison.OrdinalIgnoreCase)
+                    && FingerprintMatches(existing.MachineFingerprint)){
+                    existing.Receipt = receipt.Raw;
+                    existing.ReceiptSignature = receipt.Signature;
+                    alreadyActive = true;
+                    return LicenseStore.Save(existing);
+                }
+                ActivationRecord record = new ActivationRecord();
+                record.MachineFingerprint = fingerprint;
+                record.ActivatedDay = today;
+                record.Counter = Math.Max(LicenseStore.Counter(), 0L) + 1;
+                record.Code = canonical;
+                record.Receipt = receipt.Raw;
+                record.ReceiptSignature = receipt.Signature;
+                return LicenseStore.Save(record);
+            });
+            if(!saved)
+                return Rejected(code,"无法写入激活文件，请检查本机磁盘权限。", out message);
+            ResetCache();
+            if(alreadyActive){
                 LicenseReport again = Current();
                 notice = "该激活码已经在本机激活过了，不需要重复输入（码ID " + LicenseCodec.Display(code.CodeId) + "）。";
                 again.Notice = notice;
                 message = null;
                 return again;
             }
-
-            ActivationRecord record = new ActivationRecord();
-            record.MachineFingerprint = fingerprint;
-            record.ActivatedDay = today;
-            record.Counter = Math.Max(LicenseStore.Counter(), 0L) + 1;
-            record.Code = canonical;
-            record.Receipt = receipt.Raw;
-            record.ReceiptSignature = receipt.Signature;
-            if(!LicenseStore.Save(record))
-                return Rejected(code,"无法写入激活文件，请用管理员身份运行一次，或检查磁盘权限。", out message);
-            ResetCache();
             message = null;
             LicenseReport report = Current();
             notice = "激活成功，该激活码已绑定本机（码ID " + LicenseCodec.Display(code.CodeId) + "）。";

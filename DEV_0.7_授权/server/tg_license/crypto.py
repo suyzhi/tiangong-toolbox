@@ -79,20 +79,24 @@ def load_server_key(path):
 
 
 def master_slot_source(key_id, x, y):
-    """插件公钥槽 LicenseKeySlot.cs，与 TianGongLicenseAdmin keygen 输出逐字一致。"""
+    """插件公钥槽 LicenseKeySlot.cs，与 TianGongLicenseAdmin keygen 一致：生成随机掩码并对坐标异或，兼容客户端现有 Unmask 解码。"""
     seed_a, seed_b = "TGS-SLOT-A-" + key_id, "TGS-SLOT-B-" + key_id
+    mask_a, mask_b = os.urandom(32), os.urandom(32)
+    stream_a, stream_b = key_stream(seed_a, 32), key_stream(seed_b, 32)
+    masked_x = bytes(c ^ s ^ m for c, s, m in zip(x, stream_a, mask_a))
+    masked_y = bytes(c ^ s ^ m for c, s, m in zip(y, stream_b, mask_b))
     return (
         "// 由 TianGongLicenseAdmin keygen 生成，请勿手工修改。密钥ID：" + key_id + "\n"
         "// 这是公钥，可以随源码一起提交；私钥在同名的 .tgkey 文件里，绝不能提交。\n"
         "namespace TianGongCadSuite.Licensing {\n"
         "    internal static class LicenseKeySlot {\n"
         '        internal const string KeyId = "' + key_id + '";\n'
-        '        internal static readonly string MaskX = "' + key_stream(seed_a, 32).hex() + '";\n'
-        '        internal static readonly string MaskY = "' + key_stream(seed_b, 32).hex() + '";\n'
+        '        internal static readonly string MaskX = "' + mask_a.hex() + '";\n'
+        '        internal static readonly string MaskY = "' + mask_b.hex() + '";\n'
         '        internal static readonly string SeedX = "' + seed_a + '";\n'
         '        internal static readonly string SeedY = "' + seed_b + '";\n'
-        '        internal static readonly string ValueX = "' + base64.b64encode(x).decode("ascii") + '";\n'
-        '        internal static readonly string ValueY = "' + base64.b64encode(y).decode("ascii") + '";\n'
+        '        internal static readonly string ValueX = "' + base64.b64encode(masked_x).decode("ascii") + '";\n'
+        '        internal static readonly string ValueY = "' + base64.b64encode(masked_y).decode("ascii") + '";\n'
         "    }\n"
         "}\n"
     )

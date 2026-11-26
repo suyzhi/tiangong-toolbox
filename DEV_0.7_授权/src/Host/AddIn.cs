@@ -51,7 +51,9 @@ diagnostics=new Diagnostics(context.Application,()=>Run(registry.Find(1)),()=>Ru
         }
         static bool SupportedEnvironment(string category){foreach(string id in new[]{AssemblyCategory,TGSDK.CATID.TGPart,TGSDK.CATID.TGDraft,TGSDK.CATID.TGSheetMetal,TGSDK.CATID.TGDMPart,TGSDK.CATID.TGDMSheetMetal})if(string.Equals(category.Trim('{','}'),id.Trim('{','}'),StringComparison.OrdinalIgnoreCase))return true;return false;}
         void Run(ToolCommand c){if(c==null)return;try{
-            if(context!=null)context.InvalidateProbeCache();
+            // 防重入总栅栏：打孔/检查/导出正在泵消息（DoEvents）期间，拦截一切功能区命令（包括检查更新、更新提示、授权弹窗），
+            // 避免模态框或新命令打断进行中的原位编辑与建模事务。
+            if(context!=null){context.ThrowIfAnyBusy();context.InvalidateProbeCache();}
             var owner=context==null?null:new CadOwner(context.Application.ActiveFramehWnd);
             // 有新版本：先提示一次（每次开天工最多一次；「稍后提醒」一天内不再提示）。提示完照常执行命令
             if(c.Id!=UpdateModule.CommandId){try{if(AutoUpdate.PromptIfDue(owner))return;/* 点了「立即更新」：天工马上关，不再打开命令 */}catch(Exception e){Log.Write("UpdatePrompt",e);}}

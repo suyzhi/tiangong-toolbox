@@ -16,21 +16,34 @@ namespace TianGongCadSuite {
 
         public static List<string[]> Read(string path){
             var rows = new List<string[]>();
-            if (string.IsNullOrEmpty(path) || !File.Exists(path)) return rows;
+            if (string.IsNullOrEmpty(path)) return rows;
+            string full = Path.GetFullPath(path);
+            if (!File.Exists(full)) {
+                // 文件已不存在时清除历史 unreadable 标记，避免文件被删除重建后仍被阻断写入。
+                lock (unreadable) unreadable.Remove(full);
+                return rows;
+            }
             // 共享读：文件头写着"Excel 能打开"——用户真用 Excel 开着它时，File.ReadAllLines 会因为占用直接抛，
-            // 属性卡填写 / 批量排孔的窗口就打不开了。读不了就当没有这个文件（用默认值），记一笔日志。
-            string[] lines;
-            try {
-                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-                using (var reader = new StreamReader(fs, Encoding.UTF8, true)) {
-                    var all = new List<string>();
-                    string l;
-                    while ((l = reader.ReadLine()) != null) all.Add(l);
-                    lines = all.ToArray();
-                }
-            } catch (IOException e) { Unreadable(path, e); return rows; }
-            catch (UnauthorizedAccessException e) { Unreadable(path, e); return rows; }
-            lock (unreadable) unreadable.Remove(Path.GetFullPath(path));
+            // 属性卡填写 / 批量排孔的窗口就打不开了。瞬时占用（如并发保存/杀软扫描）短重试 2 次，仍读不了再记 unreadable。
+            string[] lines = null;
+            Exception lastErr = null;
+            for (int attempt = 0; attempt < 3; attempt++) {
+                try {
+                    using (var fs = new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                    using (var reader = new StreamReader(fs, Encoding.UTF8, true)) {
+                        var all = new List<string>();
+                        string l;
+                        while ((l = reader.ReadLine()) != null) all.Add(l);
+                        lines = all.ToArray();
+                    }
+                    lastErr = null;
+                    break;
+                } catch (IOException e) { lastErr = e; }
+                catch (UnauthorizedAccessException e) { lastErr = e; }
+                if (attempt < 2) System.Threading.Thread.Sleep(35);
+            }
+            if (lastErr != null) { Unreadable(full, lastErr); return rows; }
+            lock (unreadable) unreadable.Remove(full);
             foreach (var raw in lines) {
                 string line = raw.TrimEnd('\r');
                 if (line.Length == 0 || line.StartsWith("#", StringComparison.Ordinal)) continue;
@@ -42,29 +55,71 @@ namespace TianGongCadSuite {
         }
 
         // 这次读不出来的文件：调用方手里只有默认值，这时候按"整份重写"保存会把文件里原有的内容（排孔预设、列设置……）全冲掉。
-        // 重新读成功之前不许写。
+        // 重新读成功之前不许写；同时提供只读查询与探测清除，供调用方在文件解锁后及时恢复（不致整会话永不解封）。
         static readonly HashSet<string> unreadable = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        static void Unreadable(string path, Exception e){
-            Log.Write("SettingsRead " + Path.GetFileName(path), e.Message);
-            lock (unreadable) unreadable.Add(Path.GetFullPath(path));
+        static readonly object writeGate = new object();
+        static void Unreadable(string fullPath, Exception e){
+            Log.Write("SettingsRead " + Path.GetFileName(fullPath), e.Message);
+            lock (unreadable) unreadable.Add(fullPath);
+        }
+        public static bool IsUnreadable(string path){
+            if (string.IsNullOrEmpty(path)) return false;
+            string full = Path.GetFullPath(path);
+            lock (unreadable) return unreadable.Contains(full);
+        }
+        public static void ClearUnreadable(string path){
+            if (string.IsNullOrEmpty(path)) return;
+            string full = Path.GetFullPath(path);
+            lock (unreadable) unreadable.Remove(full);
         }
 
         public static void Write(string path, IEnumerable<string[]> rows, params string[] comments){
+            string full = Path.GetFullPath(path);
             bool blocked;
-            lock (unreadable) blocked = unreadable.Contains(Path.GetFullPath(path));
-            if (blocked && File.Exists(path))
-                throw new IOException("设置文件「" + Path.GetFileName(path) + "」刚才读不出来（可能被 Excel 之类的程序开着），为免把里面原有的内容覆盖掉，这次没保存。关掉占用它的程序、重新打开窗口后再改。");
+            lock (unreadable) blocked = unreadable.Contains(full);
+            if (blocked) {
+                if (!File.Exists(full)) {
+                    lock (unreadable) unreadable.Remove(full);
+                } else {
+                    throw new IOException("设置文件「" + Path.GetFileName(full) + "」刚才读不出来（可能被 Excel 之类的程序开着），为免把里面原有的内容覆盖掉，这次没保存。关掉占用它的程序、重新打开窗口后再改。");
+                }
+            }
             var sb = new StringBuilder();
             if (comments != null) foreach (var c in comments) sb.Append("# ").Append(c ?? "").Append("\r\n");
             foreach (var r in rows) {
-                for (int i = 0; i < r.Length; i++) { if (i > 0) sb.Append('\t'); sb.Append(Escape(r[i])); }
+                for (int i = 0; i < r.Length; i++) {
+                    if (i > 0) sb.Append('\t');
+                    string cell = Escape(r[i]);
+                    // 首列若以 # 开头，不转义会在下次 Read 时被当成注释整行吞掉；Unescape 对 \# 会原样还原为 #。
+                    if (i == 0 && cell.Length > 0 && cell[0] == '#') sb.Append('\\');
+                    sb.Append(cell);
+                }
                 sb.Append("\r\n");
             }
-            Directory.CreateDirectory(Path.GetDirectoryName(path));
-            string tmp = path + ".tmp";
-            File.WriteAllText(tmp, sb.ToString(), new UTF8Encoding(true));
-            if (File.Exists(path)) File.Replace(tmp, path, null);
-            else File.Move(tmp, path);
+            string dir = Path.GetDirectoryName(full);
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            // 临时文件名带进程号 + 随机后缀，并在进程内串行替换 + 短重试，消除多线程/多 CAD 实例写同一固定 .tmp 的竞态。
+            int pid = 0;
+            try { pid = System.Diagnostics.Process.GetCurrentProcess().Id; } catch { }
+            string tmp = full + "." + pid + "." + Guid.NewGuid().ToString("N").Substring(0, 8) + ".tmp";
+            lock (writeGate) {
+                try {
+                    File.WriteAllText(tmp, sb.ToString(), new UTF8Encoding(true));
+                    for (int attempt = 0; attempt < 5; attempt++) {
+                        try {
+                            if (File.Exists(full)) File.Replace(tmp, full, null);
+                            else File.Move(tmp, full);
+                            tmp = null;
+                            break;
+                        } catch (IOException) {
+                            if (attempt == 4) throw;
+                            System.Threading.Thread.Sleep(40);
+                        }
+                    }
+                } finally {
+                    if (tmp != null) { try { if (File.Exists(tmp)) File.Delete(tmp); } catch { } }
+                }
+            }
         }
 
         // 用户自己拿来导入的表格文本（排位表清单 / 型号库 CSV）（0.10.2）：

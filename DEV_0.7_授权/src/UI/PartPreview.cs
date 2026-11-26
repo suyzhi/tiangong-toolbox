@@ -72,12 +72,15 @@ namespace TianGongCadSuite {
         string wantedNote = "";
         bool wantedResolved;  // 延迟到防抖到期再做 File.Exists 解析，方向键连按不碰加密盘
         string loaded = "";   // 控件里现在打开着的文件
+        bool ocxDirty;        // 标记 OCX 可能仍持有文件句柄（即使加载中途抛错也能兜底释放）
         string lastShown = "";
         int fits;
         bool busy, inactive;
         bool pinned;          // 测试用：私有桌面上窗口总被判成"没激活"，钉住才看得到真实显示
         bool forceEmpty;      // 测试用：私有桌面上读不了屏（CopyFromScreen 报句柄无效），强制当成"没画出来"测兜底
         Form owner;
+        EventHandler onOwnerDeactivate, onOwnerActivated;
+        FormClosedEventHandler onOwnerClosed;
 
         public PartPreview(){
             BackColor = Ui.Bg;
@@ -174,15 +177,30 @@ namespace TianGongCadSuite {
             if (on) { debounce.Stop(); Release(true); } else Kick();
         }
 
+        void UnbindOwner(){
+            if (owner == null) return;
+            try {
+                if (onOwnerDeactivate != null) owner.Deactivate -= onOwnerDeactivate;
+                if (onOwnerActivated != null) owner.Activated -= onOwnerActivated;
+                if (onOwnerClosed != null) owner.FormClosed -= onOwnerClosed;
+            } catch { }
+            owner = null;
+        }
+
         protected override void OnHandleCreated(EventArgs e){
             base.OnHandleCreated(e);
             var f = FindForm();
             if (f != null && f != owner) {
+                UnbindOwner();
                 owner = f;
+                // 使用具名委托并在 Dispose 时退订，避免宿主窗体强引用已销毁的 PartPreview 及其 meshes 网格缓存。
+                if (onOwnerDeactivate == null) onOwnerDeactivate = (s, a) => { if (IsDisposed || pinned) return; inactive = true; debounce.Stop(); releaseDelay.Stop(); releaseDelay.Start(); };
+                if (onOwnerActivated == null) onOwnerActivated = (s, a) => { if (IsDisposed) return; inactive = false; releaseDelay.Stop(); if (loaded.Length == 0 || !wantedResolved || !string.Equals(loaded, wanted, StringComparison.OrdinalIgnoreCase)) Kick(); };
+                if (onOwnerClosed == null) onOwnerClosed = (s, a) => { if (IsDisposed) return; debounce.Stop(); releaseDelay.Stop(); Release(false); };
                 // 切到天工（或别的窗口）就放开文件：延迟 120ms，避免右键菜单/下拉面板瞬时失焦触发整套截屏+卸载重载
-                f.Deactivate += (s, a) => { if (pinned) return; inactive = true; debounce.Stop(); releaseDelay.Stop(); releaseDelay.Start(); };
-                f.Activated += (s, a) => { inactive = false; releaseDelay.Stop(); if (loaded.Length == 0 || !wantedResolved || !string.Equals(loaded, wanted, StringComparison.OrdinalIgnoreCase)) Kick(); };
-                f.FormClosed += (s, a) => { debounce.Stop(); releaseDelay.Stop(); Release(false); };
+                f.Deactivate += onOwnerDeactivate;
+                f.Activated += onOwnerActivated;
+                f.FormClosed += onOwnerClosed;
             }
         }
         protected override void OnVisibleChanged(EventArgs e){
@@ -191,8 +209,10 @@ namespace TianGongCadSuite {
         }
         protected override void Dispose(bool disposing){
             if (disposing) {
+                UnbindOwner();
                 debounce.Dispose(); settle.Dispose(); check.Dispose(); releaseDelay.Dispose();
                 Release(false);
+                meshes.Clear(); blankAsm.Clear();
                 var oldImg = still.Image; still.Image = null; if (oldImg != null) oldImg.Dispose();
                 if (host != null) { try { host.Dispose(); } catch { } host = null; }
             }
@@ -235,6 +255,7 @@ namespace TianGongCadSuite {
                 // 装配要读每个零件的显示数据（一百多个零件 3 秒多），先说一声，不然像卡住了
                 if (string.Equals(Path.GetExtension(wanted), ".asm", StringComparison.OrdinalIgnoreCase)) { Say("正在加载装配…"); hint.Refresh(); }
                 object ocx = host.Ocx;
+                ocxDirty = true;
                 Set(ocx, "Filename", wanted);
                 loaded = wanted;
                 Reveal();
@@ -243,6 +264,10 @@ namespace TianGongCadSuite {
                 if (!string.Equals(lastShown, wanted, StringComparison.OrdinalIgnoreCase)) { settle.Stop(); settle.Start(); }
                 if (sw.ElapsedMilliseconds > 500) Log.Write("PartPreview", "slow " + sw.ElapsedMilliseconds + "ms " + wanted);
             } catch (Exception e) {
+                // 加载或 Reveal 抛错前 OCX 可能已经打开了目标文件，必须显式清空 Filename 释放文件锁。
+                if (host != null) {
+                    try { object ocx = host.Ocx; if (ocx != null) Set(ocx, "Filename", ""); ocxDirty = false; } catch { }
+                }
                 loaded = "";
                 Log.Write("PartPreview", wanted + " " + e);
                 Say("这个文件预览不了：" + (e.InnerException ?? e).Message);
@@ -275,13 +300,13 @@ namespace TianGongCadSuite {
 
         // 放开文件：需要保持视觉占位时先截一张当前画面顶着，关闭/隐藏时直接放开不截屏
         void Release(bool keepSnapshot = true){
-            if (host == null || loaded.Length == 0) return;
-            if (keepSnapshot && host.Visible) {
+            if (host == null || (loaded.Length == 0 && !ocxDirty)) return;
+            if (keepSnapshot && host.Visible && loaded.Length > 0) {
                 Bitmap shot = Snapshot();
                 if (shot != null) { var old = still.Image; still.Image = shot; if (old != null) old.Dispose(); still.Visible = true; still.BringToFront(); hint.Visible = false; }
                 else Say("回到这个窗口就接着显示预览");
             }
-            try { Set(host.Ocx, "Filename", ""); } catch (Exception e) { Log.Write("PartPreview", "release " + e.Message); }
+            try { Set(host.Ocx, "Filename", ""); ocxDirty = false; } catch (Exception e) { Log.Write("PartPreview", "release " + e.Message); }
             loaded = "";
             host.Visible = false;
         }

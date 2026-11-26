@@ -10,21 +10,87 @@
 清单里带 "kind": "update"，和授权回执分开（回执里没有这个字段，也缺回执必需的字段，互相冒充不了）。
 """
 import base64
+import contextlib
 import hashlib
 import json
 import os
 import re
+import secrets
+import shutil
 import threading
 import zipfile
 from datetime import datetime
 
-VERSION = re.compile(r"^\d{1,4}\.\d{1,4}\.\d{1,6}$")
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
+
+# 使用 \Z 而非 $，拒绝末尾带换行符的绕过字符串
+VERSION = re.compile(r"^\d{1,4}\.\d{1,4}\.\d{1,6}\Z")
 # 安装包文件名：make-installer.ps1 的「天工工具箱_DEV0.9.2_安装包_20261030.zip」，或任何字母数字中文下划线点横线
-SAFE_NAME = re.compile(r"^[0-9A-Za-z_一-鿿][0-9A-Za-z_.\-一-鿿]{0,120}\.zip$")
+SAFE_NAME = re.compile(r"^[0-9A-Za-z_一-鿿][0-9A-Za-z_.\-一-鿿]{0,120}\.zip\Z")
 NAME_VERSION = re.compile(r"DEV(\d+\.\d+\.\d+)")
 MAX_ZIP = 200 * 1024 * 1024
+MAX_UNCOMPRESSED = 512 * 1024 * 1024
+MAX_ENTRIES = 10000
 MAX_NOTES = 4000
 REQUIRED = ("payload/TianGongCadSuite.dll", "tools/install.ps1")
+
+
+@contextlib.contextmanager
+def _publish_file_lock(folder):
+    """跨进程发布锁：防止命令行 publish 与网页 serve 并发改写 latest.json / history.jsonl。"""
+    lock_path = os.path.join(folder, ".publish.lock")
+    f = open(lock_path, "a+b")
+    try:
+        if fcntl is not None:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        elif msvcrt is not None:
+            f.seek(0, os.SEEK_END)
+            if f.tell() == 0:
+                f.write(b"0")
+                f.flush()
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+        yield
+    finally:
+        try:
+            if fcntl is not None:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            elif msvcrt is not None:
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+        f.close()
+
+
+def _is_safe_zip_entry(entry_name):
+    if not entry_name or any(ord(c) < 32 for c in entry_name):
+        return False
+    if entry_name.startswith("/") or entry_name.startswith("\\") or ":" in entry_name:
+        return False
+    parts = entry_name.replace("\\", "/").split("/")
+    return ".." not in parts
+
+
+def _sha256_file(path):
+    h = hashlib.sha256()
+    total = 0
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(65536)
+            if not chunk:
+                break
+            h.update(chunk)
+            total += len(chunk)
+    return h.hexdigest(), total
 
 
 def version_key(text):
@@ -89,53 +155,111 @@ class Updates:
     # ------------------------------------------------------------ 发布
 
     def publish(self, data, name, version, notes, by="cli"):
-        """发布一个版本：校验安装包 → 存盘 → 写签名清单。返回清单 dict；不合格抛 ValueError（消息给人看）"""
-        name = os.path.basename(name or "")
-        if not SAFE_NAME.match(name):
-            raise ValueError("安装包文件名不合规（只能有字母数字、中文、下划线、点、横线，以 .zip 结尾）：" + name)
-        version = (version or version_from_name(name) or "").strip()
-        if not VERSION.match(version):
-            raise ValueError("版本号应形如 0.9.2（文件名里没认出来，请填写）")
+        """发布一个版本（字节输入封装）：落入唯一临时文件后复用 publish_file。"""
         if not data or len(data) > MAX_ZIP:
             raise ValueError("安装包大小不对（0 或超过 200MB）")
-        notes = (notes or "").strip()[:MAX_NOTES]
-        tmp = os.path.join(self.folder, ".upload-%d.tmp" % threading.get_ident())
-        with open(tmp, "wb") as f:
-            f.write(data)
+        tmp = os.path.join(
+            self.folder,
+            ".upload-%d-%d-%s.tmp" % (os.getpid(), threading.get_ident(), secrets.token_hex(4)),
+        )
         try:
-            try:
-                with zipfile.ZipFile(tmp) as z:
-                    names = set(z.namelist())
-                    bad = z.testzip()
-            except zipfile.BadZipFile:
-                raise ValueError("不是有效的 zip 文件")
-            if bad:
-                raise ValueError("zip 里的文件损坏：" + bad)
-            missing = [r for r in REQUIRED if r not in names]
-            if missing:
-                raise ValueError("这不像天工工具箱安装包（缺 %s）。请上传 make-installer.ps1 打出来的 zip。" % "、".join(missing))
-            if any(n.startswith("/") or ".." in n.replace("\\", "/").split("/") for n in names):
-                raise ValueError("zip 里有不安全的路径")
-            with self.lock:
-                current = self.latest_manifest()
-                final = os.path.join(self.folder, name)
-                os.replace(tmp, final)
-                manifest = {
-                    "v": 1, "kind": "update", "version": version,
-                    "date": datetime.now().strftime("%Y-%m-%d"), "notes": notes,
-                    "file": name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
-                }
-                raw = json.dumps(manifest, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-                signed = {"manifest": base64.b64encode(raw).decode("ascii"),
-                          "sig": base64.b64encode(self.sign(self.key, raw)).decode("ascii")}
-                path = os.path.join(self.folder, "latest.json")
-                with open(path + ".tmp", "w", encoding="utf-8") as f:
-                    json.dump(signed, f)
-                os.replace(path + ".tmp", path)
-                with open(os.path.join(self.folder, "history.jsonl"), "a", encoding="utf-8") as f:
-                    f.write(json.dumps(dict(manifest, at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"), by=by,
-                                            replaced=current and current.get("version")), ensure_ascii=False) + "\n")
-                return manifest
+            with open(tmp, "wb") as f:
+                f.write(data)
+            return self.publish_file(tmp, name, version, notes, by=by, size=len(data))
         finally:
             if os.path.exists(tmp):
-                os.remove(tmp)
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+
+    def publish_file(self, tmp_path, name, version, notes, by="cli", size=None):
+        """发布一个已落盘的安装包：先检查 Zip 路径与解压上限防 Zip Bomb → 验 CRC → 跨进程加锁原子发布。"""
+        name = os.path.basename((name or "").replace("\\", "/"))
+        if not SAFE_NAME.match(name):
+            raise ValueError("安装包文件名不合规（只能有字母数字、中文、下划线、点、横线，以 .zip 结尾）：" + name)
+        raw_version = version or version_from_name(name) or ""
+        if "\r" in raw_version or "\n" in raw_version:
+            raise ValueError("版本号应形如 0.9.2（文件名里没认出来，请填写）")
+        version = raw_version.strip()
+        if not VERSION.match(version):
+            raise ValueError("版本号应形如 0.9.2（文件名里没认出来，请填写）")
+        file_size = os.path.getsize(tmp_path) if size is None else size
+        if file_size <= 0 or file_size > MAX_ZIP:
+            raise ValueError("安装包大小不对（0 或超过 200MB）")
+        notes = (notes or "").strip()[:MAX_NOTES]
+
+        try:
+            with zipfile.ZipFile(tmp_path) as z:
+                infos = z.infolist()
+                if len(infos) > MAX_ENTRIES:
+                    raise ValueError("zip 里文件数量过多")
+                total_uncompressed = 0
+                names = set()
+                for info in infos:
+                    if not _is_safe_zip_entry(info.filename):
+                        raise ValueError("zip 里有不安全的路径")
+                    total_uncompressed += max(0, info.file_size)
+                    if total_uncompressed > MAX_UNCOMPRESSED:
+                        raise ValueError("zip 解压后体积超过上限（512MB）")
+                    names.add(info.filename)
+                missing = [r for r in REQUIRED if r not in names]
+                if missing:
+                    raise ValueError("这不像天工工具箱安装包（缺 %s）。请上传 make-installer.ps1 打出来的 zip。" % "、".join(missing))
+                # 在确认条目路径安全且未超过解压体积上限后，再执行 CRC 全量解压校验
+                bad = z.testzip()
+        except zipfile.BadZipFile:
+            raise ValueError("不是有效的 zip 文件")
+        if bad:
+            raise ValueError("zip 里的文件损坏：" + bad)
+
+        digest, actual_size = _sha256_file(tmp_path)
+        if actual_size <= 0 or actual_size > MAX_ZIP:
+            raise ValueError("安装包大小不对（0 或超过 200MB）")
+
+        with self.lock, _publish_file_lock(self.folder):
+            current = self.latest_manifest()
+            final = os.path.join(self.folder, name)
+            try:
+                os.replace(tmp_path, final)
+            except OSError:
+                # 跨文件系统兜底：先拷到同目录唯一临时文件再原子替换
+                staged = os.path.join(
+                    self.folder,
+                    ".stage-%d-%d-%s.tmp" % (os.getpid(), threading.get_ident(), secrets.token_hex(4)),
+                )
+                try:
+                    shutil.copyfile(tmp_path, staged)
+                    os.replace(staged, final)
+                finally:
+                    if os.path.exists(staged):
+                        try:
+                            os.remove(staged)
+                        except OSError:
+                            pass
+            manifest = {
+                "v": 1, "kind": "update", "version": version,
+                "date": datetime.now().strftime("%Y-%m-%d"), "notes": notes,
+                "file": name, "size": actual_size, "sha256": digest,
+            }
+            raw = json.dumps(manifest, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            signed = {
+                "manifest": base64.b64encode(raw).decode("ascii"),
+                "sig": base64.b64encode(self.sign(self.key, raw)).decode("ascii"),
+            }
+            path = os.path.join(self.folder, "latest.json")
+            latest_tmp = "%s.%d.%d.%s.tmp" % (path, os.getpid(), threading.get_ident(), secrets.token_hex(4))
+            try:
+                with open(latest_tmp, "w", encoding="utf-8") as f:
+                    json.dump(signed, f)
+                os.replace(latest_tmp, path)
+            finally:
+                if os.path.exists(latest_tmp):
+                    try:
+                        os.remove(latest_tmp)
+                    except OSError:
+                        pass
+            with open(os.path.join(self.folder, "history.jsonl"), "a", encoding="utf-8") as f:
+                f.write(json.dumps(dict(manifest, at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"), by=by,
+                                        replaced=current and current.get("version")), ensure_ascii=False) + "\n")
+            return manifest

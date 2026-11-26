@@ -76,8 +76,13 @@ namespace TianGongCadSuite {
         void ScheduleOnClose(){
             if (scheduled || pkg == null || noScheduleForTest) return;
             string error;
-            if (AutoUpdate.Schedule(m, pkg, false, out error)) scheduled = true;
-            else Log.Write("UpdateSchedule", error);
+            if (AutoUpdate.Schedule(m, pkg, false, out error)) {
+                scheduled = true;
+            } else {
+                Log.Write("UpdateSchedule", error);
+                MessageBox.Show(this, "自动安装脚本启动失败：" + error + "\r\n可以稍后在功能区点「检查更新」重试，或手动运行下载目录里的 安装.cmd。",
+                    "天工工具箱 更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
         // 下载好的样子：主按钮「立即更新」，次按钮「关闭天工时再装」

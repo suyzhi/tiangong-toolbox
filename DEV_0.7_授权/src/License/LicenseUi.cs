@@ -2,6 +2,7 @@ using System;
 using System.Drawing;
 using System.IO;
 using System.Text;
+using System.Threading;
 using System.Windows.Forms;
 
 namespace TianGongCadSuite.Licensing {
@@ -13,6 +14,12 @@ namespace TianGongCadSuite.Licensing {
         readonly TextBox codeBox;
         readonly Label statusLabel;
         readonly Label planLabel;
+        readonly Button activateButton;
+        readonly Button retryButton;
+        readonly Button importButton;
+        readonly Font codeFont;
+        readonly Font machineFont;
+        bool busy;
 
         internal ActivationForm(){
             Ui.Shell(this, "天工工具箱 授权激活", 660, 486, 620, 460);
@@ -39,10 +46,11 @@ namespace TianGongCadSuite.Licensing {
             hint.ForeColor = Ui.Text2;
             Controls.Add(hint);
 
+            codeFont = new Font("Consolas", 10f);
             codeBox = new TextBox();
             codeBox.Multiline = true;
             codeBox.ScrollBars = ScrollBars.Vertical;
-            codeBox.Font = new Font("Consolas", 10f);
+            codeBox.Font = codeFont;
             codeBox.Location = new Point(pad, Ui.S(98));
             codeBox.Size = new Size(cw, Ui.S(120));
             codeBox.BorderStyle = BorderStyle.FixedSingle;
@@ -65,9 +73,10 @@ namespace TianGongCadSuite.Licensing {
             Controls.Add(machineTitle);
 
             Button copyButton = Ui.Secondary("复制机器码", 152, 34);
+            machineFont = new Font("Consolas", 12f, FontStyle.Bold);
             machineBox = new TextBox();
             machineBox.ReadOnly = true;
-            machineBox.Font = new Font("Consolas", 12f, FontStyle.Bold);
+            machineBox.Font = machineFont;
             machineBox.BackColor = Ui.Rail;
             machineBox.BorderStyle = BorderStyle.FixedSingle;
             machineBox.Location = new Point(pad, Ui.S(278));
@@ -77,18 +86,19 @@ namespace TianGongCadSuite.Licensing {
 
             copyButton.Location = new Point(machineBox.Right + Ui.S(10), Ui.S(277));
             copyButton.Click += delegate {
-                try{ Clipboard.SetText(machineBox.Text); statusLabel.Text = "机器码已复制（发给管理员时可作为售后凭证）。"; }
-                catch(Exception){ statusLabel.Text = "复制失败，请手工抄写。"; }
+                // 使用带重试的原生剪贴板封装，避免天工 CAD COM 进程内 WinForms Clipboard.SetText 偶发占用失败。
+                if(ClipboardUtil.SetText(machineBox.Text))statusLabel.Text = "机器码已复制（发给管理员时可作为售后凭证）。";
+                else statusLabel.Text = "复制失败，请手工抄写。";
             };
             Controls.Add(copyButton);
 
             int barY = ClientSize.Height - Ui.S(76);
-            Button importButton = Ui.Ghost("从文件导入…");
+            importButton = Ui.Ghost("从文件导入…");
             importButton.Location = new Point(Ui.S(16), barY + (Ui.S(76) - importButton.Height) / 2);
             importButton.Click += delegate { ImportFromFile(); };
             Controls.Add(importButton);
 
-            Button activateButton = Ui.Primary("激活", 120, 44);
+            activateButton = Ui.Primary("激活", 120, 44);
             activateButton.Location = new Point(ClientSize.Width - pad - activateButton.Width, barY + (Ui.S(76) - activateButton.Height) / 2);
             activateButton.Click += delegate { DoActivate(); };
             Controls.Add(activateButton);
@@ -99,7 +109,7 @@ namespace TianGongCadSuite.Licensing {
             Controls.Add(closeButton);
 
             // 已激活、但超过宽限期没联网（或服务器暂时连不上）时，不用重新输码，点这里再试一次。
-            Button retryButton = Ui.Secondary("重新联网验证", 126, 38);
+            retryButton = Ui.Secondary("重新联网验证", 126, 38);
             retryButton.Location = new Point(closeButton.Left - Ui.S(10) - retryButton.Width, barY + (Ui.S(76) - retryButton.Height) / 2);
             retryButton.Click += delegate { DoRetry(); };
             Controls.Add(retryButton);
@@ -115,6 +125,27 @@ namespace TianGongCadSuite.Licensing {
 
             RefreshPlan();
             statusLabel.Text = "当前状态：" + LicenseLibrary.Current().Describe();
+        }
+
+        protected override void Dispose(bool disposing){
+            if(disposing){
+                if(codeFont != null)codeFont.Dispose();
+                if(machineFont != null)machineFont.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
+        void SetBusy(bool on, string tip){
+            busy = on;
+            activateButton.Enabled = !on;
+            retryButton.Enabled = !on;
+            importButton.Enabled = !on;
+            codeBox.ReadOnly = on;
+            Cursor = on ? Cursors.WaitCursor : Cursors.Default;
+            if(!string.IsNullOrEmpty(tip)){
+                statusLabel.ForeColor = Ui.Muted;
+                statusLabel.Text = tip;
+            }
         }
 
         // 粘贴过程中就先把档位、到期日和码ID显示出来，抄错时能立刻看出来。
@@ -142,38 +173,69 @@ namespace TianGongCadSuite.Licensing {
             }
         }
 
+        // 联网复核与激活放到后台线程执行，弱网/代理超时时不再冻结天工 CAD 主窗口长达 16 秒。
         void DoRetry(){
-            Cursor = Cursors.WaitCursor;
-            LicenseReport report;
-            try{ report = LicenseOnline.RetryNow(); }
-            finally{ Cursor = Cursors.Default; }
-            statusLabel.ForeColor = report.Usable ? Ui.Ok : Ui.Bad;
-            statusLabel.Text = "当前状态：" + report.Describe();
-            if(report.Usable){
-                DialogResult = DialogResult.OK;
-                MessageBox.Show(this, "联网验证成功。\r\n" + report.Describe(), "天工工具箱", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                Close();
-            }
+            if(busy)return;
+            SetBusy(true, "正在连接授权服务器验证…");
+            Thread worker = new Thread(delegate(){
+                LicenseReport report = null;
+                string err = null;
+                try{ report = LicenseOnline.RetryNow(); }
+                catch(Exception ex){ err = ex.Message; }
+                UiPost(delegate(){
+                    SetBusy(false, null);
+                    if(err != null){
+                        statusLabel.ForeColor = Ui.Bad;
+                        statusLabel.Text = "联网验证失败：" + err;
+                        return;
+                    }
+                    statusLabel.ForeColor = report.Usable ? Ui.Ok : Ui.Bad;
+                    statusLabel.Text = "当前状态：" + report.Describe();
+                    if(report.Usable){
+                        DialogResult = DialogResult.OK;
+                        MessageBox.Show(this, "联网验证成功。\r\n" + report.Describe(), "天工工具箱", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        Close();
+                    }
+                });
+            });
+            worker.IsBackground = true;
+            worker.Name = "TG-License-Retry";
+            worker.Start();
         }
 
         void DoActivate(){
-            string message;
-            string notice;
-            LicenseReport report;
-            Cursor = Cursors.WaitCursor;
-            try{ report = LicenseLibrary.Activate(codeBox.Text, out message, out notice); }
-            finally{ Cursor = Cursors.Default; }
-            if(message != null){
-                statusLabel.ForeColor = Color.FromArgb(170, 40, 40);
-                statusLabel.Text = message;
-                return;
-            }
-            string head = string.IsNullOrEmpty(notice) ? "激活成功。" : notice;
-            statusLabel.ForeColor = Color.FromArgb(20, 110, 60);
-            statusLabel.Text = head + "\r\n" + report.Describe();
-            DialogResult = DialogResult.OK;
-            MessageBox.Show(this, head + "\r\n" + report.Describe(), "天工工具箱", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            Close();
+            if(busy)return;
+            string codeInput = codeBox.Text;
+            SetBusy(true, "正在联网激活，请稍候…");
+            Thread worker = new Thread(delegate(){
+                string message = null;
+                string notice = null;
+                LicenseReport report = null;
+                try{ report = LicenseLibrary.Activate(codeInput, out message, out notice); }
+                catch(Exception ex){ message = "激活失败：" + ex.Message; }
+                UiPost(delegate(){
+                    SetBusy(false, null);
+                    if(message != null){
+                        statusLabel.ForeColor = Color.FromArgb(170, 40, 40);
+                        statusLabel.Text = message;
+                        return;
+                    }
+                    string head = string.IsNullOrEmpty(notice) ? "激活成功。" : notice;
+                    statusLabel.ForeColor = Color.FromArgb(20, 110, 60);
+                    statusLabel.Text = head + "\r\n" + report.Describe();
+                    DialogResult = DialogResult.OK;
+                    MessageBox.Show(this, head + "\r\n" + report.Describe(), "天工工具箱", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    Close();
+                });
+            });
+            worker.IsBackground = true;
+            worker.Name = "TG-License-Activate";
+            worker.Start();
+        }
+
+        void UiPost(Action action){
+            if(IsDisposed || !IsHandleCreated)return;
+            try{ BeginInvoke(action); }catch(InvalidOperationException){ }
         }
     }
 

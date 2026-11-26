@@ -13,16 +13,12 @@
 > 另外**强烈建议**在 Caddyfile 里把 `/admin` 限制成只有你自己的 IP 能访问（`deploy/Caddyfile` 里有现成的两行，去掉注释即可）。
 > 不想让服务器签发，就不给 `--signing-key`、改用 `--admin`：看板照常管理，签发继续用本机的管理员工具。
 
-## 现网部署（2026-10-25）
+## 现网部署概览
 
-- 地址：`https://license.suyzhi.icu`（VPS 69.63.223.0，Debian 12）。443 被 s-ui 占着、80/8443 被别的项目的 Caddy 占着，
-  所以**不开端口**：服务只听 `127.0.0.1:8750`，经**独立的 Cloudflare Tunnel `tg-license`**（`/etc/cloudflared/tg-license.yml`，
-  服务 `cloudflared-tg-license`）对外；VPS 上原有的 `cloudflared`（vpn-cdn / cdn.suyzhi.icu）、s-ui、docker 都没动。
-- 服务：`tg-license.service`，用户 `tglicense`，目录 `/opt/tg-license`，用系统自带的 python3 + python3-cryptography（Debian 包）。
-- 回执私钥 `/opt/tg-license/server.key`（只在服务器上）；插件公钥槽已拷回 `src/License/LicenseServerSlot.cs`。
-- ⚠ `master.pub.json` 暂时是测试签发公钥（testmaster），只为了先把服务和隧道跑通；定了正式签发密钥后替换。
-- 看板（/admin）还没开：要先 `set-password`，再在服务里加 `--admin` 或 `--signing-key`。
-- 注意：从 Windows 连续开很多 SSH 连接偶尔会被重置（fail2ban / MaxStartups），隔几秒重试即可。
+- 接入方式：服务只监听本机回环 `127.0.0.1:8750`（不直接对外暴露端口），经独立的 HTTPS 反向代理或 Cloudflare Tunnel 对外提供服务。
+- 服务：`tg-license.service`，独立低权用户 `tglicense`，目录 `/opt/tg-license`，运行于系统 `python3` + `cryptography`。
+- 密钥：回执私钥 `server.key` 与签发私钥 `master.tgkey` 仅保留在服务器本地（`chmod 600`），客户端只内嵌公钥槽 `src/License/LicenseServerSlot.cs` 与 `src/License/LicenseKeySlot.cs`。
+- 看板（`/admin`）：首次启用前需先运行 `set-password`，再在服务启动参数中开启 `--admin` 或 `--signing-key`。
 
 ## 上线清单（2026-10-25，0.9.1 合并后）
 
@@ -92,7 +88,7 @@ sudo -u tglicense venv/bin/python tg_license_server.py keygen-master
 sudo -u tglicense venv/bin/python tg_license_server.py import-master --slot LicenseKeySlot.cs
 ```
 
-> 仓库里当前提交的 `LicenseKeySlot.cs` 是 **testmaster 测试公钥**，`import-master` 会拒绝它（联调时加 `--allow-test`）。
+> 仓库中测试公钥夹具位于 `tests/fixtures/license-test.public.cs`（`testmaster`），`import-master` 默认会拒绝它（联调时加 `--allow-test`）；`src/License/LicenseKeySlot.cs` 为正式签发公钥。
 > **换签发密钥 = 已经发出去的所有激活码作废**，正式发码前定下来，之后别再动。
 
 设置看板口令，并把以前用管理员工具发过的码导进来（可选，导入后能在看板里看到全文、客户备注）：

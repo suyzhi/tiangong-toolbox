@@ -1,4 +1,4 @@
-# tools/run-facescan-probe.ps1 —— 在私有桌面上跑"面扫描/沉孔识别"事实探针，不打扰用户桌面。
+﻿# tools/run-facescan-probe.ps1 —— 在私有桌面上跑"面扫描/沉孔识别"事实探针，不打扰用户桌面。
 param([string]$OutDir)
 $ErrorActionPreference='Continue'
 $root = Split-Path $PSScriptRoot -Parent

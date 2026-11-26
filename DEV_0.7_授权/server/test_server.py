@@ -231,10 +231,16 @@ class CodecTest(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 srv.save_signing_key(path, "prod", key)  # 绝不覆盖已有私钥
             nums = key.public_key().public_numbers()
-            source = srv.master_slot_source("prod", nums.x.to_bytes(32, "big"), nums.y.to_bytes(32, "big"))
+            x_bytes, y_bytes = nums.x.to_bytes(32, "big"), nums.y.to_bytes(32, "big")
+            source = srv.master_slot_source("prod", x_bytes, y_bytes)
             consts = dict(srv.re.findall(r'(\w+)\s*=\s*"([^"]*)"', source))
+            # 验证公钥坐标已真正异或掩码（不再是明文坐标），且能准确还原
+            self.assertNotEqual(consts["ValueX"], base64.b64encode(x_bytes).decode("ascii"))
+            self.assertNotEqual(consts["ValueY"], base64.b64encode(y_bytes).decode("ascii"))
             x = srv.unmask(consts["MaskX"], consts["ValueX"], consts["SeedX"])
+            y = srv.unmask(consts["MaskY"], consts["ValueY"], consts["SeedY"])
             self.assertEqual(int.from_bytes(x, "big"), nums.x)
+            self.assertEqual(int.from_bytes(y, "big"), nums.y)
 
 
 class AdminTest(unittest.TestCase):
@@ -360,6 +366,63 @@ class AdminTest(unittest.TestCase):
         self.assertEqual(code, 429, body)
         self.assertEqual(self.req("POST", "/admin/api/issue", {"plan": "X"}, cookie=cookie, csrf=csrf)[0], 400)
 
+        # events limit 参数边界校验（非数字 400、负数钳制为 1）
+        self.assertEqual(self.req("GET", "/admin/api/events?limit=abc", cookie=cookie)[0], 400)
+        code, _, ev_body = self.req("GET", "/admin/api/events?limit=-5", cookie=cookie)
+        self.assertEqual(code, 200)
+        self.assertLessEqual(len(json.loads(ev_body)["events"]), 1)
+
+    def test_unbind_blocks_old_check_and_allows_legacy_offline_check(self):
+        cookie, csrf = self.login()
+        # 1) 0.7 离线老码（服务器未曾见过、unbound_at 为空）：首次静默 check 仍允许自动补绑
+        legacy_payload = make_payload()
+        legacy_sig = srv.sign_p1363(self.master, legacy_payload)
+        req_legacy = {"v": 1, "op": "check", "payload": legacy_payload.hex(), "sig": legacy_sig.hex(),
+                      "machine": "1122334455", "nonce": secrets.token_hex(16)}
+        code, _, body = self.req("POST", "/api/v1/license", req_legacy)
+        self.assertEqual(code, 200, body)
+        receipt = json.loads(base64.b64decode(json.loads(body)["receipt"]))
+        self.assertEqual((receipt["status"], receipt["result"]), ("ok", "bound"))
+
+        # 2) 管理员解绑后：旧机器后台静默 check 必须返回 moved，不能把码重新绑回去
+        cid = srv.code_id(legacy_payload)
+        self.assertEqual(self.req("POST", "/admin/api/codes/%s/unbind" % cid, {}, cookie=cookie, csrf=csrf)[0], 200)
+        req_old_check = dict(req_legacy, nonce=secrets.token_hex(16))
+        code, _, body = self.req("POST", "/api/v1/license", req_old_check)
+        self.assertEqual(code, 200, body)
+        receipt = json.loads(base64.b64decode(json.loads(body)["receipt"]))
+        self.assertEqual(receipt["status"], "moved")
+
+        # 3) 新机器主动输码 activate：直接绑定且不扣换机次数
+        req_new_act = dict(req_legacy, op="activate", machine="6677889900", nonce=secrets.token_hex(16))
+        code, _, body = self.req("POST", "/api/v1/license", req_new_act)
+        self.assertEqual(code, 200, body)
+        receipt = json.loads(base64.b64decode(json.loads(body)["receipt"]))
+        self.assertEqual((receipt["status"], receipt["result"], receipt["left"]), ("ok", "bound", 2))
+
+    def test_concurrent_login_lockout_no_toctou(self):
+        self.admin.fails.clear()
+        self.admin.all_fails.clear()
+        results = []
+        results_lock = threading.Lock()
+        barrier = threading.Barrier(10)
+
+        def worker():
+            barrier.wait()
+            code, _, _ = self.admin.auth.authenticate("wrong-pass", "10.0.0.99")
+            with results_lock:
+                results.append(code)
+
+        threads = [threading.Thread(target=worker) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(results.count(401), 5)
+        self.assertEqual(results.count(429), 5)
+        self.admin.fails.clear()
+        self.admin.all_fails.clear()
+
     def test_import_ledger_rows(self):
         # 管理员工具台账里的码（testmaster 签发）用 testmaster 公钥导入
         with tempfile.TemporaryDirectory() as tmp:
@@ -462,6 +525,15 @@ class UpdateTest(unittest.TestCase):
             u.publish(make_installer_zip(), "noversion.zip", None, "")
         with self.assertRaises(ValueError):
             u.publish(make_installer_zip(extra={"../../evil.txt": b"x"}), "x_DEV1.0.0.zip", None, "")
+        # 拒绝 Windows 盘符路径、反斜杠绝对路径、以及文件名/版本号末尾带换行符
+        with self.assertRaises(ValueError):
+            u.publish(make_installer_zip(extra={"C:/evil.txt": b"x"}), "x_DEV1.0.0.zip", None, "")
+        with self.assertRaises(ValueError):
+            u.publish(make_installer_zip(extra={"\\evil.txt": b"x"}), "x_DEV1.0.0.zip", None, "")
+        with self.assertRaises(ValueError):
+            u.publish(make_installer_zip(), "x_DEV1.0.0.zip\n", "1.0.0", "")
+        with self.assertRaises(ValueError):
+            u.publish(make_installer_zip(), "x_DEV1.0.0.zip", "1.0.0\n", "")
 
     def test_admin_upload(self):
         # 登录
@@ -512,6 +584,99 @@ class UpdateTest(unittest.TestCase):
             raw = base64.b64decode(signed["manifest"])
             self.assertTrue(srv.verify_p1363(k.public_key(), raw, base64.b64decode(signed["sig"])))
             self.assertEqual(json.loads(raw)["version"], "1.2.3")
+
+    def test_preauth_upload_rejects_oversized_without_reading_body(self):
+        import socket
+        host, port = self.httpd.server_address
+        # 声称发送 200MB 但未带登录态且一个 body 字节都不发：服务端必须立刻回 401，绝不阻塞读包或 OOM
+        with socket.create_connection((host, port), timeout=3) as s:
+            s.settimeout(3)
+            raw_req = (
+                "POST /admin/api/updates?name=a_DEV1.0.0.zip&version=1.0.0 HTTP/1.1\r\n"
+                "Host: 127.0.0.1\r\n"
+                "Content-Length: 209715200\r\n"
+                "\r\n"
+            ).encode("ascii")
+            s.sendall(raw_req)
+            resp = s.recv(4096)
+        self.assertIn(b" 401 ", resp.splitlines()[0])
+
+        # 已登录但 CSRF 错误，同样在读 200MB 请求体之前立刻回 403
+        req = urllib.request.Request(self.base + "/admin/api/login", data=json.dumps({"password": "pw for test"}).encode(),
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req) as r:
+            cookie = r.headers["Set-Cookie"].split(";")[0]
+            csrf = json.loads(r.read())["csrf"]
+        with socket.create_connection((host, port), timeout=3) as s:
+            s.settimeout(3)
+            raw_req = (
+                "POST /admin/api/updates?name=a_DEV1.0.0.zip&version=1.0.0 HTTP/1.1\r\n"
+                "Host: 127.0.0.1\r\n"
+                "Cookie: " + cookie + "\r\n"
+                "X-TG-CSRF: wrong\r\n"
+                "Content-Length: 209715200\r\n"
+                "\r\n"
+            ).encode("ascii")
+            s.sendall(raw_req)
+            resp = s.recv(4096)
+        self.assertIn(b" 403 ", resp.splitlines()[0])
+
+        # 验证 X-TG-Notes 头（UTF-8 Base64）传递长多行中文说明
+        notes_text = "第一行说明\n第二行：修复上传与反代 IP"
+        notes_b64 = base64.b64encode(notes_text.encode("utf-8")).decode("ascii")
+        q = "?name=" + urllib.parse.quote("天工工具箱_DEV0.9.4_安装包_20261102.zip") + "&version=0.9.4"
+        req = urllib.request.Request(
+            self.base + "/admin/api/updates" + q,
+            data=make_installer_zip(),
+            method="POST",
+            headers={
+                "Content-Type": "application/zip",
+                "Cookie": cookie,
+                "X-TG-CSRF": csrf,
+                "X-TG-Notes": notes_b64,
+            },
+        )
+        with urllib.request.urlopen(req) as r:
+            state = json.loads(r.read())
+        self.assertEqual((state["latest"]["version"], state["latest"]["notes"]), ("0.9.4", notes_text))
+
+
+class ProxyIpTest(unittest.TestCase):
+    def test_trust_proxy_rejects_spoofed_cf_and_uses_rightmost_xff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            master = ec.generate_private_key(ec.SECP256R1())
+            server_key = ec.generate_private_key(ec.SECP256R1())
+            ledger = srv.Ledger(os.path.join(tmp, "p.db"))
+            service = srv.Service(ledger, master.public_key(), server_key, trust_proxy=True)
+            httpd = srv.BoundedThreadingHTTPServer(("127.0.0.1", 0), srv.make_handler(service))
+            base = "http://127.0.0.1:%d/api/v1/license" % httpd.server_address[1]
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+            try:
+                def send_with(headers):
+                    p = make_payload()
+                    sig = srv.sign_p1363(master, p)
+                    body = json.dumps({"v": 1, "op": "activate", "payload": p.hex(), "sig": sig.hex(),
+                                       "machine": "aaaaaaaaaa", "nonce": secrets.token_hex(16)}).encode()
+                    h = {"Content-Type": "application/json"}
+                    h.update(headers)
+                    req = urllib.request.Request(base, data=body, headers=h)
+                    with urllib.request.urlopen(req, timeout=5) as r:
+                        self.assertEqual(r.status, 200)
+                    return ledger.row(srv.code_id(p))["last_ip"]
+
+                # 无 CF-Ray 时忽略伪造的 CF-Connecting-IP，取 X-Forwarded-For 最右侧真实反代追加值
+                ip1 = send_with({"CF-Connecting-IP": "9.9.9.9", "X-Forwarded-For": "1.1.1.1, 2.2.2.2"})
+                self.assertEqual(ip1, "2.2.2.2")
+                # 同时带 CF-Ray 时信任 CF-Connecting-IP
+                ip2 = send_with({"CF-Ray": "8a1b2c3d4e-SIN", "CF-Connecting-IP": "3.3.3.3", "X-Forwarded-For": "1.1.1.1"})
+                self.assertEqual(ip2, "3.3.3.3")
+                # 非法 IP 头回退到直连地址
+                ip3 = send_with({"X-Forwarded-For": "spoofed-value"})
+                self.assertEqual(ip3, "127.0.0.1")
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+                ledger.db.close()
 
 
 if __name__ == "__main__":

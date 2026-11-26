@@ -105,14 +105,23 @@ namespace TianGongCadSuite {
             error = null;
             string url = BaseUrl;
             if (url == null) { error = "这个版本没有配置更新服务器。"; return null; }
+#if !TG_DEV_BUILD
+            // 正式构建强制 HTTPS，防止配置错误或中间人降级。
+            if (!url.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) { error = "更新服务器地址必须使用 HTTPS。"; return null; }
+#endif
             string text;
             try {
                 ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
                 var req = (HttpWebRequest)WebRequest.Create(url);
+                req.AllowAutoRedirect = false;
                 req.Timeout = TimeoutMs; req.ReadWriteTimeout = TimeoutMs;
                 req.UserAgent = Product.Name + "/" + Product.Version;
                 using (var res = (HttpWebResponse)req.GetResponse())
-                using (var r = new StreamReader(res.GetResponseStream(), Encoding.UTF8)) text = r.ReadToEnd();
+                using (var r = new StreamReader(res.GetResponseStream(), Encoding.UTF8)) {
+                    var buf = new char[65536];
+                    int got = r.ReadBlock(buf, 0, buf.Length);
+                    text = new string(buf, 0, got);
+                }
             } catch (WebException e) {
                 var res = e.Response as HttpWebResponse;
                 if (res != null && res.StatusCode == HttpStatusCode.NotFound) { res.Close(); return null; }   // 服务器上还没发布过版本
@@ -198,6 +207,12 @@ namespace TianGongCadSuite {
                 s.Staged = ""; s.StagedDir = ""; Save(s);     // 已经装上了（或包被删了）
                 return;
             }
+            // 上一次等待脚本安装失败已落盘失败标记：清除待装状态避免每次重启天工都无限重试弹窗（用户仍可手动点「检查更新」重试）。
+            if (File.Exists(Path.Combine(s.StagedDir, ".install-failed"))) {
+                Log.Write("UpdateResume", "上次待装版本 " + s.Staged + " 安装失败，已停止自动重试（可手动检查更新重试）");
+                s.Staged = ""; s.StagedDir = ""; Save(s);
+                return;
+            }
             if (WaiterRunning()) return;
             Log.Write("UpdateResume", "上次下载的 " + s.Staged + " 还没装上，重新等天工关闭后安装");
             string error;
@@ -271,45 +286,85 @@ namespace TianGongCadSuite {
 
         public static string UpdatesRoot { get { return Path.Combine(Log.Folder, "updates"); } }
 
-        // 下载到 updates\<版本>\，校验大小和 SHA-256，解压到 updates\<版本>\pkg\。返回 pkg 目录；失败抛异常（消息给人看）
+        // 下载到 updates\<版本>\，校验版本、大小和 SHA-256，防 Zip Slip 检查后解压到 updates\<版本>\pkg\。返回 pkg 目录；失败抛异常（消息给人看）
         public static string Download(UpdateManifest m, Action<long, long> progress, Func<bool> cancelled){
+            if (m == null || m.Parsed == null) throw new InvalidDataException("更新清单无效。");
+            // 拒绝版本号降级包（允许同版本 --real 重装验证；交互入口仍要求严格大于当前版本）。
+            if (m.Parsed < Current) throw new InvalidDataException("更新包版本（" + m.Version + "）低于当前版本（" + Product.Version + "），已拒绝安装。");
+            string baseUrl = BaseUrl;
+            if (string.IsNullOrEmpty(baseUrl)) throw new InvalidOperationException("这个版本没有配置更新服务器。");
+#if !TG_DEV_BUILD
+            if (!baseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("更新服务器地址必须使用 HTTPS。");
+#endif
             string dir = Path.Combine(UpdatesRoot, m.Version);
             Directory.CreateDirectory(dir);
             string zip = Path.Combine(dir, "package.zip");
-            string url = BaseUrl + "/file/" + Uri.EscapeDataString(m.File);
+            string part = Path.Combine(dir, "package.zip." + Guid.NewGuid().ToString("N").Substring(0, 8) + ".part");
+            string url = baseUrl + "/file/" + Uri.EscapeDataString(m.File);
             ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
             var req = (HttpWebRequest)WebRequest.Create(url);
+            req.AllowAutoRedirect = false;
             req.Timeout = TimeoutMs; req.ReadWriteTimeout = 60000;
             req.UserAgent = Product.Name + "/" + Product.Version;
-            using (var sha = SHA256.Create())
-            using (var res = (HttpWebResponse)req.GetResponse())
-            using (var input = res.GetResponseStream())
-            using (var output = new FileStream(zip, FileMode.Create, FileAccess.Write)) {
-                var buf = new byte[1 << 16];
-                long got = 0; int n;
-                while ((n = input.Read(buf, 0, buf.Length)) > 0) {
-                    if (cancelled != null && cancelled()) throw new OperationCanceledException("已取消下载。");
-                    got += n;
-                    if (got > m.Size) throw new InvalidDataException("下载的安装包比清单里写的大，已丢弃。");
-                    output.Write(buf, 0, n);
-                    sha.TransformBlock(buf, 0, n, null, 0);
-                    if (progress != null) progress(got, m.Size);
+            try {
+                using (var sha = SHA256.Create())
+                using (var res = (HttpWebResponse)req.GetResponse())
+                using (var input = res.GetResponseStream())
+                using (var output = new FileStream(part, FileMode.Create, FileAccess.Write, FileShare.None)) {
+                    var buf = new byte[1 << 16];
+                    long got = 0; int n;
+                    while ((n = input.Read(buf, 0, buf.Length)) > 0) {
+                        if (cancelled != null && cancelled()) throw new OperationCanceledException("已取消下载。");
+                        got += n;
+                        if (got > m.Size) throw new InvalidDataException("下载的安装包比清单里写的大，已丢弃。");
+                        output.Write(buf, 0, n);
+                        sha.TransformBlock(buf, 0, n, null, 0);
+                        if (progress != null) progress(got, m.Size);
+                    }
+                    sha.TransformFinalBlock(buf, 0, 0);
+                    if (got != m.Size) throw new InvalidDataException("安装包没下载完整（" + got + " / " + m.Size + " 字节），请稍后再试。");
+                    if (Hex(sha.Hash) != m.Sha256) throw new InvalidDataException("安装包校验不对（SHA-256 和服务器清单不一致），已丢弃，不会安装。");
                 }
-                sha.TransformFinalBlock(buf, 0, 0);
-                if (got != m.Size) throw new InvalidDataException("安装包没下载完整（" + got + " / " + m.Size + " 字节），请稍后再试。");
-                if (Hex(sha.Hash) != m.Sha256) throw new InvalidDataException("安装包校验不对（SHA-256 和服务器清单不一致），已丢弃，不会安装。");
+                if (File.Exists(zip)) File.Replace(part, zip, null);
+                else File.Move(part, zip);
+                part = null;
+            } finally {
+                if (part != null) { try { if (File.Exists(part)) File.Delete(part); } catch { } }
             }
             string pkg = Path.Combine(dir, "pkg");
+            ValidateZipEntries(zip, pkg);
             if (Directory.Exists(pkg)) Directory.Delete(pkg, true);
-            ZipFile.ExtractToDirectory(zip, pkg);      // .NET 4.6.2+：路径穿越（..\）会直接抛异常
+            ZipFile.ExtractToDirectory(zip, pkg);
+            string failMark = Path.Combine(pkg, ".install-failed");
+            if (File.Exists(failMark)) { try { File.Delete(failMark); } catch { } }
             if (!File.Exists(Path.Combine(pkg, @"payload\TianGongCadSuite.dll")) || !File.Exists(Path.Combine(pkg, @"tools\install.ps1")))
                 throw new InvalidDataException("下载的不是完整的天工工具箱安装包（缺 payload 或 install.ps1）。");
             return pkg;
         }
 
+        // 显式 Zip Slip 校验：不依赖宿主机 .NET Framework 补丁版本，拦截任何根路径、盘符路径和 .. 穿越条目。
+        static void ValidateZipEntries(string zipPath, string destDir){
+            string rootFull = Path.GetFullPath(destDir);
+            if (!rootFull.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal))
+                rootFull += Path.DirectorySeparatorChar;
+            using (var archive = ZipFile.OpenRead(zipPath)) {
+                foreach (var entry in archive.Entries) {
+                    string name = entry.FullName ?? "";
+                    if (name.Length == 0) continue;
+                    if (name.StartsWith("/", StringComparison.Ordinal) || name.StartsWith("\\", StringComparison.Ordinal) || name.IndexOf(':') >= 0)
+                        throw new InvalidDataException("安装包内含不安全的绝对路径条目：" + name);
+                    string target = Path.GetFullPath(Path.Combine(rootFull, name));
+                    if (!target.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidDataException("安装包内含路径穿越条目：" + name);
+                }
+            }
+        }
+
         // 下载好以后：起等待脚本，记下"已下载待安装"。restart = 「立即更新」：脚本先请天工关闭，装好后重新打开
         public static bool Schedule(UpdateManifest m, string pkg, out string error){ return Schedule(m, pkg, false, out error); }
         public static bool Schedule(UpdateManifest m, string pkg, bool restart, out string error){
+            string failMark = Path.Combine(pkg, ".install-failed");
+            if (File.Exists(failMark)) { try { File.Delete(failMark); } catch { } }
             if (!LaunchWaiter(pkg, m.Version, restart, out error)) return false;
             var s = Load(); s.Staged = m.Version; s.StagedDir = pkg; s.SnoozeUntil = DateTime.MinValue; Save(s);
             Log.Write("UpdateStaged", m.Version + (restart ? " 立即更新：请天工关闭，装好后重新打开：" : " 已下载，等天工关闭后安装：") + pkg);
@@ -321,21 +376,36 @@ namespace TianGongCadSuite {
         static string WaiterLog { get { return Path.Combine(UpdatesRoot, "update.log"); } }
         static string WaiterPidFile { get { return Path.Combine(UpdatesRoot, "waiter.pid"); } }
 
-        static bool WaiterRunning(){
+        static System.Diagnostics.Process FindOwnWaiterProcess(){
             try {
-                int pid;
-                if (!File.Exists(WaiterPidFile) || !int.TryParse(File.ReadAllText(WaiterPidFile).Trim(), out pid)) return false;
+                if (!File.Exists(WaiterPidFile)) return null;
+                string raw = File.ReadAllText(WaiterPidFile).Trim();
+                // 新格式 pid|startUtcTicks：必须同时核对启动时间，避免旧 PID 被 OS 复用后误杀用户无关的 PowerShell 进程。
+                var parts = raw.Split('|');
+                int pid; long savedTicks;
+                if (parts.Length < 2 || !int.TryParse(parts[0], out pid) || !long.TryParse(parts[1], out savedTicks)) return null;
                 var p = System.Diagnostics.Process.GetProcessById(pid);
-                return !p.HasExited && p.ProcessName.IndexOf("powershell", StringComparison.OrdinalIgnoreCase) >= 0;
-            } catch { return false; }
+                if (p.HasExited || p.ProcessName.IndexOf("powershell", StringComparison.OrdinalIgnoreCase) < 0) return null;
+                long actualTicks = p.StartTime.ToUniversalTime().Ticks;
+                if (Math.Abs(actualTicks - savedTicks) > TimeSpan.TicksPerSecond * 5) return null;
+                return p;
+            } catch { return null; }
+        }
+
+        static bool WaiterRunning(){
+            var p = FindOwnWaiterProcess();
+            if (p == null) return false;
+            p.Dispose();
+            return true;
         }
 
         // 等所有天工进程退出 → 运行安装包里的 install.ps1 -Force → 弹一句结果。写在 updates\apply-update.ps1
         internal const string WaiterScript =
-@"param([string]$Pkg, [string]$Version, [string]$Log, [switch]$DryRun, [switch]$Restart, [string]$CadExe = '', [string]$CadName = 'TianGong', [int]$CloseWait = 300)
+@"param([string]$Pkg, [string]$Version, [string]$Log, [string]$PidFile = '', [switch]$DryRun, [switch]$Restart, [string]$CadExe = '', [string]$CadName = 'TianGong', [int]$CloseWait = 300)
 $ErrorActionPreference = 'Continue'
 function W([string]$s){ try { Add-Content -LiteralPath $Log -Value ((Get-Date).ToString('yyyy-MM-dd HH:mm:ss') + ' ' + $s) -Encoding UTF8 } catch {} }
 function Busy { @(Get-Process -Name $CadName -ErrorAction SilentlyContinue).Count -gt 0 }
+try {
 $relaunch = $false
 if ($Restart) {
     # 立即更新：请天工关闭（等于点窗口的 ×；没保存的文件天工自己会问）。5 分钟内关掉了才在装好后重新打开它
@@ -370,11 +440,17 @@ if ($ok -and $relaunch -and $CadExe -and (Test-Path -LiteralPath $CadExe)) {
     W ('已重新打开天工：' + $CadExe)
     exit 0
 }
+if (-not $ok) {
+    try { Set-Content -LiteralPath (Join-Path $Pkg '.install-failed') -Value ((Get-Date).ToString('s') + ' exit=' + $code) -Encoding UTF8 } catch {}
+}
 Add-Type -AssemblyName System.Windows.Forms
 if ($ok) {
     [System.Windows.Forms.MessageBox]::Show('天工工具箱已更新到 ' + $Version + '。' + [Environment]::NewLine + '重新打开天工就是新版本。', '天工工具箱 更新', 'OK', 'Information') | Out-Null
 } else {
     [System.Windows.Forms.MessageBox]::Show('天工工具箱 ' + $Version + ' 没有装上。' + [Environment]::NewLine + '可以手动运行：' + (Join-Path $Pkg '安装.cmd') + [Environment]::NewLine + '详细记录：' + $Log, '天工工具箱 更新', 'OK', 'Warning') | Out-Null
+}
+} finally {
+    if ($PidFile) { try { Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue } catch {} }
 }
 ";
 
@@ -387,7 +463,7 @@ if ($ok) {
                 File.WriteAllText(script, WaiterScript, new UTF8Encoding(true));   // 带 BOM：Windows PowerShell 5 才按 UTF-8 读中文
                 string ps = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"WindowsPowerShell\v1.0\powershell.exe");
                 string cmd = "\"" + ps + "\" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + script + "\" -Pkg \"" + pkg
-                           + "\" -Version \"" + version + "\" -Log \"" + WaiterLog + "\"" + (DryRunForTest ? " -DryRun" : "");
+                           + "\" -Version \"" + version + "\" -Log \"" + WaiterLog + "\" -PidFile \"" + WaiterPidFile + "\"" + (DryRunForTest ? " -DryRun" : "");
                 if (restart) {
                     string exe = CadExeForTest;
                     if (exe == null) { try { exe = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName; } catch { exe = ""; } }   // 插件就在天工进程里
@@ -407,7 +483,14 @@ if ($ok) {
                         var outParams = cls.InvokeMethod("Create", inParams, null);
                         uint rv = Convert.ToUInt32(outParams["ReturnValue"]);
                         if (rv != 0) { error = "没能启动安装脚本（Win32_Process.Create 返回 " + rv + "）。"; return false; }
-                        File.WriteAllText(WaiterPidFile, Convert.ToString(outParams["ProcessId"]));
+                        int pid = Convert.ToInt32(outParams["ProcessId"]);
+                        long startTicks = DateTime.UtcNow.Ticks;
+                        try {
+                            using (var proc = System.Diagnostics.Process.GetProcessById(pid)) {
+                                startTicks = proc.StartTime.ToUniversalTime().Ticks;
+                            }
+                        } catch { }
+                        File.WriteAllText(WaiterPidFile, pid + "|" + startTicks);
                     }
                 }
                 return true;
@@ -416,10 +499,10 @@ if ($ok) {
 
         static void KillWaiter(){
             try {
-                int pid;
-                if (!File.Exists(WaiterPidFile) || !int.TryParse(File.ReadAllText(WaiterPidFile).Trim(), out pid)) return;
-                var p = System.Diagnostics.Process.GetProcessById(pid);
-                if (!p.HasExited && p.ProcessName.IndexOf("powershell", StringComparison.OrdinalIgnoreCase) >= 0) { p.Kill(); p.WaitForExit(3000); }
+                using (var p = FindOwnWaiterProcess()) {
+                    if (p != null) { p.Kill(); p.WaitForExit(3000); }
+                }
+                if (File.Exists(WaiterPidFile)) File.Delete(WaiterPidFile);
             } catch { }
         }
 

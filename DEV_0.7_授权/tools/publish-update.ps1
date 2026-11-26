@@ -27,24 +27,27 @@ if (-not $Zip) {
     $Zip = (Get-ChildItem $repo -Filter '天工工具箱_DEV*_安装包_*.zip' | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
     if (-not $Zip) { throw '仓库根目录里找不到安装包 zip，请用 -Zip 指定或加 -Build' }
 }
-$Zip = (Resolve-Path $Zip).Path
+$Zip = (Resolve-Path -LiteralPath $Zip).Path
 $name = [IO.Path]::GetFileName($Zip)
 if (-not $Version) { if ($name -match 'DEV(\d+\.\d+\.\d+)') { $Version = $Matches[1] } else { throw '文件名里没有 DEVx.y.z，请用 -Version 指定' } }
-if ($NotesFile) { $Notes = [IO.File]::ReadAllText((Resolve-Path $NotesFile).Path, [Text.Encoding]::UTF8) }
+if ($NotesFile) { $Notes = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $NotesFile).Path, [Text.Encoding]::UTF8) }
 $Notes = $Notes -replace '`n', "`n"
 
-if ($PasswordFile) { $pw = (Get-Content $PasswordFile -TotalCount 1).Trim() }
+if ($PasswordFile) { $pw = (Get-Content -LiteralPath $PasswordFile -TotalCount 1).Trim() }
 else {
     $sec = Read-Host '看板口令' -AsSecureString
     $pw = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))
 }
-Write-Output ('发布 ' + $Version + '：' + $name + '（' + [Math]::Round((Get-Item $Zip).Length / 1MB, 2) + ' MB）→ ' + $Server)
+Write-Output ('发布 ' + $Version + '：' + $name + '（' + [Math]::Round((Get-Item -LiteralPath $Zip).Length / 1MB, 2) + ' MB）→ ' + $Server)
 $s = New-Object Microsoft.PowerShell.Commands.WebRequestSession
 $login = Invoke-RestMethod -Method Post -Uri "$Server/admin/api/login" -WebSession $s -ContentType 'application/json; charset=utf-8' `
     -Body ([Text.Encoding]::UTF8.GetBytes((@{ password = $pw } | ConvertTo-Json)))
-$q = '?name=' + [Uri]::EscapeDataString($name) + '&version=' + [Uri]::EscapeDataString($Version) + '&notes=' + [Uri]::EscapeDataString($Notes)
+# 更新说明走 X-TG-Notes 头（UTF-8 Base64），避免长中文说明超出 URL 长度上限或写进反代日志
+$q = '?name=' + [Uri]::EscapeDataString($name) + '&version=' + [Uri]::EscapeDataString($Version)
+$headers = @{ 'X-TG-CSRF' = $login.csrf }
+if ($Notes) { $headers['X-TG-Notes'] = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Notes)) }
 try {
-    $r = Invoke-RestMethod -Method Post -Uri ("$Server/admin/api/updates" + $q) -WebSession $s -Headers @{ 'X-TG-CSRF' = $login.csrf } `
+    $r = Invoke-RestMethod -Method Post -Uri ("$Server/admin/api/updates" + $q) -WebSession $s -Headers $headers `
         -ContentType 'application/zip' -InFile $Zip
 } catch {
     $msg = $_.ErrorDetails.Message

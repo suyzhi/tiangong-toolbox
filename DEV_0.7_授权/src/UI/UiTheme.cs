@@ -200,11 +200,14 @@ namespace TianGongCadSuite {
             }
         }
 
-        // 按钮文字动态改长后确保不截断
+        // 按钮文字动态改长或改短后自适应宽度（支持随紧凑文案回缩，防止窄栏下把同行右侧按钮挤出可视区；同时尊重 MinimumSize）。
         public static void FitButton(Button b){
             if (b == null) return;
-            int need = TextRenderer.MeasureText(b.Text ?? "", b.Font ?? F9).Width + S(26);
-            if (b.Width < need) b.Width = need;
+            int pad = (b is FlatButton && ((FlatButton)b).Style == FlatButton.Kind.Ghost) ? S(22) : S(26);
+            int need = TextRenderer.MeasureText(b.Text ?? "", b.Font ?? F9).Width + pad;
+            int minW = b.MinimumSize.Width > 0 ? b.MinimumSize.Width : 0;
+            int target = Math.Max(minW, need);
+            if (b.Width != target) b.Width = target;
         }
 
         public static GraphicsPath Rounded(Rectangle r, int radius){

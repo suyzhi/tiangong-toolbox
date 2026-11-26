@@ -101,9 +101,15 @@ namespace TianGongCadSuite.Licensing {
         // ---------- 校验（LicenseLibrary.Current 调用；返回 Valid 表示联网这一关通过） ----------
 
         internal static LicenseStatus Evaluate(ActivationRecord record,LicenseCode code,out string detail){
+            bool refreshed;
+            return Evaluate(record, code, Stored(record, code), out detail, out refreshed);
+        }
+
+        internal static LicenseStatus Evaluate(ActivationRecord record,LicenseCode code,LicenseReceipt preloaded,out string detail,out bool refreshed){
             detail = null;
+            refreshed = false;
             int today = LicenseLibrary.Today;
-            LicenseReceipt receipt = Stored(record, code);
+            LicenseReceipt receipt = preloaded;
             if(receipt == null || today - receipt.Day > GraceDays){
                 LicenseReceipt fresh = Refresh(code, false);
                 if(fresh == null){
@@ -111,10 +117,11 @@ namespace TianGongCadSuite.Licensing {
                     return LicenseStatus.OnlineRequired;
                 }
                 receipt = fresh;
+                refreshed = true;
             }else if(today - receipt.Day >= RefreshDays){
                 if(Synchronous){
                     LicenseReceipt fresh = Refresh(code, true);
-                    if(fresh != null)receipt = fresh;
+                    if(fresh != null){ receipt = fresh; refreshed = true; }
                 }else RefreshInBackground(code);
             }
             // 本机时间比服务器上次给的日期还早一周以上：时间被回调过。
@@ -128,6 +135,18 @@ namespace TianGongCadSuite.Licensing {
             }
             detail = "授权服务器返回了无法识别的结论：" + receipt.Status;
             return LicenseStatus.OnlineRequired;
+        }
+
+        // 供 LicenseStore.Load 在主/影两份激活文件中比较哪份已签名回执更新。
+        internal static int ReceiptDay(ActivationRecord record){
+            if(record == null || string.IsNullOrEmpty(record.Receipt) || string.IsNullOrEmpty(record.ReceiptSignature))return 0;
+            LicenseReceipt r = LicenseReceipt.Open(record.Receipt, record.ReceiptSignature);
+            return r == null ? 0 : r.Day;
+        }
+
+        // 与后台 Persist 共用同一把锁，避免用户刚激活新码时被后台复核线程写回旧码覆盖。
+        internal static bool SaveWithPersistLock(Func<bool> action){
+            lock(sync){ return action(); }
         }
 
         // 激活文件里存的回执：验签通过、且确实是"这个码 + 本机"的才算数。
@@ -182,12 +201,16 @@ namespace TianGongCadSuite.Licensing {
                 record.Receipt = receipt.Raw;
                 record.ReceiptSignature = receipt.Signature;
                 LicenseStore.Save(record);
+                LicenseLibrary.InvalidateReportCache();
             }
         }
 
         // 到期日：服务器回执里给了就以它为准（管理员可以随时延长 / 缩短），没给（老服务端 / 还没联网）按码里写的
         internal static int ExpiryDay(ActivationRecord record,LicenseCode code){
-            LicenseReceipt receipt = Stored(record, code);
+            return ExpiryDay(record, code, Stored(record, code));
+        }
+
+        internal static int ExpiryDay(ActivationRecord record,LicenseCode code,LicenseReceipt receipt){
             if(receipt != null && receipt.Expires > 0)return receipt.Expires;
             LicensePlan plan = code == null ? null : code.Plan;
             return code == null || plan == null ? 0 : code.Payload.DayOffset + plan.Days;
@@ -252,10 +275,15 @@ namespace TianGongCadSuite.Licensing {
             if(LicenseTestHooks.ServerUrlOverride != null)url = LicenseTestHooks.ServerUrlOverride;
 #endif
             if(string.IsNullOrEmpty(url)){ error = "插件没有配置授权服务器地址（LicenseServerSlot 仍是占位），请联系管理员。"; return null; }
+#if !TG_DEV_BUILD
+            // 正式构建强制 HTTPS 并禁止 302 跳转降级到明文 HTTP。
+            if(!url.StartsWith("https://", StringComparison.OrdinalIgnoreCase)){ error = "授权服务器地址必须使用 HTTPS。"; return null; }
+#endif
             try{
                 ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
                 HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
                 request.Method = "POST";
+                request.AllowAutoRedirect = false;
                 request.ContentType = "application/json; charset=utf-8";
                 request.Timeout = TimeoutMs;
                 request.ReadWriteTimeout = TimeoutMs;

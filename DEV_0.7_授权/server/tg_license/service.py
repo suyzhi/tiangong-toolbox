@@ -10,6 +10,7 @@ from .codec import PAYLOAD_SIZE, PLANS, code_id, day_offset, parse_payload
 from .crypto import sign_p1363, verify_p1363
 
 MAX_BODY = 4096
+MAX_TRACKED_IPS = 5000
 HEX = re.compile(r"^[0-9a-f]+$")
 
 
@@ -25,12 +26,33 @@ class Service:
         self.clock = time.time  # 测试可替换
         self.updates = None     # 版本发布（tg_license.updates.Updates），serve 时挂上
 
+    def _prune_hits_locked(self, now):
+        # 定期清理 60 秒窗口已过期的 IP 键，避免长期运行或伪造多 IP 导致字典无限增长。
+        stale = []
+        for k, q in self.hits.items():
+            while q and now - q[0] > 60:
+                q.popleft()
+            if not q:
+                stale.append(k)
+        for k in stale:
+            del self.hits[k]
+
     def allow(self, ip):
         now = time.monotonic()
         with self.hits_lock:
-            q = self.hits[ip]
-            while q and now - q[0] > 60:
-                q.popleft()
+            if len(self.hits) > 1000:
+                self._prune_hits_locked(now)
+            q = self.hits.get(ip)
+            if q is None:
+                if len(self.hits) >= MAX_TRACKED_IPS:
+                    self._prune_hits_locked(now)
+                    if len(self.hits) >= MAX_TRACKED_IPS:
+                        return False
+                q = deque()
+                self.hits[ip] = q
+            else:
+                while q and now - q[0] > 60:
+                    q.popleft()
             if len(q) >= self.rate:
                 return False
             q.append(now)

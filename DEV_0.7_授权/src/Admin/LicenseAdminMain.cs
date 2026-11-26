@@ -107,8 +107,23 @@ namespace TianGongCadSuite.Licensing.Admin {
             Buffer.BlockCopy(coordinates, 32, y, 0, 32);
             string seedA = "TGS-SLOT-A-" + keyId;
             string seedB = "TGS-SLOT-B-" + keyId;
-            byte[] maskA = LicenseKeyMaterial.Stream(seedA, 32);
-            byte[] maskB = LicenseKeyMaterial.Stream(seedB, 32);
+            byte[] streamA = LicenseKeyMaterial.Stream(seedA, 32);
+            byte[] streamB = LicenseKeyMaterial.Stream(seedB, 32);
+            // 生成独立随机掩码并对坐标做双重异或编码（Value = Coord ^ Stream ^ Mask），
+            // 修复原先 Mask == Stream 且 Value 明文直存导致客户端 Unmask 异或恒等抵消的问题；
+            // 客户端 LicenseKeyMaterial.Unmask 解码公式不变，完全向后兼容已有 LicenseKeySlot.cs。
+            byte[] maskA = new byte[32];
+            byte[] maskB = new byte[32];
+            using(System.Security.Cryptography.RandomNumberGenerator rng = System.Security.Cryptography.RandomNumberGenerator.Create()){
+                rng.GetBytes(maskA);
+                rng.GetBytes(maskB);
+            }
+            byte[] maskedX = new byte[32];
+            byte[] maskedY = new byte[32];
+            for(int i = 0; i < 32; i++){
+                maskedX[i] = (byte)(x[i] ^ streamA[i] ^ maskA[i]);
+                maskedY[i] = (byte)(y[i] ^ streamB[i] ^ maskB[i]);
+            }
             StringBuilder text = new StringBuilder();
             text.Append("// 由 TianGongLicenseAdmin keygen 生成，请勿手工修改。密钥ID：").Append(keyId).Append('\n');
             text.Append("// 这是公钥，可以随源码一起提交；私钥在同名的 .tgkey 文件里，绝不能提交。\n");
@@ -119,8 +134,8 @@ namespace TianGongCadSuite.Licensing.Admin {
             text.Append("        internal static readonly string MaskY = \"").Append(Hex(maskB)).Append("\";\n");
             text.Append("        internal static readonly string SeedX = \"").Append(seedA).Append("\";\n");
             text.Append("        internal static readonly string SeedY = \"").Append(seedB).Append("\";\n");
-            text.Append("        internal static readonly string ValueX = \"").Append(Convert.ToBase64String(x)).Append("\";\n");
-            text.Append("        internal static readonly string ValueY = \"").Append(Convert.ToBase64String(y)).Append("\";\n");
+            text.Append("        internal static readonly string ValueX = \"").Append(Convert.ToBase64String(maskedX)).Append("\";\n");
+            text.Append("        internal static readonly string ValueY = \"").Append(Convert.ToBase64String(maskedY)).Append("\";\n");
             text.Append("    }\n");
             text.Append("}\n");
             return text.ToString();

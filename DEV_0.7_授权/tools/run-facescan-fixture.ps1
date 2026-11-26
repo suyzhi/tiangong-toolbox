@@ -1,4 +1,4 @@
-# tools/run-facescan-fixture.ps1 —— 在私有桌面上造"面扫描"鼠标实测用的夹具装配。
+﻿# tools/run-facescan-fixture.ps1 —— 在私有桌面上造"面扫描"鼠标实测用的夹具装配。
 param([string]$OutDir)
 $ErrorActionPreference='Continue'
 $root = Split-Path $PSScriptRoot -Parent

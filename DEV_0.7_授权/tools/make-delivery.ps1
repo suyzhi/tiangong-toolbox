@@ -1,4 +1,4 @@
-# tools/make-delivery.ps1 —— 打交付包：交付_DEV_0.7.0_<日期>/ + 同名 zip。
+﻿# tools/make-delivery.ps1 —— 打交付包：交付_DEV_0.7.0_<日期>/ + 同名 zip。
 # 只放源码、二进制、脚本和文档；不放 build/、artifacts/ 和客户样表。
 param([string]$Version='0.7.0')
 $ErrorActionPreference='Stop'

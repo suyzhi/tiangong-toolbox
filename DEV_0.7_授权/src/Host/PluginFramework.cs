@@ -60,7 +60,7 @@ namespace TianGongCadSuite {
         int probeTick;
         bool probeValid, probeHasAsm, probeHasEdit, probeHasStandalone;
         public ToolContext(F.Application application){Application=application;}
-        public void InvalidateProbeCache(){probeValid=false;}
+        public void InvalidateProbeCache(){probeValid=false;lastHit=null;lastPart=null;lastDocs=0;}
         void EnsureProbeFresh(){
             int now=Environment.TickCount;
             if(probeValid&&(now-probeTick)>=0&&(now-probeTick)<250)return;
@@ -156,20 +156,32 @@ namespace TianGongCadSuite {
         // All modeless tools share one selection session; switching tools closes the previous form.
         // reuse：现在开着的窗口能不能直接接着用（同一个命令、同一个装配）→ 是就提到前面，不重开。
         // 0.10.3：配孔检查查了十分钟，在功能区上再点一下「配孔检查」（想把窗口找出来 / 想再查一遍），原来直接把窗口连同结果关掉重开
+        // 统一忙碌状态检查：供 PanelAddIn.Run 入口与 Show/ShowCompanion 共享，防止 DoEvents 泵消息期间任意命令重入。
+        public void ThrowIfAnyBusy(){
+            ThrowIfCompanionBusy();
+            var working=active as IBusyTool;
+            if(working!=null&&!active.IsDisposed&&working.Busy)throw new InvalidOperationException("「"+active.Text+"」正在"+working.BusyWhat+"，等它做完再点别的命令。");
+        }
         public void Show(Func<Form> create,Action<Form> start,Func<Form,bool> reuse=null){
             TianGongCadSuite.Licensing.LicenseGate.Require();
-            ThrowIfCompanionBusy();
+            // 必须先拦忙碌状态再调 reuse 回调，防止重复点击同一正忙命令重入 reuse 副作用。
+            ThrowIfAnyBusy();
             if(reuse!=null&&active!=null&&!active.IsDisposed&&active.Visible&&reuse(active)){
                 try{ if(active.WindowState==FormWindowState.Minimized)active.WindowState=FormWindowState.Normal; active.Activate(); }catch{}
                 return;
             }
-            var working=active as IBusyTool;
-            if(working!=null&&!active.IsDisposed&&working.Busy)throw new InvalidOperationException("「"+active.Text+"」正在"+working.BusyWhat+"，等它做完再点别的命令。");
             // 上一个窗口里有没写入的修改（属性卡、批量改名）：它的关闭确认里点了「否」= 用户要留着它，新命令就不开了。
             // 原来不管点了什么都接着 Dispose，修改照样全丢
             if(!CloseActive())return;
             var next=create();active=next;
-            try{next.Show(new CadOwner(Application.ActiveFramehWnd));if(start!=null)start(next);}catch{Dispose();throw;}
+            try{next.Show(new CadOwner(Application.ActiveFramehWnd));if(start!=null)start(next);}
+            catch{
+                // 仅清理刚创建失败的 next，绝不能调 this.Dispose() 连坐关闭已保留的伴随窗口（如耗时的配孔检查结果）。
+                try{if(!next.IsDisposed)next.Close();}catch{}
+                try{if(!next.IsDisposed)next.Dispose();}catch{}
+                if(ReferenceEquals(active,next))active=null;
+                throw;
+            }
         }
         bool CloseActive(){
             if(active==null)return true;
@@ -189,9 +201,7 @@ namespace TianGongCadSuite {
         }
         public void ShowCompanion(Func<Form> create,Func<Form,bool> sameKind,Func<Form,bool> reuse){
             TianGongCadSuite.Licensing.LicenseGate.Require();
-            ThrowIfCompanionBusy();
-            var working=active as IBusyTool;
-            if(working!=null&&!active.IsDisposed&&working.Busy)throw new InvalidOperationException("「"+active.Text+"」正在"+working.BusyWhat+"，等它做完再点别的命令。");
+            ThrowIfAnyBusy();
             foreach(var f in companions.ToArray()){
                 if(!sameKind(f))continue;
                 if(f.Visible&&reuse(f)){try{if(f.WindowState==FormWindowState.Minimized)f.WindowState=FormWindowState.Normal;f.Activate();}catch{}return;}
@@ -201,9 +211,16 @@ namespace TianGongCadSuite {
             }
             var next=create();companions.Add(next);
             next.FormClosed+=delegate{companions.Remove(next);};
-            next.Show(new CadOwner(Application.ActiveFramehWnd));
+            try{next.Show(new CadOwner(Application.ActiveFramehWnd));}
+            catch{
+                companions.Remove(next);
+                try{if(!next.IsDisposed)next.Close();}catch{}
+                try{if(!next.IsDisposed)next.Dispose();}catch{}
+                throw;
+            }
         }
         public void Dispose(){
+            lastHit=null;lastPart=null;lastDocs=0;
             foreach(var f in companions.ToArray())try{if(!f.IsDisposed)f.Close();f.Dispose();}catch{}
             companions.Clear();
             if(active!=null){if(!active.IsDisposed)active.Close();active.Dispose();active=null;}
@@ -212,11 +229,15 @@ namespace TianGongCadSuite {
     public static class ModuleCatalog {
         // 已在功能区下线的命令（客户版不再出现）：
         //   1 = 四面生成内嵌板（手工选四面，已被"型材自动填充"取代）
-        //   4 = 导出出图训练数据（内部研究用）
+        //   4 = 导出出图训练数据（内部研究用，仅开发构建编入）
         //  10 = 属性卡填写（0.13.0 已整合进命令 14「出图清单工作台」）
         //  12 = 批量改名（0.13.0 已整合进命令 14「出图清单工作台」）
-        // 只影响"注册哪些按钮"；对应实现仍编译在 DLL 里，命令 ID 也永久保留。
+        // 只影响"注册哪些按钮"；命令 ID 永久保留，不可复用。
         static readonly int[] Hidden=new int[]{1,4,10,12};
-        public static ToolRegistry Create(ToolContext context){var registry=new ToolRegistry();foreach(int id in Hidden)registry.Retire(id);registry.Add(new InsetPanelModule(context));registry.Add(new LineupModule(context));registry.Add(new TrainingExportModule(context));registry.Add(new FormatConvertModule(context));registry.Add(new AutoHoleModule(context));registry.Add(new PropCardModule(context));registry.Add(new BatchRenameModule(context));registry.Add(new DrawingModule(context));registry.Add(new QuickBomModule(context));registry.Add(new UpdateModule(context));return registry;}
+        public static ToolRegistry Create(ToolContext context){var registry=new ToolRegistry();foreach(int id in Hidden)registry.Retire(id);registry.Add(new InsetPanelModule(context));registry.Add(new LineupModule(context));
+#if TG_DEV_BUILD
+            registry.Add(new TrainingExportModule(context));
+#endif
+            registry.Add(new FormatConvertModule(context));registry.Add(new AutoHoleModule(context));registry.Add(new PropCardModule(context));registry.Add(new BatchRenameModule(context));registry.Add(new DrawingModule(context));registry.Add(new QuickBomModule(context));registry.Add(new UpdateModule(context));return registry;}
     }
 }

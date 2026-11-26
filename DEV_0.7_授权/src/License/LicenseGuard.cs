@@ -44,10 +44,16 @@ namespace TianGongCadSuite.Licensing {
 
         static bool HasProfiler(){
             try{
-                string[] names = new string[]{ "COR_PROFILER", "CORECLR_PROFILER", "COR_PROFILER_PATH", "CORECLR_PROFILER_PATH", "COMPLUS_ProfAPI_ProfilerCompatibilitySetting" };
-                for(int i = 0; i < names.Length; i++){
-                    string value = Environment.GetEnvironmentVariable(names[i]);
-                    if(!string.IsNullOrEmpty(value))return true;
+                // 仅当显式开启了 Profiling 时才判定分析器注入，避免企业终端残留已禁用的 APM/监控环境变量误锁正常客户。
+                string corEnable = Environment.GetEnvironmentVariable("COR_ENABLE_PROFILING");
+                if(!string.IsNullOrEmpty(corEnable) && corEnable != "0"){
+                    if(!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("COR_PROFILER"))
+                        || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("COR_PROFILER_PATH")))return true;
+                }
+                string coreEnable = Environment.GetEnvironmentVariable("CORECLR_ENABLE_PROFILING");
+                if(!string.IsNullOrEmpty(coreEnable) && coreEnable != "0"){
+                    if(!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CORECLR_PROFILER"))
+                        || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CORECLR_PROFILER_PATH")))return true;
                 }
             }catch(Exception){ }
             return false;

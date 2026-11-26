@@ -3,6 +3,8 @@
 [Unit]
 Description=TianGong toolbox license server
 After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 User=tglicense
@@ -12,8 +14,13 @@ Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/opt/tg-license
+ProtectHome=true
+PrivateDevices=true
 PrivateTmp=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# 建议将 server.key / master.tgkey 迁至只读子目录（由 root 持有、tglicense 只读），仅对数据目录开放写入：
+# ReadWritePaths=/opt/tg-license/data /opt/tg-license/updates
+ReadWritePaths=/opt/tg-license
 
 [Install]
 WantedBy=multi-user.target

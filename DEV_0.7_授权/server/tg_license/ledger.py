@@ -52,6 +52,7 @@ CODE_COLUMNS = {
     "issued_by": "TEXT",   # 签发时的登录 IP / "import"
     "source": "TEXT",      # web / import / NULL（客户端首次联网时才见到）
     "extra_days": "INTEGER NOT NULL DEFAULT 0",   # 管理员延长（负数 = 缩短）的天数；到期日 = 签发日 + 档位天数 + 它
+    "unbound_at": "TEXT",  # 管理员手动解绑时间；存在时拒绝旧机静默 check 自动回绑，仅允许主动 activate 重新绑定
 }
 
 
@@ -168,8 +169,14 @@ class Ledger:
             return "expired", "", left, quota, expires
 
         if row["machine"] is None:
+            # 管理员显式解绑过（unbound_at 非空）时，旧机器后台静默 check 必须返回 moved 使其停用，
+            # 避免旧机抢在新机激活前把码又自动绑回去；
+            # 没解绑过的记录（如 0.7 离线激活老用户首次联网，unbound_at 为空）仍允许 check 自动补绑。
+            if op == "check" and row["unbound_at"]:
+                return "moved", "", left, quota, expires
             self.db.execute(
-                "UPDATE codes SET machine=?, bound_at=?, last_seen=?, last_ip=? WHERE code_id=?", (machine, now, now, ip, cid)
+                "UPDATE codes SET machine=?, bound_at=?, last_seen=?, last_ip=?, unbound_at=NULL WHERE code_id=?",
+                (machine, now, now, ip, cid),
             )
             return "ok", "bound", left, quota, expires
         if row["machine"] == machine:

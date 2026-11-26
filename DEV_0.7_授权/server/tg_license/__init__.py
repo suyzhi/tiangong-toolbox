@@ -48,7 +48,7 @@ from .crypto import (
     slot_source,
     verify_p1363,
 )
-from .http_server import make_handler
+from .http_server import BoundedThreadingHTTPServer, make_handler
 from .ledger import CODE_COLUMNS, SCHEMA, Ledger, expiry_day
 from .service import HEX, MAX_BODY, Service
 from .updates import MAX_ZIP as UPDATE_MAX_ZIP, Updates
@@ -69,6 +69,7 @@ __all__ = [
     "SCHEMA",
     "TGKEY_MAGIC",
     "UPDATE_MAX_ZIP",
+    "BoundedThreadingHTTPServer",
     "Ledger",
     "Service",
     "Updates",

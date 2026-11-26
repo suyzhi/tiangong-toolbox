@@ -1,29 +1,78 @@
 """HTTP 请求分发层：挂接插件授权接口、版本更新下载与管理看板。"""
+import ipaddress
 import json
 import os
+import secrets
 import sys
-from http.server import BaseHTTPRequestHandler
-from urllib.parse import unquote
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import unquote, urlsplit
 
 from .codec import day_offset, stamp
 from .service import MAX_BODY
 from .updates import MAX_ZIP as UPDATE_MAX_ZIP
 
 
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """带并发线程上限的 HTTP 服务，防止慢速连接（Slowloris）耗尽线程与文件描述符。"""
+
+    daemon_threads = True
+    request_queue_size = 64
+
+    def __init__(self, server_address, RequestHandlerClass, bind_and_activate=True, max_workers=64):
+        self._worker_sem = threading.Semaphore(max_workers)
+        super().__init__(server_address, RequestHandlerClass, bind_and_activate=bind_and_activate)
+
+    def process_request(self, request, client_address):
+        if not self._worker_sem.acquire(timeout=2.0):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._worker_sem.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._worker_sem.release()
+
+
+def _valid_ip(text):
+    text = (text or "").strip()
+    if not text or len(text) > 64:
+        return None
+    try:
+        return str(ipaddress.ip_address(text))
+    except ValueError:
+        return None
+
+
 def make_handler(service, admin=None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "TianGongLicense/1"
         sys_version = ""
+        # 单次连接读写超时，防止恶意客户端慢速发包永久占住工作线程
+        timeout = 30
 
         def client_ip(self):
             if service.trust_proxy:
-                # 经 Cloudflare Tunnel 进来：CF-Connecting-IP 是客户端真实 IP（X-Forwarded-For 可能被客户端自己塞值）
-                real = self.headers.get("CF-Connecting-IP", "").strip()
-                if real:
-                    return real
+                # 经 Cloudflare Tunnel 进来时必然带 CF-Ray；直连其他反代若未剥离 CF-Connecting-IP，
+                # 仅在同时存在 CF-Ray 时信任该头，避免客户端伪造绕过限流与锁定。
+                if self.headers.get("CF-Ray", "").strip():
+                    real = _valid_ip(self.headers.get("CF-Connecting-IP", ""))
+                    if real:
+                        return real
                 forwarded = self.headers.get("X-Forwarded-For", "")
                 if forwarded:
-                    return forwarded.split(",")[0].strip()
+                    # 反代会把真实客户端 IP 追加在最右侧；取左侧 [0] 会被客户端伪造前置头绕过。
+                    parts = [p.strip() for p in forwarded.split(",") if p.strip()]
+                    if parts:
+                        real = _valid_ip(parts[-1])
+                        if real:
+                            return real
             return self.client_address[0]
 
         def reply(self, code, obj):
@@ -43,23 +92,90 @@ def make_handler(service, admin=None):
             self.end_headers()
             self.wfile.write(data)
 
+        def _stream_to_temp(self, folder, length):
+            """分块把上传包流式写入临时文件，避免 200MB 整包读入内存导致 OOM。"""
+            os.makedirs(folder, exist_ok=True)
+            tmp = os.path.join(
+                folder,
+                ".upload-%d-%d-%s.tmp" % (os.getpid(), threading.get_ident(), secrets.token_hex(4)),
+            )
+            remaining = length
+            written = 0
+            try:
+                with open(tmp, "wb") as f:
+                    while remaining > 0:
+                        chunk = self.rfile.read(min(65536, remaining))
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        written += len(chunk)
+                        remaining -= len(chunk)
+            except Exception:
+                if os.path.exists(tmp):
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
+                raise
+            return tmp, written
+
         def to_admin(self, method):
             # 网页看板：没开 --signing-key / --admin 时整段不存在
             if admin is None:
                 return self.reply(404, {"error": "not found"})
+            route = urlsplit(self.path).path
+            ip = self.client_ip()
             body = b""
             if method == "POST":
                 try:
                     length = int(self.headers.get("Content-Length", "0"))
                 except ValueError:
                     length = -1
-                # 发布新版本（看板上传安装包）放宽到安装包的上限，其余管理请求仍是小 JSON
-                limit = UPDATE_MAX_ZIP if self.path.split("?")[0] == "/admin/api/updates" else MAX_BODY * 4
+                if not route.startswith("/admin/api/"):
+                    self.close_connection = True
+                    return self.send_raw(*admin.json(404, {"error": "not found"}))
+                # 登录接口以外的所有管理写请求：先验会话与 CSRF，再读请求体，
+                # 彻底阻断未认证客户端向 /admin/api/updates 伪造大 Content-Length 打爆内存。
+                if route != "/admin/api/login":
+                    session = admin.session(self.headers)
+                    if session is None:
+                        self.close_connection = True
+                        return self.send_raw(*admin.json(401, {"error": "请先登录"}))
+                    if not admin.auth.verify_csrf(self.headers, session):
+                        self.close_connection = True
+                        return self.send_raw(*admin.json(403, {"error": "页面已过期，请刷新后重试"}))
+                if route == "/admin/api/updates":
+                    if service.updates is None:
+                        self.close_connection = True
+                        return self.send_raw(*admin.json(400, {"error": "服务器没有配置版本发布目录"}))
+                    if length <= 0 or length > UPDATE_MAX_ZIP:
+                        self.close_connection = True
+                        return self.reply(413 if length > UPDATE_MAX_ZIP else 400, {"error": "请求体大小不对"})
+                    tmp = None
+                    try:
+                        tmp, written = self._stream_to_temp(service.updates.folder, length)
+                        if written != length:
+                            self.close_connection = True
+                            return self.reply(400, {"error": "上传中断"})
+                        code, headers, data = admin.handle_update_upload(self.path, self.headers, tmp, written, ip)
+                    except Exception as e:
+                        sys.stderr.write("[%s] ADMIN ERROR %r\n" % (stamp(), e))
+                        self.close_connection = True
+                        return self.reply(500, {"error": "服务器内部错误"})
+                    finally:
+                        if tmp and os.path.exists(tmp):
+                            try:
+                                os.remove(tmp)
+                            except OSError:
+                                pass
+                    return self.send_raw(code, headers, data)
+                limit = MAX_BODY * 4
                 if length < 0 or length > limit:
+                    self.close_connection = True
                     return self.reply(413, {"error": "请求体大小不对"})
-                body = self.rfile.read(length)
+                body = self.rfile.read(length) if length > 0 else b""
             try:
-                code, headers, data = admin.handle(method, self.path, self.headers, body, self.client_ip())
+                code, headers, data = admin.handle(method, self.path, self.headers, body, ip)
             except Exception as e:
                 sys.stderr.write("[%s] ADMIN ERROR %r\n" % (stamp(), e))
                 return self.reply(500, {"error": "服务器内部错误"})
@@ -89,6 +205,7 @@ def make_handler(service, admin=None):
             self.send_header("Content-Type", "application/zip")
             self.send_header("Content-Length", str(size))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
             with open(path, "rb") as f:
                 while True:
@@ -110,6 +227,7 @@ def make_handler(service, admin=None):
             except ValueError:
                 length = -1
             if length <= 0 or length > MAX_BODY:
+                self.close_connection = True
                 return self.reply(413 if length > MAX_BODY else 400, {"error": "请求体大小不对"})
             body = self.rfile.read(length)
             try:
@@ -120,6 +238,8 @@ def make_handler(service, admin=None):
             self.reply(code, obj)
 
         def log_message(self, fmt, *args):
-            sys.stderr.write("[%s] %s %s\n" % (stamp(), self.client_ip(), fmt % args))
+            # 过滤控制换行符，防止客户端构造路径注入伪造日志行
+            msg = (fmt % args).replace("\r", "\\r").replace("\n", "\\n")
+            sys.stderr.write("[%s] %s %s\n" % (stamp(), self.client_ip(), msg))
 
     return Handler

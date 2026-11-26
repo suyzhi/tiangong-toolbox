@@ -1,4 +1,5 @@
 """授权管理看板（/admin）：静态资源、激活码查询与统计、签发、作废 / 解绑 / 换机次数 / 延长 / 备注 / 版本发布。"""
+import base64
 import json
 import mimetypes
 import os
@@ -8,14 +9,14 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlsplit
 
 from .admin_auth import AdminAuth
-from .codec import LETTER_OF, PLAN_LETTERS, PLANS, code_id, compose, date_text, day_offset, display_id, new_payload
+from .codec import LETTER_OF, PLAN_LETTERS, PLANS, code_id, compose, date_text, day_offset, display_id, new_payload, stamp
 from .crypto import sign_p1363, verify_p1363
 from .ledger import expiry_day
 
 # 静态资源目录位于 server/admin/（本模块在 server/tg_license/ 下）
 STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "admin")
 STATIC_FILES = {"/admin/": "index.html", "/admin/app.js": "app.js", "/admin/app.css": "app.css"}
-ID_PATH = re.compile(r"^/admin/api/codes/([0-9a-z]{8})(?:/(revoke|unrevoke|unbind|quota|meta|extend))?$")
+ID_PATH = re.compile(r"^/admin/api/codes/([0-9a-z]{8})(?:/(revoke|unrevoke|unbind|quota|meta|extend))?\Z")
 SECURITY_HEADERS = [
     ("X-Content-Type-Options", "nosniff"),
     ("Referrer-Policy", "no-referrer"),
@@ -75,8 +76,8 @@ class AdminWeb:
             if not self.auth.verify_csrf(headers, session):
                 return self.json(403, {"error": "页面已过期，请刷新后重试"})
             if route == "/admin/api/updates":
-                # 发布新版本：请求体就是安装包 zip 原文（不是 JSON），文件名 / 版本 / 说明放在查询参数里
-                return self.publish_update(parse_qs(url.query), body, ip)
+                # 发布新版本：请求体就是安装包 zip 原文（不是 JSON），文件名 / 版本在查询参数，说明优先走 X-TG-Notes 头
+                return self.publish_update(parse_qs(url.query), headers, body, ip)
             try:
                 data = json.loads(body.decode("utf-8") or "{}")
             except (ValueError, UnicodeDecodeError):
@@ -92,7 +93,12 @@ class AdminWeb:
         if method == "GET" and route == "/admin/api/codes":
             return self.json(200, {"codes": self.codes(), "stats": self.stats(), "today": day_offset(self.now())})
         if method == "GET" and route == "/admin/api/events":
-            limit = min(int((query.get("limit") or ["100"])[0] or 100), 500)
+            raw_limit = (query.get("limit") or ["100"])[0] or "100"
+            try:
+                limit = int(raw_limit)
+            except (TypeError, ValueError):
+                return self.json(400, {"error": "limit 应为正整数"})
+            limit = max(1, min(limit, 500))
             return self.json(200, {"events": self.events(None, limit)})
         if method == "GET" and route == "/admin/api/updates":
             return self.json(200, self.updates_state())
@@ -117,13 +123,41 @@ class AdminWeb:
             return {"enabled": False, "latest": None, "history": []}
         return {"enabled": True, "latest": u.latest_manifest(), "history": u.history(10)}
 
-    def publish_update(self, query, body, ip):
+    @staticmethod
+    def _extract_update_notes(headers, query):
+        # 优先从请求头 X-TG-Notes 读取 UTF-8 Base64，避免长中文说明触发 URL 长度上限或落进访问日志；
+        # 保留 ?notes=... 查询参数兼容旧版脚本与现有单测。
+        b64 = (headers.get("X-TG-Notes") or "").strip() if headers else ""
+        if b64:
+            try:
+                return base64.b64decode(b64.encode("ascii")).decode("utf-8")
+            except (ValueError, UnicodeDecodeError):
+                raise ValueError("更新说明编码格式不对")
+        return (query.get("notes") or [""])[0]
+
+    def publish_update(self, query, headers, body, ip):
         u = self.service.updates
         if u is None:
             return self.json(400, {"error": "服务器没有配置版本发布目录"})
         first = lambda k: (query.get(k) or [""])[0]
         try:
-            m = u.publish(body, first("name"), first("version"), first("notes"), by=ip)
+            notes = self._extract_update_notes(headers, query)
+            m = u.publish(body, first("name"), first("version"), notes, by=ip)
+        except ValueError as e:
+            return self.json(400, {"error": str(e)})
+        self.ledger.audit(ip, "publish", None, "%s %s" % (m["version"], m["file"]))
+        return self.json(200, self.updates_state())
+
+    def handle_update_upload(self, path, headers, tmp_path, size, ip):
+        """流式上传版本入口（由 http_server 提前验完登录与 CSRF 并流式写盘后调用）。"""
+        u = self.service.updates
+        if u is None:
+            return self.json(400, {"error": "服务器没有配置版本发布目录"})
+        query = parse_qs(urlsplit(path).query)
+        first = lambda k: (query.get(k) or [""])[0]
+        try:
+            notes = self._extract_update_notes(headers, query)
+            m = u.publish_file(tmp_path, first("name"), first("version"), notes, by=ip, size=size)
         except ValueError as e:
             return self.json(400, {"error": str(e)})
         self.ledger.audit(ip, "publish", None, "%s %s" % (m["version"], m["file"]))
@@ -325,8 +359,19 @@ class AdminWeb:
             L.execute("UPDATE codes SET revoked=0 WHERE code_id=?", (cid,))
             L.audit(ip, "unrevoke", cid)
         elif action == "unbind":
-            before = L.row(cid)["machine"]
-            L.execute("UPDATE codes SET machine=NULL, bound_at=NULL WHERE code_id=?", (cid,))
+            with L.lock:
+                L.db.execute("BEGIN IMMEDIATE")
+                try:
+                    before = L.row(cid)["machine"]
+                    # 记录 unbound_at，阻止旧机后台静默 check 自动回绑
+                    L.db.execute(
+                        "UPDATE codes SET machine=NULL, bound_at=NULL, unbound_at=? WHERE code_id=?",
+                        (stamp(), cid),
+                    )
+                    L.db.execute("COMMIT")
+                except Exception:
+                    L.db.execute("ROLLBACK")
+                    raise
             L.audit(ip, "unbind", cid, before)
         elif action == "quota":
             if data.get("reset"):
@@ -335,6 +380,8 @@ class AdminWeb:
                 value = data["quota"]
                 if value is not None:
                     try:
+                        if isinstance(value, bool):
+                            raise ValueError()
                         value = int(value)
                     except (TypeError, ValueError):
                         return self.json(400, {"error": "换机次数应为 0 ~ 99 的整数"})
@@ -343,27 +390,41 @@ class AdminWeb:
                 L.execute("UPDATE codes SET quota=? WHERE code_id=?", (value, cid))
             L.audit(ip, "quota", cid, json.dumps({k: data.get(k) for k in ("quota", "reset") if k in data}))
         elif action == "extend":
-            # 延长 / 缩短有效期：{"days": N}（负数 = 缩短）或 {"to": "YYYY-MM-DD"}。码不用换，客户下次联网复核就按新日期算
-            row = L.row(cid)
-            extra = row["extra_days"] or 0
-            if data.get("to"):
-                base = expiry_day(row)
-                if base is None:
-                    return self.json(400, {"error": "服务器还没见过这个码（客户没联网激活过），只能按天数延长"})
+            # 延长 / 缩短有效期：在台账锁与写事务内原子读改写，避免并发连点导致累加丢失。
+            with L.lock:
+                L.db.execute("BEGIN IMMEDIATE")
                 try:
-                    target = day_offset(datetime.strptime(str(data["to"]), "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
-                except ValueError:
-                    return self.json(400, {"error": "日期格式应为 YYYY-MM-DD"})
-                extra += target - base
-            else:
-                try:
-                    days = int(data.get("days"))
-                except (TypeError, ValueError):
-                    return self.json(400, {"error": "延长天数应为整数（负数 = 缩短）"})
-                if not -3650 <= days <= 3650:
-                    return self.json(400, {"error": "一次最多延长 / 缩短 3650 天"})
-                extra += days
-            L.execute("UPDATE codes SET extra_days=? WHERE code_id=?", (extra, cid))
+                    row = L.row(cid)
+                    extra = row["extra_days"] or 0
+                    if data.get("to"):
+                        base = expiry_day(row)
+                        if base is None:
+                            L.db.execute("ROLLBACK")
+                            return self.json(400, {"error": "服务器还没见过这个码（客户没联网激活过），只能按天数延长"})
+                        try:
+                            target = day_offset(datetime.strptime(str(data["to"]), "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
+                        except ValueError:
+                            L.db.execute("ROLLBACK")
+                            return self.json(400, {"error": "日期格式应为 YYYY-MM-DD"})
+                        extra += target - base
+                    else:
+                        raw_days = data.get("days")
+                        try:
+                            if isinstance(raw_days, bool):
+                                raise ValueError()
+                            days = int(raw_days)
+                        except (TypeError, ValueError):
+                            L.db.execute("ROLLBACK")
+                            return self.json(400, {"error": "延长天数应为整数（负数 = 缩短）"})
+                        if not -3650 <= days <= 3650:
+                            L.db.execute("ROLLBACK")
+                            return self.json(400, {"error": "一次最多延长 / 缩短 3650 天"})
+                        extra += days
+                    L.db.execute("UPDATE codes SET extra_days=? WHERE code_id=?", (extra, cid))
+                    L.db.execute("COMMIT")
+                except Exception:
+                    L.db.execute("ROLLBACK")
+                    raise
             L.audit(ip, "extend", cid, "累计 %+d 天" % extra)
         elif action == "meta":
             customer = str(data.get("customer") or "").strip()[:100] or None

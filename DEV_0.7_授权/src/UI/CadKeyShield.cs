@@ -13,6 +13,7 @@ namespace TianGongCadSuite {
         const int WH_GETMESSAGE = 3;
         const uint WM_NULL = 0x0000;
         const uint WM_KEYDOWN = 0x0100;
+        const uint WM_SYSKEYDOWN = 0x0104;
         const uint WM_CUT = 0x0300;
         const uint WM_COPY = 0x0301;
         const uint WM_PASTE = 0x0302;
@@ -145,11 +146,11 @@ namespace TianGongCadSuite {
         }
 
         static IntPtr OnThreadGetMessage(int nCode, IntPtr wParam, IntPtr lParam) {
-            // 极速零分配快路径：仅当 PM_REMOVE 且消息是 WM_KEYDOWN 时才进一步解析，
+            // 极速零分配快路径：仅当 PM_REMOVE 且消息是 WM_KEYDOWN / WM_SYSKEYDOWN（Alt+↑/↓ 等组合键）时才解析，
             // 鼠标移动 / 绘制 / 定时器等高频消息不装箱、不 PtrToStructure、不触发任何 Win32 API。
             if (nCode >= 0 && wParam == (IntPtr)1 && lParam != IntPtr.Zero && threadShields != null && threadShields.Count > 0) {
                 uint msg = (uint)Marshal.ReadInt32(lParam, IntPtr.Size);
-                if (msg == WM_KEYDOWN) {
+                if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) {
                     IntPtr hwnd = Marshal.ReadIntPtr(lParam, 0);
                     if (hwnd != IntPtr.Zero) {
                         for (int i = threadShields.Count - 1; i >= 0; i--) {
@@ -199,6 +200,19 @@ namespace TianGongCadSuite {
                         }
                     } else if (inMainForm && resolveShortcut != null) {
                         Keys kd = (Keys)vk;
+                        if (ctrl) kd |= Keys.Control;
+                        if (shift) kd |= Keys.Shift;
+                        var act = resolveShortcut(kd);
+                        if (act != null) {
+                            host.BeginInvoke(act);
+                            handled = true;
+                        }
+                    }
+                } else if (inMainForm && resolveShortcut != null && !IsWin32EditControl(m.hwnd)) {
+                    // Alt+↑/↓ 等系统键组合（WM_SYSKEYDOWN）交由窗体快捷键表裁决；保留 ComboBox 原生 Alt+↓ 展开行为。
+                    bool isComboArrow = (vk == (int)Keys.Up || vk == (int)Keys.Down) && (Control.FromHandle(m.hwnd) is ComboBox);
+                    if (!isComboArrow) {
+                        Keys kd = (Keys)vk | Keys.Alt;
                         if (ctrl) kd |= Keys.Control;
                         if (shift) kd |= Keys.Shift;
                         var act = resolveShortcut(kd);

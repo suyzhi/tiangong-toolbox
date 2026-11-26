@@ -30,15 +30,35 @@ namespace TianGongCadSuite.Licensing {
             }
         }
 
+        static readonly object ioSync = new object();
+
         static byte[] Entropy(){
             using(SHA256 hash = SHA256.Create())
                 return hash.ComputeHash(Encoding.UTF8.GetBytes(Domain + "#" + LicenseMachine.ShortCode()));
         }
 
+        // 同时读取 PrimaryPath(%ProgramData%) 与 ShadowPath(%LOCALAPPDATA%) 并择优返回更新的一份：
+        // 管理员安装后普通用户对 %ProgramData% 下的旧文件往往只读，续期回执只能写进 ShadowPath；
+        // 原先永远优先返回 PrimaryPath，会导致 7 天宽限期满后反复同步联网甚至断网永久锁死。
         internal static ActivationRecord Load(){
-            ActivationRecord record = ReadFile(PrimaryPath);
-            if(record != null)return record;
-            return ReadFile(ShadowPath);
+            lock(ioSync){
+                ActivationRecord primary = ReadFile(PrimaryPath);
+                ActivationRecord shadow = ReadFile(ShadowPath);
+                return PickNewer(primary, shadow);
+            }
+        }
+
+        static ActivationRecord PickNewer(ActivationRecord primary, ActivationRecord shadow){
+            if(primary == null)return shadow;
+            if(shadow == null)return primary;
+            if(shadow.Counter != primary.Counter)return shadow.Counter > primary.Counter ? shadow : primary;
+            int pDay = LicenseOnline.ReceiptDay(primary);
+            int sDay = LicenseOnline.ReceiptDay(shadow);
+            if(sDay != pDay)return sDay > pDay ? shadow : primary;
+            bool pHas = !string.IsNullOrEmpty(primary.Receipt) && !string.IsNullOrEmpty(primary.ReceiptSignature);
+            bool sHas = !string.IsNullOrEmpty(shadow.Receipt) && !string.IsNullOrEmpty(shadow.ReceiptSignature);
+            if(sHas != pHas)return sHas ? shadow : primary;
+            return primary;
         }
 
         static ActivationRecord ReadFile(string path){
@@ -57,10 +77,13 @@ namespace TianGongCadSuite.Licensing {
             byte[] blob;
             try{ blob = ProtectedData.Protect(plain, Entropy(), DataProtectionScope.LocalMachine); }
             catch(CryptographicException){ return false; }
-            bool primary = WriteFile(PrimaryPath, blob);
-            WriteFile(ShadowPath, blob);
-            SaveStamp(record);
-            return primary;
+            lock(ioSync){
+                bool primary = WriteFile(PrimaryPath, blob);
+                bool shadow = WriteFile(ShadowPath, blob);
+                if(!primary && !shadow)return false;
+                SaveStamp(record);
+                return true;
+            }
         }
 
         // 测试专用：保存指定记录 / 读取计数器，用来验证"伪造激活文件"和"状态被重置"。
@@ -68,20 +91,41 @@ namespace TianGongCadSuite.Licensing {
         internal static long CounterForTest(){ return Counter(); }
 
         internal static void Clear(){
-            try{ if(File.Exists(PrimaryPath))File.Delete(PrimaryPath); }catch(Exception){ }
-            try{ if(File.Exists(ShadowPath))File.Delete(ShadowPath); }catch(Exception){ }
+            lock(ioSync){
+                try{ if(File.Exists(PrimaryPath))File.Delete(PrimaryPath); }catch(Exception){ }
+                try{ if(File.Exists(ShadowPath))File.Delete(ShadowPath); }catch(Exception){ }
+            }
+        }
+
+        // 供缓存失效检测使用：任一路径最后修改时间或大小变化即令短时内存缓存失效。
+        internal static string StorageVersionStamp(){
+            return FileStamp(PrimaryPath) + "|" + FileStamp(ShadowPath);
+        }
+        static string FileStamp(string path){
+            try{
+                var fi = new FileInfo(path);
+                if(!fi.Exists)return "-";
+                return fi.LastWriteTimeUtc.Ticks.ToString() + ":" + fi.Length.ToString();
+            }catch(Exception){ return "?"; }
         }
 
         static bool WriteFile(string path,byte[] blob){
+            string temporary = null;
             try{
                 string folder = Path.GetDirectoryName(path);
-                if(!Directory.Exists(folder))Directory.CreateDirectory(folder);
-                string temporary = path + "." + Guid.NewGuid().ToString("N").Substring(0, 8) + ".tmp";
+                if(!string.IsNullOrEmpty(folder) && !Directory.Exists(folder))Directory.CreateDirectory(folder);
+                temporary = path + "." + Guid.NewGuid().ToString("N").Substring(0, 8) + ".tmp";
                 File.WriteAllBytes(temporary, blob);
-                if(File.Exists(path))File.Delete(path);
-                File.Move(temporary, path);
+                // 使用 File.Replace 原子替换，避免原先 File.Delete + File.Move 中途失败或并发读取时丢文件。
+                if(File.Exists(path))File.Replace(temporary, path, null);
+                else File.Move(temporary, path);
+                temporary = null;
                 return true;
-            }catch(Exception){ return false; }
+            }catch(Exception){
+                return false;
+            }finally{
+                if(temporary != null){ try{ if(File.Exists(temporary))File.Delete(temporary); }catch(Exception){ } }
+            }
         }
 
 // 心跳：只抬高单调时间基准，不改动激活内容。

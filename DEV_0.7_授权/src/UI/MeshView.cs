@@ -122,6 +122,8 @@ namespace TianGongCadSuite {
             return (Bitmap)frame.Clone();
         }
 
+        static bool IsFinite(double v){ return !double.IsNaN(v) && !double.IsInfinity(v); }
+
         void Raster(int rw, int rh, int step){
             // 视图坐标系：D = 从模型指向看的人，right = 屏幕向右，up = D × right（屏幕向上）
             double ca = Math.Cos(az), sa = Math.Sin(az), ce = Math.Cos(el), se = Math.Sin(el);
@@ -129,30 +131,39 @@ namespace TianGongCadSuite {
             double rx = -sa, ry = ca, rz = 0;
             double ux = dy * rz - dz * ry, uy = dz * rx - dx * rz, uz = dx * ry - dy * rx;
             float[] lo = mesh.Lo, hi = mesh.Hi;
-            double ox = (lo[0] + hi[0]) / 2, oy = (lo[1] + hi[1]) / 2, oz = (lo[2] + hi[2]) / 2;
-            double radius = Math.Sqrt((hi[0] - lo[0]) * (hi[0] - lo[0]) + (hi[1] - lo[1]) * (hi[1] - lo[1]) + (hi[2] - lo[2]) * (hi[2] - lo[2])) / 2;
+            if (lo == null || hi == null || lo.Length < 3 || hi.Length < 3) return;
+            for (int c = 0; c < 3; c++) if (!IsFinite(lo[c]) || !IsFinite(hi[c])) return;
+            double ox = (lo[0] + hi[0]) * 0.5, oy = (lo[1] + hi[1]) * 0.5, oz = (lo[2] + hi[2]) * 0.5;
+            double ddx = (double)hi[0] - lo[0], ddy = (double)hi[1] - lo[1], ddz = (double)hi[2] - lo[2];
+            double radius = Math.Sqrt(ddx * ddx + ddy * ddy + ddz * ddz) * 0.5;
+            if (!IsFinite(radius)) return;
             if (radius <= 0) radius = 1;
             // 包围球装进视野（转到哪个角度都不出框）、留一点边
             double scale = Math.Min(rw, rh) * 0.46 / radius * zoom;
+            if (!IsFinite(scale) || scale <= 0) return;
             double cx0 = rw / 2.0 + panX / step, cy0 = rh / 2.0 + panY / step;
-            var t = mesh.Tri; int count = mesh.Triangles;
+            var t = mesh.Tri; int count = Math.Min(mesh.Triangles, t != null ? t.Length / 9 : 0);
             // 光从看的人左上方、略靠前来（世界坐标）
             double lx = -0.35 * rx + 0.55 * ux + 0.76 * dx, ly = -0.35 * ry + 0.55 * uy + 0.76 * dy, lz = -0.35 * rz + 0.55 * uz + 0.76 * dz;
             var sx = new double[3]; var syv = new double[3]; var sz = new double[3];
             for (int i = 0; i < count; i++) {
                 int b = i * 9;
+                bool finite = true;
                 for (int v = 0; v < 3; v++) {
                     double px = t[b + v * 3] - ox, py = t[b + v * 3 + 1] - oy, pz = t[b + v * 3 + 2] - oz;
-                    sx[v] = cx0 + (px * rx + py * ry + pz * rz) * scale;
-                    syv[v] = cy0 - (px * ux + py * uy + pz * uz) * scale;
-                    sz[v] = -(px * dx + py * dy + pz * dz);           // 越小越近
+                    double vx = cx0 + (px * rx + py * ry + pz * rz) * scale;
+                    double vy = cy0 - (px * ux + py * uy + pz * uz) * scale;
+                    double vz = -(px * dx + py * dy + pz * dz);           // 越小越近
+                    if (!IsFinite(vx) || !IsFinite(vy) || !IsFinite(vz)) { finite = false; break; }
+                    sx[v] = vx; syv[v] = vy; sz[v] = vz;
                 }
+                if (!finite) continue;
                 // 法线（世界坐标）→ 明暗，两面都亮（网格的朝向不一定统一）
                 double ax = t[b + 3] - t[b], ay = t[b + 4] - t[b + 1], aaz = t[b + 5] - t[b + 2];
                 double bx = t[b + 6] - t[b], by = t[b + 7] - t[b + 1], bz = t[b + 8] - t[b + 2];
                 double nx = ay * bz - aaz * by, ny = aaz * bx - ax * bz, nz = ax * by - ay * bx;
                 double len = Math.Sqrt(nx * nx + ny * ny + nz * nz);
-                if (len < 1e-30) continue;
+                if (!IsFinite(len) || len < 1e-30) continue;
                 double lit = Math.Abs((nx * lx + ny * ly + nz * lz) / len);
                 double shade = 0.55 + 0.45 * lit;
                 int tint = mesh.Tint[i];
@@ -164,14 +175,26 @@ namespace TianGongCadSuite {
         static int Clamp(double v){ return v < 0 ? 0 : v > 255 ? 255 : (int)v; }
 
         void Fill(int rw, int rh, double[] x, double[] y, double[] z, int color){
-            int x0 = (int)Math.Max(0, Math.Floor(Math.Min(x[0], Math.Min(x[1], x[2])))), x1 = (int)Math.Min(rw - 1, Math.Ceiling(Math.Max(x[0], Math.Max(x[1], x[2]))));
-            int y0 = (int)Math.Max(0, Math.Floor(Math.Min(y[0], Math.Min(y[1], y[2])))), y1 = (int)Math.Min(rh - 1, Math.Ceiling(Math.Max(y[0], Math.Max(y[1], y[2]))));
+            double fx0 = Math.Floor(Math.Min(x[0], Math.Min(x[1], x[2])));
+            double fx1 = Math.Ceiling(Math.Max(x[0], Math.Max(x[1], x[2])));
+            double fy0 = Math.Floor(Math.Min(y[0], Math.Min(y[1], y[2])));
+            double fy1 = Math.Ceiling(Math.Max(y[0], Math.Max(y[1], y[2])));
+            // 显式拦住 NaN/Infinity 与超大坐标，避免 unchecked (int) 强转成 int.MinValue 绕过边界并越界索引 zbuf。
+            if (!IsFinite(fx0) || !IsFinite(fx1) || !IsFinite(fy0) || !IsFinite(fy1)) return;
+            if (fx1 < 0 || fy1 < 0 || fx0 > rw - 1 || fy0 > rh - 1) return;
+            int x0 = fx0 <= 0 ? 0 : (fx0 >= rw - 1 ? rw - 1 : (int)fx0);
+            int x1 = fx1 >= rw - 1 ? rw - 1 : (fx1 <= 0 ? 0 : (int)fx1);
+            int y0 = fy0 <= 0 ? 0 : (fy0 >= rh - 1 ? rh - 1 : (int)fy0);
+            int y1 = fy1 >= rh - 1 ? rh - 1 : (fy1 <= 0 ? 0 : (int)fy1);
             if (x0 > x1 || y0 > y1) return;
             double area = (x[1] - x[0]) * (y[2] - y[0]) - (x[2] - x[0]) * (y[1] - y[0]);
             if (Math.Abs(area) < 1e-9) {
                 // 退化成线 / 点的小三角形：只点一个像素，薄板的侧面不至于消失
-                int px = (int)x[0], py = (int)y[0];
-                if (px >= 0 && py >= 0 && px < rw && py < rh) { int k = py * rw + px; if (z[0] < zbuf[k]) { zbuf[k] = (float)z[0]; pix[k] = color; } }
+                if (IsFinite(x[0]) && IsFinite(y[0]) && x[0] >= 0 && y[0] >= 0 && x[0] < rw && y[0] < rh) {
+                    int px = (int)x[0], py = (int)y[0];
+                    int k = py * rw + px;
+                    if (z[0] < zbuf[k]) { zbuf[k] = (float)z[0]; pix[k] = color; }
+                }
                 return;
             }
             double inv = 1 / area;
@@ -212,6 +235,7 @@ namespace TianGongCadSuite {
                 wheelSettle.Dispose();
                 if (frame != null) { frame.Dispose(); frame = null; }
                 if (scratchCoarse != null) { scratchCoarse.Dispose(); scratchCoarse = null; }
+                mesh = null; zbuf = new float[0]; pix = new int[0]; edgeBuf = new bool[0];
             }
             base.Dispose(disposing);
         }

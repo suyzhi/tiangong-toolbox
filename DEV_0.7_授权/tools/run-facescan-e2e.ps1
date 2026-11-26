@@ -1,4 +1,4 @@
-# tools/run-facescan-e2e.ps1 —— 在私有桌面上跑"点带孔的面自动认孔 → 点打孔面 → 打孔"的界面级实测。
+﻿# tools/run-facescan-e2e.ps1 —— 在私有桌面上跑"点带孔的面自动认孔 → 点打孔面 → 打孔"的界面级实测。
 # 走的是插件「自动打孔」窗口的真实代码路径（和鼠标点击同一个 AcceptPick），不弹框、结果写日志。
 param(
     [string]$Fixture,

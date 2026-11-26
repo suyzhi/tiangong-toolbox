@@ -18,8 +18,8 @@ $reg=[Microsoft.Win32.Registry]::CurrentUser
 $companions=@('TianGongCadSuite.dll','Interop.TG.dll','TianGongConverter.exe','lineup-models-seed.xml','lineup-sample.tsv','SuiteRenameWorker.exe')
 
 function Get-TianGongProcesses {
-    # 只认"天工 CAD 本体 + 本插件拉起的工具进程"，绝不碰别的程序。
-    $names=@('TianGong','TianGongConverter','TianGongDrillWorker','PanelLauncher','TrainingExportRunner')
+    # 只认"天工 CAD 本体 + 本插件拉起的工具进程"，绝不碰别的程序（含批量改名辅助进程 SuiteRenameWorker）。
+    $names=@('TianGong','TianGongConverter','TianGongDrillWorker','PanelLauncher','TrainingExportRunner','SuiteRenameWorker')
     @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $names -contains $_.ProcessName })
 }
 function Stop-TianGongProcesses($list){
@@ -87,7 +87,7 @@ if($Uninstall){
 
 $root=Split-Path $PSScriptRoot -Parent
 $dll=if($LibraryPath){[IO.Path]::GetFullPath($LibraryPath)}else{Join-Path $root 'build\TianGongCadSuite.dll'}
-if(!(Test-Path $dll)){throw '找不到插件 DLL。请用 -LibraryPath 指定 payload\TianGongCadSuite.dll。'}
+if(!(Test-Path -LiteralPath $dll)){throw '找不到插件 DLL。请用 -LibraryPath 指定 payload\TianGongCadSuite.dll。'}
 
 # 顺序很重要：**先清进程，再复制**。
 # 旧版本是把复制放在前面，结果"CAD 正开着时升级"会撞上"文件被占用"（实测复现：
@@ -98,15 +98,40 @@ if($StageDirectory){
     $stage=[IO.Path]::GetFullPath($StageDirectory)
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
     $from=Split-Path -Parent $dll
-    foreach($f in $companions){
-        $s=Join-Path $from $f
-        if(-not (Test-Path $s)){ continue }
-        # 进程虽然退了，文件句柄偶尔还要几百毫秒才释放；这里重试几次再报错。
-        $copied=$false
-        for($try=1;$try -le 8 -and -not $copied;$try++){
-            try{ Copy-Item $s $stage -Force; $copied=$true }
-            catch{ if($try -eq 8){ throw ('复制 ' + $f + ' 失败：' + $_.Exception.Message + '（该文件仍被占用，请确认天工 CAD / 转换器已经完全退出）') }; Start-Sleep -Milliseconds 600 }
+    $backup=Join-Path $stage ('.backup-' + [Guid]::NewGuid().ToString('N'))
+    $backedUp=New-Object System.Collections.Generic.List[string]
+    $newlyCopied=New-Object System.Collections.Generic.List[string]
+    try{
+        foreach($f in $companions){
+            $s=Join-Path $from $f
+            if(-not (Test-Path -LiteralPath $s)){ continue }
+            $dstFile=Join-Path $stage $f
+            # 覆盖前先备份旧文件，若后续某个文件因占用复制失败则整体回滚，避免留下新旧混杂的半残安装
+            if(Test-Path -LiteralPath $dstFile){
+                if(-not (Test-Path -LiteralPath $backup)){ New-Item -ItemType Directory -Force -Path $backup | Out-Null }
+                Copy-Item -LiteralPath $dstFile -Destination (Join-Path $backup $f) -Force
+                $backedUp.Add($f)
+            }
+            # 进程虽然退了，文件句柄偶尔还要几百毫秒才释放；这里重试几次再报错。
+            $copied=$false
+            for($try=1;$try -le 8 -and -not $copied;$try++){
+                try{ Copy-Item -LiteralPath $s -Destination $dstFile -Force; $copied=$true }
+                catch{ if($try -eq 8){ throw ('复制 ' + $f + ' 失败：' + $_.Exception.Message + '（该文件仍被占用，请确认天工 CAD / 转换器已经完全退出）') }; Start-Sleep -Milliseconds 600 }
+            }
+            if(-not $backedUp.Contains($f)){ $newlyCopied.Add($f) }
         }
+    }catch{
+        foreach($f in $backedUp){
+            $bak=Join-Path $backup $f
+            if(Test-Path -LiteralPath $bak){ try{ Copy-Item -LiteralPath $bak -Destination (Join-Path $stage $f) -Force }catch{} }
+        }
+        foreach($f in $newlyCopied){
+            $nf=Join-Path $stage $f
+            if(Test-Path -LiteralPath $nf){ try{ Remove-Item -LiteralPath $nf -Force }catch{} }
+        }
+        throw
+    }finally{
+        if(Test-Path -LiteralPath $backup){ Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue }
     }
     $dll=Join-Path $stage 'TianGongCadSuite.dll'
     Write-Output ('已把插件文件安装到：' + $stage)
@@ -133,9 +158,10 @@ $keepVersion=$assembly.Version.ToString()
 foreach($old in @($server.GetSubKeyNames())){
     if($old -ne $keepVersion){ $server.DeleteSubKeyTree($old,$false); Write-Output ('已删除旧版本注册子键：' + $old) }
 }
+$codeBase=([Uri]$dll).AbsoluteUri
 foreach($target in @($server,$server.CreateSubKey($assembly.Version.ToString()))){
     $target.SetValue('Assembly',$assembly.FullName);$target.SetValue('Class','TianGongCadSuite.PanelAddIn')
-    $target.SetValue('RuntimeVersion','v4.0.30319');$target.SetValue('CodeBase','file:///'+$dll.Replace('\','/'))
+    $target.SetValue('RuntimeVersion','v4.0.30319');$target.SetValue('CodeBase',$codeBase)
 }
 $key.CreateSubKey('ProgId').SetValue('',$prog)
 $reg.CreateSubKey('Software\Classes\'+$prog+'\CLSID').SetValue('',$guid)

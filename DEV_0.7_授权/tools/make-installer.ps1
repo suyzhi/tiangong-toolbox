@@ -36,13 +36,14 @@ if(-not $OutputRoot){ $OutputRoot = $repo }
 $stamp = Get-Date -Format 'yyyyMMdd'
 $name  = '天工工具箱_DEV' + $Version + '_安装包_' + $stamp
 $dst   = Join-Path $OutputRoot $name
-if(Test-Path $dst){ Remove-Item $dst -Recurse -Force }
+if(Test-Path -LiteralPath $dst){ Remove-Item -LiteralPath $dst -Recurse -Force }
 
 Write-Output '1/5 编译（正式构建，不含测试开关）…'
 $bin = Join-Path $root ('build' + $sep + 'installer-' + $Version)
 & (Join-Path $PSScriptRoot 'build.ps1') -Version $Version -OutputDirectory $bin | Out-Null
+if($LASTEXITCODE -and $LASTEXITCODE -ne 0){ throw '编译失败（build.ps1 返回非零退出码）' }
 $dll = Join-Path $bin 'TianGongCadSuite.dll'
-if(!(Test-Path $dll)){ throw '编译失败：没有生成 TianGongCadSuite.dll' }
+if(!(Test-Path -LiteralPath $dll)){ throw '编译失败：没有生成 TianGongCadSuite.dll' }
 
 Write-Output '2/5 组装 payload（只带插件运行时真正要用的文件）…'
 $payload = Join-Path $dst 'payload'
@@ -50,14 +51,14 @@ New-Item -ItemType Directory -Force -Path $payload | Out-Null
 # 清单含义：插件本体 / Solid Edge 互操作库 / 批量格式转换的独立进程 / Lineup 默认型号表
 foreach($f in 'TianGongCadSuite.dll','Interop.TG.dll','TianGongConverter.exe','lineup-models-seed.xml','SuiteRenameWorker.exe'){   # + 批量改名的改文件名进程
     $src = Join-Path $bin $f
-    if(Test-Path $src){ Copy-Item $src $payload -Force }
+    if(Test-Path -LiteralPath $src){ Copy-Item -LiteralPath $src -Destination $payload -Force }
     else { Write-Output ('  （缺少 ' + $f + '，跳过；若运行中报错请检查这一项）') }
 }
 
 Write-Output '3/5 写安装/卸载脚本…'
 $tools = Join-Path $dst 'tools'
 New-Item -ItemType Directory -Force -Path $tools | Out-Null
-Copy-Item (Join-Path $PSScriptRoot 'install.ps1') $tools -Force
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'install.ps1') -Destination $tools -Force
 # 编码护栏（实测踩过，别删）：安装.cmd 里是 powershell.exe —— Windows PowerShell 5.1，
 # 它读 .ps1 只认【带 BOM 的 UTF-8】；没有 BOM 就按系统 ANSI(GBK) 解码，中文注释当场变乱码，
 # 脚本直接语法错误、安装半途而废（现象：弹一堆 Missing expression / Unexpected token）。
@@ -217,27 +218,27 @@ $readme = (@(
 Write-Output '5/5 清单 + 打包…'
 $rows = New-Object System.Collections.Generic.List[string]
 $rows.Add('相对路径,SHA256,字节')
-foreach($f in Get-ChildItem $dst -Recurse -File | Sort-Object FullName){
+foreach($f in Get-ChildItem -LiteralPath $dst -Recurse -File | Sort-Object FullName){
     $rel = $f.FullName.Substring($dst.Length + 1)
-    $h = (Get-FileHash $f.FullName -Algorithm SHA256).Hash
+    $h = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash
     $rows.Add($rel + ',' + $h + ',' + $f.Length)
 }
 [IO.File]::WriteAllLines((Join-Path $dst 'manifest-sha256.csv'), $rows, (New-Object Text.UTF8Encoding($true)))
 
 $zip = Join-Path $OutputRoot ($name + '.zip')
-if(Test-Path $zip){ Remove-Item $zip -Force }
+if(Test-Path -LiteralPath $zip){ Remove-Item -LiteralPath $zip -Force }
 # 不用 Compress-Archive：在 Windows PowerShell 5.1 里它把条目写成 payload\xxx（反斜杠，不合 zip 规范），
 # 授权服务器认不出是安装包（0.10.0 发布时被拒），自动更新解压也可能出错。自己写条目，一律正斜杠。
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $archive = [IO.Compression.ZipFile]::Open($zip, [IO.Compression.ZipArchiveMode]::Create)
 try {
-    foreach($f in (Get-ChildItem $dst -Recurse -File)){
+    foreach($f in (Get-ChildItem -LiteralPath $dst -Recurse -File)){
         $entry = $f.FullName.Substring($dst.Length).TrimStart('\','/').Replace('\','/')
         [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $f.FullName, $entry, [IO.Compression.CompressionLevel]::Optimal)
     }
 } finally { $archive.Dispose() }
 Write-Output ('安装包目录：' + $dst)
-Write-Output ('压缩包    ：' + $zip + '  (' + [math]::Round((Get-Item $zip).Length/1MB,2) + ' MB)')
-Write-Output ('文件数    ：' + (Get-ChildItem $dst -Recurse -File).Count)
+Write-Output ('压缩包    ：' + $zip + '  (' + [math]::Round((Get-Item -LiteralPath $zip).Length/1MB,2) + ' MB)')
+Write-Output ('文件数    ：' + (Get-ChildItem -LiteralPath $dst -Recurse -File).Count)
 Write-Output ('插件版本  ：' + $Version + '  (assembly ' + $Version + ')')

@@ -81,7 +81,14 @@ namespace TianGongCadSuite {
             for (int i = 0; i < scratch.Count; i++) {
                 var t = scratch[i];
                 if (!live.Contains(t)) continue;
-                if (t.Owner.IsDisposed || !t.Owner.Visible) { live.Remove(t); continue; }
+                if (t.Owner.IsDisposed) { live.Remove(t); continue; }
+                // 控件在动画中途被隐藏（如窗体最小化或切页）：先落到终态并执行 Done，避免 Toast 保持 Visible=true 或 Flash 字典残留。
+                if (!t.Owner.Visible) {
+                    live.Remove(t);
+                    Safe(t.Step, 1.0);
+                    if (t.Done != null) Safe(t.Done);
+                    continue;
+                }
                 double p = Math.Min(1.0, (now - t.StartMs) / (double)t.Ms);
                 Safe(t.Step, t.Ease(p));
                 if (p >= 1.0) { live.Remove(t); if (t.Done != null) Safe(t.Done); }
