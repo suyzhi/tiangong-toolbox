@@ -11,6 +11,7 @@ namespace TianGongCadSuite {
         public string TemplateA3, TemplateA4;   // 空 = 自动找（DrawingTemplates）
         public string DimensionStyle;           // 空 = 默认按公司标准择优（A3-国标-水平 / A3-国标）
         public string OutputDir;                // 空 = 放在模型旁边
+        public string OutputName;               // 空 = 与模型同名（批量遇同目录同名 .asm/.par 冲突时由调用方区分）
         public bool Overwrite;                  // 已有同名工程图时：false = 另存为「名字(自动).dft」
         public bool Save = true;
         public string PdfDir;                   // 非空：顺便导出一份 PDF（测试 / 交付用）
@@ -29,6 +30,10 @@ namespace TianGongCadSuite {
     // 找公司模板：优先读天工已配置的模板目录，再查安装目录 Template\SK先惠\A3-SK图纸.dft / A4-SK图纸.dft；没有才回退天工自带 GB 模板
     public static class DrawingTemplates {
         public static string Root(){
+            try {
+                string inst = Path.Combine(CadBuilder.CadInstallRoot, "Template");
+                if (Directory.Exists(inst)) return inst;
+            } catch { }
             foreach (var p in new[] { @"C:\Program Files\NDS\TianGong 2025\Template", @"D:\Program Files\NDS\TianGong 2025\Template" }) if (Directory.Exists(p)) return p;
             return "";
         }
@@ -36,6 +41,12 @@ namespace TianGongCadSuite {
             return Find(null, size);
         }
         public static string Find(F.Application app, string size){
+            string company = FindCompany(app, size);
+            if (company.Length > 0) return company;
+            return FindFallback(app);
+        }
+        // 只查公司模板（A3-SK图纸.dft / A4-SK图纸.dft），避免 A4 缺失时误回退到非公司 GB 模板而放弃已存在的公司 A3 模板
+        public static string FindCompany(F.Application app, string size){
             string fileName = size + "-SK图纸.dft";
             foreach (var dir in CandidateDirs(app)) {
                 string direct = Path.Combine(dir, fileName);
@@ -43,6 +54,10 @@ namespace TianGongCadSuite {
                 string sk = Path.Combine(dir, "SK先惠", fileName);
                 if (File.Exists(sk)) return sk;
             }
+            return "";
+        }
+        // 仅在公司 A3/A4 模板均缺失时回退天工自带 GB 模板
+        public static string FindFallback(F.Application app){
             foreach (var dir in CandidateDirs(app)) {
                 string gb = Path.Combine(dir, "GB Metric", "GB 公制工程图.dft");
                 if (File.Exists(gb)) return gb;
@@ -76,6 +91,7 @@ namespace TianGongCadSuite {
                     } catch { }
                 }
             }
+            try { add(Path.Combine(CadBuilder.CadInstallRoot, "Template")); } catch { }
             foreach (var p in new[] { @"C:\Program Files\NDS\TianGong 2025\Template", @"D:\Program Files\NDS\TianGong 2025\Template" })
                 add(p);
             return dirs;

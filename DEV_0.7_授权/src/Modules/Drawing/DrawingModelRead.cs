@@ -57,7 +57,7 @@ namespace TianGongCadSuite {
             return f;
         }
 
-        // 回转体 / 销子端部的 45° 锥面外倒角（如 02-029 销底 C1）：记录倒角边长供 DropNearOutline 过滤掉紧贴 0 的 1mm 坐标线
+        // 回转体 / 销子端部的 45° 锥面外倒角（如 02-029 销底 C1）：记录精确倒角边长供 DropNearOutline 过滤掉紧贴 0 的 1mm 坐标线
         static void ConeChamfer(G.Face face, G.Cone cone, ModelFacts f){
             try {
                 Array bp = new double[3], ax = new double[3]; double rr, ang; bool exp;
@@ -68,7 +68,7 @@ namespace TianGongCadSuite {
                 double leg = Math.Abs(Convert.ToDouble(hi.GetValue(a)) - Convert.ToDouble(lo.GetValue(a)));
                 if (leg > 0.006 || leg < 1e-5) return;
                 f.Chamfers.Add(Math.Round(leg * 1000, 2));
-                for (int i = 0; i < 3; i++) f.EdgeTol[i] = Math.Max(f.EdgeTol[i], leg);
+                for (int i = 0; i < 3; i++) f.AddEdgeOffset(i, leg);
             } catch { }
         }
 
@@ -85,12 +85,14 @@ namespace TianGongCadSuite {
                 double leg = Math.Min(e1, e2);
                 if (leg > 0.006 || leg < 1e-5) return;
                 f.Chamfers.Add(Math.Round(leg * 1000, 2));
-                f.EdgeTol[i1] = Math.Max(f.EdgeTol[i1], leg); f.EdgeTol[i2] = Math.Max(f.EdgeTol[i2], leg);
+                f.AddEdgeOffset(i1, leg); f.AddEdgeOffset(i2, leg);
             } catch { }
         }
 
-        // 外棱倒圆（凸的四分之一圆柱面，半径 ≤ 6mm）：和倒角一样，它在视图里留下一条离外形 r 的切线，不该当台阶标
+        // 外棱倒圆（凸的四分之一圆柱面，半径 ≤ 6mm）：和倒角一样，它在视图里留下一条离外形 r 的切线，不该当台阶标。
+        // 钣金件（.psm）的折弯外圆角本身是结构折弯（外半径 R = 内半径 + 板厚 > 板厚），绝不能写入 EdgeTol/EdgeOffsets，否则会把折弯内壁的板厚尺寸整个抹掉。
         static void EdgeRound(G.Face face, G.Cylinder cyl, ModelFacts f){
+            if (f.SheetMetal) return;
             try {
                 Array bp = new double[3], ax = new double[3]; double r; cyl.GetCylinderData(ref bp, ref ax, out r);
                 if (r > 0.006 || r < 1e-5) return;
@@ -98,14 +100,22 @@ namespace TianGongCadSuite {
                 Array lo = new double[3], hi = new double[3]; face.GetExactRange(ref lo, ref hi);
                 for (int i = 0; i < 3; i++) { if (i == a) continue; if (Math.Abs(Convert.ToDouble(hi.GetValue(i)) - Convert.ToDouble(lo.GetValue(i))) > r * 1.05) return; }
                 f.Rounds.Add(Math.Round(r * 1000, 2));
-                for (int i = 0; i < 3; i++) if (i != a) f.EdgeTol[i] = Math.Max(f.EdgeTol[i], r);
+                for (int i = 0; i < 3; i++) if (i != a) f.AddEdgeOffset(i, r);
             } catch { }
+        }
+
+        // 检查零件/钣金文档是否至少有一个有效设计实体（用于拦截空模型/损坏模型，防止生成空白 10:1 图纸）
+        public static bool HasGeometry(object document){
+            if (document == null) return false;
+            foreach (var b in Bodies(document)) return true;
+            return false;
         }
 
         // ---- 孔（给孔标注用） ----
         // 凹圆柱面按轴线归成孔：同一根轴线上半径最小的那段是孔本身，更大的是沉孔；
-        // 一端连着同轴锥面（钻尖）或者一块和孔差不多大的端面（平底）= 盲孔，深度 = 孔那段圆柱的长度。
-        // 孔特征（含插件「多孔合一」的输入孔）上能读到规格的，按轮廓里孔心的位置挂上去：螺纹规格、螺纹深度、沉孔尺寸都用它的。
+        // 一端连着同轴收敛锥面（钻尖）或者一块和孔差不多大的端面（平底）= 盲孔，深度 = 孔那段圆柱的长度；
+        // 一端连着向外扩口的同轴锥面（锥口半径明显大于孔径）= 锥形沉孔（不能误当钻尖封底），同步记录锥口半径与锥角。
+        // 孔特征（含插件「多孔合一」的输入孔）上能读到规格的，按轮廓里孔心的位置挂上去：螺纹规格、螺纹深度、沉孔/锥沉尺寸都用它的。
         public static List<ModelHole> Holes(object document){
             var cyls = new List<ModelHole>();
             foreach (var body in Bodies(document)) {
@@ -121,7 +131,11 @@ namespace TianGongCadSuite {
                     V3 axis; try { axis = V3.From(ax).Unit(); } catch { continue; }
                     double lo, hi; if (!Extent(face, V3.From(bp), axis, out lo, out hi)) continue;
                     var seg = new ModelHole { Point = V3.From(bp), Axis = axis, Radius = r, Lo = lo, Hi = hi };
-                    seg.BlindLo = ClosedEnd(face, axis, r, V3.From(bp) + axis * lo); seg.BlindHi = ClosedEnd(face, axis, r, V3.From(bp) + axis * hi);
+                    double csRLo, csALo, csRHi, csAHi;
+                    seg.BlindLo = InspectEnd(face, axis, r, V3.From(bp) + axis * lo, out csRLo, out csALo);
+                    seg.BlindHi = InspectEnd(face, axis, r, V3.From(bp) + axis * hi, out csRHi, out csAHi);
+                    if (csRHi > csRLo) { seg.CsRadius = csRHi; seg.CsAngle = csAHi; }
+                    else if (csRLo > 0) { seg.CsRadius = csRLo; seg.CsAngle = csALo; }
                     cyls.Add(seg);
                 }
             }
@@ -147,8 +161,12 @@ namespace TianGongCadSuite {
             return hi - lo > 1e-7;
         }
 
-        // 这一端是不是封口：挨着的面里有同轴锥面（钻尖），或者是垂直于轴、面积不超过孔截面 1.3 倍的平面（平底）
-        static bool ClosedEnd(G.Face face, V3 axis, double r, V3 at){
+        // 这一端是不是封口（返回 true），同时识别向外扩口的锥形沉孔（csRadius/csAngle）：
+        //   · 向内收敛的同轴凹锥面（锥面最大圆边半径 ≤ r）= 钻尖封底 → 返回 true；
+        //   · 向外扩口的同轴凹锥面（最大圆边半径 > r + 0.1mm）= 锥形沉孔或孔口倒角，不是封底！扩口增量 ≥ 0.8mm 记为锥沉孔；
+        //   · 垂直于轴、整块面落在孔圆内的平面 = 平底封口 → 返回 true。
+        static bool InspectEnd(G.Face face, V3 axis, double r, V3 at, out double csRadius, out double csAngle){
+            csRadius = 0; csAngle = 0;
             try {
                 foreach (G.Edge e in (G.Edges)face.Edges) {
                     var c = e.Geometry as G.Circle; if (c == null) continue;
@@ -161,7 +179,25 @@ namespace TianGongCadSuite {
                         var cone = g as G.Cone;
                         if (cone != null) {
                             Array p = new double[3], a = new double[3]; double rr, ang; bool exp; cone.GetConeData(ref p, ref a, out rr, out ang, out exp);
-                            if (Math.Abs(Math.Abs(V3.From(a).Unit().Dot(axis)) - 1) < 1e-4 && f.IsParamReversed) return true;
+                            if (Math.Abs(Math.Abs(V3.From(a).Unit().Dot(axis)) - 1) < 1e-4 && f.IsParamReversed) {
+                                double maxEdgeR = 0;
+                                try {
+                                    foreach (G.Edge ce in (G.Edges)f.Edges) {
+                                        var cc = ce.Geometry as G.Circle;
+                                        if (cc != null && cc.Radius > maxEdgeR) maxEdgeR = cc.Radius;
+                                    }
+                                } catch { }
+                                if (maxEdgeR > r + 1e-4) {
+                                    // 外扩锥面（锥形沉孔或孔口倒角）：绝不是盲孔封底
+                                    if (maxEdgeR - r >= 0.0008 && maxEdgeR > csRadius) {
+                                        csRadius = maxEdgeR;
+                                        double deg = Math.Abs(ang) * 2.0 * 180.0 / Math.PI;
+                                        csAngle = deg > 1 && deg < 179 ? Math.Round(deg, 1) : 90;
+                                    }
+                                    continue;
+                                }
+                                return true;
+                            }
                         }
                         var pl = g as G.Plane;
                         if (pl != null) {
@@ -197,12 +233,19 @@ namespace TianGongCadSuite {
             if (holes.Count == 0) return;
             dynamic models = ((dynamic)document).Models;
             int nm = (int)models.Count;
+            bool hasPatternOrMirror = false;
             for (int i = 1; i <= nm; i++) {
                 P.Model model = models.Item(i);
+                try { if (model.Patterns.Count > 0) hasPatternOrMirror = true; } catch { hasPatternOrMirror = true; }
+                try { if (((dynamic)model).MirrorCopies.Count > 0) hasPatternOrMirror = true; } catch { }
+                try { if (((dynamic)model).MirrorParts.Count > 0) hasPatternOrMirror = true; } catch { }
                 var list = new List<P.Hole>();
                 try { foreach (P.Hole h in model.Holes) list.Add(h); } catch { }
                 try { foreach (P.UserDefinedPattern u in model.UserDefinedPatterns) list.AddRange(HoleCombine.Inputs(u)); } catch { }
                 foreach (var h in list) {
+                    // 跳过已抑制或报错失效的孔特征，避免历史废孔规格串配到现存同位光孔上
+                    try { if (h.Suppress) continue; } catch { }
+                    try { object stD; if ((int)h.GetStatusEx(out stD) == (int)P.FeatureStatusConstants.igFeatureFailed) continue; } catch { }
                     HoleSpec spec; bool through;
                     try { spec = HoleEditCad.ReadSpec(h, out through); } catch { continue; }
                     int np; Array profs = new object[0];
@@ -224,22 +267,39 @@ namespace TianGongCadSuite {
                     }
                 }
             }
-            // 把种子孔读到的规格传播给阵列 / 镜像生成的同径同深同形式几何孔（仅当所有已匹配同组孔规格一致时才传播）
+            // 仅当模型中确实存在阵列 / 镜像特征时，才将种子孔规格传播给同轴向、同径、同沉孔/锥沉、同深的未匹配几何孔，
+            // 并完整校验 ThreadFull / ThreadDepth / 沉孔 / 锥沉 冲突，防止拉伸切除的 Ø5 销孔被同件的 M6 底孔误污染。
+            if (!hasPatternOrMirror) return;
             foreach (var mh in holes) {
                 if (mh.Spec != null) continue;
                 HoleSpec shared = null; bool conflict = false;
                 foreach (var src in holes) {
                     if (src.Spec == null) continue;
                     if (src.Through != mh.Through) continue;
+                    if (Math.Abs(src.Axis.Dot(mh.Axis)) < 0.999) continue;
                     if (Math.Abs(src.Radius - mh.Radius) > 1e-5) continue;
                     if (Math.Abs(src.CbRadius - mh.CbRadius) > 1e-5) continue;
+                    if (Math.Abs(src.CbDepth - mh.CbDepth) > 3e-4) continue;
+                    if (Math.Abs(src.CsRadius - mh.CsRadius) > 1e-5) continue;
                     if (!mh.Through && Math.Abs(src.Depth - mh.Depth) > 3e-4) continue;
                     if (shared == null) shared = src.Spec;
-                    else if (shared.Kind != src.Spec.Kind || !string.Equals(shared.ThreadSize, src.Spec.ThreadSize, StringComparison.OrdinalIgnoreCase)
-                        || Math.Abs(shared.Depth - src.Spec.Depth) > 0.05) { conflict = true; break; }
+                    else if (!SameHoleSpec(shared, src.Spec)) { conflict = true; break; }
                 }
                 if (shared != null && !conflict) mh.Spec = shared;
             }
+        }
+
+        static bool SameHoleSpec(HoleSpec a, HoleSpec b){
+            if (a.Kind != b.Kind) return false;
+            if (!string.Equals(a.ThreadSize ?? "", b.ThreadSize ?? "", StringComparison.OrdinalIgnoreCase)) return false;
+            if (Math.Abs(a.Depth - b.Depth) > 0.05) return false;
+            if (a.ThreadFull != b.ThreadFull) return false;
+            if (!a.ThreadFull && Math.Abs(a.ThreadDepth - b.ThreadDepth) > 0.05) return false;
+            if (Math.Abs(a.CounterboreDiameter - b.CounterboreDiameter) > 0.05) return false;
+            if (Math.Abs(a.CounterboreDepth - b.CounterboreDepth) > 0.05) return false;
+            if (Math.Abs(a.CountersinkDiameter - b.CountersinkDiameter) > 0.05) return false;
+            if (Math.Abs(a.CountersinkAngle - b.CountersinkAngle) > 0.5) return false;
+            return true;
         }
 
         static bool SpecMatchesHole(ModelHole mh, V3 profilePt, HoleSpec spec, bool specThrough){
@@ -249,10 +309,13 @@ namespace TianGongCadSuite {
             foreach (var sg in mh.Segments) { if (sg.Lo < minLo) minLo = sg.Lo; if (sg.Hi > maxHi) maxHi = sg.Hi; }
             double t = (profilePt - mh.Point).Dot(mh.Axis);
             if (t < minLo - 0.003 || t > maxHi + 0.003) return false;
-            // 2. 孔径校验：螺纹孔的几何孔径必须严格小于螺纹公称直径（避免过孔 Ø5.5 / Ø6.6 被错认成 M5 / M6）
+            // 2. 孔径与沉孔/锥沉校验：螺纹孔的几何孔径必须严格小于螺纹公称直径（避免过孔 Ø5.5 / Ø6.6 被错认成 M5 / M6）
             double diaMm = mh.Radius * 2000.0;
             if (spec.Kind == HoleKind.Tapped && spec.ThreadSize.Length > 0) {
                 return DrawingStyleRules.IsNominalTappedDiameter(diaMm, spec.ThreadSize);
+            }
+            if (spec.Kind == HoleKind.Countersink && spec.CountersinkDiameter > 0 && mh.CsRadius > 0) {
+                if (Math.Abs(mh.CsRadius * 2000.0 - spec.CountersinkDiameter) > 0.5) return false;
             }
             if (spec.HoleDiameter > 0) {
                 bool diaOk = Math.Abs(diaMm - spec.HoleDiameter) <= 0.35

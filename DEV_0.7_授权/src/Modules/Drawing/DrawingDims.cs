@@ -61,6 +61,13 @@ namespace TianGongCadSuite {
             }
         }
 
+        // 读取工程图文档当前的活动尺寸样式名（缺失公司样式时用于检索中心线后恢复原活动样式）
+        public static string GetActiveStyle(D.DraftDocument doc){
+            if (doc == null) return "";
+            try { return ((S.DimensionStyles)doc.DimensionStyles).Active ?? ""; }
+            catch (Exception e) { Log.Write("DrawingGetActiveStyle", e); return ""; }
+        }
+
         // 切换工程图文档的当前活动尺寸样式（新建尺寸 / 气泡 / 形位公差 / 粗糙度一律继承当前活动样式）
         public static bool SetActiveStyle(D.DraftDocument doc, string styleName){
             if (doc == null || string.IsNullOrEmpty(styleName)) return false;
@@ -402,26 +409,79 @@ namespace TianGongCadSuite {
         }
 
         // 放置引线标注、校准端符朝向，并按天工实际渲染出的文字架范围复核是否与已放文字重叠；
-        // 若实测字体比预估宽/高导致撞到前一条文字，沿竖直方向微调避开后再登记。
+        // 若实测字体比预估宽/高导致撞到前一条文字，沿单调方向按重叠框并集外推避让并校验图纸/视图边界，
+        // 杜绝双框夹缝间往复振荡或把文字推入标题栏 / 视图本体。
         void PlaceAndGuardCallout(S.Dimension d, double[] textPos, Action fixTerminator){
             MoveText(d, textPos);
             if (fixTerminator != null) fixTerminator();
             if (textPos != null && calloutBoxes.Count > 0) {
-                for (int attempt = 0; attempt < 6; attempt++) {
-                    var tb = ReadCalloutShelfBox(d);
-                    if (tb == null) break;
-                    double[] hit = FindOverlap(tb, calloutBoxes);
-                    if (hit == null) break;
-                    // 优先往下错开（或根据碰撞框相对位置往外退），步长足够彻底脱离碰撞框
-                    double shiftDown = hit[1] - tb[3] - 0.0018;
-                    double shiftUp = hit[3] - tb[1] + 0.0018;
-                    double dy = Math.Abs(shiftDown) <= Math.Abs(shiftUp) ? shiftDown : shiftUp;
-                    textPos = new[] { textPos[0], textPos[1] + dy };
-                    MoveText(d, textPos);
-                    if (fixTerminator != null) fixTerminator();
+                var origPos = new[] { textPos[0], textPos[1] };
+                var tb0 = ReadCalloutShelfBox(d);
+                double[] hit0 = tb0 == null ? null : FindOverlap(tb0, calloutBoxes);
+                if (tb0 != null && hit0 != null) {
+                    double sd0 = hit0[1] - tb0[3] - 0.0018;
+                    double su0 = hit0[3] - tb0[1] + 0.0018;
+                    int firstDir = Math.Abs(sd0) <= Math.Abs(su0) ? -1 : 1;
+                    double[] bestPos = origPos;
+                    int bestOverlaps = CountOverlaps(tb0, calloutBoxes);
+                    bool solved = false;
+                    foreach (int dir in new[] { firstDir, -firstDir }) {
+                        if (dir != firstDir) {
+                            MoveText(d, origPos);
+                            if (fixTerminator != null) fixTerminator();
+                        }
+                        var curPos = new[] { origPos[0], origPos[1] };
+                        for (int attempt = 0; attempt < 6; attempt++) {
+                            var tb = ReadCalloutShelfBox(d);
+                            if (tb == null) break;
+                            double minY, maxY;
+                            int ov = OverlapYUnion(tb, calloutBoxes, out minY, out maxY);
+                            if (ov == 0) { bestPos = curPos; bestOverlaps = 0; solved = true; break; }
+                            double dy = dir < 0 ? (minY - tb[3] - 0.0018) : (maxY - tb[1] + 0.0018);
+                            if (Math.Abs(dy) < 1e-6) break;
+                            var pred = new[] { tb[0], tb[1] + dy, tb[2], tb[3] + dy };
+                            if (Space != null && !Space.InsideAndClearOfViews(pred)) break;
+                            var nextPos = new[] { curPos[0], curPos[1] + dy };
+                            MoveText(d, nextPos);
+                            if (fixTerminator != null) fixTerminator();
+                            var nextTb = ReadCalloutShelfBox(d);
+                            if (nextTb == null) break;
+                            if (Space != null && !Space.InsideAndClearOfViews(nextTb)) break;
+                            curPos = nextPos;
+                            int nextOv = CountOverlaps(nextTb, calloutBoxes);
+                            if (nextOv < bestOverlaps) { bestOverlaps = nextOv; bestPos = curPos; }
+                            if (nextOv == 0) { solved = true; break; }
+                        }
+                        if (solved) break;
+                    }
+                    if (!solved) {
+                        MoveText(d, bestPos);
+                        if (fixTerminator != null) fixTerminator();
+                    }
                 }
             }
             RecordCalloutShelf(d);
+        }
+
+        static int CountOverlaps(double[] r, List<double[]> boxes){
+            int n = 0;
+            foreach (var u in boxes) {
+                if (r[0] < u[2] && u[0] < r[2] && r[1] < u[3] && u[1] < r[3]) n++;
+            }
+            return n;
+        }
+
+        static int OverlapYUnion(double[] r, List<double[]> boxes, out double minY, out double maxY){
+            minY = double.MaxValue; maxY = double.MinValue;
+            int n = 0;
+            foreach (var u in boxes) {
+                if (r[0] < u[2] && u[0] < r[2] && r[1] < u[3] && u[1] < r[3]) {
+                    if (u[1] < minY) minY = u[1];
+                    if (u[3] > maxY) maxY = u[3];
+                    n++;
+                }
+            }
+            return n;
         }
 
         void RecordCalloutShelf(S.Dimension d){

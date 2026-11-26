@@ -34,6 +34,7 @@ namespace TianGongCadSuite {
         readonly CadKeyShield keyShield;
 
         readonly List<DrawingJob> jobs = new List<DrawingJob>();
+        readonly List<Control> busyLockControls = new List<Control>();
         string topProject = "";
         string lastFolder = "";
         string lastPreviewPath = "";
@@ -62,7 +63,7 @@ namespace TianGongCadSuite {
             var btnReload = Ui.Small("载入当前文档"); btnReload.Click += (s, e) => LoadActive();
             var btnAdd = Ui.Small("添加文件…"); btnAdd.Click += (s, e) => AddFiles();
             var btnScan = Ui.Small("扫描文件夹…"); btnScan.Click += (s, e) => ScanFolder();
-            foreach (var b in new[] { btnReload, btnAdd, btnScan }) ((FlatButton)b).SetFore(Ui.Text2);
+            foreach (var b in new[] { btnReload, btnAdd, btnScan }) { ((FlatButton)b).SetFore(Ui.Text2); busyLockControls.Add(b); }
 
             // 主表卡片 + 右侧 3D 预览
             var listFrame = Ui.Card("", 0, "");
@@ -99,11 +100,12 @@ namespace TianGongCadSuite {
             searchClearBtn.Height = Ui.S(26);
             searchClearBtn.Visible = false;
             tips.SetToolTip(searchClearBtn, "清空筛选 (Esc)");
-            searchClearBtn.Click += (s, e) => { searchBox.Text = ""; searchDebounce.Stop(); RebuildList(); try { list.Focus(); } catch { } };
+            searchClearBtn.Click += (s, e) => { if (busy) return; searchBox.Text = ""; searchDebounce.Stop(); RebuildList(); try { list.Focus(); } catch { } };
             searchBox.SetBounds(0, 0, searchWrap.Width, Ui.S(26));
             searchClearBtn.SetBounds(searchWrap.Width - searchClearBtn.Width, 0, searchClearBtn.Width, Ui.S(26));
-            searchDebounce.Tick += (s, e) => { searchDebounce.Stop(); if (!IsDisposed) RebuildList(); };
+            searchDebounce.Tick += (s, e) => { searchDebounce.Stop(); if (!IsDisposed && !busy) RebuildList(); };
             searchBox.TextChanged += (s, e) => {
+                if (busy) return;
                 bool show = searchBox.Text.Length > 0;
                 if (searchClearBtn.Visible != show) {
                     searchClearBtn.Visible = show;
@@ -112,6 +114,8 @@ namespace TianGongCadSuite {
                 searchDebounce.Stop();
                 searchDebounce.Start();
             };
+            busyLockControls.Add(searchBox);
+            busyLockControls.Add(searchClearBtn);
             searchBox.KeyDown += (s, e) => {
                 if (e.KeyCode == Keys.Escape) {
                     if (searchBox.Text.Length > 0) searchBox.Text = "";
@@ -134,6 +138,7 @@ namespace TianGongCadSuite {
             foreach (var b in new[] { bAll, bNone, bCustom, bMissing, bFailed, bRefresh }) {
                 ((FlatButton)b).SetFore(Ui.Text2);
                 b.Margin = Ui.SPad(0, 3, 2, 2);
+                busyLockControls.Add(b);
             }
             tools.Controls.Add(searchWrap);
             tools.Controls.AddRange(new Control[] { bAll, bNone, bCustom, bMissing, bFailed, bRefresh });
@@ -158,9 +163,12 @@ namespace TianGongCadSuite {
             dimStyleBox.SelectedIndex = styleIdx >= 0 ? styleIdx : 0;
             dimStyleBox.SelectionChangeCommitted += (s, e) => Choices.Set("drawing.dimstyle", SelectedDimensionStyle());
             tips.SetToolTip(dimStyleBox, "新建工程图统一使用的尺寸样式（默认 A3-国标-水平，也可切为 A3-国标，不再沿用模板默认的 A3-孔 / A4-水平2）。");
-            overwrite.Text = "已有同名工程图时覆盖（不勾：另存为「名字(自动).dft」）"; overwrite.AutoSize = true; overwrite.Font = Ui.F9; overwrite.Margin = Ui.SPad(0, 5, 18, 0);
+            // 覆盖开关默认每次打开窗口均不勾选（不持久化到 choices.tsv），防止上次勾过覆盖导致跨会话误覆写已有人工图纸
+            overwrite.Text = "已有同名工程图时覆盖（不勾：另存为「名字(自动).dft」）"; overwrite.AutoSize = true; overwrite.Checked = false; overwrite.Font = Ui.F9; overwrite.Margin = Ui.SPad(0, 5, 18, 0);
             openAfter.Text = "出完打开工程图（批量 > 3 张时仅打开最后一张）"; openAfter.AutoSize = true; openAfter.Checked = true; openAfter.Font = Ui.F9; openAfter.Margin = Ui.SPad(0, 5, 0, 0);
-            Choices.Bind(overwrite, "drawing.overwrite");
+            busyLockControls.Add(dimStyleBox);
+            busyLockControls.Add(overwrite);
+            busyLockControls.Add(openAfter);
             opts.Controls.Add(lblStyle); opts.Controls.Add(dimStyleBox); opts.Controls.Add(overwrite); opts.Controls.Add(openAfter);
             body.Add(opts);
 
@@ -252,14 +260,18 @@ namespace TianGongCadSuite {
             try { dirty = (bool)((dynamic)doc).Dirty; } catch { }
             var asm = doc as A.AssemblyDocument;
             topProject = DrawingBatch.Project(Path.GetFileNameWithoutExtension(file));
-            jobs.Add(new DrawingJob { File = file, Kind = DrawingBatch.KindOf(file), Count = 1, Selected = true, HasDrawing = DrawingBatch.HasDrawing(file) });
+            var dftDirCache = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+            jobs.Add(new DrawingJob { File = file, Kind = DrawingBatch.KindOf(file), Count = 1, Selected = true, HasDrawing = DrawingBatch.HasDrawingCached(file, dftDirCache) });
             if (asm != null) {
                 var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-                Collect(asm, counts, 0);
+                Collect(asm, counts);
+                var existsCache = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
                 foreach (var kv in counts.OrderBy(k => Path.GetFileName(k.Key), StringComparer.OrdinalIgnoreCase)) {
+                    // 跳过磁盘上已缺失的断链子件，避免默认勾进批量队列后逐个报错
+                    if (!FileExistsCached(kv.Key, existsCache)) continue;
                     string why;
                     bool custom = DrawingBatch.Custom(kv.Key, topProject, out why);
-                    jobs.Add(new DrawingJob { File = kv.Key, Kind = DrawingBatch.KindOf(kv.Key), Count = kv.Value, Selected = custom, Reason = why, HasDrawing = DrawingBatch.HasDrawing(kv.Key) });
+                    jobs.Add(new DrawingJob { File = kv.Key, Kind = DrawingBatch.KindOf(kv.Key), Count = kv.Value, Selected = custom, Reason = why, HasDrawing = DrawingBatch.HasDrawingCached(kv.Key, dftDirCache) });
                 }
             }
             RebuildList();
@@ -296,9 +308,12 @@ namespace TianGongCadSuite {
             string dir = FolderPicker.Pick(this, "选择包含要出图模型的文件夹（递归扫描 .par / .psm / .asm）", lastFolder, "drawing.scan");
             if (string.IsNullOrEmpty(dir)) return;
             lastFolder = dir;
-            var found = ScanModelsInFolder(dir);
+            int skippedDirs;
+            var found = ScanModelsInFolder(dir, out skippedDirs);
             if (found.Count == 0) {
-                status.Text = "该文件夹下没有找到 .par / .psm / .asm 模型文件。";
+                status.Text = skippedDirs > 0
+                    ? ("该文件夹下没有找到可用模型（另有 " + skippedDirs + " 个无权限或超长路径子目录被跳过）。")
+                    : "该文件夹下没有找到 .par / .psm / .asm 模型文件。";
                 status.ForeColor = Ui.Warn;
                 return;
             }
@@ -311,8 +326,8 @@ namespace TianGongCadSuite {
             }
             int added = AppendModelFiles(found, false);
             head.Text = "文件夹「" + Path.GetFileName(dir.TrimEnd('\\', '/')) + "」";
-            status.Text = "已扫描并载入 " + added + " 个模型（默认勾选加工件）。";
-            status.ForeColor = Ui.Muted;
+            status.Text = "已扫描并载入 " + added + " 个模型（默认勾选加工件）" + (skippedDirs > 0 ? "；另有 " + skippedDirs + " 个受限/超长子目录已跳过。" : "。");
+            status.ForeColor = skippedDirs > 0 ? Ui.Warn : Ui.Muted;
             SelectFirstForPreview();
         }
 
@@ -328,11 +343,14 @@ namespace TianGongCadSuite {
 
             var models = new List<string>();
             bool fromFolder = false;
+            int skippedDirs = 0;
             foreach (string raw in dropped) {
                 if (string.IsNullOrEmpty(raw)) continue;
                 if (Directory.Exists(raw)) {
                     fromFolder = true;
-                    models.AddRange(ScanModelsInFolder(raw));
+                    int sk;
+                    models.AddRange(ScanModelsInFolder(raw, out sk));
+                    skippedDirs += sk;
                 } else if (File.Exists(raw) && IsSupportedModel(raw)) {
                     models.Add(raw);
                 }
@@ -344,8 +362,8 @@ namespace TianGongCadSuite {
             }
             int added = AppendModelFiles(models, !fromFolder);
             if (jobs.Count > 0 && string.IsNullOrEmpty(head.Text)) head.Text = "已添加模型";
-            status.Text = added > 0 ? ("已拖入并新增 " + added + " 个模型。") : "拖入的模型已在列表中。";
-            status.ForeColor = Ui.Muted;
+            status.Text = (added > 0 ? ("已拖入并新增 " + added + " 个模型") : "拖入的模型已在列表中") + (skippedDirs > 0 ? "（另有 " + skippedDirs + " 个受限子目录已跳过）。" : "。");
+            status.ForeColor = skippedDirs > 0 ? Ui.Warn : Ui.Muted;
             SelectFirstForPreview();
         }
 
@@ -354,21 +372,42 @@ namespace TianGongCadSuite {
             return ext == ".par" || ext == ".psm" || ext == ".asm";
         }
 
-        static List<string> ScanModelsInFolder(string dir) {
+        // 显式栈安全遍历目录：跳过符号链接/目录联接防止循环，单目录异常（无权限/超长路径）仅计数跳过，绝不中断整棵树扫描
+        static List<string> ScanModelsInFolder(string dir, out int skippedDirs) {
+            skippedDirs = 0;
             var res = new List<string>();
-            try {
-                foreach (string f in Directory.EnumerateFiles(dir, "*.*", SearchOption.AllDirectories)) {
-                    string name = Path.GetFileName(f) ?? "";
-                    if (name.StartsWith("~$", StringComparison.Ordinal)) continue;
-                    if (IsSupportedModel(f)) res.Add(f);
-                }
-            } catch { }
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return res;
+            var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var stack = new Stack<string>();
+            stack.Push(dir);
+            while (stack.Count > 0) {
+                string cur = stack.Pop();
+                string key;
+                try { key = Path.GetFullPath(cur).TrimEnd('\\', '/'); } catch { skippedDirs++; continue; }
+                if (!visited.Add(key)) continue;
+                try {
+                    foreach (string f in Directory.EnumerateFiles(cur)) {
+                        string name = Path.GetFileName(f) ?? "";
+                        if (name.StartsWith("~$", StringComparison.Ordinal)) continue;
+                        if (IsSupportedModel(f)) res.Add(f);
+                    }
+                } catch { skippedDirs++; continue; }
+                try {
+                    foreach (string sub in Directory.EnumerateDirectories(cur)) {
+                        try {
+                            if ((File.GetAttributes(sub) & FileAttributes.ReparsePoint) != 0) continue;
+                            stack.Push(sub);
+                        } catch { skippedDirs++; }
+                    }
+                } catch { skippedDirs++; }
+            }
             res.Sort((a, b) => WorkbenchRules.NaturalCompare(Path.GetFileName(a), Path.GetFileName(b)));
             return res;
         }
 
         int AppendModelFiles(IEnumerable<string> paths, bool selectAllExplicit) {
             var existing = new HashSet<string>(jobs.Select(j => j.File), StringComparer.OrdinalIgnoreCase);
+            var dftDirCache = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
             int added = 0;
             foreach (string f in paths) {
                 if (string.IsNullOrEmpty(f) || !File.Exists(f) || !IsSupportedModel(f)) continue;
@@ -381,7 +420,7 @@ namespace TianGongCadSuite {
                     Count = 1,
                     Selected = selectAllExplicit || custom,
                     Reason = selectAllExplicit ? "" : why,
-                    HasDrawing = DrawingBatch.HasDrawing(f)
+                    HasDrawing = DrawingBatch.HasDrawingCached(f, dftDirCache)
                 });
                 added++;
             }
@@ -389,22 +428,130 @@ namespace TianGongCadSuite {
             return added;
         }
 
-        static void Collect(A.AssemblyDocument asm, Dictionary<string, int> counts, int depth) {
-            if (depth > 8) return;
-            foreach (A.Occurrence occ in asm.Occurrences) {
-                string f = ""; try { f = occ.OccurrenceFileName; } catch { }
-                if (f.Length == 0) continue;
-                bool sub = f.EndsWith(".asm", StringComparison.OrdinalIgnoreCase);
-                if (sub) {
-                    try { var d = occ.OccurrenceDocument as A.AssemblyDocument; if (d != null) Collect(d, counts, depth + 1); } catch { }
+        // 按目录一次枚举缓存判断文件是否存在，避免大装配在 DLP 加密盘上逐件 File.Exists 卡顿
+        static bool FileExistsCached(string path, Dictionary<string, HashSet<string>> dirCache) {
+            if (string.IsNullOrEmpty(path)) return false;
+            try {
+                string dir = Path.GetDirectoryName(path) ?? "";
+                string name = Path.GetFileName(path) ?? "";
+                if (dir.Length == 0 || name.Length == 0) return false;
+                HashSet<string> files;
+                if (!dirCache.TryGetValue(dir, out files)) {
+                    files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    try {
+                        if (Directory.Exists(dir))
+                            foreach (string f in Directory.GetFiles(dir)) files.Add(Path.GetFileName(f));
+                    } catch { }
+                    dirCache[dir] = files;
                 }
-                int n; counts.TryGetValue(f, out n); counts[f] = n + 1;
+                return files.Contains(name);
+            } catch { return false; }
+        }
+
+        // 收集装配里的全部有效加工/子装文件（对齐 AssemblyParts 的隐藏/参考过滤）：
+        //   1. 跳过隐藏、仅参考、不计物理属性与已抑制实例（如运动范围包络件）；
+        //   2. 优先走 SubOccurrences（无需强加载轻量化子装配文档），且对相同子装配文件做记忆化缓存，避免重复子装呈指数级遍历。
+        static void Collect(A.AssemblyDocument asm, Dictionary<string, int> counts) {
+            var subMemo = new Dictionary<string, Dictionary<string, int>>(StringComparer.OrdinalIgnoreCase);
+            CollectAsm(asm, counts, 0, subMemo);
+        }
+
+        static void CollectAsm(A.AssemblyDocument asm, Dictionary<string, int> counts, int depth, Dictionary<string, Dictionary<string, int>> subMemo) {
+            if (asm == null || depth > 8) return;
+            foreach (A.Occurrence occ in asm.Occurrences) {
+                if (IsIgnoredOcc(occ)) continue;
+                string f = ""; try { f = occ.OccurrenceFileName ?? ""; } catch { }
+                if (f.Length == 0) continue;
+                AddCount(counts, f, 1);
+                bool sub = false;
+                try { sub = occ.Subassembly; } catch { sub = f.EndsWith(".asm", StringComparison.OrdinalIgnoreCase); }
+                if (!sub) continue;
+
+                Dictionary<string, int> cached;
+                if (subMemo.TryGetValue(f, out cached)) {
+                    foreach (var kv in cached) AddCount(counts, kv.Key, kv.Value);
+                    continue;
+                }
+                var local = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                bool walked = false;
+                try {
+                    var subs = occ.SubOccurrences;
+                    if (subs != null && subs.Count > 0) {
+                        CollectSubs(subs, local, depth + 1, subMemo);
+                        walked = true;
+                    }
+                } catch { }
+                if (!walked) {
+                    try {
+                        var d = occ.OccurrenceDocument as A.AssemblyDocument;
+                        if (d != null) CollectAsm(d, local, depth + 1, subMemo);
+                    } catch { }
+                }
+                subMemo[f] = local;
+                foreach (var kv in local) AddCount(counts, kv.Key, kv.Value);
             }
+        }
+
+        static void CollectSubs(A.SubOccurrences subs, Dictionary<string, int> counts, int depth, Dictionary<string, Dictionary<string, int>> subMemo) {
+            if (subs == null || depth > 8) return;
+            int n = 0; try { n = subs.Count; } catch { }
+            for (int i = 1; i <= n; i++) {
+                A.SubOccurrence s = null; try { s = subs.Item(i); } catch { }
+                if (s == null || IsIgnoredSub(s)) continue;
+                string f = ""; try { f = s.SubOccurrenceFileName ?? ""; } catch { }
+                if (f.Length == 0) continue;
+                AddCount(counts, f, 1);
+                bool sub = false;
+                try { sub = s.Subassembly; } catch { sub = f.EndsWith(".asm", StringComparison.OrdinalIgnoreCase); }
+                if (!sub) continue;
+
+                Dictionary<string, int> cached;
+                if (subMemo.TryGetValue(f, out cached)) {
+                    foreach (var kv in cached) AddCount(counts, kv.Key, kv.Value);
+                    continue;
+                }
+                var local = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                bool walked = false;
+                try {
+                    var childSubs = s.SubOccurrences;
+                    if (childSubs != null && childSubs.Count > 0) {
+                        CollectSubs(childSubs, local, depth + 1, subMemo);
+                        walked = true;
+                    }
+                } catch { }
+                if (!walked) {
+                    try {
+                        var d = s.SubOccurrenceDocument as A.AssemblyDocument;
+                        if (d != null) CollectAsm(d, local, depth + 1, subMemo);
+                    } catch { }
+                }
+                subMemo[f] = local;
+                foreach (var kv in local) AddCount(counts, kv.Key, kv.Value);
+            }
+        }
+
+        static void AddCount(Dictionary<string, int> map, string file, int delta) {
+            int cur; map.TryGetValue(file, out cur); map[file] = cur + delta;
+        }
+
+        static bool IsIgnoredOcc(A.Occurrence o) {
+            try { if (!o.Visible) return true; } catch { }
+            try { if (o.ReferenceOnly) return true; } catch { }
+            try { if (o.DisplayAsReference) return true; } catch { }
+            try { if (!o.IncludeInPhysicalProperties) return true; } catch { }
+            return false;
+        }
+
+        static bool IsIgnoredSub(A.SubOccurrence s) {
+            try { if (!s.Visible) return true; } catch { }
+            try { if (s.ExcludeFromPhysicalProperties) return true; } catch { }
+            return false;
         }
 
         // ---- 列表渲染与筛选 ----
 
         void RebuildList() {
+            if (busy) return;
             rebuilding = true;
             list.BeginUpdate();
             try {
@@ -477,6 +624,14 @@ namespace TianGongCadSuite {
         void OnListItemChecked(object sender, ItemCheckedEventArgs e) {
             if (rebuilding || e.Item == null) return;
             var j = e.Item.Tag as DrawingJob;
+            if (busy) {
+                // 出图期间禁止用户篡改勾选状态，立即还原复选框视觉
+                if (j != null && e.Item.Checked != j.Selected) {
+                    rebuilding = true;
+                    try { e.Item.Checked = j.Selected; } finally { rebuilding = false; }
+                }
+                return;
+            }
             if (j != null) {
                 j.Selected = e.Item.Checked;
                 ApplyItemColor(e.Item, j);
@@ -506,23 +661,12 @@ namespace TianGongCadSuite {
 
         void RefreshHasDrawing() {
             if (busy) return;
-            // 按目录一次枚举 .dft，避免公司加密盘上逐文件 File.Exists 慢 I/O
+            // 按目录一次枚举 .dft，避免公司加密盘上逐文件 File.Exists 慢 I/O，并与载入/双击打开口径统一
             var dirCache = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
             int foundNew = 0;
             foreach (var j in jobs) {
                 bool had = j.HasDrawing;
-                string dir = Path.GetDirectoryName(j.File) ?? "";
-                HashSet<string> dfts;
-                if (!dirCache.TryGetValue(dir, out dfts)) {
-                    dfts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    try {
-                        if (Directory.Exists(dir))
-                            foreach (string f in Directory.GetFiles(dir, "*.dft")) dfts.Add(Path.GetFileName(f));
-                    } catch { }
-                    dirCache[dir] = dfts;
-                }
-                string stem = Path.GetFileNameWithoutExtension(j.File) ?? "";
-                j.HasDrawing = dfts.Contains(stem + ".dft") || dfts.Contains(stem + "(自动).dft");
+                j.HasDrawing = DrawingBatch.HasDrawingCached(j.File, dirCache);
                 if (!had && j.HasDrawing) foundNew++;
             }
             list.BeginUpdate();
@@ -660,11 +804,51 @@ namespace TianGongCadSuite {
             return DrawingStyleRules.NormalizePreferredStyle(s);
         }
 
+        void SetBusyUi(bool on) {
+            foreach (var c in busyLockControls) {
+                if (c != null && !c.IsDisposed) c.Enabled = !on;
+            }
+        }
+
+        ListViewItem FindListItem(DrawingJob j, Dictionary<DrawingJob, ListViewItem> itemMap) {
+            ListViewItem it;
+            if (itemMap.TryGetValue(j, out it) && it != null && it.ListView == list) return it;
+            foreach (ListViewItem cur in list.Items) {
+                if (ReferenceEquals(cur.Tag, j)) { itemMap[j] = cur; return cur; }
+            }
+            return null;
+        }
+
         void RunJobList(IList<DrawingJob> todo, Dictionary<DrawingJob, ListViewItem> itemMap) {
             if (busy || todo.Count == 0) return;
             if (app == null) { status.Text = "未连接到天工 CAD。"; status.ForeColor = Ui.Bad; return; }
+            // 在进入批量循环前快照选项并做覆盖二次确认，防止中途误改选项或误覆写已有人工工程图
+            bool optOverwrite = overwrite.Checked;
+            bool optOpenAfter = openAfter.Checked;
+            string optStyle = SelectedDimensionStyle();
+            if (optOverwrite) {
+                int existingDft = 0;
+                foreach (var j in todo) {
+                    try { if (File.Exists(Path.ChangeExtension(j.File, ".dft"))) existingDft++; } catch { }
+                }
+                if (existingDft > 0) {
+                    var confirm = MessageBox.Show(this,
+                        "当前已勾选「覆盖已有同名工程图」，本次出图将直接替换已有的 " + existingDft + " 张同名 .dft 图纸（原文件不可撤销）。\r\n\r\n确认继续覆盖出图吗？",
+                        Title, MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+                    if (confirm != DialogResult.Yes) return;
+                }
+            }
+            // 同目录同名不同扩展（如 Foo.asm 与 Foo.par / Foo.psm）同批出图时自动按类型区分输出文件名，避免后出覆盖先出
+            var stemCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (var j in todo) {
+                string sk = (Path.GetDirectoryName(j.File) ?? "") + "|" + (Path.GetFileNameWithoutExtension(j.File) ?? "");
+                int n; stemCounts.TryGetValue(sk, out n); stemCounts[sk] = n + 1;
+            }
+
             busy = true;
             stop = false;
+            searchDebounce.Stop();
+            SetBusyUi(true);
             preview.Hold(true);
             run.Text = "停止";
             run.Enabled = true;
@@ -674,8 +858,7 @@ namespace TianGongCadSuite {
             bar.Value = 0;
 
             int done = 0, ok = 0;
-            string lastOutput = "";
-            bool keepEach = openAfter.Checked && todo.Count <= 3;
+            bool keepEach = optOpenAfter && todo.Count <= 3;
             try {
                 for (int idx = 0; idx < todo.Count; idx++) {
                     if (stop) { status.Text = "已停止。"; status.ForeColor = Ui.Warn; break; }
@@ -683,22 +866,30 @@ namespace TianGongCadSuite {
                     status.Text = "正在出图 " + (done + 1) + "/" + todo.Count + "：" + Path.GetFileName(j.File);
                     status.ForeColor = Ui.Muted;
                     j.Status = "出图中…";
-                    ListViewItem it;
-                    if (itemMap.TryGetValue(j, out it)) { RefreshItemVisual(it); it.EnsureVisible(); }
+                    var it = FindListItem(j, itemMap);
+                    if (it != null) { RefreshItemVisual(it); it.EnsureVisible(); }
                     Application.DoEvents();
 
                     bool isLast = idx == todo.Count - 1;
-                    bool keep = keepEach || (openAfter.Checked && isLast);
-                    var opt = new DrawingOptions { Overwrite = overwrite.Checked, Close = !keep, DimensionStyle = SelectedDimensionStyle() };
+                    bool keep = keepEach || (optOpenAfter && isLast);
+                    string stemKey = (Path.GetDirectoryName(j.File) ?? "") + "|" + (Path.GetFileNameWithoutExtension(j.File) ?? "");
+                    int stemDup;
+                    bool hasStemCollision = stemCounts.TryGetValue(stemKey, out stemDup) && stemDup > 1;
+                    var opt = new DrawingOptions {
+                        Overwrite = optOverwrite,
+                        Close = !keep,
+                        DimensionStyle = optStyle,
+                        OutputName = hasStemCollision ? (Path.GetFileNameWithoutExtension(j.File) + "(" + j.Kind + ")") : null
+                    };
                     var o = j.Kind == "装配" ? DrawingMaker.Assembly(app, j.File, opt) : DrawingMaker.Part(app, j.File, opt);
                     j.Result = o;
                     j.Status = "";
                     if (o.Ok) {
                         ok++;
                         j.HasDrawing = DrawingBatch.HasDrawing(j.File) || (!string.IsNullOrEmpty(o.Output) && File.Exists(o.Output));
-                        if (!string.IsNullOrEmpty(o.Output)) lastOutput = o.Output;
                     }
-                    if (itemMap.TryGetValue(j, out it)) RefreshItemVisual(it);
+                    it = FindListItem(j, itemMap);
+                    if (it != null) RefreshItemVisual(it);
                     done++;
                     bar.Value = done;
                     Application.DoEvents();
@@ -713,6 +904,7 @@ namespace TianGongCadSuite {
                 Log.Write("DrawingForm", e);
             } finally {
                 busy = false;
+                SetBusyUi(false);
                 close.Enabled = true;
                 bar.Visible = false;
                 preview.Hold(false);
@@ -723,11 +915,8 @@ namespace TianGongCadSuite {
         static string ResolveDrawingPath(DrawingJob j) {
             if (j == null) return "";
             if (j.Result != null && !string.IsNullOrEmpty(j.Result.Output) && File.Exists(j.Result.Output)) return j.Result.Output;
-            if (j.HasDrawing) {
-                string cand = Path.ChangeExtension(j.File, ".dft");
-                if (File.Exists(cand)) return cand;
-            }
-            return "";
+            // 与列表「已有图纸」状态列保持同一解析口径：同时支持 .dft 与 (自动).dft
+            return DrawingBatch.FindDrawing(j.File);
         }
 
         void OpenSelectedDrawing() {

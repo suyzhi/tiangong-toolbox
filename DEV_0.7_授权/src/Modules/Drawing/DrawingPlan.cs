@@ -53,6 +53,7 @@ namespace TianGongCadSuite {
         public readonly List<DwgTarget> Targets = new List<DwgTarget>();   // 不含原点
         public double Line;              // 文字所在的那条线（Horizontal 时是 y，否则是 x），视图坐标
         public bool LowSide;             // true = 下方 / 左边
+        public bool Truncated;           // 原始落点超过 MaxRun 被 Significant 裁剪过（提醒人工补）
         public int Count { get { return Targets.Count + 1; } }
     }
 
@@ -197,6 +198,68 @@ namespace TianGongCadSuite {
         public static List<DwgTarget> DropNearOutline(List<DwgTarget> targets, double lo, double hi, double tol){
             if (tol <= 0) return targets;
             return targets.Where(t => !t.KeyPoint ? !((t.Coord - lo > SameCoord && t.Coord - lo <= tol + SameCoord) || (hi - t.Coord > SameCoord && hi - t.Coord <= tol + SameCoord)) : true).ToList();
+        }
+        // 精确版轮廓内分界线过滤：仅当距离确实匹配该轴记录的倒角边长 / 非钣金外倒圆半径，且该边在二维上确属贴外缘的倒角/圆角分界线时才滤除，
+        // 避免按全零件最大倒角/折弯半径（≤6mm）一刀切删掉钣金板厚、薄壁内腔壁或台阶特征。
+        public static List<DwgTarget> DropNearOutline(List<DwgTarget> targets, IList<DwgEdge> edges, bool horizontal, double[] box, double tol, IList<double> exactOffsets, bool sheetMetal){
+            if (targets == null || targets.Count == 0) return targets;
+            if (exactOffsets == null) return DropNearOutline(targets, horizontal ? box[0] : box[1], horizontal ? box[2] : box[3], tol);
+            if (exactOffsets.Count == 0) return targets;
+            double lo = horizontal ? box[0] : box[1], hi = horizontal ? box[2] : box[3];
+            double perpLo = horizontal ? box[1] : box[0], perpHi = horizontal ? box[3] : box[2];
+            double maxOff = Math.Max(tol, exactOffsets.Max());
+            if (maxOff <= 0) return targets;
+            const double offTol = 5e-5;
+            return targets.Where(t => {
+                if (t.KeyPoint || t.Edge == null || t.Edge.Kind != DwgKind.Line) return true;
+                double dLo = t.Coord - lo, dHi = hi - t.Coord;
+                bool hitLo = dLo > SameCoord && exactOffsets.Any(o => Math.Abs(dLo - o) <= offTol);
+                bool hitHi = dHi > SameCoord && exactOffsets.Any(o => Math.Abs(dHi - o) <= offTol);
+                if (!hitLo && !hitHi) return true;
+                // 钣金件折弯内壁不是外棱倒角切线：仅当线端直连外侧 45° 倒角斜线时才视作倒角分界线
+                if (sheetMetal) {
+                    bool isCh = (hitLo && TouchesOutwardChamferOrArc(t.Edge, edges, horizontal, t.Coord, true, true))
+                        || (hitHi && TouchesOutwardChamferOrArc(t.Edge, edges, horizontal, t.Coord, false, true));
+                    return !isCh;
+                }
+                if ((hitLo && IsOutlineSeamLine(t.Edge, edges, horizontal, t.Coord, perpLo, perpHi, true))
+                    || (hitHi && IsOutlineSeamLine(t.Edge, edges, horizontal, t.Coord, perpLo, perpHi, false))) return false;
+                return true;
+            }).ToList();
+        }
+        static bool IsOutlineSeamLine(DwgEdge line, IList<DwgEdge> edges, bool horizontal, double coord, double perpLo, double perpHi, bool towardLo){
+            double eLo = horizontal ? Math.Min(line.Y1, line.Y2) : Math.Min(line.X1, line.X2);
+            double eHi = horizontal ? Math.Max(line.Y1, line.Y2) : Math.Max(line.X1, line.X2);
+            // 贴着垂向外形端面直达外沿（如正对面的外棱圆角切线 / 端面 C 角线），或端点连着向外伸到外框的倒角斜线/圆弧
+            if (eLo <= perpLo + 5e-5 || eHi >= perpHi - 5e-5) return true;
+            return TouchesOutwardChamferOrArc(line, edges, horizontal, coord, towardLo, false);
+        }
+        static bool TouchesOutwardChamferOrArc(DwgEdge line, IList<DwgEdge> edges, bool horizontal, double coord, bool towardLo, bool chamferOnly){
+            if (edges == null) return false;
+            const double ptTol = 5e-5;
+            double[] xs = { line.X1, line.X2 }, ys = { line.Y1, line.Y2 };
+            foreach (var o in edges) {
+                if (o == null || ReferenceEquals(o, line)) continue;
+                if (o.Kind == DwgKind.Circle) continue;
+                if (chamferOnly && o.Kind != DwgKind.Line) continue;
+                bool touches = false;
+                for (int i = 0; i < 2 && !touches; i++) {
+                    if ((Math.Abs(o.X1 - xs[i]) <= ptTol && Math.Abs(o.Y1 - ys[i]) <= ptTol)
+                        || (Math.Abs(o.X2 - xs[i]) <= ptTol && Math.Abs(o.Y2 - ys[i]) <= ptTol)) touches = true;
+                }
+                if (!touches) continue;
+                if (o.Kind == DwgKind.Line) {
+                    if (chamferOnly && (o.IsHorizontal || o.IsVertical)) continue;
+                    double oMin = horizontal ? Math.Min(o.X1, o.X2) : Math.Min(o.Y1, o.Y2);
+                    double oMax = horizontal ? Math.Max(o.X1, o.X2) : Math.Max(o.Y1, o.Y2);
+                    if (towardLo ? oMin < coord - SameCoord : oMax > coord + SameCoord) return true;
+                } else if (o.Kind == DwgKind.Arc) {
+                    var ab = Box(new[] { o });
+                    double oMin = horizontal ? ab[0] : ab[1], oMax = horizontal ? ab[2] : ab[3];
+                    if (towardLo ? oMin < coord - SameCoord : oMax > coord + SameCoord) return true;
+                }
+            }
+            return false;
         }
 
         // 点 (x,y)（已在圆上）是不是落在这段弧扫过的范围里
@@ -382,22 +445,87 @@ namespace TianGongCadSuite {
 
         // 一整串：落点 → 基准 → 排开。scale = 视图比例（纸面 / 模型）。box = 视图外框（视图坐标），offset = 文字线离外框多远（纸面米）
         public static OrdinateRun Ordinate(IList<DwgEdge> edges, bool horizontal, double scale, double[] box, bool lowSide, double offsetPaper){
-            return Ordinate(edges, horizontal, scale, box, lowSide, offsetPaper, 0);
+            return Ordinate(edges, horizontal, scale, box, lowSide, offsetPaper, 0, null, false);
         }
         public static OrdinateRun Ordinate(IList<DwgEdge> edges, bool horizontal, double scale, double[] box, bool lowSide, double offsetPaper, double chamferTol){
+            return Ordinate(edges, horizontal, scale, box, lowSide, offsetPaper, chamferTol, null, false);
+        }
+        public static OrdinateRun Ordinate(IList<DwgEdge> edges, bool horizontal, double scale, double[] box, bool lowSide, double offsetPaper, double chamferTol, IList<double> exactOffsets, bool sheetMetal){
             var ts = Targets(edges, horizontal, lowSide);
-            ts = DropNearOutline(ts, horizontal ? box[0] : box[1], horizontal ? box[2] : box[3], chamferTol);
+            ts = DropNearOutline(ts, edges, horizontal, box, chamferTol, exactOffsets, sheetMetal);
+            int beforeSig = ts.Count;
             ts = Significant(ts, horizontal ? box[3] - box[1] : box[2] - box[0]);
+            bool truncated = beforeSig > MaxRun && ts.Count < beforeSig;
             if (ts.Count < 2) return null;
             bool sym;
             var origin = PickOrigin(ts, out sym);
-            var run = new OrdinateRun { Horizontal = horizontal, Origin = origin, LowSide = lowSide };
+            var run = new OrdinateRun { Horizontal = horizontal, Origin = origin, LowSide = lowSide, Truncated = truncated };
             foreach (var t in ts) if (!ReferenceEquals(t, origin)) run.Targets.Add(t);
             var all = new List<DwgTarget>(run.Targets); all.Add(origin);
             Spread(all, TextPitch / Math.Max(scale, 1e-9));
             double off = offsetPaper / Math.Max(scale, 1e-9);
             run.Line = horizontal ? (lowSide ? box[1] - off : box[3] + off) : (lowSide ? box[0] - off : box[2] + off);
             return run;
+        }
+
+        // 投影/补充视图去重：将 Origin 与 Targets 一并纳入已标集合比对；
+        // 当原对称中心 Origin 未在主视图标过时，改以已定位的外形最小边作新基准并将该中心孔降入 Targets，
+        // 避免居中单孔整串被删空或对称多孔脱锚浮空（20-0-20 却不交代 0 到外边的距离）。
+        public static OrdinateRun FilterNewTargets(OrdinateRun r, Func<DwgTarget, bool> isAlreadyDone, double scale){
+            if (r == null || r.Origin == null) return null;
+            var all = new List<DwgTarget>(r.Targets.Count + 1) { r.Origin };
+            all.AddRange(r.Targets);
+            var novel = all.Where(t => !isAlreadyDone(t)).ToList();
+            if (novel.Count == 0) return null;
+            if (isAlreadyDone(r.Origin)) {
+                r.Targets.Clear();
+                r.Targets.AddRange(novel);
+            } else {
+                // 原 Origin 本身是需要新标的坐标（典型为对称中心孔）：优先找已标过的最小边线做新基准
+                var anchor = all.Where(t => isAlreadyDone(t))
+                    .OrderBy(t => t.KeyPoint ? 1 : 0)
+                    .ThenBy(t => t.Coord)
+                    .FirstOrDefault();
+                if (anchor != null) {
+                    r.Origin = anchor;
+                    r.Targets.Clear();
+                    r.Targets.AddRange(novel);
+                } else {
+                    // 参考视图没有任何已标坐标（如纯圆端面被跳过）：保留整串不动
+                    r.Targets.Clear();
+                    foreach (var t in all) if (!ReferenceEquals(t, r.Origin)) r.Targets.Add(t);
+                }
+            }
+            if (r.Targets.Count == 0) return null;
+            var spreadList = new List<DwgTarget>(r.Targets) { r.Origin };
+            Spread(spreadList, TextPitch / Math.Max(scale, 1e-9));
+            return r;
+        }
+
+        // 按工艺签名拆分同直径孔组：避免同径不同深、通孔/盲孔、光孔/沉孔、M6底孔Ø5/Ø5 H7销孔被并成同一个标注互相覆盖
+        public static List<HoleGroup> SplitHoleGroupByKey(HoleGroup g, Func<DwgEdge, string> keyOf){
+            var result = new List<HoleGroup>();
+            if (g == null || g.Circles.Count == 0) return result;
+            var order = new List<string>();
+            var buckets = new Dictionary<string, List<DwgEdge>>(StringComparer.Ordinal);
+            foreach (var c in g.Circles) {
+                string k = keyOf != null ? (keyOf(c) ?? "") : "";
+                List<DwgEdge> list;
+                if (!buckets.TryGetValue(k, out list)) {
+                    list = new List<DwgEdge>();
+                    buckets[k] = list;
+                    order.Add(k);
+                }
+                list.Add(c);
+            }
+            foreach (var k in order) {
+                var circles = buckets[k];
+                var sub = new HoleGroup { DiameterMm = g.DiameterMm };
+                sub.Circles.AddRange(circles);
+                sub.Leader = circles.OrderByDescending(c => c.Cx + c.Cy).First();
+                result.Add(sub);
+            }
+            return result;
         }
 
         // ---- 孔、圆角分组 ----
@@ -462,8 +590,17 @@ namespace TianGongCadSuite {
             var r = new List<RadiusGroup>();
             foreach (var g in Cluster(lines, l => Math.Round(Math.Abs(l.X2 - l.X1), 6), SameCoord)) {
                 var rg = new RadiusGroup { RadiusMm = Math.Round(Math.Abs(g[0].X2 - g[0].X1) * 1000, 2) };
-                rg.Arcs.AddRange(g);
-                rg.Leader = g.OrderByDescending(l => (l.X1 + l.X2) + (l.Y1 + l.Y2)).First();
+                // 对重合的 45° 斜线按端点外框+中点去重（多实体/台阶重叠投影时会读出重复线段，避免 4-C2 被翻倍计成 8-C2）
+                foreach (var l in g) {
+                    double lminX = Math.Min(l.X1, l.X2), lminY = Math.Min(l.Y1, l.Y2);
+                    double lmaxX = Math.Max(l.X1, l.X2), lmaxY = Math.Max(l.Y1, l.Y2);
+                    bool dup = rg.Arcs.Any(o =>
+                        Math.Abs(Math.Min(o.X1, o.X2) - lminX) < SameCoord && Math.Abs(Math.Min(o.Y1, o.Y2) - lminY) < SameCoord
+                        && Math.Abs(Math.Max(o.X1, o.X2) - lmaxX) < SameCoord && Math.Abs(Math.Max(o.Y1, o.Y2) - lmaxY) < SameCoord);
+                    if (!dup) rg.Arcs.Add(l);
+                }
+                if (rg.Arcs.Count == 0) continue;
+                rg.Leader = rg.Arcs.OrderByDescending(l => (l.X1 + l.X2) + (l.Y1 + l.Y2)).First();
                 r.Add(rg);
             }
             return r;
@@ -509,6 +646,7 @@ namespace TianGongCadSuite {
         public double Radius, Lo, Hi;            // 段：沿轴线的范围（相对 Point）
         public bool BlindLo, BlindHi;            // 段：这一端封口
         public double CbRadius, CbDepth;
+        public double CsRadius, CsAngle;         // 锥形沉孔几何外径半径（米）与锥角（度）
         public double Depth;
         public bool Through = true;
         public HoleSpec Spec;                    // 孔特征的规格（读得到时）
@@ -519,28 +657,86 @@ namespace TianGongCadSuite {
             return radial.Length <= tol;
         }
         public static List<ModelHole> Merge(IEnumerable<ModelHole> segments){
-            var holes = new List<ModelHole>();
+            // 先按同轴无限直线分组并统一到同一轴向坐标系，再按轴向连续性拆分成独立孔：
+            //   1. U 型支架/双凸缘上隔空同轴的分离孔（如一侧 M5、另一侧 Ø5.5 过孔）不再误并成单个台阶孔；
+            //   2. 厚块正反面对钻同径盲孔因各自有封底且不连通，保留为两个独立盲孔与各自真实深度和孔口朝向。
+            const double AdjTol = 5e-5;
+            var axisLines = new List<ModelHole>();
+            var lineSegs = new List<List<ModelHole>>();
             foreach (var s in segments) {
-                ModelHole h = holes.FirstOrDefault(x => Math.Abs(Math.Abs(x.Axis.Dot(s.Axis)) - 1) < 1e-4 && x.OnAxis(s.Point, 2e-5));
-                if (h == null) { h = new ModelHole { Point = s.Point, Axis = s.Axis }; holes.Add(h); }
-                // 统一到 h 的轴向参数
-                double shift = (s.Point - h.Point).Dot(h.Axis), sign = h.Axis.Dot(s.Axis) >= 0 ? 1 : -1;
+                int idx = -1;
+                for (int i = 0; i < axisLines.Count; i++) {
+                    if (Math.Abs(Math.Abs(axisLines[i].Axis.Dot(s.Axis)) - 1) < 1e-4 && axisLines[i].OnAxis(s.Point, 2e-5)) { idx = i; break; }
+                }
+                if (idx < 0) {
+                    idx = axisLines.Count;
+                    axisLines.Add(new ModelHole { Point = s.Point, Axis = s.Axis });
+                    lineSegs.Add(new List<ModelHole>());
+                }
+                var refLine = axisLines[idx];
+                double shift = (s.Point - refLine.Point).Dot(refLine.Axis), sign = refLine.Axis.Dot(s.Axis) >= 0 ? 1 : -1;
                 double lo = shift + sign * s.Lo, hi = shift + sign * s.Hi;
-                var seg = new ModelHole { Point = h.Point, Axis = h.Axis, Radius = s.Radius, Lo = Math.Min(lo, hi), Hi = Math.Max(lo, hi), BlindLo = sign > 0 ? s.BlindLo : s.BlindHi, BlindHi = sign > 0 ? s.BlindHi : s.BlindLo };
-                // 同一根轴上同半径的两段（被槽打断的孔）合成一段
-                var same = h.Segments.FirstOrDefault(x => Math.Abs(x.Radius - seg.Radius) < 1e-6);
-                if (same != null) { same.Lo = Math.Min(same.Lo, seg.Lo); same.Hi = Math.Max(same.Hi, seg.Hi); same.BlindLo |= seg.BlindLo; same.BlindHi |= seg.BlindHi; }
-                else h.Segments.Add(seg);
+                var seg = new ModelHole {
+                    Point = refLine.Point, Axis = refLine.Axis, Radius = s.Radius,
+                    Lo = Math.Min(lo, hi), Hi = Math.Max(lo, hi),
+                    BlindLo = sign > 0 ? s.BlindLo : s.BlindHi,
+                    BlindHi = sign > 0 ? s.BlindHi : s.BlindLo,
+                    CsRadius = s.CsRadius, CsAngle = s.CsAngle
+                };
+                lineSegs[idx].Add(seg);
             }
-            foreach (var h in holes) {
-                var main = h.Segments.OrderBy(x => x.Radius).First();
-                h.Radius = main.Radius; h.Lo = main.Lo; h.Hi = main.Hi;
-                h.Depth = main.Hi - main.Lo;
-                h.Through = !(main.BlindLo || main.BlindHi);
-                h.BlindLo = main.BlindLo; h.BlindHi = main.BlindHi;
-                // 沉孔：比孔粗、贴着孔的一端的那段
-                var cb = h.Segments.Where(x => x.Radius > main.Radius + 1e-6 && (Math.Abs(x.Hi - main.Lo) < 2e-5 || Math.Abs(x.Lo - main.Hi) < 2e-5)).OrderBy(x => x.Radius).FirstOrDefault();
-                if (cb != null) { h.CbRadius = cb.Radius; h.CbDepth = cb.Hi - cb.Lo; if (!h.Through && Math.Abs(cb.Lo - main.Hi) < 2e-5 && main.BlindLo) { } }
+
+            var holes = new List<ModelHole>();
+            for (int li = 0; li < axisLines.Count; li++) {
+                var ordered = lineSegs[li].OrderBy(x => x.Lo).ThenBy(x => x.Hi).ToList();
+                var clusters = new List<List<ModelHole>>();
+                foreach (var seg in ordered) {
+                    if (clusters.Count == 0) {
+                        clusters.Add(new List<ModelHole> { seg });
+                        continue;
+                    }
+                    var cur = clusters[clusters.Count - 1];
+                    double curHi = cur.Max(x => x.Hi);
+                    // 仅当两段轴向重叠或紧贴（≤0.05mm），且顺序衔接处没有任何封底（BlindHi / BlindLo）时才属同一个物理孔
+                    bool overlaps = seg.Lo < curHi - AdjTol;
+                    bool touches = !overlaps && seg.Lo <= curHi + AdjTol;
+                    bool blockedByBlind = touches && (seg.BlindLo || cur.Any(x => Math.Abs(x.Hi - curHi) <= AdjTol && x.BlindHi));
+                    if (overlaps || (touches && !blockedByBlind)) cur.Add(seg);
+                    else clusters.Add(new List<ModelHole> { seg });
+                }
+
+                foreach (var cl in clusters) {
+                    var h = new ModelHole { Point = axisLines[li].Point, Axis = axisLines[li].Axis };
+                    foreach (var seg in cl) {
+                        // 同一孔内同半径的拆分圆柱面（如 STEP 两半圆柱或紧邻接段）合成一段，端面封口按实际外端归属合并
+                        var same = h.Segments.FirstOrDefault(x => Math.Abs(x.Radius - seg.Radius) < 1e-6);
+                        if (same != null) {
+                            double newLo = Math.Min(same.Lo, seg.Lo), newHi = Math.Max(same.Hi, seg.Hi);
+                            bool bLo = (Math.Abs(same.Lo - newLo) <= AdjTol && same.BlindLo) || (Math.Abs(seg.Lo - newLo) <= AdjTol && seg.BlindLo);
+                            bool bHi = (Math.Abs(same.Hi - newHi) <= AdjTol && same.BlindHi) || (Math.Abs(seg.Hi - newHi) <= AdjTol && seg.BlindHi);
+                            same.Lo = newLo; same.Hi = newHi; same.BlindLo = bLo; same.BlindHi = bHi;
+                            if (seg.CsRadius > same.CsRadius) { same.CsRadius = seg.CsRadius; same.CsAngle = seg.CsAngle; }
+                        } else {
+                            h.Segments.Add(seg);
+                        }
+                    }
+                    var main = h.Segments.OrderBy(x => x.Radius).First();
+                    h.Radius = main.Radius; h.Lo = main.Lo; h.Hi = main.Hi;
+                    h.Through = !(main.BlindLo || main.BlindHi);
+                    h.BlindLo = main.BlindLo; h.BlindHi = main.BlindHi;
+                    foreach (var sg in h.Segments) if (sg.CsRadius > h.CsRadius) { h.CsRadius = sg.CsRadius; h.CsAngle = sg.CsAngle; }
+                    // 沉孔：比孔粗、贴着孔的一端的那段
+                    var cb = h.Segments.Where(x => x.Radius > main.Radius + 1e-6 && (Math.Abs(x.Hi - main.Lo) < AdjTol || Math.Abs(x.Lo - main.Hi) < AdjTol)).OrderBy(x => x.Radius).FirstOrDefault();
+                    if (cb != null) {
+                        h.CbRadius = cb.Radius;
+                        h.CbDepth = cb.Hi - cb.Lo;
+                    }
+                    // 盲沉孔总深度应从开口表面量至孔底（包含沉孔深），与工程图习惯和孔特征 Depth 一致
+                    h.Depth = (!h.Through && cb != null)
+                        ? (Math.Max(main.Hi, cb.Hi) - Math.Min(main.Lo, cb.Lo))
+                        : (main.Hi - main.Lo);
+                    holes.Add(h);
+                }
             }
             return holes;
         }
@@ -599,6 +795,8 @@ namespace TianGongCadSuite {
             }
             if (h != null && h.CbRadius > 0) subfix = "%CB%DI" + N(h.CbRadius * 2000) + "%DP" + N(h.CbDepth * 1000);
             else if (spec != null && spec.Kind == HoleKind.Counterbore && spec.CounterboreDiameter > 0) subfix = "%CB%DI" + N(spec.CounterboreDiameter) + "%DP" + N(spec.CounterboreDepth);
+            else if (spec != null && spec.Kind == HoleKind.Countersink && spec.CountersinkDiameter > 0) subfix = "%CS%DI" + N(spec.CountersinkDiameter) + "×" + N(spec.CountersinkAngle > 0 ? spec.CountersinkAngle : 90) + "°";
+            else if (h != null && h.CsRadius > 0) subfix = "%CS%DI" + N(h.CsRadius * 2000) + "×" + N(h.CsAngle > 0 ? h.CsAngle : 90) + "°";
             if (through) suffix = " 贯通";
             else if (h != null && holeDepthMm > 0) suffix = "%DP" + N(holeDepthMm);
         }

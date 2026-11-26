@@ -25,6 +25,13 @@ namespace TianGongCadSuite {
         public readonly List<double> Rounds = new List<double>();     // 外棱倒圆半径（毫米）
         // 每个模型轴上"外形边里侧多近的线算倒角 / 倒圆分界线"（米）：倒角 / 倒圆只把线往它切掉的那两个轴的方向挪
         public double[] EdgeTol = new double[3];
+        // 每个模型轴上真实记录到的倒角边长 / 非钣金外倒圆半径集合（米），用于精确匹配分界线，避免按最大容差一刀切抹掉薄壁或台阶
+        public readonly List<double>[] EdgeOffsets = new[] { new List<double>(), new List<double>(), new List<double>() };
+        public void AddEdgeOffset(int axis, double dist){
+            if (axis < 0 || axis > 2 || dist <= 1e-5) return;
+            EdgeTol[axis] = Math.Max(EdgeTol[axis], dist);
+            if (!EdgeOffsets[axis].Any(x => Math.Abs(x - dist) < 2e-5)) EdgeOffsets[axis].Add(dist);
+        }
         // 外形边里侧这么近的平行线都是倒角 / 倒圆的分界线
         public double ChamferMax { get { return Math.Max(Chamfers.Count == 0 ? 0 : Chamfers.Max(), Rounds.Count == 0 ? 0 : Rounds.Max()); } }
     }
@@ -165,6 +172,17 @@ namespace TianGongCadSuite {
             lay.Dropped.AddRange(extra.Select(v => v.Role));
             return lay;
         }
+        // 当仅有一种图幅模板可用（如缺失 A4 模板只剩 A3）时，直接在固定图幅上排版，避免 A4 布局硬塞进 A3 图框
+        public static DwgLayout ArrangeForSheet(List<DwgViewSpec> views, SheetZones z, double isoW, double isoH){
+            var core = views.Where(v => !v.Extra).ToList();
+            var lay = Fit(core, z, isoW, isoH);
+            var extra = views.Where(v => v.Extra).ToList();
+            if (extra.Count == 0) return lay;
+            var full = Fit(views, z, isoW, isoH);
+            if (full.Scale >= lay.Scale - 1e-12) return full;
+            lay.Dropped.AddRange(extra.Select(v => v.Role));
+            return lay;
+        }
         static DwgLayout Pick(List<DwgViewSpec> views, double isoW, double isoH){
             var a4 = Fit(views, SheetZones.A4(), isoW, isoH);
             var a3 = Fit(views, SheetZones.A3(), isoW, isoH);
@@ -247,6 +265,41 @@ namespace TianGongCadSuite {
             w = (size[0] + size[1]) * c;
             h = size[2] + (size[0] + size[1]) * s;
         }
+
+        // 装配图轴测区择优：在明细表上方、明细表左侧与公差表左上方中挑选正面积有效区域，按动态气泡留白计算最大可用比例；
+        // 避免明细表较长（≥18/25 行）时区域宽/高变负或上下翻转导致轴测图压上明细表或右上未注公差表。
+        public static bool PlaceAssemblyIso(double orthoRight, double bx0, double by1, double iw, double ih, double mainScale, out double cx, out double cy, out double isoScale){
+            cx = 0; cy = 0; isoScale = 0;
+            var candidates = new[] {
+                new[] { Math.Max(orthoRight, 0.200), by1 + 0.006, 0.412, 0.242 },   // 明细表上方、公差表下方
+                new[] { orthoRight, 0.050, bx0 - 0.006, 0.272 },                     // 正投影右侧到明细表左侧
+                new[] { Math.Max(orthoRight, 0.160), by1 + 0.006, 0.296, 0.272 }     // 公差表左侧、明细表上方（窄明细表场景）
+            };
+            double bestScore = -1;
+            double[] bestZone = null;
+            double bestScale = 0;
+            foreach (var zone in candidates) {
+                double zw = zone[2] - zone[0], zh = zone[3] - zone[1];
+                if (zw < 0.032 || zh < 0.032) continue;
+                // 气泡留白随可用区自适应收缩（最大 50mm，最窄不超区域 30%），避免 40mm 高区域减 50mm 变负缩放
+                double padX = Math.Min(0.050, zw * 0.30);
+                double padY = Math.Min(0.050, zh * 0.30);
+                double availW = Math.Max(0.016, zw - padX);
+                double availH = Math.Max(0.016, zh - padY);
+                double s = Math.Min(availW / Math.Max(iw, 1e-6), availH / Math.Max(ih, 1e-6));
+                if (s <= 0) continue;
+                double mag = Math.Pow(10, Math.Floor(Math.Log10(s)) - 1);
+                if (mag > 0) s = Math.Floor(s / mag) * mag;
+                s = Math.Min(mainScale, Math.Max(s, mainScale * 0.1));
+                double score = s * Math.Min(zw, zh);
+                if (score > bestScore) { bestScore = score; bestZone = zone; bestScale = s; }
+            }
+            if (bestZone == null) return false;
+            cx = (bestZone[0] + bestZone[2]) / 2;
+            cy = (bestZone[1] + bestZone[3]) / 2;
+            isoScale = bestScale;
+            return true;
+        }
     }
 
     // 图纸上已经占用的地方（视图、尺寸、标注文字），给引线文字找空地。全部图纸坐标（米），矩形 {x0,y0,x1,y1}。
@@ -274,6 +327,12 @@ namespace TianGongCadSuite {
         }
         bool Inside(double[] r){ foreach (var z in allowed) if (r[0] >= z[0] - 1e-9 && r[2] <= z[2] + 1e-9 && r[1] >= z[1] - 1e-9 && r[3] <= z[3] + 1e-9) return true; return false; }
         public bool Free(double[] r){ if (!Inside(r)) return false; foreach (var u in used) if (Overlap(u, r)) return false; return true; }
+        // 供 PlaceAndGuardCallout 微调时校验候选文字框不越出图纸允许区且不压入任何视图本体（避免推入标题栏或相邻视图）
+        public bool InsideAndClearOfViews(double[] r){
+            if (r == null || r.Length < 4 || !Inside(r)) return false;
+            foreach (var vb in viewBoxes) if (Overlap(vb, r)) return false;
+            return true;
+        }
         bool FreeExcept(double[] r, double[] ignore){
             if (!Inside(r)) return false;
             foreach (var u in used) {
