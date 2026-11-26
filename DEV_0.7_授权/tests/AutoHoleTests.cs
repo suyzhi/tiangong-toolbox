@@ -190,7 +190,148 @@ namespace TianGongCadSuite {
             }
             PatternUiState();
             CheckUiState();
+            ResponsiveLayoutUiState();
             Console.WriteLine("AUTO-HOLE UI ASSERTIONS " + checks);
+        }
+
+        // 自动布局回归：多组参考孔、窄窗/矮窗、所有参数行展开时，零裁切、零兄弟控件遮挡、滚动后重排不错位
+        static void ResponsiveLayoutUiState(){
+            // 1. AutoHoleForm：12 组参考孔 + 沉孔/盲孔/倒角，在默认尺寸、最小尺寸与极窄/极矮尺寸下零遮挡零裁切
+            using (var form = new AutoHoleForm(null, null)) {
+                form.ShowInTaskbar = false;
+                form.StartPosition = W.FormStartPosition.Manual;
+                form.Location = new System.Drawing.Point(-20000, -20000);
+                form.Show();
+                W.Application.DoEvents();
+                double[] dias = { 2.5, 3.2, 4.2, 5.0, 6.6, 8.5, 10.2, 11.0, 13.5, 16.0, 17.5, 22.0 };
+                for (int i = 0; i < dias.Length; i++) form.AddReferenceForTest(dias[i], i + 2);
+                form.GoPageForTest(2);
+                var kind = FindControl<Segmented>(form);
+                var all = new List<W.Control>(); Collect(form, all);
+                var blind = Radio(all, "盲孔");
+                var chamfer = Chk(all, "孔口倒角");
+                kind.SelectedIndex = 2; blind.Checked = true; chamfer.Checked = true;
+                W.Application.DoEvents();
+
+                var tabs = FindControl<ChipTabs>(form);
+                Assert(tabs != null && tabs.Count == 12 && tabs.VisibleChipCount == 12, "多组参考孔：ChipTabs 完整保留全部 12 组标签");
+                Assert(tabs.Height > Ui.S(50), "多组参考孔：ChipTabs 自动多行折行增高，实得 " + tabs.Height);
+                var selRect = tabs.ChipBounds(11);
+                Assert(selRect.Top >= 0 && selRect.Bottom <= tabs.Height, "多组参考孔：最后一组（当前选中）自动滚入可视区域 " + selRect + " / H=" + tabs.Height);
+                AssertNoOverlapOrGridClip("AutoHole p2 default", form);
+
+                form.Size = form.MinimumSize;
+                W.Application.DoEvents();
+                AssertNoOverlapOrGridClip("AutoHole p2 minsize", form);
+
+                // 强制缩小到极窄/极矮窗口，验证 SplitColumns 自动改为上下堆叠且依然零遮挡零裁切
+                form.MinimumSize = new System.Drawing.Size(100, 100);
+                form.Size = new System.Drawing.Size(Ui.S(760), Ui.S(500));
+                W.Application.DoEvents();
+                var split = FindControl<SplitColumns>(form);
+                Assert(split != null && split.IsStacked(split.ClientSize.Width), "极窄窗口下 SplitColumns 自动改为上下堆叠，宽=" + (split == null ? 0 : split.ClientSize.Width));
+                AssertNoOverlapOrGridClip("AutoHole p2 narrow-short", form);
+
+                // 预览页：多组参考孔下自动增高且零遮挡
+                form.GoPageForTest(3);
+                W.Application.DoEvents();
+                AssertNoOverlapOrGridClip("AutoHole p3 narrow-short", form);
+                form.Close();
+            }
+
+            // 2. AutoHolePatternForm：排布页与孔规格页在最小尺寸与窄窗下零裁切零遮挡
+            using (var form = new AutoHolePatternForm(null, (SolidEdgeAssembly.AssemblyDocument)null)) {
+                form.ShowInTaskbar = false;
+                form.StartPosition = W.FormStartPosition.Manual;
+                form.Location = new System.Drawing.Point(-20000, -20000);
+                form.Show();
+                form.GoPageForTest(1);
+                form.Size = form.MinimumSize;
+                W.Application.DoEvents();
+                AssertNoOverlapOrGridClip("Pattern p1 minsize", form);
+                form.GoPageForTest(2);
+                W.Application.DoEvents();
+                AssertNoOverlapOrGridClip("Pattern p2 minsize", form);
+                form.MinimumSize = new System.Drawing.Size(100, 100);
+                form.Size = new System.Drawing.Size(Ui.S(760), Ui.S(500));
+                form.GoPageForTest(1);
+                W.Application.DoEvents();
+                AssertNoOverlapOrGridClip("Pattern p1 narrow-short", form);
+                form.Close();
+            }
+
+            // 3. HoleEditForm / AutoHoleCheckForm / HoleRulesForm / HoleCheckOptionsForm
+            using (var form = new HoleEditForm(null, (SolidEdgeAssembly.AssemblyDocument)null)) {
+                form.ShowInTaskbar = false; form.StartPosition = W.FormStartPosition.Manual; form.Location = new System.Drawing.Point(-20000, -20000);
+                form.Show(); form.GoPageForTest(1); form.Size = form.MinimumSize; W.Application.DoEvents();
+                AssertNoOverlapOrGridClip("HoleEdit p1 minsize", form);
+                form.Close();
+            }
+            using (var form = new AutoHoleCheckForm(null, null)) {
+                form.ShowInTaskbar = false; form.StartPosition = W.FormStartPosition.Manual; form.Location = new System.Drawing.Point(-20000, -20000);
+                form.Show(); form.MinimumSize = new System.Drawing.Size(100, 100); form.Size = new System.Drawing.Size(Ui.S(760), Ui.S(440)); W.Application.DoEvents();
+                AssertNoOverlapOrGridClip("HoleCheck short", form);
+                form.Close();
+            }
+            using (var form = new HoleRulesForm(HoleRuleBook.Current)) {
+                form.ShowInTaskbar = false; form.StartPosition = W.FormStartPosition.Manual; form.Location = new System.Drawing.Point(-20000, -20000);
+                form.Show(); W.Application.DoEvents();
+                AssertNoOverlapOrGridClip("HoleRules default", form);
+                form.Close();
+            }
+            using (var form = new HoleCheckOptionsForm(new HoleCheckOptions())) {
+                form.ShowInTaskbar = false; form.StartPosition = W.FormStartPosition.Manual; form.Location = new System.Drawing.Point(-20000, -20000);
+                form.Show(); W.Application.DoEvents();
+                AssertNoOverlapOrGridClip("HoleCheckOptions default", form);
+                form.Close();
+            }
+
+            // 4. VerticalStack 溢出时自动出现垂直滚动条（无水平滚动条），且滚动后重排必须保持 AutoScrollPosition 偏移，不跳回顶部也不发生重叠
+            using (var host = new W.Form { ShowInTaskbar = false, StartPosition = W.FormStartPosition.Manual, Location = new System.Drawing.Point(-20000, -20000), ClientSize = new System.Drawing.Size(300, 160) }) {
+                var vs = new VerticalStack { Dock = W.DockStyle.Fill, Padding = new W.Padding(0), Gap = 10, AutoScroll = true };
+                var p1 = new W.Panel { Height = 100 }; var p2 = new W.Panel { Height = 100 }; var p3 = new W.Panel { Height = 100 };
+                vs.Add(p1); vs.Add(p2); vs.Add(p3);
+                host.Controls.Add(vs);
+                host.Show(); W.Application.DoEvents();
+                Assert(vs.VerticalScroll.Visible && !vs.HorizontalScroll.Visible,
+                    "VerticalStack 内容超限时自动出现垂直滚动条且无水平滚动条：V=" + vs.VerticalScroll.Visible + " H=" + vs.HorizontalScroll.Visible);
+                vs.AutoScrollPosition = new System.Drawing.Point(0, 60);
+                vs.Relayout();
+                W.Application.DoEvents();
+                Assert(vs.AutoScrollPosition.Y <= -50 && p1.Top == vs.AutoScrollPosition.Y && p2.Top == p1.Bottom + 10 && p3.Top == p2.Bottom + 10,
+                    "VerticalStack 滚动后重排保持滚动偏移且零重叠：p1=" + p1.Top + " p2=" + p2.Top + " p3=" + p3.Top + " scrollY=" + vs.AutoScrollPosition.Y);
+                host.Close();
+            }
+        }
+
+        static void AssertNoOverlapOrGridClip(string tag, W.Control root){
+            var issues = new List<string>();
+            InspectLayoutTree(root, "", issues);
+            Assert(issues.Count == 0, tag + " 零遮挡零裁切" + (issues.Count > 0 ? "：" + string.Join(" | ", issues.Take(5).ToArray()) : ""));
+        }
+        static void InspectLayoutTree(W.Control parent, string path, List<string> issues){
+            if (!parent.Visible) return;
+            var vis = new List<W.Control>();
+            foreach (W.Control c in parent.Controls) {
+                if (!c.Visible || parent is W.UpDownBase) continue;
+                vis.Add(c);
+                string name = c.GetType().Name + (string.IsNullOrEmpty(c.Text) ? "" : "('" + (c.Text.Length > 14 ? c.Text.Substring(0, 14) : c.Text) + "')");
+                // FieldGrid 内部行控件必须全部落在行宽与行高内（禁止水平/垂直裁切）
+                if (parent.Parent is FieldGrid && c.Width > 0) {
+                    if (c.Right > parent.ClientSize.Width + 2 || c.Bottom > parent.ClientSize.Height + 2 || c.Left < -1 || c.Top < -1)
+                        issues.Add("FieldGrid裁切 " + path + "/" + name + " " + c.Bounds + " in " + parent.ClientSize);
+                }
+                InspectLayoutTree(c, path + "/" + name, issues);
+            }
+            for (int i = 0; i < vis.Count; i++) {
+                for (int j = i + 1; j < vis.Count; j++) {
+                    var a = vis[i]; var b = vis[j];
+                    if (a is Toast || b is Toast || a is EmptyHint || b is EmptyHint) continue;
+                    var inter = System.Drawing.Rectangle.Intersect(a.Bounds, b.Bounds);
+                    if (inter.Width > 2 && inter.Height > 2)
+                        issues.Add("重叠 " + path + ": " + a.GetType().Name + a.Bounds + " vs " + b.GetType().Name + b.Bounds);
+                }
+            }
         }
 
         static W.Label FindLabelContains(W.Control c, string text){

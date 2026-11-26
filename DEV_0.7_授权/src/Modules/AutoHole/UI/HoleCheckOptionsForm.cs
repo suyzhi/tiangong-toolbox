@@ -19,10 +19,10 @@ namespace TianGongCadSuite {
             Ui.Shell(this, "配孔检查 · 判定口径", 560, 500, 520, 490);
             FormBorderStyle = FormBorderStyle.FixedToolWindow;
             // 0.9.0「D」对话框：上面标题 + 一行说明，中间参数，底部操作栏（左：恢复默认；右：取消、保存）
-            var body = new VerticalStack { Dock = DockStyle.Fill, Padding = Ui.SPad(24, 20, 24, 8), Gap = Ui.S(6), AutoScroll = false };
+            var body = new VerticalStack { Dock = DockStyle.Fill, Padding = Ui.SPad(24, 20, 24, 8), Gap = Ui.S(6), AutoScroll = true };
             body.Add(new Label { Text = "判定口径", AutoSize = false, Height = Ui.S(34), Font = Ui.F12B, ForeColor = Ui.Text, BackColor = Ui.Bg });
-            body.Add(new Label { Text = "改完点保存：「不查的零件」马上按新的筛，其余的下次检查生效。", AutoSize = false, Height = Ui.S(28), Font = Ui.F8, ForeColor = Ui.Muted, BackColor = Ui.Bg });
-            var grid = new FieldGrid { LabelWidth = Ui.S(96), BackColor = Ui.Bg };
+            body.Add(new Label { Text = "改完点保存：「不查的零件」马上按新的筛，其余的下次检查生效。", AutoSize = false, Height = Ui.S(26), MinimumSize = new Size(0, Ui.S(22)), Tag = "autoheight", Font = Ui.F8, ForeColor = Ui.Muted, BackColor = Ui.Bg });
+            var grid = new FieldGrid { LabelWidth = Ui.S(96), BackColor = Ui.Bg, Tag = "autoheight" };
             grid.Add("连接孔孔径", minDia, FieldGrid.Unit("mm"), Ui.Caption("～"), maxDia, FieldGrid.Unit("mm"));
             grid.Add("轴线方向差", angle, FieldGrid.Unit("°"), FieldGrid.Space(6), Ui.Muted8("小于它算同一方向"));
             grid.Add("同轴偏差", offset, FieldGrid.Unit("mm"), FieldGrid.Space(6), Ui.Muted8("超过它报「孔偏了」"));
@@ -32,7 +32,7 @@ namespace TianGongCadSuite {
             body.Add(grid);
             body.Add(new Label { Text = "名字（含所在子装配名）里有这些字的零件，它们内部的问题不列出 —— 外购件（气缸、导轨、传感器）改不了。"
                 + "用空格或逗号隔开，例：FESTO BOSCH LEUZE MISUMI。孔在外购件上、缺孔的是你的支架，照样会报。",
-                AutoSize = false, Height = Ui.S(68), Font = Ui.F8, ForeColor = Ui.Muted, BackColor = Ui.Bg });
+                AutoSize = false, Height = Ui.S(68), MinimumSize = new Size(0, Ui.S(40)), Tag = "autoheight", Font = Ui.F8, ForeColor = Ui.Muted, BackColor = Ui.Bg });
 
             var actions = new ActionBar { Dock = DockStyle.Bottom, Height = Ui.S(68), Padding = Ui.SPad(18, 0, 18, 0) };
             var save = Ui.Primary("保存", 96, 40);

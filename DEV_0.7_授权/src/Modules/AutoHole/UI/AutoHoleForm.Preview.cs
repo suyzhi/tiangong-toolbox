@@ -143,9 +143,11 @@ namespace TianGongCadSuite {
             threadNum.Enabled = threadPartRadio.Checked;
             chamferCheck.Enabled = k != HoleKind.Countersink;
             chamferSetNum.Enabled = chamferAngNum.Enabled = chamferCheck.Enabled && chamferCheck.Checked;
-            // 行数变了：网格跟着变高/变矮（下面的行自动顶上来，不留空带）
+            // 行数变了：网格跟着变高/变矮（下面的行自动顶上来，不留空带）；窄窗上下堆叠时同步重排外层滚动区
             int ph = grid.PreferredHeight;
             if (grid.Height != ph) grid.Height = ph;
+            if (specLeftStack != null) specLeftStack.PerformLayout();
+            if (specCols != null && specCols.IsStacked(specCols.ClientSize.Width) && specStack != null) specStack.PerformLayout();
         }
 
         // 换孔型 / 换规格都要按标准表重填尺寸。选中了参考孔就改那一组；没选中就改草稿。
@@ -350,9 +352,13 @@ namespace TianGongCadSuite {
                 newSub = s;
             }
             bool chipChanged = oldChipText != newChipText || oldChipColor != newChipColor;
-            if (chipChanged) { chip.Text = newChipText; chip.ChipColor = newChipColor; chip.Invalidate(); }
+            if (chipChanged) { chip.Text = newChipText; chip.ChipColor = newChipColor; LayoutPreviewHeader(); chip.Invalidate(); }
             if (oldLine != newLine) { previewLine.Text = newLine; tips.SetToolTip(previewLine, newLine); }
-            if (oldSub != newSub) { previewSub.Text = newSub; tips.SetToolTip(previewSub, newSub); }
+            if (oldSub != newSub) {
+                previewSub.Text = newSub; tips.SetToolTip(previewSub, newSub);
+                if (previewAreaStack != null) previewAreaStack.PerformLayout();
+                if (previewStack != null) previewStack.PerformLayout();
+            }
             bool specOk = groups.All(g => g.Spec == null || g.Spec.SpecProblem.Length == 0);
             string wantRefCount = FormatRefCount();
             if (refCount.Text != wantRefCount) refCount.Text = wantRefCount;

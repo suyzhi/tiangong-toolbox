@@ -39,6 +39,7 @@ namespace TianGongCadSuite {
             presetSeg.SelectedIndexChanged += (s, e) => { if (!loading && presetSeg.SelectedIndex >= 0) Fill(presets[presetSeg.SelectedIndex]); };
 
             var tableCard = Ui.Card("规则表", 0, "先找这个规格专门的一行，没有再用「全部规格」");
+            tableCard.MinimumSize = new Size(0, Ui.S(160));
             var add = Ui.Small("添加一行"); var del = Ui.Small("删除选中行");
             ((FlatButton)del).SetFore(Ui.Text2);
             add.Click += (s, e) => { grid.Rows.Add("M8", HoleRuleBook.RoleName(HoleRefRole.Clearance), HoleSpec.KindName(HoleKind.Through), HoleStandards.Normal); Changed(); };
@@ -47,7 +48,7 @@ namespace TianGongCadSuite {
             BuildGrid();
             tableCard.Controls.Add(grid);
 
-            var hint = new Label { AutoSize = false, Height = Ui.S(64), ForeColor = Ui.Muted, Font = Ui.F8, BackColor = Ui.Bg,
+            var hint = new Label { AutoSize = false, Height = Ui.S(64), MinimumSize = new Size(0, Ui.S(40)), Tag = "autoheight", ForeColor = Ui.Muted, Font = Ui.F8, BackColor = Ui.Bg,
                 Text = "参考孔是螺纹底孔 = 参考件上是螺纹孔，螺钉从目标件这边穿过去；参考孔是过孔 = 螺钉穿过参考件拧进/穿过目标件。\r\n过孔配合决定通孔、沉孔、锥沉的孔径（天工孔标准表「常规螺钉间隙」的紧密 / 普通 / 宽松三档）。" };
 
             var actions = new ActionBar { Dock = DockStyle.Bottom, Height = Ui.S(68), Padding = Ui.SPad(18, 0, 18, 0) };
@@ -59,7 +60,7 @@ namespace TianGongCadSuite {
             actions.Status = status; status.ForeColor = Ui.Bad;
             CancelButton = cancel;
 
-            var stack = new VerticalStack { Dock = DockStyle.Fill, Padding = Ui.SPad(20, 16, 20, 4), AutoScroll = false };
+            var stack = new VerticalStack { Dock = DockStyle.Fill, Padding = Ui.SPad(20, 16, 20, 4), AutoScroll = true };
             stack.Add(presetCard); stack.Add(tableCard, true); stack.Add(hint);
             Controls.Add(stack); Controls.Add(actions);
 

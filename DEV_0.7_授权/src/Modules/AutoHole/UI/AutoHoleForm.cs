@@ -78,7 +78,7 @@ namespace TianGongCadSuite {
         readonly Label previewLine = new Label();
         readonly Label previewSub = new Label();
         readonly Label status = new Label();
-        readonly FlatButton run = (FlatButton)Ui.Primary("开始打孔", 240, 44);
+        readonly FlatButton run = (FlatButton)Ui.Primary("开始打孔", 136, 44);
         // 保持关联：把"这个孔照哪个孔配的"写进孔特征，参考零件挪了以后能一键同步回去
         readonly CheckBox linkCheck = new CheckBox { Checked = true, Text = "保持与参考孔关联", AutoSize = true };
 

@@ -305,6 +305,7 @@ namespace TianGongCadSuite {
             Ui.EnableDoubleBuffer(host);
             railPanel.BackColor = Ui.Rail;
             railPanel.Controls.Add(Rail);
+            railPanel.Resize += (s, e) => LayoutRail();
             content.BackColor = Ui.Bg;
             stepLabel.AutoSize = false; stepLabel.Font = Ui.F8; stepLabel.ForeColor = Ui.Muted; stepLabel.BackColor = Ui.Bg;
             titleLabel.AutoSize = false; titleLabel.Font = Ui.Title; titleLabel.ForeColor = Ui.Text; titleLabel.BackColor = Ui.Bg; titleLabel.AutoEllipsis = true;
@@ -409,13 +410,46 @@ namespace TianGongCadSuite {
             content.SetBounds(RailWidth, 0, Math.Max(0, Width - RailWidth), Height);
             LayoutRail();
         }
+        bool railLayoutBusy;
         void LayoutRail(){
-            int pad = Ui.S(12);
-            int w = RailWidth - pad * 2, y = Ui.S(18);
-            if (railTop != null) { railTop.SetBounds(pad, y, w, railTop.Height); y += railTop.Height + Ui.S(12); }
-            int bottom = Height - Ui.S(14);
-            if (railBottom != null) { bottom -= railBottom.Height; railBottom.SetBounds(pad, bottom, w, railBottom.Height); bottom -= Ui.S(10); }
-            Rail.SetBounds(pad, y, w, Math.Max(0, bottom - y));
+            if (railLayoutBusy) return;
+            railLayoutBusy = true;
+            try {
+                int pad = Ui.S(12);
+                int fullW = railPanel.Width > 0 ? railPanel.Width : RailWidth;
+                int fullH = railPanel.Height > 0 ? railPanel.Height : Height;
+                int y0 = Ui.S(18);
+                int y = y0;
+                if (railTop != null) y += railTop.Height + Ui.S(12);
+                int railNeed = Rail.Visible ? Rail.PreferredHeight : 0;
+                int bottomPad = Ui.S(14), bottomGap = Ui.S(10);
+                int bottomH = railBottom != null ? railBottom.Height : 0;
+                int minTotalH = y + railNeed + (railBottom != null ? bottomGap + bottomH : 0) + bottomPad;
+                // 仅当侧栏内容真正高于侧栏高度时才开启垂直滚动，并预先扣除滚动条宽度，绝不出现多余的水平滚动条
+                bool needVScroll = fullH > 0 && minTotalH > fullH;
+                int usableW = needVScroll ? Math.Max(Ui.S(80), fullW - SystemInformation.VerticalScrollBarWidth - 1) : fullW;
+                int w = Math.Max(Ui.S(80), usableW - pad * 2);
+                if (!needVScroll && railPanel.AutoScroll) {
+                    railPanel.AutoScrollMinSize = Size.Empty;
+                    railPanel.AutoScroll = false;
+                }
+                int scrollY = needVScroll && railPanel.AutoScroll ? railPanel.AutoScrollPosition.Y : 0;
+                int cy = y0;
+                if (railTop != null) { railTop.SetBounds(pad, cy + scrollY, w, railTop.Height); cy += railTop.Height + Ui.S(12); }
+                if (railBottom != null) {
+                    int bottomY = Math.Max(cy + railNeed + bottomGap, fullH - bottomPad - bottomH);
+                    if (Rail.Visible) Rail.SetBounds(pad, cy + scrollY, w, Math.Max(railNeed, bottomY - bottomGap - cy));
+                    railBottom.SetBounds(pad, bottomY + scrollY, w, bottomH);
+                } else {
+                    if (Rail.Visible) Rail.SetBounds(pad, cy + scrollY, w, Math.Max(railNeed, fullH - bottomPad - cy));
+                }
+                if (needVScroll) {
+                    if (!railPanel.AutoScroll) railPanel.AutoScroll = true;
+                    if (railPanel.HorizontalScroll.Visible) railPanel.HorizontalScroll.Visible = false;
+                    var wantMin = new Size(0, minTotalH);
+                    if (railPanel.AutoScrollMinSize != wantMin) railPanel.AutoScrollMinSize = wantMin;
+                }
+            } finally { railLayoutBusy = false; }
         }
         void LayoutContent(){
             int w = content.Width, h = content.Height;

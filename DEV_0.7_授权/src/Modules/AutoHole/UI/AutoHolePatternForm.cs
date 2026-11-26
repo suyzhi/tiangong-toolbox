@@ -86,7 +86,7 @@ namespace TianGongCadSuite {
         readonly Label stdInfo = new Label();
         readonly Label previewText = new Label();
         readonly Label status = new Label();
-        readonly FlatButton run = (FlatButton)Ui.Primary("开始打孔", 220, 44);
+        readonly FlatButton run = (FlatButton)Ui.Primary("开始打孔", 136, 44);
         readonly ToolTip tips = new ToolTip { AutoPopDelay = 15000, InitialDelay = 400 };
         ContextMenuStrip moreMenu;
 

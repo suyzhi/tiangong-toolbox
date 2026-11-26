@@ -109,6 +109,7 @@ namespace TianGongCadSuite {
         // │ 复制结果 · 判定口径│ [☑ 选中即跳转]  状态字 ……   [跳转到孔] [去配孔] │
         // 侧栏里的四类是可以同时勾几类的筛选（孤孔默认不显示），不是单选。
         readonly WizardShell shell = new WizardShell { StepCaption = false };
+        VerticalStack bodyStack;
         readonly Label countLine = new Label();
         readonly QuickClose quickClose = new QuickClose();
         List<string> lastWarnings = new List<string>();   // 这次读取失败的零件（状态栏只说个数，悬停 / 复制结果里列出是哪些）
@@ -154,13 +155,15 @@ namespace TianGongCadSuite {
             shell.RailBottom = links;
 
             // ---- 正文：一句话结论 → 问题列表 → 涉及的孔 ----
-            var stack = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = Ui.S(10), AutoScroll = false };
+            var stack = bodyStack = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = Ui.S(10), AutoScroll = true };
             page.Body.Controls.Add(stack);
             summary.AutoSize = false; summary.TextAlign = ContentAlignment.MiddleLeft; summary.AutoEllipsis = true;
+            summary.Tag = "autoheight"; summary.MinimumSize = new Size(0, Ui.S(24)); summary.MaximumSize = new Size(0, Ui.S(58));
             summary.ForeColor = Ui.Muted; summary.BackColor = Ui.Bg; summary.Font = Ui.F9; summary.Height = Ui.S(24);
             summary.Text = "还没检查";
             summary.TextChanged += (s, e) => { if (!closing && !IsDisposed) tips.SetToolTip(summary, summary.Text); };
             list.IntegralHeight = false; list.BorderStyle = BorderStyle.None;
+            list.MinimumSize = new Size(0, Ui.S(140));
             list.DrawMode = DrawMode.OwnerDrawFixed; list.ItemHeight = Ui.S(70); list.BackColor = Color.White;
             Ui.EnableDoubleBuffer(list);
             list.DrawItem += DrawIssue;
@@ -179,6 +182,7 @@ namespace TianGongCadSuite {
             };
             list.DoubleClick += (s, e) => { if (busy || closing || IsDisposed) return; selectDebounce.Stop(); HighlightSelected(); JumpToSelected(true); };
             var detailCard = Ui.Card("涉及的孔", 140, "");
+            detailCard.MinimumSize = new Size(0, Ui.S(110));
             detailCard.Fill = true;
             detail.Dock = DockStyle.Fill; detail.Multiline = true; detail.ReadOnly = true; detail.BorderStyle = BorderStyle.None;
             detail.BackColor = Ui.Rail; detail.ForeColor = Ui.Text; detail.ScrollBars = ScrollBars.Vertical; detail.Font = Ui.F9;
@@ -405,6 +409,7 @@ namespace TianGongCadSuite {
                 summary.ForeColor = counted.Count == 0 ? Ui.Ok : Ui.Warn;
                 shell.SetTitle(counted.Count == 0 ? "没有发现问题" : "发现 " + counted.Sum(i => i.Places) + " 处问题", "点一条在模型里高亮");
                 countLine.Text = holeCount + " 个孔 · " + groupCount + " 组同轴孔";
+                if (bodyStack != null) bodyStack.PerformLayout();
             }
             ShowDetail();
         }

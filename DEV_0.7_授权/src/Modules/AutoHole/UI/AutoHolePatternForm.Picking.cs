@@ -204,7 +204,10 @@ namespace TianGongCadSuite {
                     previewText.ForeColor = outside.Count > 0 ? Ui.Warn : Ui.Ok; ok = true;
                 }
             } catch (Exception e) { previewText.Text = e.Message; previewText.ForeColor = Ui.Bad; }
-            if (tips.GetToolTip(previewText) != previewText.Text) tips.SetToolTip(previewText, previewText.Text);
+            if (tips.GetToolTip(previewText) != previewText.Text) {
+                tips.SetToolTip(previewText, previewText.Text);
+                if (rootStack != null) rootStack.PerformLayout();
+            }
             bool wantRun = ok && !busy;
             if (run.Enabled != wantRun) run.Enabled = wantRun;
             string specProblem = ""; try { specProblem = SlotMode ? "" : hs.SpecProblem; } catch { }
@@ -225,10 +228,11 @@ namespace TianGongCadSuite {
         void FitCards(){
             int lh = layoutGrid.PreferredHeight;
             if (layoutGrid.Height != lh) layoutGrid.Height = lh;
+            if (layoutLeftStack != null) layoutLeftStack.PerformLayout();
+            if (layoutCols != null && layoutCols.IsStacked(layoutCols.ClientSize.Width) && layoutPageStack != null) layoutPageStack.PerformLayout();
             int sh = specGrid.PreferredHeight;
             if (specGrid.Height != sh) specGrid.Height = sh;
-            int st = sh + 6;
-            if (stdInfo.Top != st) stdInfo.Top = st;
+            if (specPageStack != null) specPageStack.PerformLayout();
         }
 
         // 排孔示意图：面轮廓 + 每个孔的位置（腰孔画成长圆）。

@@ -56,7 +56,7 @@ namespace TianGongCadSuite {
         readonly ResultList results = new ResultList();
         Card resultCard;
         VerticalStack rootStack;
-        readonly FlatButton apply = (FlatButton)Ui.Primary("应用", 200, 44);
+        readonly FlatButton apply = (FlatButton)Ui.Primary("应用", 110, 44);
         readonly Button undoButton = Ui.Secondary("撤销修改", 96, 38);
         readonly Label status = new Label();
         readonly ToolTip tips = new ToolTip { AutoPopDelay = 15000, InitialDelay = 400 };
@@ -98,10 +98,11 @@ namespace TianGongCadSuite {
         // 在模型里点了孔自动翻回第 1 步，新的一行闪一下。
         const int PageHoles = 0, PageSpec = 1;
         readonly WizardShell shell = new WizardShell();
-        readonly FlatButton nextButton = (FlatButton)Ui.Primary("下一步：改成", 200, 44);
+        readonly FlatButton nextButton = (FlatButton)Ui.Primary("下一步：改成", 136, 44);
         readonly FlatButton backButton = (FlatButton)Ui.Secondary("上一步", 84, 38);
         readonly EmptyHint holeEmpty = new EmptyHint("正在等你在模型里点要改的孔：孔口圆边、孔内壁，或带孔的平面…");
         Panel previewBox;
+        VerticalStack specBlockStack;
         Flash flash;
         int lastN;
 
@@ -116,10 +117,10 @@ namespace TianGongCadSuite {
             remove.Click += (s, e) => RemoveSelected();
             clear.Click += (s, e) => { if (busy) return; targets.Clear(); picked.Clear(); RefreshAll(); SetStatus("已清空。重新点要改的孔。", Ui.Accent); };
             shell.AddHeader(pHoles, remove); shell.AddHeader(pHoles, clear);
-            var hs = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = Ui.S(8), AutoScroll = false };
+            var hs = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = Ui.S(8), AutoScroll = true };
             pHoles.Body.Controls.Add(hs);
-            hs.Add(new Label { Text = "在模型里点孔口圆边、孔内壁，或点带孔的平面（面上的孔全加进来）。可以连续点。", AutoSize = false, Height = Ui.S(48), ForeColor = Ui.Text2, BackColor = Ui.Bg });
-            var frame = new Panel { BackColor = Color.White };
+            hs.Add(new Label { Text = "在模型里点孔口圆边、孔内壁，或点带孔的平面（面上的孔全加进来）。可以连续点。", AutoSize = false, Height = Ui.S(44), MinimumSize = new Size(0, Ui.S(24)), Tag = "autoheight", ForeColor = Ui.Text2, BackColor = Ui.Bg });
+            var frame = new Panel { BackColor = Color.White, MinimumSize = new Size(0, Ui.S(140)) };
             Ui.EnableDoubleBuffer(frame);
             list.Dock = DockStyle.Fill; list.BorderStyle = BorderStyle.None; list.IntegralHeight = false; list.Font = Ui.F9;
             list.BackColor = Color.White;
@@ -136,33 +137,28 @@ namespace TianGongCadSuite {
             flash = new Flash(list);
 
             // ---- ② 改成 ----
-            var st = rootStack = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = Ui.S(12), AutoScroll = false };
+            var st = rootStack = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = Ui.S(12), AutoScroll = true };
             pSpec.Body.Controls.Add(st);
             previewBox = new RoundBox { Height = Ui.S(74), Fill = Ui.AccentSoft, Padding = Ui.SPad(14, 8, 14, 6) };
             preview.AutoSize = false; preview.Font = Ui.F9B; preview.AutoEllipsis = true; preview.BackColor = Ui.AccentSoft;
             preview.Dock = DockStyle.Fill;
             previewBox.Controls.Add(preview);
-            var sb = new Panel { BackColor = Ui.Bg, Height = 4 * Ui.S(40) + Ui.S(32) };
+            var sb = specBlockStack = new VerticalStack { Padding = new Padding(0), Gap = Ui.S(4), BackColor = Ui.Bg, AutoScroll = false, Tag = "autoheight" };
             specGrid.BackColor = Ui.Bg;
-            sb.Controls.Add(specGrid);
+            specGrid.Tag = "autoheight";
             stdInfo.AutoSize = false; stdInfo.Font = Ui.F8; stdInfo.ForeColor = Ui.Muted; stdInfo.AutoEllipsis = true; stdInfo.BackColor = Ui.Bg;
-            sb.Controls.Add(stdInfo);
+            stdInfo.Tag = "autoheight"; stdInfo.MinimumSize = new Size(0, Ui.S(22)); stdInfo.MaximumSize = new Size(0, Ui.S(48));
             kindSeg.Width = Math.Max(Ui.S(340), kindSeg.PreferredWidth);
             specGrid.Add("孔型", kindSeg);
             specGrid.Add("规格", sizeBox, FieldGrid.Space(10), Ui.Caption("孔径"), diaNum, FieldGrid.Unit("mm"));
             specGrid.Add("深度", throughRadio, blindRadio, depthNum, FieldGrid.Unit("mm"));
             threadRow = specGrid.Add("螺纹", threadFullRadio, threadPartRadio, threadNum, FieldGrid.Unit("mm"));
             tips.SetToolTip(blindRadio, "贯通孔不能直接改成盲孔（天工接口限制，实测会让孔失效）；盲孔可以改深度、也可以改成贯通。");
-            EventHandler fit = (s, e) => {
-                int w = Math.Max(Ui.S(80), sb.ClientSize.Width);
-                specGrid.SetBounds(0, 0, w, specGrid.PreferredHeight);
-                stdInfo.SetBounds(0, specGrid.PreferredHeight + Ui.S(4), w, Ui.S(24));
-                int h = specGrid.PreferredHeight + Ui.S(32);
-                if (sb.Height != h) { sb.Height = h; if (rootStack != null) rootStack.Relayout(); }
-            };
-            sb.Resize += fit; specGrid.Resize += fit;
+            sb.Add(specGrid);
+            sb.Add(stdInfo);
 
             resultCard = Ui.Card("本次结果", 0, "点一条跳到那个孔");
+            resultCard.MinimumSize = new Size(0, Ui.S(180));
             var hideResult = Ui.Small("收起");
             hideResult.Click += (s, e) => { resultCard.Visible = false; rootStack.Relayout(); };
             resultCard.AddHeader(hideResult);
@@ -173,6 +169,10 @@ namespace TianGongCadSuite {
             st.Add(previewBox); st.Add(sb); st.Add(resultCard, true);
 
             // ---- 底部操作栏 ----
+            apply.MinimumSize = new Size(Ui.S(110), 0);
+            nextButton.MinimumSize = new Size(Ui.S(136), 0);
+            Ui.FitButton(apply);
+            Ui.FitButton(nextButton);
             backButton.Click += (s, e) => shell.Go(shell.Current - 1);
             nextButton.Click += (s, e) => shell.Go(PageSpec);
             apply.Click += (s, e) => Apply();
@@ -295,6 +295,8 @@ namespace TianGongCadSuite {
             var hs = SpecNow();
             stdInfo.Text = HoleStandards.Describe(hs);
             stdInfo.ForeColor = HoleStandards.Resolve(hs) != null ? Ui.Muted : Ui.Warn;
+            if (specBlockStack != null) specBlockStack.PerformLayout();
+            if (rootStack != null) rootStack.PerformLayout();
 
             if (picksChanged) {
                 int sel = list.SelectedIndex;

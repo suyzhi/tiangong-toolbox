@@ -198,7 +198,7 @@ namespace TianGongCadSuite {
                 if (i == hover && i != selected && Enabled) Ui.FillRound(g, Rectangle.Inflate(new Rectangle(r.X, m, r.Width, Height - m * 2 - 1), -1, 0), rIn, Color.FromArgb(0xEA, 0xEA, 0xEC));
                 Color fore = i == selected ? (Enabled ? Ui.Accent : Ui.Muted) : (Enabled ? Ui.Text : Ui.Faint);
                 TextRenderer.DrawText(g, Items[i], i == selected ? Ui.F9B : Font, r, fore,
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
             }
         }
     }

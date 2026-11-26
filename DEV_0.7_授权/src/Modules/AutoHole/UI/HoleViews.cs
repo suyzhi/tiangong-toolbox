@@ -33,6 +33,13 @@ namespace TianGongCadSuite {
             var sz = Measure(g, text, font);
             Halo(g, text, font, color, right - sz.Width, y);
         }
+        // 带边界钳制的描边文字：窄视图下自动贴边内收，绝不截断在画布之外
+        public static void HaloClamped(Graphics g, string text, Font font, Color color, float x, float y, float maxW, float maxH){
+            var sz = Measure(g, text, font);
+            float cx = Math.Max(2f, Math.Min(x, Math.Max(2f, maxW - sz.Width - 2f)));
+            float cy = Math.Max(2f, Math.Min(y, Math.Max(2f, maxH - sz.Height - 2f)));
+            Halo(g, text, font, color, cx, cy);
+        }
 
         public static void Arrow(Graphics g, Brush b, PointF tip, PointF from, float len){
             double dx = tip.X - from.X, dy = tip.Y - from.Y;
@@ -222,23 +229,21 @@ namespace TianGongCadSuite {
             using (var dimPen = new Pen(Ui.Accent, 1f))
             using (var dimBrush = new SolidBrush(Ui.Accent)) {
                 var f = Ui.F8;
-                // 孔口直径：有沉孔/锥沉就标孔口那个，否则标主孔
+                // 孔口直径：有沉孔/锥沉就标孔口那个，否则标主孔；始终画在顶面上方，避免与倒角顶边和中线重叠
                 string mouthText = "Φ" + Draw2.N(shape.MouthDiameterMm);
                 if (shape.Kind == HoleKind.Counterbore) mouthText = "沉孔 Φ" + Draw2.N(shape.CounterboreDiaMm);
                 else if (shape.Kind == HoleKind.Countersink) mouthText = "锥孔 Φ" + Draw2.N(shape.CountersinkDiaMm);
                 else if (shape.Chamfer) mouthText = "Φ" + Draw2.N(shape.HoleDiameterMm);
-                float dimY = plateT - Ui.S(16);
+                float dimY = plateT - Ui.S(14);
                 float halfMouth = X(shape.MouthRadiusMm) - axisX;
-                // 带孔口倒角时（通孔/螺纹孔/沉孔），尺寸线落在倒角下沿，宽度取倒角下沿实际直径而非倒角顶径 MouthRadiusMm
+                // 带孔口倒角时（通孔/螺纹孔/沉孔），标注宽度取倒角下沿实际直径而非倒角顶径 MouthRadiusMm
                 float dimHalf = shape.Chamfer
                     ? (shape.Kind == HoleKind.Counterbore ? X(shape.CounterboreDiaMm / 2.0) - axisX : X(shape.HoleRadiusMm) - axisX)
                     : halfMouth;
-                float dimZ = shape.Chamfer ? Y(Math.Min(shape.ChamferDepMm, shape.VoidDepthMm)) : plateT;
-                if (shape.Chamfer) { dimY = dimZ; }
-                Draw2.DimH(g, dimPen, dimBrush, f, Ui.Accent, axisX - dimHalf, axisX + dimHalf, dimY, mouthText, true, shape.Chamfer);
+                Draw2.DimH(g, dimPen, dimBrush, f, Ui.Accent, axisX - dimHalf, axisX + dimHalf, dimY, mouthText, true, false);
 
                 // 主孔直径：孔口那个尺寸标的不是主孔时（沉孔/锥沉），在孔内再标一个。
-                // 通孔/螺纹孔即使带了孔口倒角，上面标的也已经是主孔直径（标在倒角末尾），不能再标一遍。
+                // 通孔/螺纹孔即使带了孔口倒角，上面标的也已经是主孔直径，不能再标一遍。
                 bool mouthIsMain = shape.Kind == HoleKind.Through || shape.Kind == HoleKind.Tapped;
                 if (!mouthIsMain) {
                     double z = shape.Kind == HoleKind.Counterbore ? shape.CounterboreDepMm
@@ -265,14 +270,18 @@ namespace TianGongCadSuite {
                 // 板厚（示意）：右侧
                 Draw2.DimV(g, dimPen, dimBrush, f, Ui.Accent, plateT, plateB, plateR - 14, "t " + Draw2.N(shape.ThicknessMm), false);
 
-                // 倒角引线
+                // 倒角引线：按可用宽度钳制文字坐标，防止窄视图下右侧裁切
                 if (shape.Chamfer) {
+                    string chText = Draw2.N(shape.ChamferSetbackMm) + "×" + Draw2.N(shape.ChamferAngleDeg) + "°";
+                    var chSz = Draw2.Measure(g, chText, f);
                     float zc = Y(shape.ChamferDepMm);
                     var tip = new PointF(X(shape.MouthRadiusMm), (Y(0) + zc) / 2f);
-                    var end = new PointF(tip.X + 16, tip.Y - 12);
+                    float tx = tip.X + 18;
+                    float ty = Math.Max(2f, tip.Y - 12 - chSz.Height / 2f);
+                    if (tx + chSz.Width > Width - 4) tx = Math.Max(2f, Width - 4 - chSz.Width);
+                    var end = new PointF(tx > tip.X + 4 ? tx - 2 : tip.X + 6, ty + chSz.Height / 2f);
                     g.DrawLine(dimPen, tip, end);
-                    Draw2.Halo(g, Draw2.N(shape.ChamferSetbackMm) + "×" + Draw2.N(shape.ChamferAngleDeg) + "°",
-                               f, Ui.Accent, end.X + 2, end.Y - 6);
+                    Draw2.HaloClamped(g, chText, f, Ui.Accent, tx, ty, Width, Height);
                 }
                 // V 型底角度
                 if (!shape.Through && shape.Bottom == HoleBottom.VBottom && shape.TipHeightMm > 0.05) {
@@ -285,15 +294,23 @@ namespace TianGongCadSuite {
                 }
                 // 锥沉角度
                 if (shape.Kind == HoleKind.Countersink) {
-                    Draw2.Halo(g, Draw2.N(shape.CountersinkAngleDeg) + "°", f, Ui.Accent,
-                               axisX + halfMouth + 6, plateT + 2);
+                    Draw2.HaloClamped(g, Draw2.N(shape.CountersinkAngleDeg) + "°", f, Ui.Accent,
+                                      axisX + halfMouth + 6, plateT + 2, Width, Height);
                 }
             }
 
-            // 7) 底部一行小字（按实际字体高度留白，避免高 DPI 下被底部裁切）
+            // 7) 底部一行小字（宽度不足时自动精简并居中，避免高 DPI / 窄列下被右侧裁切）
             string cap = "剖面：按实际孔型绘制　·　板厚 " + Draw2.N(shape.ThicknessMm) + " 为示意";
-            float capH = Draw2.Measure(g, cap, Ui.F8).Height;
-            Draw2.Halo(g, cap, Ui.F8, Ui.Muted, plateL, Height - capH - Ui.S(2));
+            var capSz = Draw2.Measure(g, cap, Ui.F8);
+            if (capSz.Width > Width - 8) {
+                cap = "剖面　·　板厚 " + Draw2.N(shape.ThicknessMm) + " 为示意";
+                capSz = Draw2.Measure(g, cap, Ui.F8);
+            }
+            if (capSz.Width > Width - 8) {
+                cap = "剖面示意";
+                capSz = Draw2.Measure(g, cap, Ui.F8);
+            }
+            Draw2.HaloCenter(g, cap, Ui.F8, Ui.Muted, Width / 2f, Height - capSz.Height - Ui.S(2));
         }
     }
 
@@ -528,7 +545,9 @@ namespace TianGongCadSuite {
             float x = at.X + 20, y = at.Y - sz.Height - 6;
             if (x + sz.Width > Width - 4) x = Width - 4 - sz.Width;
             if (x < 4) x = 4;
-            if (y < 18) y = at.Y + 10;
+            if (y < 4) y = at.Y + 10;
+            float maxY = Math.Max(4f, Height - sz.Height - Ui.S(22));
+            if (y > maxY) y = maxY;
             using (var p = new Pen(Ui.Accent, 1f)) {
                 g.DrawLine(p, at, new PointF(x - 3, y + sz.Height / 2f));
                 using (var b = new SolidBrush(Ui.Accent)) Draw2.Arrow(g, b, at, new PointF(x, y + sz.Height / 2f), 7);

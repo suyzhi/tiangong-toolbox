@@ -24,11 +24,14 @@ namespace TianGongCadSuite {
         // 主按钮只要能打就是「开始打孔 N 个孔」（哪一步都能直接打），还不能打才是「下一步：…」。
         const int PageRefs = 0, PageFaces = 1, PageSpec = 2, PagePreview = 3;
         readonly WizardShell shell = new WizardShell();
-        readonly FlatButton nextButton = (FlatButton)Ui.Primary("下一步", 240, 44);
+        readonly FlatButton nextButton = (FlatButton)Ui.Primary("下一步", 136, 44);
         readonly FlatButton backButton = (FlatButton)Ui.Secondary("上一步", 84, 38);
         readonly FlatButton moreButton = (FlatButton)Ui.Secondary("更多 ▾", 84, 38);
         readonly ChipTabs groupTabs = new ChipTabs { EmptyText = "还没有参考孔：现在改的是草稿规格，点了孔以后按孔径分组反推。" };
         readonly StatTile statHoles = new StatTile("要打的孔"), statRefs = new StatTile("参考孔"), statFaces = new StatTile("打孔面");
+        VerticalStack specStack, specLeftStack, previewStack, previewAreaStack;
+        SplitColumns specCols;
+        Panel pvBodyPanel;
         Flash refFlash, faceFlash;
         bool drilledOnce;   // 打过一批：第 4 步打勾
 
@@ -76,7 +79,7 @@ namespace TianGongCadSuite {
             BuildSpecCard(pSpec.Body);
 
             // ---- ④ 预览并打孔 ----
-            var prev = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = Ui.S(12) };
+            var prev = previewStack = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = Ui.S(12), AutoScroll = true };
             pPrev.Body.Controls.Add(prev);
             var stats = new Panel { Height = statHoles.Height, BackColor = Ui.Bg };
             stats.Controls.Add(statHoles); stats.Controls.Add(statRefs); stats.Controls.Add(statFaces);
@@ -84,15 +87,15 @@ namespace TianGongCadSuite {
                 int g = Ui.S(12), w = (stats.Width - g * 2) / 3;
                 statHoles.SetBounds(0, 0, w, stats.Height); statRefs.SetBounds(w + g, 0, w, stats.Height); statFaces.SetBounds(2 * (w + g), 0, stats.Width - 2 * (w + g), stats.Height);
             };
-            var pvBody = new Panel { Height = Ui.S(30), BackColor = Ui.Bg };
-            int chipW = Ui.S(124);
-            chip.SetBounds(0, 1, chipW, Ui.S(28));
-            previewLine.SetBounds(chipW + Ui.S(10), 0, Ui.S(600), Ui.S(30));
+            var pvBody = pvBodyPanel = new Panel { Height = Ui.S(30), BackColor = Ui.Bg };
             previewLine.AutoSize = false; previewLine.Font = Ui.F9B; previewLine.ForeColor = Ui.Text; previewLine.AutoEllipsis = true;
             previewLine.TextAlign = ContentAlignment.MiddleLeft;
             pvBody.Controls.Add(chip); pvBody.Controls.Add(previewLine);
-            pvBody.Resize += (s, e) => previewLine.Width = Math.Max(Ui.S(60), pvBody.ClientSize.Width - (chipW + Ui.S(10)));
-            previewSub.AutoSize = false; previewSub.ForeColor = Ui.Text2; previewSub.AutoEllipsis = true; previewSub.Height = Ui.S(70);
+            pvBody.Resize += (s, e) => LayoutPreviewHeader();
+            LayoutPreviewHeader();
+            previewSub.AutoSize = false; previewSub.ForeColor = Ui.Text2; previewSub.AutoEllipsis = true;
+            previewSub.Tag = "autoheight"; previewSub.MinimumSize = new Size(0, Ui.S(24)); previewSub.MaximumSize = new Size(0, Ui.S(136));
+            previewSub.Height = Ui.S(48);
             previewSub.BackColor = Ui.Bg;
             linkCheck.BackColor = Ui.Bg; linkCheck.ForeColor = Ui.Text; linkCheck.Height = Ui.S(28);
             linkCheck.Text = "保持与参考孔关联";
@@ -102,13 +105,13 @@ namespace TianGongCadSuite {
                                        "打孔时插件会自动进出原位编辑，界面会闪一下，这是正常的。\r\n" +
                                        "挂不上天工关联的孔（零件的链接属于别的装配、斜孔、认不准实例……）改用插件自己的关联记录，\r\n" +
                                        "结果里会逐条说明原因；参考零件挪动后点「同步孔位」把它们挪回去。");
-            var previewArea = new VerticalStack { Padding = new Padding(0), Gap = Ui.S(10), AutoScroll = false };
+            var previewArea = previewAreaStack = new VerticalStack { Padding = new Padding(0), Gap = Ui.S(10), AutoScroll = false, Tag = "autoheight" };
             previewArea.Add(stats); previewArea.Add(pvBody); previewArea.Add(previewSub); previewArea.Add(linkCheck);
-            previewArea.Height = stats.Height + pvBody.Height + previewSub.Height + linkCheck.Height + Ui.S(32);
             previewCard = previewArea;
 
             // 打孔结果：打完出现在预览下面，点一条跳到那个孔
             resultCard = Ui.Card("本次结果", 0, "点一条跳到那个孔");
+            resultCard.MinimumSize = new Size(0, Ui.S(200));
             var copyResult = Ui.Small("复制"); var hideResult = Ui.Small("收起");
             copyResult.Click += (s, e) => { try { Clipboard.SetText(results.AsText()); SetStatus("结果已复制。", Ui.Ok); } catch (Exception ex) { SetStatus("复制失败：" + ex.Message, Ui.Warn); } };
             hideResult.Click += (s, e) => ShowResults(false);
@@ -132,15 +135,20 @@ namespace TianGongCadSuite {
                                         "插件关联的孔（挂不上天工关联时改用的）：按记下的参考孔重新求孔心，把错位的挪回同轴（孔型规格不变）。");
             linkCard.Controls.Add(linkLabel); linkCard.Controls.Add(syncButton); linkCard.Controls.Add(rescanButton);
             linkCard.Resize += (s, e) => {
-                int pad = Ui.S(12), w = Math.Max(40, linkCard.Width - pad * 2), bh = Ui.S(30), by = linkCard.Height - bh - Ui.S(10);
+                int pad = Ui.S(12), w = Math.Max(40, linkCard.Width - pad * 2), bh = Ui.S(30), by = linkCard.Height - bh - Ui.S(10), gap = Ui.S(6);
                 linkLabel.SetBounds(pad, Ui.S(34), w, Math.Max(20, by - Ui.S(38)));
-                int syncW = Math.Min(Ui.S(112), Math.Max(Ui.S(60), w - Ui.S(70)));
+                int rescanW = Math.Min(Math.Max(Ui.S(52), TextRenderer.MeasureText(rescanButton.Text ?? "检查", rescanButton.Font ?? Ui.F9).Width + Ui.S(20)), Math.Max(Ui.S(48), w / 3));
+                int syncW = Math.Max(Ui.S(60), w - rescanW - gap);
                 syncButton.SetBounds(pad, by, syncW, bh);
-                rescanButton.SetBounds(syncButton.Right + Ui.S(6), by, Math.Max(Ui.S(44), w - syncButton.Width - Ui.S(6)), bh);
+                rescanButton.SetBounds(syncButton.Right + gap, by, Math.Max(Ui.S(44), w - syncW - gap), bh);
             };
             shell.RailBottom = linkCard;
 
             // ---- 底部操作栏 ----
+            run.MinimumSize = new Size(Ui.S(136), 0);
+            nextButton.MinimumSize = new Size(Ui.S(136), 0);
+            Ui.FitButton(run);
+            Ui.FitButton(nextButton);
             var more = moreMenu = Ui.Menu();
             var miEdit = more.Items.Add("改孔型…（刚打的这批孔整组换孔型）");
             var miUndo = more.Items.Add("撤销本次打孔");
@@ -168,15 +176,26 @@ namespace TianGongCadSuite {
             shell.PageChanged += (s, e) => UpdatePrimary();
         }
 
+        void LayoutPreviewHeader(){
+            if (pvBodyPanel == null) return;
+            int chipNeed = TextRenderer.MeasureText(chip.Text ?? "", chip.Font ?? Ui.F9B).Width + Ui.S(24);
+            int chipW = Math.Min(Ui.S(180), Math.Max(Ui.S(104), chipNeed));
+            int gap = Ui.S(10);
+            var cr = new Rectangle(0, 1, chipW, Ui.S(28));
+            if (chip.Bounds != cr) chip.Bounds = cr;
+            var lr = new Rectangle(chipW + gap, 0, Math.Max(Ui.S(60), pvBodyPanel.ClientSize.Width - chipW - gap), Ui.S(30));
+            if (previewLine.Bounds != lr) previewLine.Bounds = lr;
+        }
+
         // 列表页：一行说明 → 列表（每一项自己画成圆角小卡片）→ 底行（左：勾选，右：计数）
         readonly Button delSlots = Ui.Small("去掉腰孔");
         readonly EmptyHint refEmpty = new EmptyHint("正在等你在模型里点孔：孔口圆边、孔内壁，或一个带孔的面…");
         readonly EmptyHint faceEmpty = new EmptyHint("正在等你在模型里点要打孔的平面…");
         void ListPage(Panel body, string hint, ListBox list, EmptyHint empty, Control footLeft, Label footRight){
-            var stack = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = Ui.S(8), AutoScroll = false };
+            var stack = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = Ui.S(8), AutoScroll = true };
             body.Controls.Add(stack);
-            var h = new Label { Text = hint, AutoSize = false, Height = Ui.S(48), ForeColor = Ui.Text2, BackColor = Ui.Bg, Font = Ui.F9 };
-            var frame = new Panel { BackColor = Color.White, Padding = new Padding(0) };
+            var h = new Label { Text = hint, AutoSize = false, Height = Ui.S(44), MinimumSize = new Size(0, Ui.S(24)), MaximumSize = new Size(0, Ui.S(96)), Tag = "autoheight", ForeColor = Ui.Text2, BackColor = Ui.Bg, Font = Ui.F9 };
+            var frame = new Panel { BackColor = Color.White, Padding = new Padding(0), MinimumSize = new Size(0, Ui.S(140)) };
             Ui.EnableDoubleBuffer(frame);
             Ui.EnableDoubleBuffer(list);
             list.Dock = DockStyle.Fill; list.Margin = new Padding(0);
@@ -185,18 +204,24 @@ namespace TianGongCadSuite {
             var foot = new Panel { Height = Ui.S(28), BackColor = Ui.Bg };
             if (footLeft != null) { footLeft.Location = new Point(0, Ui.S(4)); foot.Controls.Add(footLeft); }
             foot.Controls.Add(footRight);
-            foot.Resize += (s, e) => footRight.SetBounds(Math.Max(0, foot.Width - Ui.S(220)), Ui.S(2), Ui.S(220), Ui.S(24));
+            foot.Resize += (s, e) => {
+                int lx = footLeft != null ? footLeft.Right + Ui.S(8) : 0;
+                footRight.SetBounds(lx, Ui.S(2), Math.Max(Ui.S(60), foot.Width - lx), Ui.S(24));
+            };
             stack.Add(h); stack.Add(frame, true); stack.Add(foot);
         }
 
-        // 孔规格页：组标签 + 两行"正在编辑谁 / 规格怎么来的"，下面左边参数网格、右边孔形状（剖面在上、3D 在下）。
-        // 网格每一行都是"标签 + 一串控件"，位置由 FieldGrid 算，不再手摆坐标；换孔型时整行显示/隐藏，下面的行自动顶上去。
+        // 孔规格页：多行自适应组标签 + 两行"正在编辑谁 / 规格怎么来的"，下面左边自动折行/滚动参数网格、右边孔形状（窄窗时自动上下堆叠）。
+        // 网格每一行都是"标签 + 一串控件"，位置与折行由 FieldGrid 算，不再手摆坐标；换孔型时整行显示/隐藏，下面的行自动顶上去。
         void BuildSpecCard(Panel page){
-            var stack = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = Ui.S(8) };
+            var stack = specStack = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = Ui.S(8), AutoScroll = true };
             page.Controls.Add(stack);
+            groupTabs.Tag = "autoheight";
             groupTabs.SelectedChanged += (s, e) => { if (!busy && !closing && !IsDisposed && groupTabs.Selected >= 0 && groupTabs.Selected < refList.Items.Count) refList.SelectedIndex = groupTabs.Selected; };
-            editWho.AutoSize = false; editWho.Font = Ui.F9B; editWho.ForeColor = Ui.Text; editWho.AutoEllipsis = true; editWho.Height = Ui.S(24); editWho.BackColor = Ui.Bg;
-            editNote.AutoSize = false; editNote.Font = Ui.F8; editNote.ForeColor = Ui.Muted; editNote.AutoEllipsis = true; editNote.Height = Ui.S(22); editNote.BackColor = Ui.Bg;
+            editWho.AutoSize = false; editWho.Font = Ui.F9B; editWho.ForeColor = Ui.Text; editWho.AutoEllipsis = true;
+            editWho.Tag = "autoheight"; editWho.MinimumSize = new Size(0, Ui.S(22)); editWho.MaximumSize = new Size(0, Ui.S(46)); editWho.Height = Ui.S(24); editWho.BackColor = Ui.Bg;
+            editNote.AutoSize = false; editNote.Font = Ui.F8; editNote.ForeColor = Ui.Muted; editNote.AutoEllipsis = true;
+            editNote.Tag = "autoheight"; editNote.MinimumSize = new Size(0, Ui.S(20)); editNote.MaximumSize = new Size(0, Ui.S(44)); editNote.Height = Ui.S(22); editNote.BackColor = Ui.Bg;
 
             kindSeg.Width = Math.Max(Ui.S(340), kindSeg.PreferredWidth);
             grid.BackColor = Ui.Bg;
@@ -212,12 +237,20 @@ namespace TianGongCadSuite {
             tips.SetToolTip(threadPartRadio, "从孔口往下攻指定深度（盲孔不能超过孔深）。\r\n螺纹孔按螺纹内小径建模，螺纹以装饰螺纹显示（和 CAD 自己的孔命令一致）。");
             tips.SetToolTip(bottomBox, "盲孔默认平底；需要钻尖就选 V 型底（默认 118°）。");
 
-            var cols = new SplitColumns(0.62f) { Gap = Ui.S(20) };
-            var left = new Panel { BackColor = Ui.Bg };
-            left.Controls.Add(grid);
-            left.Resize += (s, e) => grid.SetBounds(0, 0, left.Width, grid.PreferredHeight);
+            var cols = specCols = new SplitColumns(0.60f) {
+                Gap = Ui.S(20),
+                MinLeftWidth = Ui.S(340),
+                MinRightWidth = Ui.S(240),
+                StackWhenNarrow = true,
+                MinStackedRightHeight = Ui.S(280),
+                MinimumSize = new Size(0, Ui.S(260))
+            };
+            var left = specLeftStack = new VerticalStack { Padding = new Padding(0), Gap = Ui.S(6), BackColor = Ui.Bg, AutoScroll = true };
+            grid.Tag = "autoheight";
+            left.Add(grid);
             var shapeCard = Ui.Card("孔形状", 0, "剖面 · 打完后的样子");
             shapeCard.Fill = true;
+            shapeCard.MinimumSize = new Size(0, Ui.S(260));
             shapeCard.Padding = Ui.SPad(10, 38, 10, 10);
             sectionView.Header = ""; modelView.Header = "";
             var views = new VerticalStack { Dock = DockStyle.Fill, Padding = new Padding(0), Gap = Ui.S(8), BackColor = Ui.Rail, AutoScroll = false };
@@ -311,7 +344,9 @@ namespace TianGongCadSuite {
             // 规格本身不成立（例如盲孔的螺纹深度超过孔深）：这一行改成红字说原因，开始打孔同时变灰
             string problem = cur == null ? "" : cur.SpecProblem;
             if (problem.Length > 0) { editNote.Text = "⚠ " + problem; editNote.ForeColor = Ui.Bad; }
+            tips.SetToolTip(editWho, editWho.Text);
             tips.SetToolTip(editNote, editNote.Text);
+            if (specStack != null) specStack.PerformLayout();
         }
 
         // 参数控件当前值 -> 一个 HoleSpec。不依赖"有没有选中参考孔"：
