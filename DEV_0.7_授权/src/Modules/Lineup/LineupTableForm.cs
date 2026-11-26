@@ -247,7 +247,7 @@ namespace TianGongCadSuite {
             };
             grid.DataError += (s, e) => { e.ThrowException = false; status.Text = "请选择有效的器件类别。"; };
             grid.KeyDown += (s, e) => {
-                if (e.Control && e.KeyCode == Keys.V) { e.SuppressKeyPress = true; Try(() => PasteCells(Clipboard.GetText())); }
+                if (e.Control && e.KeyCode == Keys.V) { e.SuppressKeyPress = true; Try(() => PasteCells(ClipboardUtil.GetText())); }
                 if (e.Control && e.KeyCode == Keys.Z) { e.SuppressKeyPress = true; Try(Undo); }
             };
             saver.Tick += (s, e) => {
@@ -302,7 +302,8 @@ namespace TianGongCadSuite {
             if (loading || e.RowIndex < 0 || e.ColumnIndex < 0) return;
             string after = Convert.ToString(grid.Rows[e.RowIndex].Cells[e.ColumnIndex].Value ?? "");
             if (string.Equals(after, editStartVal, StringComparison.Ordinal)) return;
-            if (!dirty) undo.Push(project);
+            // 压入深拷贝快照，防止后续切入气动面板原地修改 project 时污染撤销栈顶
+            if (!dirty) undo.Push(LineupEntry.Clone(project));
             if (e.ColumnIndex == 5) Try(() => CompleteKnownModel(e.RowIndex));
             if (e.ColumnIndex == 5 || e.ColumnIndex == 6 || e.ColumnIndex == 10) modelFieldEdited = true;
             dirty = true;
@@ -327,7 +328,19 @@ namespace TianGongCadSuite {
 
         internal void GoStep(int stepIndex) {
             if (stepIndex < 0 || stepIndex > 2) return;
-            if (stepIndex == currentStep && pageListBody != null) { OnStepChanged(); return; }
+            int prevStep = currentStep;
+            if (stepIndex == prevStep && pageListBody != null) { OnStepChanged(); return; }
+            // 先完成离开当前步骤前的刷盘与校验（如重复编号），失败时保留原 currentStep 防止导航胶囊与页面内容撕裂
+            if (prevStep == 1 && cadStudio != null) cadStudio.FlushPendingSave();
+            else if (prevStep == 2 && exportPanel != null) exportPanel.CommitMetadataIfChanged();
+            else if (prevStep == 0) {
+                if (pneumaticPanel != null) pneumaticPanel.EndEdit();
+                grid.EndEdit();
+                if (dirty) {
+                    saver.Stop();
+                    SaveDraft(false);
+                }
+            }
             currentStep = stepIndex;
             OnStepChanged();
         }
@@ -346,6 +359,19 @@ namespace TianGongCadSuite {
             if (mode < 0 || mode > 3) return;
             if (pneumaticPanel != null) pneumaticPanel.EndEdit();
             grid.EndEdit();
+            // 切换视图前若有 550ms 防抖期内的未刷盘表格编辑，必须先同步落盘到 project，
+            // 否则切回气动系统会用旧 project 刷新并清掉 pneumaticDirty，继而在气动面板编辑时抹掉前次修改
+            if (dirty) {
+                saver.Stop();
+                try {
+                    SaveDraft(false);
+                } catch (Exception ex) {
+                    string m = Plain(ex);
+                    status.Text = m;
+                    ShowToast(m, Ui.Warn);
+                    return;
+                }
+            }
             activeViewMode = mode;
             Control freezeTarget = (preview != null && preview.Visible) ? (Control)workContentHost : listStack;
             Ui.BeginRedrawFreeze(freezeTarget);
@@ -405,7 +431,7 @@ namespace TianGongCadSuite {
             for (int i = 0; i < 3; i++) {
                 int idx = i;
                 stepPills[i] = new StepPill(i + 1, titles[i]) { Margin = new Padding(0) };
-                stepPills[i].Click += (s, e) => GoStep(idx);
+                stepPills[i].Click += (s, e) => Try(() => GoStep(idx));
                 stepFlow.Controls.Add(stepPills[i]);
                 if (i < 2) {
                     stepFlow.Controls.Add(new Label {
@@ -1073,7 +1099,7 @@ namespace TianGongCadSuite {
             var bPaste = Ui.Small("从剪贴板粘贴清单"); ((FlatButton)bPaste).SetFore(Ui.Text2);
             bAddSe.Click += (s, e) => Try(() => AddRecordAndOpenMode("普通传感器", 1));
             bAddE.Click += (s, e) => Try(() => AddRecordAndOpenMode("其他电气件", 2));
-            bPaste.Click += (s, e) => Try(() => ImportText(Clipboard.GetText(), '\t'));
+            bPaste.Click += (s, e) => Try(() => ImportText(ClipboardUtil.GetText(), '\t'));
             linkRow.Controls.AddRange(new Control[] { lOr, bAddSe, bAddE, bPaste });
 
             inner.Controls.Add(linkRow);
@@ -1275,13 +1301,29 @@ namespace TianGongCadSuite {
             var cells = grid.SelectedCells.Cast<DataGridViewCell>()
                 .Where(c => c.RowIndex >= 0 && !c.ReadOnly && c.ColumnIndex >= 1 && c.ColumnIndex <= 11).ToList();
             if (cells.Count == 0) return;
-            if (!dirty) undo.Push(project);
+            // 先锁定全部底层 DataRow 引用再批量写入，避免筛选/排序视图在修改首行后实时移位或消失导致写错行/越界
+            var targets = new List<Tuple<DataRow, string, int>>(cells.Count);
             foreach (var c in cells) {
-                if (c.ColumnIndex == 5 || c.ColumnIndex == 6 || c.ColumnIndex == 10) modelFieldEdited = true;
-                c.Value = "";
+                var drv = grid.Rows[c.RowIndex].DataBoundItem as DataRowView;
+                if (drv == null) continue;
+                string colName = c.OwningColumn.DataPropertyName;
+                if (string.IsNullOrEmpty(colName)) continue;
+                targets.Add(Tuple.Create(drv.Row, colName, c.ColumnIndex));
+            }
+            if (targets.Count == 0) return;
+            if (!dirty) undo.Push(LineupEntry.Clone(project));
+            loading = true;
+            try {
+                foreach (var t in targets) {
+                    if (t.Item3 == 5 || t.Item3 == 6 || t.Item3 == 10) modelFieldEdited = true;
+                    t.Item1[t.Item2] = "";
+                }
+            } finally {
+                loading = false;
             }
             dirty = true;
             pneumaticDirty = true;
+            if (btnUndoFooter != null) btnUndoFooter.Enabled = undo.Count > 0;
             saver.Stop();
             saver.Start();
         }
@@ -1294,11 +1336,11 @@ namespace TianGongCadSuite {
                 if (keyData == (Keys.Alt | Keys.Up)) return () => { Try(() => MoveRows(-1)); };
                 if (keyData == (Keys.Alt | Keys.Down)) return () => { Try(() => MoveRows(1)); };
                 if (pneumaticPanel.ContainsFocus) {
-                    if (keyData == (Keys.Control | Keys.C)) return () => pneumaticPanel.CopySelectedCells();
-                    if (keyData == (Keys.Control | Keys.V)) return () => pneumaticPanel.PasteSelectedCells(Clipboard.GetText());
-                    if (keyData == (Keys.Control | Keys.D)) return () => pneumaticPanel.FillDownSelectedCells();
+                    if (keyData == (Keys.Control | Keys.C)) return () => { Try(() => pneumaticPanel.CopySelectedCells()); };
+                    if (keyData == (Keys.Control | Keys.V)) return () => { Try(() => pneumaticPanel.PasteSelectedCells(ClipboardUtil.GetText())); };
+                    if (keyData == (Keys.Control | Keys.D)) return () => { Try(() => pneumaticPanel.FillDownSelectedCells()); };
                     if (keyData == (Keys.Control | Keys.Z)) return () => { Try(Undo); };
-                    if (keyData == Keys.Delete) return () => pneumaticPanel.ClearSelectedCells();
+                    if (keyData == Keys.Delete) return () => { Try(() => pneumaticPanel.ClearSelectedCells()); };
                 }
                 return null;
             }
@@ -1451,7 +1493,11 @@ namespace TianGongCadSuite {
                 pneumaticPanel.RefreshFromProject(selectedId);
                 pneumaticDirty = false;
             }
-            if (selectedId != null && activeViewMode != 0) SelectId(selectedId);
+            if (selectedId != null) {
+                // 处于点选模式时无论当前视图是否为气动主视图，都必须同步推进 pickingId
+                if (pickingMode) pickingId = selectedId;
+                if (activeViewMode != 0) SelectId(selectedId);
+            }
             if (preview != null && preview.Visible) UpdatePreviewForCurrentRow();
         }
 
@@ -1511,8 +1557,9 @@ namespace TianGongCadSuite {
         string CurrentId() {
             if (pickingMode) return pickingId;
             if (activeViewMode == 0 && pneumaticPanel != null && pneumaticPanel.Visible) {
+                // 气动主视图下 grid 处于隐藏状态：即使点击顶栏/底栏按钮导致焦点离开 pneumaticPanel，也绝不能误读隐藏 grid 的旧 CurrentRow
                 string pid = pneumaticPanel.SelectedRecordId ?? pneumaticSelectedId;
-                if (!string.IsNullOrEmpty(pid) && (pneumaticPanel.ContainsFocus || grid.CurrentRow == null)) return pid;
+                return string.IsNullOrEmpty(pid) ? null : pid;
             }
             if (grid.CurrentRow == null || grid.CurrentRow.DataBoundItem == null) return pneumaticSelectedId;
             return Convert.ToString(((DataRowView)grid.CurrentRow.DataBoundItem)["Id"]);
@@ -1569,7 +1616,7 @@ namespace TianGongCadSuite {
         // 位置图页点选与抬头元数据保存专用轻量通道：只落盘并刷新顶栏徽标，不重建 BOM/气动树，不读写型号库
         void CommitLightFileOnly(LineupProject next, string message) {
             EnsureFile();
-            var before = project;
+            var before = project == null ? null : LineupEntry.Clone(project);
             next.Save(store);
             if (before != null) undo.Push(before);
             project = next;
@@ -1594,6 +1641,7 @@ namespace TianGongCadSuite {
         internal void SaveDraft() { SaveDraft(true); }
 
         internal void SaveDraft(bool requireActive) {
+            if (saver != null) saver.Stop();
             if (requireActive) Ensure(); else EnsureFile();
             if (!dirty) { UpdateStatus("已保存"); return; }
             var next = Snapshot();
@@ -1606,23 +1654,50 @@ namespace TianGongCadSuite {
                     && (r.Category == "普通传感器" || r.Category == "其他电气件" || ((r.Category == "气缸" || r.Category == "阀片") && !string.IsNullOrWhiteSpace(next.NumberPrefix))))
                     changed.Add(r);
             }
-            if (changed.Count > 0) LineupNumbering.FillMissing(next, changed);
+            bool anyNumberChanged = false;
+            if (changed.Count > 0) {
+                LineupNumbering.FillMissing(next, changed);
+                anyNumberChanged = true;
+            }
             foreach (var valve in next.Records) {
                 LineupRecord old;
-                if (valve.Category == "阀片" && oldById.TryGetValue(valve.Id, out old) && old.Number != valve.Number)
+                if (valve.Category == "阀片" && oldById.TryGetValue(valve.Id, out old) && old.Number != valve.Number) {
                     LineupHierarchy.RenumberChildren(next, valve);
+                    anyNumberChanged = true;
+                }
             }
             foreach (var cylinder in next.Records) {
                 LineupRecord old;
-                if (cylinder.Category == "气缸" && oldById.TryGetValue(cylinder.Id, out old) && old.Number != cylinder.Number)
-                    foreach (var sensor in next.Records.Where(r => r.CylinderId == cylinder.Id))
-                        sensor.Number = cylinder.Number + sensor.Position;
+                if (cylinder.Category == "气缸" && oldById.TryGetValue(cylinder.Id, out old) && old.Number != cylinder.Number) {
+                    anyNumberChanged = true;
+                    // 清空气缸编号时绝不把关联磁开号错改成裸 "H"/"W"
+                    if (!string.IsNullOrWhiteSpace(cylinder.Number)) {
+                        string cn = cylinder.Number.Trim();
+                        foreach (var sensor in next.Records.Where(r => r.CylinderId == cylinder.Id)) {
+                            if (!string.IsNullOrWhiteSpace(sensor.Position)) sensor.Number = cn + sensor.Position;
+                        }
+                    }
+                }
             }
+            if (!anyNumberChanged) {
+                foreach (var r in next.Records) {
+                    LineupRecord old;
+                    if (oldById.TryGetValue(r.Id, out old) && !string.Equals(old.Number ?? "", r.Number ?? "", StringComparison.Ordinal)) {
+                        anyNumberChanged = true;
+                        break;
+                    }
+                }
+            }
+            if (anyNumberChanged) LineupNumbering.SyncCadPageNumbers(next);
             LineupTableData.RejectDuplicates(next.Records);
             next.Save(store);
             project = next;
             dirty = false;
             if (activeViewMode != 0) pneumaticDirty = true;
+            else if (pneumaticDirty && pneumaticPanel != null && !pneumaticPanel.IsEditing) {
+                pneumaticPanel.RefreshFromProject(null);
+                pneumaticDirty = false;
+            }
             var newById = project.Records.ToDictionary(r => r.Id);
             // 只回写实际发生变化的衍生单元格，避免触发整表刷新闪烁
             foreach (DataRow row in data.Rows) {
@@ -1714,29 +1789,31 @@ namespace TianGongCadSuite {
             };
             var sum = LineupXlsxWriter.Write(path, project, effective);
 
-            // 导出成功后自动记录导出快照（首次导出顺带初始化第一条更新日志与基准快照，便于下一版直接追踪差异）
-            string ver = LineupRevision.CurrentVersion(project);
-            if (project.ChangeLogs == null) project.ChangeLogs = new List<LineupChangeLog>();
-            if (project.ChangeLogs.Count == 0) {
+            // 导出成功后在副本上记录导出快照与首条日志再替换 project，避免原地修改活对象污染撤销栈
+            var exportedProj = project.Copy();
+            string ver = LineupRevision.CurrentVersion(exportedProj);
+            if (exportedProj.ChangeLogs == null) exportedProj.ChangeLogs = new List<LineupChangeLog>();
+            if (exportedProj.ChangeLogs.Count == 0) {
                 string today = DateTime.Today.ToString("yyyy/M/d", System.Globalization.CultureInfo.InvariantCulture);
                 string mDate = today;
-                try { if (!string.IsNullOrEmpty(project.AssemblyFile) && File.Exists(project.AssemblyFile)) mDate = File.GetLastWriteTime(project.AssemblyFile).ToString("yyyy/M/d", System.Globalization.CultureInfo.InvariantCulture); } catch { }
-                project.ChangeLogs.Add(new LineupChangeLog {
+                try { if (!string.IsNullOrEmpty(exportedProj.AssemblyFile) && File.Exists(exportedProj.AssemblyFile)) mDate = File.GetLastWriteTime(exportedProj.AssemblyFile).ToString("yyyy/M/d", System.Globalization.CultureInfo.InvariantCulture); } catch { }
+                exportedProj.ChangeLogs.Add(new LineupChangeLog {
                     Date = today,
                     Version = ver,
                     ModelDate = mDate,
                     Content = !string.IsNullOrWhiteSpace(effective.VersionNote)
                         ? effective.VersionNote.Trim()
-                        : ((project.CadPages != null && project.CadPages.Count > 0) ? "导出 LineUP第二版_BOM 及 LineUP第三版_CAD（共 " + project.CadPages.Count + " 页位置图）" : "导出 LineUP第二版_BOM"),
+                        : ((exportedProj.CadPages != null && exportedProj.CadPages.Count > 0) ? "导出 LineUP第二版_BOM 及 LineUP第三版_CAD（共 " + exportedProj.CadPages.Count + " 页位置图）" : "导出 LineUP第二版_BOM"),
                     Notes = "由天工工具箱自动导出",
-                    Designer = project.Designer ?? "",
-                    Editor = project.Editor ?? ""
+                    Designer = exportedProj.Designer ?? "",
+                    Editor = exportedProj.Editor ?? ""
                 });
             }
-            project.LatestExported = LineupRevision.CaptureSnapshot(project, ver);
-            if (project.Baseline == null || project.Baseline.Records == null || project.Baseline.Records.Count == 0) {
-                project.Baseline = project.LatestExported.Copy();
+            exportedProj.LatestExported = LineupRevision.CaptureSnapshot(exportedProj, ver);
+            if (exportedProj.Baseline == null || exportedProj.Baseline.Records == null || exportedProj.Baseline.Records.Count == 0) {
+                exportedProj.Baseline = exportedProj.LatestExported.Copy();
             }
+            project = exportedProj;
             try { if (!string.IsNullOrEmpty(store)) project.Save(store); } catch { }
             if (exportPanel != null) exportPanel.RefreshFromProject();
             return sum;
@@ -1796,7 +1873,9 @@ namespace TianGongCadSuite {
             foreach (var source in next.Records.Where(r => ids.Contains(r.Id)).ToArray()) {
                 var r = LineupTableData.Copy(source);
                 r.Id = Guid.NewGuid().ToString("N");
+                // 同步清空层级外键（ValveId/IslandId/CylinderId/Position），避免复制出的气缸/磁开隐性挂到旧上级导致改号劫持或重复号
                 r.Number = ""; r.Address = ""; r.ReferenceKey = ""; r.SourceFile = ""; r.InstancePath = new string[0];
+                r.ValveId = ""; r.IslandId = ""; r.CylinderId = ""; r.Position = "";
                 if (BomCategories.Contains(r.Category) && r.Category != "气缸传感器")
                     r.Number = LineupNumbering.Next(next, r.Category);
                 next.Records.Add(r);
@@ -1819,50 +1898,112 @@ namespace TianGongCadSuite {
         }
 
         internal void FillDown() {
-            var cells = grid.SelectedCells.Cast<DataGridViewCell>().Where(c => !c.ReadOnly).ToArray();
+            var cells = grid.SelectedCells.Cast<DataGridViewCell>().Where(c => c.RowIndex >= 0 && !c.ReadOnly).ToArray();
             if (cells.Length < 2) throw new InvalidOperationException("请先在同一列选中多行单元格，再向下填充。");
             if (cells.Any(c => c.ColumnIndex == 1 || c.ColumnIndex == 2))
                 throw new InvalidOperationException("向下填充不包含编号和地址，请只选需要共用的列。");
-            var before = Snapshot();
+            // 先快照全部目标 DataRow 与待写入值，再批量回写底层 DataRow，防止排序/筛选态下边写边重排导致写错行
+            var ops = new List<Tuple<DataRow, string, object, int>>();
             foreach (var group in cells.GroupBy(c => c.ColumnIndex)) {
                 var ordered = group.OrderBy(c => c.RowIndex).ToArray();
-                if (group.Key == 5 || group.Key == 6 || group.Key == 10) modelFieldEdited = true;
-                foreach (var cell in ordered.Skip(1)) cell.Value = ordered[0].Value;
+                if (ordered.Length < 2) continue;
+                object srcVal = ordered[0].Value;
+                string colName = ordered[0].OwningColumn.DataPropertyName;
+                if (string.IsNullOrEmpty(colName)) continue;
+                foreach (var cell in ordered.Skip(1)) {
+                    var drv = grid.Rows[cell.RowIndex].DataBoundItem as DataRowView;
+                    if (drv != null) ops.Add(Tuple.Create(drv.Row, colName, srcVal ?? (object)"", group.Key));
+                }
+            }
+            if (ops.Count == 0) return;
+            var before = Snapshot();
+            loading = true;
+            try {
+                foreach (var op in ops) {
+                    if (op.Item4 == 5 || op.Item4 == 6 || op.Item4 == 10) modelFieldEdited = true;
+                    op.Item1[op.Item2] = op.Item3;
+                }
+            } finally {
+                loading = false;
             }
             dirty = true;
-            try { SaveDraft(); undo.Push(before); }
-            catch { project = before; Reload(null); dirty = false; throw; }
+            pneumaticDirty = true;
+            try {
+                // 使用 SaveDraft(false) 仅校验文件未另存，不再强制要求 CAD 当前激活此装配；先压栈再刷新撤销按钮状态
+                SaveDraft(false);
+                undo.Push(before);
+                if (btnUndoFooter != null) btnUndoFooter.Enabled = undo.Count > 0;
+            } catch {
+                project = before;
+                Reload(null);
+                dirty = false;
+                throw;
+            }
         }
 
         internal void PasteCells(string text) {
             if (grid.CurrentCell == null) throw new InvalidOperationException("先点击要粘贴的起始单元格。");
             var block = LineupTableData.ReadDelimited(text, '\t');
-            int top = grid.CurrentCell.RowIndex;
             if (block.Count == 0) return;
             var cols = grid.Columns.Cast<DataGridViewColumn>().Where(c => c.Visible).OrderBy(c => c.DisplayIndex).ToList();
-            int start = cols.IndexOf(grid.CurrentCell.OwningColumn);
             Func<DataGridViewColumn, bool> business = c => c.Index >= 1 && c.Index <= 11;
             var targets = grid.SelectedCells.Cast<DataGridViewCell>().Where(c => c.RowIndex >= 0 && business(c.OwningColumn)).ToList();
             bool fill = block.Count == 1 && block[0].Length == 1 && targets.Count > 1;
+
+            // 多格选区矩形粘贴时以选区左上角（最小 RowIndex、最小可视列序）为起点，兼容从右下向左上拖选
+            int top = grid.CurrentCell.RowIndex;
+            int start = cols.IndexOf(grid.CurrentCell.OwningColumn);
+            if (!fill && targets.Count > 1) {
+                top = targets.Min(c => c.RowIndex);
+                start = targets.Min(c => cols.IndexOf(c.OwningColumn));
+            }
             if (!fill && (top + block.Count > grid.Rows.Count || start < 0 || block.Any(r => start + r.Length > cols.Count || cols.Skip(start).Take(r.Length).Any(c => !business(c)))))
                 throw new InvalidOperationException("粘贴区域超出已有单元格。新增整表请点「+ 添加器件 ▾ → 从剪贴板粘贴整张清单」。");
-            var before = Snapshot();
+
+            // 预收集底层 DataRow 写入计划，彻底规避 DefaultView 在筛选/排序状态下首行改动后立即移位或隐藏引发的错写与越界
+            var ops = new List<Tuple<DataRow, string, string, int>>();
             if (fill) {
                 foreach (var cell in targets) {
-                    if (cell.ColumnIndex == 5 || cell.ColumnIndex == 6 || cell.ColumnIndex == 10) modelFieldEdited = true;
-                    cell.Value = block[0][0];
+                    var drv = grid.Rows[cell.RowIndex].DataBoundItem as DataRowView;
+                    if (drv == null) continue;
+                    string colName = cell.OwningColumn.DataPropertyName;
+                    if (!string.IsNullOrEmpty(colName)) ops.Add(Tuple.Create(drv.Row, colName, block[0][0], cell.ColumnIndex));
                 }
             } else {
-                for (int y = 0; y < block.Count; y++)
+                for (int y = 0; y < block.Count; y++) {
+                    var drv = grid.Rows[top + y].DataBoundItem as DataRowView;
+                    if (drv == null) continue;
                     for (int x = 0; x < block[y].Length; x++) {
-                        int colIdx = cols[start + x].Index;
-                        if (colIdx == 5 || colIdx == 6 || colIdx == 10) modelFieldEdited = true;
-                        grid.Rows[top + y].Cells[colIdx].Value = block[y][x];
+                        var col = cols[start + x];
+                        string colName = col.DataPropertyName;
+                        if (!string.IsNullOrEmpty(colName)) ops.Add(Tuple.Create(drv.Row, colName, block[y][x], col.Index));
                     }
+                }
+            }
+            if (ops.Count == 0) return;
+
+            var before = Snapshot();
+            loading = true;
+            try {
+                foreach (var op in ops) {
+                    if (op.Item4 == 5 || op.Item4 == 6 || op.Item4 == 10) modelFieldEdited = true;
+                    op.Item1[op.Item2] = op.Item3;
+                }
+            } finally {
+                loading = false;
             }
             dirty = true;
-            try { SaveDraft(); undo.Push(before); }
-            catch { project = before; Reload(null); dirty = false; throw; }
+            pneumaticDirty = true;
+            try {
+                SaveDraft(false);
+                undo.Push(before);
+                if (btnUndoFooter != null) btnUndoFooter.Enabled = undo.Count > 0;
+            } catch {
+                project = before;
+                Reload(null);
+                dirty = false;
+                throw;
+            }
         }
 
         internal void BindAndNext() {
@@ -1879,10 +2020,14 @@ namespace TianGongCadSuite {
             r.ReferenceKey = binding.ReferenceKey;
             r.SourceFile = binding.SourceFile;
             r.InstancePath = binding.InstancePath;
-            var visible = grid.Rows.Cast<DataGridViewRow>().Select(row => Convert.ToString(((DataRowView)row.DataBoundItem)["Id"])).ToList();
+            var visible = grid.Rows.Cast<DataGridViewRow>()
+                .Where(row => row.DataBoundItem != null)
+                .Select(row => Convert.ToString(((DataRowView)row.DataBoundItem)["Id"])).ToList();
+            if (visible.Count == 0) visible = next.Records.Select(row => row.Id).ToList();
             int index = visible.IndexOf(id);
-            string following = index + 1 < visible.Count ? visible[index + 1] : id;
-            Commit(next, following, index + 1 < visible.Count ? "已绑定 " + r.Number + "，已移至下一行" : "已绑定 " + r.Number + "；已到最后一行");
+            string following = (index >= 0 && index + 1 < visible.Count) ? visible[index + 1] : id;
+            if (pickingMode) pickingId = following;
+            Commit(next, following, (index >= 0 && index + 1 < visible.Count) ? "已绑定 " + r.Number + "，已移至下一行" : "已绑定 " + r.Number + "；已到最后一行");
             assembly.SelectSet.RemoveAll();
         }
 
@@ -1899,6 +2044,7 @@ namespace TianGongCadSuite {
         }
 
         internal void Undo() {
+            if (saver != null) saver.Stop();
             StopContinuous();
             if (undo.Count == 0) return;
             Ensure();

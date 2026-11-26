@@ -332,8 +332,17 @@ namespace TianGongCadSuite {
                         foreach (var m in media) WriteBytesEntry(zip, m.ZipPath, m.Bytes);
                     }
                 }
-                if (File.Exists(fullOut)) File.Delete(fullOut);
-                File.Move(tmp, fullOut);
+                // 原子替换目标文件，避免先删后移在杀软/DLP 拦截 tmp 时导致原有 .xlsx 永久丢失
+                try {
+                    if (File.Exists(fullOut)) File.Replace(tmp, fullOut, null);
+                    else File.Move(tmp, fullOut);
+                } catch (IOException ex) {
+                    int hr = ex.HResult & 0xFFFF;
+                    if (hr == 32 || hr == 33) {
+                        throw new IOException("「" + Path.GetFileName(fullOut) + "」正被别的程序（多半是 Excel / WPS）打开着，无法覆盖写入。请先关闭它或换个文件名导出。", ex);
+                    }
+                    throw;
+                }
             } finally {
                 if (File.Exists(tmp)) try { File.Delete(tmp); } catch { }
             }
@@ -1050,7 +1059,10 @@ namespace TianGongCadSuite {
 
         static string FormatTagSuffix(string tag) {
             if (string.IsNullOrWhiteSpace(tag)) return "";
-            return " [" + tag.Trim().Replace("\"", "") + "]";
+            // 清洗 XML 非法控制字符与换行/双引号，防止拼接进 Excel 公式字符串字面量时破坏 sheet4.xml
+            string clean = SanitizeXml(tag).Replace("\r", " ").Replace("\n", " ").Replace("\"", "").Trim();
+            if (clean.Length == 0) return "";
+            return " [" + clean + "]";
         }
 
         static void WriteLeftCalloutCells(StringBuilder sb, int r, LineupCadCallout co, SstBuilder sst) {
@@ -1545,7 +1557,7 @@ namespace TianGongCadSuite {
         }
 
         static string CellFormulaStr(string cellRef, string formula, string cachedValue, int style) {
-            return "<c r=\"" + cellRef + "\" s=\"" + style + "\" t=\"str\"><f>" + Esc(formula) + "</f><v>" + Esc(SanitizeXml(cachedValue ?? "")) + "</v></c>";
+            return "<c r=\"" + cellRef + "\" s=\"" + style + "\" t=\"str\"><f>" + Esc(SanitizeXml(formula ?? "")) + "</f><v>" + Esc(SanitizeXml(cachedValue ?? "")) + "</v></c>";
         }
 
         public static string ColName(int col1Based) {
@@ -1590,13 +1602,7 @@ namespace TianGongCadSuite {
         }
 
         static string SanitizeXml(string s) {
-            if (string.IsNullOrEmpty(s)) return "";
-            var sb = new StringBuilder(s.Length);
-            for (int i = 0; i < s.Length; i++) {
-                char ch = s[i];
-                if (ch == 0x9 || ch == 0xA || ch == 0xD || (ch >= 0x20 && ch <= 0xD7FF) || (ch >= 0xE000 && ch <= 0xFFFD)) sb.Append(ch);
-            }
-            return sb.ToString();
+            return LineupXmlSanitizer.Clean(s);
         }
 
         static void WriteTextEntry(ZipArchive zip, string path, string text) {

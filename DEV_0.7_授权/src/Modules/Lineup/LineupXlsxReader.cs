@@ -59,6 +59,18 @@ namespace TianGongCadSuite {
             }
         }
 
+        // 区分「OpenXML 解析成功但 BOM 业务校验失败（如重复编号、空清单）」与「ZIP 容器损坏/非标准压缩包」：
+        // InvalidDataException 为 sealed 类，故用内部包装异常在 Read() 中还原并直接抛出，避免把非标准 ZIP 的 COM 兜底通道拦死。
+        sealed class BomValidationException : Exception {
+            public readonly InvalidDataException Original;
+            public BomValidationException(InvalidDataException original)
+                : base(original != null ? original.Message : "", original) {
+                Original = original ?? new InvalidDataException();
+            }
+            public BomValidationException(string message)
+                : this(new InvalidDataException(message)) { }
+        }
+
         // 默认开启 Excel / WPS 官方 COM 只读通道；纯单元测试可临时关闭以验证无 Office 时的兜底提示
         internal static bool EnableComFallback = true;
 
@@ -74,12 +86,14 @@ namespace TianGongCadSuite {
             if (!isTsd && isZip && ext != ".xls") {
                 try {
                     return ReadOpenXml(path, allowDuplicates);
-                } catch (InvalidDataException) {
-                    throw;
+                } catch (BomValidationException ex) {
+                    // 工作簿已成功解包，属于真实业务校验错误（如编号重复/无 BOM 数据行），直接向用户报错不再误切 COM
+                    throw ex.Original;
                 } catch (InvalidOperationException) {
                     throw;
                 } catch {
-                    // 非标准压缩包或文件被独占锁定时，改走本机 Excel / WPS 只读通道兜底
+                    // 非标准压缩包（ZipArchive 抛 InvalidDataException）或文件被独占锁定时，若已禁用 COM 兜底则抛出原错，否则走本机 Excel / WPS 只读通道兜底
+                    if (!EnableComFallback) throw;
                 }
             }
 
@@ -119,14 +133,15 @@ namespace TianGongCadSuite {
 
             using (var ms = new MemoryStream(bytes))
             using (var zip = new ZipArchive(ms, ZipArchiveMode.Read)) {
-                var sst = ReadSharedStrings(zip);
+                HashSet<int> struckSst;
+                var sst = ReadSharedStrings(zip, out struckSst);
                 var strikeStyles = ReadStrikethroughStyleIndices(zip);
                 var sheets = ReadSheetTargets(zip);
-                if (sheets.Count == 0) throw new InvalidDataException("工作簿中没有找到任何工作表。");
+                if (sheets.Count == 0) throw new BomValidationException("工作簿中没有找到任何工作表。");
 
                 var names = sheets.Select(s => s.Key).ToList();
                 int bomIdx = PickBomSheetIndex(names);
-                var result = ParseBomSheet(zip, sheets[bomIdx].Value, sst, strikeStyles, allowDuplicates);
+                var result = ParseBomSheet(zip, sheets[bomIdx].Value, sst, struckSst, strikeStyles, allowDuplicates);
 
                 int cadIdx = PickCadSheetIndex(names);
                 if (cadIdx >= 0) ReadCadMetadata(zip, sheets[cadIdx].Value, sst, result);
@@ -188,33 +203,52 @@ namespace TianGongCadSuite {
             return false;
         }
 
-        static LineupImport ParseBomSheet(ZipArchive zip, string entryPath, List<string> sst, HashSet<int> strikeStyles, bool allowDuplicates) {
+        internal static bool IsSectionTitle(string text) {
+            if (string.IsNullOrWhiteSpace(text)) return false;
+            string s = text.Trim();
+            return Array.FindIndex(SectionPrefixes, p => s.StartsWith(p, StringComparison.OrdinalIgnoreCase)) >= 0;
+        }
+
+        static LineupImport ParseBomSheet(
+            ZipArchive zip,
+            string entryPath,
+            List<string> sst,
+            HashSet<int> struckSst,
+            HashSet<int> strikeStyles,
+            bool allowDuplicates) {
             var doc = LoadXml(zip, entryPath);
             if (doc == null) throw new InvalidDataException("无法读取工作表 XML：" + entryPath);
 
             var nsm = MakeNsm(doc);
-            // 1. 读全部单元格到稀疏表 (row -> col -> value)，并识别按公司规范带删除线的“取消元件”行
+            // 1. 读全部单元格到稀疏表 (row -> col -> value)，并按列记录带删除线的单元格，
+            //    等 TryMapBomHeaders 确定真实编号列/描述列后再判定取消行，避免硬编码 A/D 列在列偏移时漏判。
             var grid = new SortedDictionary<int, Dictionary<int, string>>();
-            var struckRows = new HashSet<int>();
+            var struckColsByRow = new Dictionary<int, HashSet<int>>();
             foreach (XmlElement rowEl in doc.SelectNodes("//m:sheetData/m:row", nsm)) {
                 int r;
                 if (!int.TryParse(rowEl.GetAttribute("r"), out r)) continue;
                 var rowMap = new Dictionary<int, string>();
-                bool rowStruck = false;
+                HashSet<int> rowStruckCols = null;
                 foreach (XmlElement cEl in rowEl.SelectNodes("m:c", nsm)) {
                     string cref = cEl.GetAttribute("r");
                     int col = ParseColIndex(cref);
                     if (col < 0 || col >= 15) continue;
-                    string val = ReadCellValue(cEl, sst, nsm);
+                    bool cellRunStruck;
+                    string val = ReadCellValue(cEl, sst, struckSst, nsm, out cellRunStruck);
                     if (!string.IsNullOrEmpty(val)) {
                         rowMap[col] = val;
-                        if ((col == 0 || col == 3) && strikeStyles != null && strikeStyles.Count > 0) {
+                        bool cellStyleStruck = false;
+                        if (strikeStyles != null && strikeStyles.Count > 0) {
                             int sIdx;
-                            if (int.TryParse(cEl.GetAttribute("s"), out sIdx) && strikeStyles.Contains(sIdx)) rowStruck = true;
+                            if (int.TryParse(cEl.GetAttribute("s"), out sIdx) && strikeStyles.Contains(sIdx)) cellStyleStruck = true;
+                        }
+                        if (cellStyleStruck || cellRunStruck) {
+                            if (rowStruckCols == null) rowStruckCols = new HashSet<int>();
+                            rowStruckCols.Add(col);
                         }
                     }
                 }
-                if (rowStruck) struckRows.Add(r);
+                if (rowStruckCols != null) struckColsByRow[r] = rowStruckCols;
                 if (rowMap.Count > 0) grid[r] = rowMap;
             }
 
@@ -229,7 +263,12 @@ namespace TianGongCadSuite {
                 }
             }
 
-            return ParseBomGrid(grid, merges, allowDuplicates, struckRows);
+            // 仅把 ParseBomGrid 的业务校验异常包装为 BomValidationException，避免 LoadXml 失败（坏包）被误判为业务错而阻断 COM 兜底
+            try {
+                return ParseBomGrid(grid, merges, allowDuplicates, null, struckColsByRow);
+            } catch (InvalidDataException ex) {
+                throw new BomValidationException(ex);
+            }
         }
 
         // OpenXML 与 Excel/WPS COM 两条通道共用的 BOM 稀疏网格解析器
@@ -237,7 +276,8 @@ namespace TianGongCadSuite {
             SortedDictionary<int, Dictionary<int, string>> grid,
             IEnumerable<LineupCellMerge> merges,
             bool allowDuplicates,
-            HashSet<int> struckRows = null) {
+            HashSet<int> struckRows = null,
+            Dictionary<int, HashSet<int>> struckColsByRow = null) {
             if (grid == null) grid = new SortedDictionary<int, Dictionary<int, string>>();
 
             // 1. 展开纵向合并单元格（安装方式列阀岛/汇流排、备注列模块名等）
@@ -275,8 +315,15 @@ namespace TianGongCadSuite {
                     }
                 }
 
-                string col0 = getCol(0);
-                int secIdx = Array.FindIndex(SectionPrefixes, p => col0.StartsWith(p, StringComparison.OrdinalIgnoreCase));
+                // 分区标题兼容首列留白偏移：优先取已映射编号列，其次取本行首个非空格
+                string leadText = (mapping != null && mapping[0] >= 0) ? getCol(mapping[0]) : getCol(0);
+                if (leadText.Length == 0) {
+                    foreach (var cell in rowMap.OrderBy(c => c.Key)) {
+                        string tv = (cell.Value ?? "").Trim();
+                        if (tv.Length > 0) { leadText = tv; break; }
+                    }
+                }
+                int secIdx = Array.FindIndex(SectionPrefixes, p => leadText.StartsWith(p, StringComparison.OrdinalIgnoreCase));
                 if (secIdx >= 0) {
                     category = LineupTableData.Categories[secIdx];
                     var secCells = new string[11];
@@ -288,6 +335,13 @@ namespace TianGongCadSuite {
                 if (mapping == null || string.IsNullOrEmpty(category)) continue;
                 // 跳过按公司规范加了删除线的“取消元件”历史留档行，避免二次导入时复活已取消器件
                 if (struckRows != null && struckRows.Contains(kv.Key)) continue;
+                if (struckColsByRow != null) {
+                    HashSet<int> sc;
+                    if (struckColsByRow.TryGetValue(kv.Key, out sc)
+                        && ((mapping[0] >= 0 && sc.Contains(mapping[0])) || (mapping[3] >= 0 && sc.Contains(mapping[3])))) {
+                        continue;
+                    }
+                }
 
                 var vals = new string[11];
                 for (int i = 0; i < 11; i++) vals[i] = getCol(mapping[i]);
@@ -310,37 +364,16 @@ namespace TianGongCadSuite {
         }
 
         // 将单行单元格映射为 LineupTableData.Headers（0..10）对应的列下标；找不到「编号」与「型号」返回 null
-        static int[] TryMapBomHeaders(Dictionary<int, string> rowMap) {
+        internal static int[] TryMapBomHeaders(Dictionary<int, string> rowMap) {
             int[] map = new int[LineupTableData.Headers.Length];
             for (int i = 0; i < map.Length; i++) map[i] = -1;
 
             foreach (var cell in rowMap.OrderBy(kv => kv.Key)) {
-                int fieldIdx = MatchHeaderFieldIndex(cell.Value);
+                int fieldIdx = LineupTableData.MatchBomHeaderField(cell.Value);
                 if (fieldIdx >= 0 && map[fieldIdx] < 0) map[fieldIdx] = cell.Key;
             }
             if (map[0] < 0 || map[4] < 0) return null;
             return map;
-        }
-
-        static int MatchHeaderFieldIndex(string raw) {
-            if (string.IsNullOrWhiteSpace(raw)) return -1;
-            string s = raw.Replace("\r\n", "\n").Trim();
-            int nl = s.IndexOf('\n');
-            string first = (nl >= 0 ? s.Substring(0, nl) : s).Trim();
-            string compact = Regex.Replace(first, @"\s+", "");
-
-            if (compact == "编号" || compact.StartsWith("编号") || compact.Equals("SK编号", StringComparison.OrdinalIgnoreCase) || compact.StartsWith("SK编号", StringComparison.OrdinalIgnoreCase)) return 0;
-            if (compact == "地址" || compact.StartsWith("地址")) return 1;
-            if (compact == "功能参数" || compact == "规格参数" || compact.StartsWith("功能参数")) return 2;
-            if (compact == "描述" || compact.StartsWith("描述")) return 3;
-            if (compact == "型号" || compact.StartsWith("型号")) return 4;
-            if (compact == "品牌" || compact.StartsWith("品牌")) return 5;
-            if (compact == "原位" || compact.StartsWith("原位")) return 6;
-            if (compact == "安装方式" || compact.StartsWith("安装方式")) return 7;
-            if (compact == "机构名称" || compact == "机构") return 8;
-            if (compact == "传感器接口类型" || compact == "接口类型" || compact.StartsWith("传感器接口")) return 9;
-            if (compact == "备注" || compact.StartsWith("备注")) return 10;
-            return -1;
         }
 
         static void ReadCadMetadata(ZipArchive zip, string entryPath, List<string> sst, LineupImport result) {
@@ -441,6 +474,12 @@ namespace TianGongCadSuite {
                     string v; return (c >= 0 && cells.TryGetValue(c, out v)) ? CleanLogCell(v) : "";
                 };
                 string c0 = get(0);
+                if (c0.Length == 0) {
+                    foreach (var cell in cells.OrderBy(c => c.Key)) {
+                        string tv = CleanLogCell(cell.Value);
+                        if (tv.Length > 0) { c0 = tv; break; }
+                    }
+                }
                 if (c0.StartsWith("备注", StringComparison.Ordinal)) break;
 
                 string date = LineupRevision.NormalizeDateString(get(dateCol));
@@ -473,6 +512,13 @@ namespace TianGongCadSuite {
             return s;
         }
 
+        static bool IsXmlBoolTrue(string val, bool defaultWhenEmpty) {
+            if (string.IsNullOrWhiteSpace(val)) return defaultWhenEmpty;
+            string v = val.Trim();
+            if (v == "0" || v.Equals("false", StringComparison.OrdinalIgnoreCase)) return false;
+            return true;
+        }
+
         static HashSet<int> ReadStrikethroughStyleIndices(ZipArchive zip) {
             var res = new HashSet<int>();
             try {
@@ -483,7 +529,9 @@ namespace TianGongCadSuite {
                 var fontNodes = doc.SelectNodes("//m:fonts/m:font", nsm);
                 if (fontNodes != null) {
                     for (int i = 0; i < fontNodes.Count; i++) {
-                        if (fontNodes[i].SelectSingleNode("m:strike", nsm) != null) strikeFonts.Add(i);
+                        // ECMA-376 §18.4.10：<strike val="0"/> 或 <strike val="false"/> 表示显式关闭删除线，不能误判为删除线
+                        var strikeEl = fontNodes[i].SelectSingleNode("m:strike", nsm) as XmlElement;
+                        if (strikeEl != null && IsXmlBoolTrue(strikeEl.GetAttribute("val"), true)) strikeFonts.Add(i);
                     }
                 }
                 if (strikeFonts.Count == 0) return res;
@@ -491,8 +539,11 @@ namespace TianGongCadSuite {
                 if (xfNodes != null) {
                     for (int i = 0; i < xfNodes.Count; i++) {
                         var el = xfNodes[i] as XmlElement;
+                        if (el == null) continue;
+                        string applyFont = el.GetAttribute("applyFont");
+                        if (!string.IsNullOrEmpty(applyFont) && !IsXmlBoolTrue(applyFont, true)) continue;
                         int fid;
-                        if (el != null && int.TryParse(el.GetAttribute("fontId"), out fid) && strikeFonts.Contains(fid)) {
+                        if (int.TryParse(el.GetAttribute("fontId"), out fid) && strikeFonts.Contains(fid)) {
                             res.Add(i);
                         }
                     }
@@ -501,17 +552,61 @@ namespace TianGongCadSuite {
             return res;
         }
 
-        static List<string> ReadSharedStrings(ZipArchive zip) {
+        static List<string> ReadSharedStrings(ZipArchive zip, out HashSet<int> struckIndices) {
             var list = new List<string>();
+            struckIndices = new HashSet<int>();
             var doc = LoadXml(zip, "xl/sharedStrings.xml");
             if (doc == null) return list;
             var nsm = MakeNsm(doc);
+            int idx = 0;
             foreach (XmlElement si in doc.SelectNodes("//m:si", nsm)) {
                 var sb = new StringBuilder();
-                foreach (XmlNode t in si.SelectNodes(".//m:t", nsm)) sb.Append(t.InnerText);
+                // 仅读取 m:t 与富文本 m:r/m:t，严格排除东亚输入法 <rPh><t> 拼音/注音假名节点，避免把拼音拼进正文
+                var directT = si.SelectNodes("m:t", nsm);
+                if (directT != null && directT.Count > 0) {
+                    foreach (XmlNode t in directT) sb.Append(t.InnerText);
+                } else {
+                    var runs = si.SelectNodes("m:r", nsm);
+                    bool anyTextRun = false;
+                    bool allTextRunsStruck = true;
+                    if (runs != null) {
+                        foreach (XmlElement r in runs) {
+                            var rt = r.SelectSingleNode("m:t", nsm);
+                            string rtxt = rt != null ? (rt.InnerText ?? "") : "";
+                            sb.Append(rtxt);
+                            if (!string.IsNullOrWhiteSpace(rtxt)) {
+                                anyTextRun = true;
+                                var strikeEl = r.SelectSingleNode("m:rPr/m:strike", nsm) as XmlElement;
+                                if (strikeEl == null || !IsXmlBoolTrue(strikeEl.GetAttribute("val"), true)) allTextRunsStruck = false;
+                            }
+                        }
+                    }
+                    if (anyTextRun && allTextRunsStruck) struckIndices.Add(idx);
+                }
                 list.Add(sb.ToString());
+                idx++;
             }
             return list;
+        }
+
+        static string NormalizeZipPath(string baseDir, string target) {
+            string p = (target ?? "").Replace('\\', '/').Trim();
+            if (p.IndexOf('%') >= 0) {
+                try { p = Uri.UnescapeDataString(p); } catch { }
+            }
+            bool rooted = p.StartsWith("/", StringComparison.Ordinal);
+            p = p.TrimStart('/');
+            string combined = rooted ? p : (string.IsNullOrEmpty(baseDir) ? p : baseDir.TrimEnd('/') + "/" + p);
+            var stack = new List<string>();
+            foreach (var seg in combined.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries)) {
+                if (seg == ".") continue;
+                if (seg == "..") {
+                    if (stack.Count > 0) stack.RemoveAt(stack.Count - 1);
+                    continue;
+                }
+                stack.Add(seg);
+            }
+            return string.Join("/", stack.ToArray());
         }
 
         static List<KeyValuePair<string, string>> ReadSheetTargets(ZipArchive zip) {
@@ -533,18 +628,44 @@ namespace TianGongCadSuite {
                 string rid = sh.GetAttribute("id", NsRel);
                 string target;
                 if (string.IsNullOrEmpty(rid) || !relMap.TryGetValue(rid, out target)) continue;
-                target = target.TrimStart('/');
-                if (!target.StartsWith("xl/", StringComparison.OrdinalIgnoreCase)) target = "xl/" + target;
-                res.Add(new KeyValuePair<string, string>(name, target));
+                string norm = NormalizeZipPath("xl", target);
+                res.Add(new KeyValuePair<string, string>(name, norm));
             }
             return res;
         }
 
         static string ReadCellValue(XmlElement cEl, List<string> sst, XmlNamespaceManager nsm) {
+            bool ignored;
+            return ReadCellValue(cEl, sst, null, nsm, out ignored);
+        }
+
+        static string ReadCellValue(XmlElement cEl, List<string> sst, HashSet<int> struckSst, XmlNamespaceManager nsm, out bool runStruck) {
+            runStruck = false;
             string t = cEl.GetAttribute("t");
+            // 公式错误值（#N/A、#REF!、#VALUE! 等）与 COM 通道保持一致过滤为空，避免污染编号/型号
+            if (t == "e") return "";
             if (t == "inlineStr") {
                 var sb = new StringBuilder();
-                foreach (XmlNode tn in cEl.SelectNodes(".//m:t", nsm)) sb.Append(tn.InnerText);
+                var directT = cEl.SelectNodes("m:is/m:t", nsm);
+                if (directT != null && directT.Count > 0) {
+                    foreach (XmlNode tn in directT) sb.Append(tn.InnerText);
+                } else {
+                    var runs = cEl.SelectNodes("m:is/m:r", nsm);
+                    bool anyText = false, allStruck = true;
+                    if (runs != null) {
+                        foreach (XmlElement r in runs) {
+                            var rt = r.SelectSingleNode("m:t", nsm);
+                            string rtxt = rt != null ? (rt.InnerText ?? "") : "";
+                            sb.Append(rtxt);
+                            if (!string.IsNullOrWhiteSpace(rtxt)) {
+                                anyText = true;
+                                var strikeEl = r.SelectSingleNode("m:rPr/m:strike", nsm) as XmlElement;
+                                if (strikeEl == null || !IsXmlBoolTrue(strikeEl.GetAttribute("val"), true)) allStruck = false;
+                            }
+                        }
+                    }
+                    if (anyText && allStruck) runStruck = true;
+                }
                 return sb.ToString();
             }
             var vEl = cEl.SelectSingleNode("m:v", nsm);
@@ -552,8 +673,14 @@ namespace TianGongCadSuite {
             string raw = vEl.InnerText ?? "";
             if (t == "s") {
                 int idx;
-                if (int.TryParse(raw, out idx) && idx >= 0 && idx < sst.Count) return sst[idx];
+                if (int.TryParse(raw, out idx) && idx >= 0 && idx < sst.Count) {
+                    if (struckSst != null && struckSst.Contains(idx)) runStruck = true;
+                    return sst[idx];
+                }
                 return "";
+            }
+            if (t == "b") {
+                return (raw == "1" || raw.Equals("true", StringComparison.OrdinalIgnoreCase)) ? "TRUE" : "FALSE";
             }
             return raw;
         }

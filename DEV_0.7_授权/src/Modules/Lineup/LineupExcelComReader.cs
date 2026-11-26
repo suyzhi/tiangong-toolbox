@@ -22,6 +22,52 @@ namespace TianGongCadSuite {
         const int RpcEServerCallRetryLater = unchecked((int)0x8001010A);
         const int MsoAutomationSecurityForceDisable = 3;
 
+        [DllImport("user32.dll")]
+        static extern uint GetWindowThreadProcessId(IntPtr hWnd, out int lpdwProcessId);
+
+        static HashSet<int> SnapshotProcessIds(string processName) {
+            var ids = new HashSet<int>();
+            if (string.IsNullOrEmpty(processName)) return ids;
+            Process[] procs = null;
+            try {
+                procs = Process.GetProcessesByName(processName);
+                foreach (var p in procs) {
+                    try { ids.Add(p.Id); } catch { }
+                }
+            } catch {
+            } finally {
+                if (procs != null) {
+                    foreach (var p in procs) { try { p.Dispose(); } catch { } }
+                }
+            }
+            return ids;
+        }
+
+        // 通过 app.Hwnd 精确反查该 COM 实例所属进程 PID，绝不靠进程快照差集误杀用户并发启动的其他 Excel
+        static int TryGetAppProcessId(object app) {
+            if (app == null) return 0;
+            try {
+                object hw = GetProp(app, "Hwnd");
+                if (hw == null) return 0;
+                IntPtr hwnd = new IntPtr(Convert.ToInt64(hw));
+                if (hwnd == IntPtr.Zero) return 0;
+                int pid;
+                GetWindowThreadProcessId(hwnd, out pid);
+                return pid > 0 ? pid : 0;
+            } catch {
+                return 0;
+            }
+        }
+
+        static void SafeKillProcess(int pid) {
+            if (pid <= 0) return;
+            try {
+                using (var proc = Process.GetProcessById(pid)) {
+                    if (!proc.HasExited) proc.Kill();
+                }
+            } catch { }
+        }
+
         sealed class ComEngine {
             public readonly string DisplayName;
             public readonly string ProgId;
@@ -197,7 +243,7 @@ namespace TianGongCadSuite {
             if (!worker.Join(timeoutMs)) {
                 int pid = Thread.VolatileRead(ref ownedSpawnedPid[0]);
                 if (pid > 0) {
-                    try { Process.GetProcessById(pid).Kill(); } catch { }
+                    SafeKillProcess(pid);
                     worker.Join(2000);
                 }
                 throw new TimeoutException("打开工作簿超时（可能弹出密码框、激活提示或加密拦截）");
@@ -207,34 +253,37 @@ namespace TianGongCadSuite {
         }
 
         static ComWorkbookSnapshot ExtractSnapshotIsolated(string fullPath, ComEngine engine, Type comType, int[] ownedSpawnedPid) {
-            var beforePids = new HashSet<int>();
-            if (!string.IsNullOrEmpty(engine.ProcessName)) {
-                foreach (var p in Process.GetProcessesByName(engine.ProcessName)) {
-                    try { beforePids.Add(p.Id); } catch { }
-                }
-            }
+            var beforePids = SnapshotProcessIds(engine.ProcessName);
 
             object app = null;
             object workbooks = null;
             object wb = null;
             object sheets = null;
             bool ownServer = false;
+            bool spawnedNewProc = false;
+            int exactPid = 0;
             bool openedByUs = false;
-            object prevAlerts = null;
-            bool alertsChanged = false;
+            object prevAlerts = null, prevEvents = null, prevAutoSec = null, prevAskLinks = null;
+            bool alertsChanged = false, eventsChanged = false, autoSecChanged = false, askLinksChanged = false;
 
             try {
                 app = Activator.CreateInstance(comType);
+                exactPid = TryGetAppProcessId(app);
+                if (exactPid > 0) {
+                    spawnedNewProc = !beforePids.Contains(exactPid);
+                } else {
+                    // 极少数无 Hwnd 的兼容引擎才降级看进程集合是否仅新增 1 个实例（避免多实例歧义）
+                    var afterPids = SnapshotProcessIds(engine.ProcessName);
+                    afterPids.ExceptWith(beforePids);
+                    if (afterPids.Count == 1) {
+                        exactPid = afterPids.First();
+                        spawnedNewProc = true;
+                    }
+                }
+
                 workbooks = GetProp(app, "Workbooks");
                 int initialWbCount = SafeCount(workbooks);
 
-                int spawnedPid = 0;
-                if (!string.IsNullOrEmpty(engine.ProcessName)) {
-                    foreach (var p in Process.GetProcessesByName(engine.ProcessName)) {
-                        try { if (!beforePids.Contains(p.Id)) { spawnedPid = p.Id; break; } } catch { }
-                    }
-                }
-                bool spawnedNewProc = spawnedPid > 0;
                 bool wasVisible = false;
                 try {
                     object vis = GetProp(app, "Visible");
@@ -247,22 +296,20 @@ namespace TianGongCadSuite {
                     ? (initialWbCount == 0 && (spawnedNewProc || !wasVisible))
                     : (initialWbCount == 0);
 
-                if (ownServer && spawnedPid > 0 && ownedSpawnedPid != null) {
-                    Thread.VolatileWrite(ref ownedSpawnedPid[0], spawnedPid);
+                // 只要归我们接管且拿到精确 PID（含预启动的不可见自动化进程），立即向看门狗登记，防止弹窗卡死时泄漏进程
+                if (ownServer && exactPid > 0 && ownedSpawnedPid != null) {
+                    Thread.VolatileWrite(ref ownedSpawnedPid[0], exactPid);
                 }
 
                 if (ownServer) {
                     TrySetProp(app, "Visible", false);
                     TrySetProp(app, "ScreenUpdating", false);
-                    TrySetProp(app, "AskToUpdateLinks", false);
-                    TrySetProp(app, "EnableEvents", false);
-                    TrySetProp(app, "AutomationSecurity", MsoAutomationSecurityForceDisable);
                 }
-                try {
-                    prevAlerts = GetProp(app, "DisplayAlerts");
-                    SetProp(app, "DisplayAlerts", false);
-                    alertsChanged = true;
-                } catch { }
+                // 无论是否复用用户进程，打开外部工作簿前都暂存并禁用宏/事件/链接提示/弹窗，避免 .xlsm Workbook_Open 宏执行或弹窗阻塞
+                try { prevAutoSec = GetProp(app, "AutomationSecurity"); SetProp(app, "AutomationSecurity", MsoAutomationSecurityForceDisable); autoSecChanged = true; } catch { }
+                try { prevEvents = GetProp(app, "EnableEvents"); SetProp(app, "EnableEvents", false); eventsChanged = true; } catch { }
+                try { prevAskLinks = GetProp(app, "AskToUpdateLinks"); SetProp(app, "AskToUpdateLinks", false); askLinksChanged = true; } catch { }
+                try { prevAlerts = GetProp(app, "DisplayAlerts"); SetProp(app, "DisplayAlerts", false); alertsChanged = true; } catch { }
 
                 // 如果复用的进程里用户本来就开着同一个工作簿，直接只读提取且绝不帮用户关闭
                 if (initialWbCount > 0) {
@@ -271,6 +318,10 @@ namespace TianGongCadSuite {
                 if (wb == null) {
                     wb = OpenReadOnlyWithRetry(workbooks, fullPath);
                     openedByUs = true;
+                }
+                // 复用用户窗口时，Open 完毕立刻还原全局开关，把影响窗口压缩到最小（finally 中仍兜底还原）
+                if (!ownServer) {
+                    RestoreAppFlags(app, ref alertsChanged, prevAlerts, ref eventsChanged, prevEvents, ref autoSecChanged, prevAutoSec, ref askLinksChanged, prevAskLinks);
                 }
 
                 sheets = GetProp(wb, "Worksheets");
@@ -336,22 +387,61 @@ namespace TianGongCadSuite {
                 return snap;
             } finally {
                 Release(sheets);
+                bool closeSucceeded = true;
                 if (wb != null) {
                     if (openedByUs) {
-                        try { Call(wb, "Close", false); } catch { }
+                        closeSucceeded = CloseWorkbookWithRetry(wb);
                     }
                     Release(wb);
                 }
-                if (app != null && alertsChanged && !ownServer && prevAlerts != null) {
-                    TrySetProp(app, "DisplayAlerts", prevAlerts);
+                if (app != null && !ownServer) {
+                    RestoreAppFlags(app, ref alertsChanged, prevAlerts, ref eventsChanged, prevEvents, ref autoSecChanged, prevAutoSec, ref askLinksChanged, prevAskLinks);
                 }
                 int remainingWbs = workbooks != null ? SafeCount(workbooks) : 0;
                 Release(workbooks);
-                if (app != null && ownServer && remainingWbs == 0) {
-                    try { Call(app, "Quit"); } catch { }
+                // 若实例归插件接管，即使 wb.Close 因 RPC 繁忙失败导致 remainingWbs 仍为 1，也必须调用 Quit 防止隐藏 EXCEL.EXE 永久泄漏锁文件
+                if (app != null && ownServer && (remainingWbs == 0 || !closeSucceeded)) {
+                    bool quitOk = false;
+                    try { Call(app, "Quit"); quitOk = true; } catch { }
+                    Release(app);
+                    app = null;
+                    if (!quitOk && spawnedNewProc && exactPid > 0) {
+                        SafeKillProcess(exactPid);
+                    }
+                } else {
+                    Release(app);
                 }
-                Release(app);
             }
+        }
+
+        static void RestoreAppFlags(
+            object app,
+            ref bool alertsChanged, object prevAlerts,
+            ref bool eventsChanged, object prevEvents,
+            ref bool autoSecChanged, object prevAutoSec,
+            ref bool askLinksChanged, object prevAskLinks) {
+            if (app == null) return;
+            if (alertsChanged) { if (prevAlerts != null) TrySetProp(app, "DisplayAlerts", prevAlerts); alertsChanged = false; }
+            if (eventsChanged) { if (prevEvents != null) TrySetProp(app, "EnableEvents", prevEvents); eventsChanged = false; }
+            if (autoSecChanged) { if (prevAutoSec != null) TrySetProp(app, "AutomationSecurity", prevAutoSec); autoSecChanged = false; }
+            if (askLinksChanged) { if (prevAskLinks != null) TrySetProp(app, "AskToUpdateLinks", prevAskLinks); askLinksChanged = false; }
+        }
+
+        static bool CloseWorkbookWithRetry(object wb) {
+            for (int attempt = 0; attempt < 3; attempt++) {
+                try {
+                    Call(wb, "Close", false);
+                    return true;
+                } catch (Exception ex) {
+                    var comEx = UnwrapComException(ex);
+                    if (comEx != null && (comEx.ErrorCode == RpcECallRejected || comEx.ErrorCode == RpcEServerCallRetryLater) && attempt < 2) {
+                        Thread.Sleep(150);
+                        continue;
+                    }
+                    return false;
+                }
+            }
+            return false;
         }
 
         static object FindAlreadyOpenWorkbook(object workbooks, int count, string targetFullPath) {
@@ -435,11 +525,19 @@ namespace TianGongCadSuite {
                 object rawVal = GetProp(readRange, "Value2");
                 FillGridFromRangeValue(rawVal, firstRow, firstCol, grid);
 
-                // 仅对存在合并单元格的列、且仅对非空起始单元格查询 MergeArea（通常 < 50 次调用）
-                ReadVerticalMerges(ws, firstRow, maxRow, firstCol, maxCol, grid, merges);
+                // 先在内存中定位表头行与动态列映射，供合并单元格和删除线探测精确过滤目标列（0 次 COM 调用）
+                int headerRow = -1;
+                int[] colMapping = null;
+                foreach (var kv in grid) {
+                    var cand = LineupXlsxReader.TryMapBomHeaders(kv.Value);
+                    if (cand != null) { headerRow = kv.Key; colMapping = cand; break; }
+                }
 
-                // 快速探测 A/D 列是否存在删除线（无删除线时仅 1~2 次 COM 调用，零额外开销）
-                ReadStrikethroughRows(ws, firstRow, maxRow, grid, struckRows);
+                // 仅对可能存在纵向合并的列、且仅对“下一行该列为空”的候选格查询 MergeArea，避开全宽分区标题引发的数千次 COM 往返
+                ReadVerticalMerges(ws, firstRow, maxRow, firstCol, maxCol, headerRow, colMapping, grid, merges);
+
+                // 对真实映射出的编号/描述列使用递归二分区间探测删除线（O(K log N) COM 调用，避免中大型表超时）
+                ReadStrikethroughRows(ws, firstRow, maxRow, headerRow, colMapping, grid, struckRows);
             } finally {
                 Release(readRange);
                 Release(usedCols);
@@ -452,47 +550,72 @@ namespace TianGongCadSuite {
             object ws,
             int firstRow,
             int maxRow,
+            int headerRow,
+            int[] colMapping,
             SortedDictionary<int, Dictionary<int, string>> grid,
             HashSet<int> struckRows) {
             if (struckRows == null || grid == null || grid.Count == 0) return;
-            foreach (int col1 in new[] { 1, 4 }) {
-                int col0 = col1 - 1;
-                string colAddr = ColLetters(col1);
-                bool mayHaveStrike = false;
-                object colRange = null;
-                object colFont = null;
-                try {
-                    colRange = GetIndexed(ws, "Range", colAddr + firstRow + ":" + colAddr + maxRow);
-                    colFont = GetProp(colRange, "Font");
-                    object st = GetProp(colFont, "Strikethrough");
-                    // 整列全无删除线时 Excel/WPS 返回 false；全有返回 true，混合返回 DBNull/null
-                    if (!(st is bool && !(bool)st)) mayHaveStrike = true;
-                } catch {
-                    mayHaveStrike = false;
-                } finally {
-                    Release(colFont);
-                    Release(colRange);
-                }
-                if (!mayHaveStrike) continue;
 
+            var targetCols0 = new List<int>();
+            if (colMapping != null) {
+                if (colMapping[0] >= 0 && colMapping[0] < MaxBomCols) targetCols0.Add(colMapping[0]);
+                if (colMapping[3] >= 0 && colMapping[3] < MaxBomCols && !targetCols0.Contains(colMapping[3])) targetCols0.Add(colMapping[3]);
+            }
+            if (targetCols0.Count == 0) { targetCols0.Add(0); targetCols0.Add(3); }
+
+            foreach (int col0 in targetCols0) {
+                string colAddr = ColLetters(col0 + 1);
+                var nonEmptyRows = new List<int>();
                 foreach (var rowKv in grid) {
-                    if (struckRows.Contains(rowKv.Key)) continue;
+                    if (rowKv.Key <= headerRow || struckRows.Contains(rowKv.Key)) continue;
                     string val;
                     if (!rowKv.Value.TryGetValue(col0, out val) || string.IsNullOrWhiteSpace(val)) continue;
-                    object cell = null;
-                    object fnt = null;
-                    try {
-                        cell = GetIndexed(ws, "Range", colAddr + rowKv.Key);
-                        fnt = GetProp(cell, "Font");
-                        object st = GetProp(fnt, "Strikethrough");
-                        if (st is bool && (bool)st) struckRows.Add(rowKv.Key);
-                    } catch {
-                    } finally {
-                        Release(fnt);
-                        Release(cell);
-                    }
+                    if (LineupXlsxReader.IsSectionTitle(val)) continue;
+                    nonEmptyRows.Add(rowKv.Key);
                 }
+                if (nonEmptyRows.Count == 0) continue;
+                ProbeStrikethroughRange(ws, colAddr, nonEmptyRows, 0, nonEmptyRows.Count - 1, struckRows);
             }
+        }
+
+        // 递归二分探测区间 [lo..hi] 的删除线状态：整段 false 瞬时跳过，整段 true 批量标记，仅混合态继续二分
+        static void ProbeStrikethroughRange(
+            object ws,
+            string colAddr,
+            List<int> rows,
+            int lo,
+            int hi,
+            HashSet<int> struckRows) {
+            if (lo > hi) return;
+            int rStart = rows[lo];
+            int rEnd = rows[hi];
+            string addr = rStart == rEnd ? (colAddr + rStart) : (colAddr + rStart + ":" + colAddr + rEnd);
+            object range = null;
+            object font = null;
+            object st = null;
+            bool ok = false;
+            try {
+                range = GetIndexed(ws, "Range", addr);
+                font = GetProp(range, "Font");
+                st = GetProp(font, "Strikethrough");
+                ok = true;
+            } catch {
+                ok = false;
+            } finally {
+                Release(font);
+                Release(range);
+            }
+            if (!ok) return;
+            if (st is bool) {
+                if ((bool)st) {
+                    for (int i = lo; i <= hi; i++) struckRows.Add(rows[i]);
+                }
+                return;
+            }
+            if (lo == hi) return; // 单格内混合态（局部文字删除线）不按整行取消处理
+            int mid = lo + (hi - lo) / 2;
+            ProbeStrikethroughRange(ws, colAddr, rows, lo, mid, struckRows);
+            ProbeStrikethroughRange(ws, colAddr, rows, mid + 1, hi, struckRows);
         }
 
         static void ReadVerticalMerges(
@@ -501,17 +624,49 @@ namespace TianGongCadSuite {
             int maxRow,
             int firstCol,
             int maxCol,
+            int headerRow,
+            int[] colMapping,
             SortedDictionary<int, Dictionary<int, string>> grid,
             List<LineupCellMerge> merges) {
             var seen = new HashSet<string>(StringComparer.Ordinal);
-            for (int col1 = firstCol; col1 <= maxCol; col1++) {
-                int col0 = col1 - 1;
+
+            // 仅探测可能纵向合并的列（安装方式/机构名称/传感器接口类型/备注），绕开被全宽分区横条污染的 A..G 列
+            var candidateCols0 = new List<int>();
+            if (colMapping != null) {
+                foreach (int fi in new[] { 7, 8, 9, 10 }) {
+                    int c0 = colMapping[fi];
+                    if (c0 >= firstCol - 1 && c0 <= maxCol - 1 && !candidateCols0.Contains(c0)) candidateCols0.Add(c0);
+                }
+            }
+            if (candidateCols0.Count == 0) {
+                for (int col1 = firstCol; col1 <= maxCol; col1++) candidateCols0.Add(col1 - 1);
+            }
+
+            foreach (int col0 in candidateCols0) {
+                int col1 = col0 + 1;
                 string colAddr = ColLetters(col1);
-                // 先整列一次判断是否包含任何合并单元格：无合并则整列跳过
+                // 先在内存中筛选「本行非空，且紧邻下一行存在数据但本列为空」的候选格：
+                // 纵向合并区 (R1..R2, R2>R1) 的 R1+1 行在本列必然为空，无候选格直接 0 次 COM 调用跳过！
+                var candidateRows = new List<int>();
+                foreach (var rowKv in grid) {
+                    int r = rowKv.Key;
+                    if (r <= headerRow || r >= maxRow) continue;
+                    string val;
+                    if (!rowKv.Value.TryGetValue(col0, out val) || string.IsNullOrWhiteSpace(val)) continue;
+                    if (LineupXlsxReader.IsSectionTitle(val)) continue;
+                    Dictionary<int, string> nextRow;
+                    if (!grid.TryGetValue(r + 1, out nextRow)) continue;
+                    string nextVal;
+                    if (nextRow.TryGetValue(col0, out nextVal) && !string.IsNullOrWhiteSpace(nextVal)) continue;
+                    candidateRows.Add(r);
+                }
+                if (candidateRows.Count == 0) continue;
+
+                // 粗筛：整列完全不含任何合并格时跳过
                 bool mayHaveMerges = true;
                 object colRange = null;
                 try {
-                    colRange = GetIndexed(ws, "Range", colAddr + firstRow + ":" + colAddr + maxRow);
+                    colRange = GetIndexed(ws, "Range", colAddr + candidateRows[0] + ":" + colAddr + maxRow);
                     object state = GetProp(colRange, "MergeCells");
                     if (state is bool && !(bool)state) mayHaveMerges = false;
                 } catch {
@@ -521,11 +676,7 @@ namespace TianGongCadSuite {
                 }
                 if (!mayHaveMerges) continue;
 
-                // 合并区域的文本一定在左上角单元格，所以只查 grid 里该列非空的行即可
-                foreach (var rowKv in grid) {
-                    string val;
-                    if (!rowKv.Value.TryGetValue(col0, out val) || string.IsNullOrWhiteSpace(val)) continue;
-                    int r = rowKv.Key;
+                foreach (int r in candidateRows) {
                     object cell = null;
                     object ma = null;
                     object maRows = null;
@@ -542,7 +693,7 @@ namespace TianGongCadSuite {
                         int mc1 = Convert.ToInt32(GetProp(ma, "Column")) - 1;
                         int rc = Convert.ToInt32(GetProp(maRows, "Count"));
                         int cc = Convert.ToInt32(GetProp(maCols, "Count"));
-                        // 只收集单列纵向合并（安装方式阀岛、备注模块名等），跳过横向标题合并
+                        // 只收集单列纵向合并（安装方式阀岛、机构名称、备注模块名等），跳过横向标题合并
                         if (cc == 1 && rc > 1 && mc1 >= 0 && mc1 < MaxBomCols) {
                             string key = r1 + ":" + mc1;
                             if (seen.Add(key)) {
@@ -644,6 +795,13 @@ namespace TianGongCadSuite {
                 // Excel 公式错误值（如 #N/A = -2146826246）以 0x800Axxxx 编码为 Int32，过滤为空避免污染编号/型号
                 if ((iv & unchecked((int)0xFFFF0000)) == unchecked((int)0x800A0000)) return "";
                 return iv.ToString(CultureInfo.InvariantCulture);
+            }
+            if (val is DateTime) {
+                var dt = (DateTime)val;
+                // 部分 WPS 引擎在 Value2 上仍直接返回 DateTime；统一格式化为 yyyy/M/d 防止落入 InvariantCulture 美式月/日格式
+                return dt.TimeOfDay == TimeSpan.Zero
+                    ? dt.ToString("yyyy/M/d", CultureInfo.InvariantCulture)
+                    : dt.ToString("yyyy/M/d HH:mm:ss", CultureInfo.InvariantCulture);
             }
             if (val is bool) return ((bool)val) ? "TRUE" : "FALSE";
             return Convert.ToString(val, CultureInfo.InvariantCulture) ?? "";

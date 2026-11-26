@@ -4,8 +4,171 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Xml;
 using System.Xml.Serialization;
 namespace TianGongCadSuite {
+    // XML 1.0 控制字符清洗器：
+    // XmlSerializer.Serialize(Stream) 默认使用 XmlTextWriter，不会拦截 0x01~0x1F（除 \t/\r/\n）并写成 &#xB;，
+    // 下次 Deserialize(Stream) 启用 CheckCharacters=true 会直接抛 XmlException 导致整个项目/型号库无法打开。
+    internal static class LineupXmlSanitizer {
+        public static string Clean(string s) {
+            if (string.IsNullOrEmpty(s)) return s ?? "";
+            bool dirty = false;
+            for (int i = 0; i < s.Length; i++) {
+                char ch = s[i];
+                if (IsValidXmlChar(ch)) continue;
+                if (char.IsHighSurrogate(ch) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1])) { i++; continue; }
+                dirty = true;
+                break;
+            }
+            if (!dirty) return s;
+            var sb = new StringBuilder(s.Length);
+            for (int i = 0; i < s.Length; i++) {
+                char ch = s[i];
+                if (IsValidXmlChar(ch)) {
+                    sb.Append(ch);
+                } else if (char.IsHighSurrogate(ch) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1])) {
+                    sb.Append(ch);
+                    sb.Append(s[++i]);
+                }
+            }
+            return sb.ToString();
+        }
+
+        static bool IsValidXmlChar(char ch) {
+            return ch == 0x9 || ch == 0xA || ch == 0xD
+                || (ch >= 0x20 && ch <= 0xD7FF)
+                || (ch >= 0xE000 && ch <= 0xFFFD);
+        }
+
+        public static void CleanRecord(LineupRecord r) {
+            if (r == null) return;
+            r.Id = Clean(r.Id);
+            r.Number = Clean(r.Number);
+            r.Category = Clean(r.Category);
+            r.Address = Clean(r.Address);
+            r.Parameters = Clean(r.Parameters);
+            r.Description = Clean(r.Description);
+            r.Model = Clean(r.Model);
+            r.Brand = Clean(r.Brand);
+            r.Home = Clean(r.Home);
+            r.Mounting = Clean(r.Mounting);
+            r.Mechanism = Clean(r.Mechanism);
+            r.Connector = Clean(r.Connector);
+            r.Notes = Clean(r.Notes);
+            r.IslandId = Clean(r.IslandId);
+            r.ValveId = Clean(r.ValveId);
+            r.CylinderId = Clean(r.CylinderId);
+            r.Position = Clean(r.Position);
+            r.SourceFile = Clean(r.SourceFile);
+            r.ReferenceKey = Clean(r.ReferenceKey);
+            if (r.InstancePath != null) {
+                for (int i = 0; i < r.InstancePath.Length; i++) r.InstancePath[i] = Clean(r.InstancePath[i]);
+            }
+        }
+
+        public static void CleanProjectInPlace(LineupProject p) {
+            if (p == null) return;
+            p.AssemblyFile = Clean(p.AssemblyFile);
+            p.NumberPrefix = Clean(p.NumberPrefix);
+            p.ProjectCode = Clean(p.ProjectCode);
+            p.StationCode = Clean(p.StationCode);
+            p.LineCode = Clean(p.LineCode);
+            p.Designer = Clean(p.Designer);
+            p.Editor = Clean(p.Editor);
+            p.Revision = Clean(p.Revision);
+            if (p.Records != null) {
+                for (int i = 0; i < p.Records.Count; i++) CleanRecord(p.Records[i]);
+            }
+            if (p.Sections != null) {
+                for (int i = 0; i < p.Sections.Count; i++) {
+                    var s = p.Sections[i];
+                    if (s == null) continue;
+                    s.Category = Clean(s.Category);
+                    if (s.Cells != null) {
+                        for (int j = 0; j < s.Cells.Length; j++) s.Cells[j] = Clean(s.Cells[j]);
+                    }
+                }
+            }
+            if (p.Islands != null) {
+                for (int i = 0; i < p.Islands.Count; i++) {
+                    var isl = p.Islands[i];
+                    if (isl == null) continue;
+                    isl.Key = Clean(isl.Key);
+                    isl.Model = Clean(isl.Model);
+                    isl.Kind = Clean(isl.Kind);
+                }
+            }
+            if (p.EntryPresets != null) {
+                for (int i = 0; i < p.EntryPresets.Count; i++) {
+                    var ep = p.EntryPresets[i];
+                    if (ep == null) continue;
+                    ep.Category = Clean(ep.Category);
+                    ep.Model = Clean(ep.Model);
+                    ep.Brand = Clean(ep.Brand);
+                    ep.Connector = Clean(ep.Connector);
+                    ep.Description = Clean(ep.Description);
+                    ep.Home = Clean(ep.Home);
+                    ep.Mounting = Clean(ep.Mounting);
+                    ep.Mechanism = Clean(ep.Mechanism);
+                    ep.ParentId = Clean(ep.ParentId);
+                    ep.Position = Clean(ep.Position);
+                }
+            }
+            if (p.CadPages != null) {
+                for (int i = 0; i < p.CadPages.Count; i++) {
+                    var pg = p.CadPages[i];
+                    if (pg == null) continue;
+                    pg.Id = Clean(pg.Id);
+                    pg.Name = Clean(pg.Name);
+                    pg.LineCode = Clean(pg.LineCode);
+                    pg.ImageFile = Clean(pg.ImageFile);
+                    pg.ViewMode = Clean(pg.ViewMode);
+                    if (pg.Points != null) {
+                        for (int j = 0; j < pg.Points.Count; j++) {
+                            var pt = pg.Points[j];
+                            if (pt == null) continue;
+                            pt.Id = Clean(pt.Id);
+                            pt.Number = Clean(pt.Number);
+                            pt.Model = Clean(pt.Model);
+                            pt.Category = Clean(pt.Category);
+                            pt.State = Clean(pt.State);
+                            pt.Reason = Clean(pt.Reason);
+                            pt.Method = Clean(pt.Method);
+                            pt.Side = Clean(pt.Side);
+                            pt.Tag = Clean(pt.Tag);
+                            pt.Description = Clean(pt.Description);
+                        }
+                    }
+                }
+            }
+            if (p.ChangeLogs != null) {
+                for (int i = 0; i < p.ChangeLogs.Count; i++) {
+                    var lg = p.ChangeLogs[i];
+                    if (lg == null) continue;
+                    lg.Date = Clean(lg.Date);
+                    lg.Version = Clean(lg.Version);
+                    lg.ModelDate = Clean(lg.ModelDate);
+                    lg.Content = Clean(lg.Content);
+                    lg.Notes = Clean(lg.Notes);
+                    lg.Designer = Clean(lg.Designer);
+                    lg.Editor = Clean(lg.Editor);
+                    lg.Approver = Clean(lg.Approver);
+                }
+            }
+            CleanBaseline(p.Baseline);
+            CleanBaseline(p.LatestExported);
+        }
+
+        static void CleanBaseline(LineupBaselineSnapshot b) {
+            if (b == null) return;
+            b.Version = Clean(b.Version);
+            b.CapturedAt = Clean(b.CapturedAt);
+            if (b.Records != null) {
+                for (int i = 0; i < b.Records.Count; i++) CleanRecord(b.Records[i]);
+            }
+        }
+    }
     public sealed class LineupRecord {
         public string Id=Guid.NewGuid().ToString("N");
         public string Number="",Category="",Address="",Parameters="",Description="",Model="",Brand="",Home="",Mounting="",Mechanism="",Connector="",Notes="";
@@ -118,15 +281,36 @@ namespace TianGongCadSuite {
             return p;
         }
         public void Save(string file) {
-            var temporary=file+"."+Guid.NewGuid().ToString("N")+".tmp";
+            // 在副本上清洗全部 XML 1.0 非法控制字符，配合 CheckCharacters=true 写出，彻底杜绝写坏 .lineup.xml
+            var clean = Copy();
+            LineupXmlSanitizer.CleanProjectInPlace(clean);
+            var dir = Path.GetDirectoryName(Path.GetFullPath(file));
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            var temporary = file + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            var ws = new XmlWriterSettings { Encoding = new UTF8Encoding(false), Indent = true, CheckCharacters = true };
             try {
-                using(var stream=new FileStream(temporary,FileMode.CreateNew))ProjectSerializer.Serialize(stream,this);
-                if(File.Exists(file))File.Replace(temporary,file,file+".bak");else File.Move(temporary,file);
-            } finally {if(File.Exists(temporary))File.Delete(temporary);}
+                using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                using (var writer = XmlWriter.Create(stream, ws)) {
+                    ProjectSerializer.Serialize(writer, clean);
+                }
+                if (File.Exists(file)) {
+                    try { File.Replace(temporary, file, file + ".bak"); }
+                    catch (IOException) { File.Replace(temporary, file, null); }
+                } else {
+                    File.Move(temporary, file);
+                }
+            } finally {
+                if (File.Exists(temporary)) { try { File.Delete(temporary); } catch { } }
+            }
         }
         public static LineupProject Load(string file,string assembly) {
             LineupProject p;
-            using(var stream=File.OpenRead(file))p=(LineupProject)ProjectSerializer.Deserialize(stream);
+            // 关闭 XmlReader CheckCharacters 以兼容历史已写出 &#xB; 等控制字符的旧 .lineup.xml，加载后即时清洗自愈
+            var rs = new XmlReaderSettings { CheckCharacters = false, DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null };
+            using (var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            using (var reader = XmlReader.Create(stream, rs)) {
+                p = (LineupProject)ProjectSerializer.Deserialize(reader);
+            }
             if(p.Version!=1)throw new InvalidDataException("不支持的 Lineup 文件版本。");
             if(p.Records==null)p.Records=new List<LineupRecord>();
             if(p.Sections==null)p.Sections=new List<LineupSection>();
@@ -134,6 +318,7 @@ namespace TianGongCadSuite {
             if(p.EntryPresets==null)p.EntryPresets=new List<LineupEntryPreset>();
             if(p.CadPages==null)p.CadPages=new List<LineupCadPage>();
             if(p.ChangeLogs==null)p.ChangeLogs=new List<LineupChangeLog>();
+            LineupXmlSanitizer.CleanProjectInPlace(p);
             if(!string.Equals(Path.GetFullPath(p.AssemblyFile),Path.GetFullPath(assembly),StringComparison.OrdinalIgnoreCase)){
                 // 0.10.3：数据文件就是这个装配旁边、同名的那个 .lineup.xml → 装配连同文件夹被拷走 / 挪走 / 改过名（记的还是老路径）。
                 // 原来一律报"属于另一装配"、Lineup 打不开：H 盘上到处是「项目 - 副本」，拷一份接着做就再也打不开清单。

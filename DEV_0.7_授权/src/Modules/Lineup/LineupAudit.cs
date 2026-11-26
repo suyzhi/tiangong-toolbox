@@ -244,16 +244,28 @@ namespace TianGongCadSuite {
                 }
             }
 
-            // 7. CAD 位置图覆盖率与重复标注检查
+            // 7. CAD 位置图覆盖率与重复标注检查（同时支持 pt.Id 与 pt.Number 匹配，避免 BOM 改号后误报 CAD_MISSING）
             var pages = p.CadPages ?? new List<LineupCadPage>();
             if (pages.Count > 0) {
-                var covered = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var recById = new Dictionary<string, LineupRecord>(StringComparer.Ordinal);
+                foreach (var r in records) {
+                    if (!string.IsNullOrEmpty(r.Id) && !recById.ContainsKey(r.Id)) recById[r.Id] = r;
+                }
+                var coveredNumbers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var coveredIds = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var pg in pages) {
                     var onPage = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     foreach (var pt in pg.Points ?? new List<LineupLocationPoint>()) {
-                        string pn = (pt.Number ?? "").Trim();
+                        LineupRecord linked = null;
+                        if (!string.IsNullOrEmpty(pt.Id)) {
+                            coveredIds.Add(pt.Id);
+                            recById.TryGetValue(pt.Id, out linked);
+                        }
+                        string pn = (linked != null && !string.IsNullOrWhiteSpace(linked.Number))
+                            ? linked.Number.Trim()
+                            : (pt.Number ?? "").Trim();
                         if (pn.Length == 0) continue;
-                        covered.Add(pn);
+                        coveredNumbers.Add(pn);
                         if (!onPage.Add(pn)) {
                             res.Issues.Add(new LineupAuditIssue {
                                 Severity = LineupAuditSeverity.Warning, RuleCode = "CAD_DUP",
@@ -276,7 +288,9 @@ namespace TianGongCadSuite {
                     // 位置图重点核查需在总图/机构图上标注的主器件（气缸、普通传感器、其他电气件）；阀片与磁开通常随气缸/阀岛成组
                     if (cat == "阀片" || cat == "气缸传感器") continue;
                     string rn = (r.Number ?? "").Trim();
-                    if (rn.Length > 0 && !covered.Contains(rn)) {
+                    bool hasId = !string.IsNullOrEmpty(r.Id) && coveredIds.Contains(r.Id);
+                    bool hasNum = rn.Length > 0 && coveredNumbers.Contains(rn);
+                    if (rn.Length > 0 && !hasId && !hasNum) {
                         res.Issues.Add(new LineupAuditIssue {
                             Severity = LineupAuditSeverity.Info, RuleCode = "CAD_MISSING",
                             RecordId = r.Id, Number = rn, Category = r.Category,

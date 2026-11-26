@@ -117,9 +117,28 @@ namespace TianGongCadSuite {
             var matchedBase = new bool[baseList.Count];
             var matchedCur = new bool[curList.Count];
 
-            // 1. 先按 (Category, Number) 精确配对（编号是 Lineup 器件最稳定的业务键）
+            // 1. 优先按记录 Id 精确配对：
+            //    同项目内删中间行后 CompactAfterDelete 会顺延重排后续编号（如 Y1C03→Y1C02），
+            //    但每条记录的 GUID Id 不变；若先按编号匹配会把旧 Y1C02 错配给重排后的 Y1C03，导致整段串行误报、末行误标取消。
+            var baseById = new Dictionary<string, int>(StringComparer.Ordinal);
+            for (int i = 0; i < baseList.Count; i++) {
+                string id = baseList[i].Id ?? "";
+                if (id.Length > 0 && !baseById.ContainsKey(id)) baseById[id] = i;
+            }
+            for (int j = 0; j < curList.Count; j++) {
+                string id = curList[j].Id ?? "";
+                int bi;
+                if (id.Length > 0 && baseById.TryGetValue(id, out bi) && !matchedBase[bi]) {
+                    matchedBase[bi] = true;
+                    matchedCur[j] = true;
+                    CollectModIfChanged(baseList[bi], curList[j], diff);
+                }
+            }
+
+            // 2. 其次按 (Category, Number) 精确配对（兼容外部重新导入 Excel 后 Id 重新生成的跨会话对比）
             var baseByCatNum = new Dictionary<string, Queue<int>>(StringComparer.OrdinalIgnoreCase);
             for (int i = 0; i < baseList.Count; i++) {
+                if (matchedBase[i]) continue;
                 string num = (baseList[i].Number ?? "").Trim();
                 if (num.Length == 0) continue;
                 string key = LineupTableData.Category(baseList[i].Category) + "\u001F" + num;
@@ -128,30 +147,13 @@ namespace TianGongCadSuite {
                 q.Enqueue(i);
             }
             for (int j = 0; j < curList.Count; j++) {
+                if (matchedCur[j]) continue;
                 string num = (curList[j].Number ?? "").Trim();
                 if (num.Length == 0) continue;
                 string key = LineupTableData.Category(curList[j].Category) + "\u001F" + num;
                 Queue<int> q;
                 if (baseByCatNum.TryGetValue(key, out q) && q.Count > 0) {
                     int bi = q.Dequeue();
-                    matchedBase[bi] = true;
-                    matchedCur[j] = true;
-                    CollectModIfChanged(baseList[bi], curList[j], diff);
-                }
-            }
-
-            // 2. 其次按 Id 配对（覆盖改了编号但仍是同一条记录，或无编号预留行）
-            var baseById = new Dictionary<string, int>(StringComparer.Ordinal);
-            for (int i = 0; i < baseList.Count; i++) {
-                if (matchedBase[i]) continue;
-                string id = baseList[i].Id ?? "";
-                if (id.Length > 0 && !baseById.ContainsKey(id)) baseById[id] = i;
-            }
-            for (int j = 0; j < curList.Count; j++) {
-                if (matchedCur[j]) continue;
-                string id = curList[j].Id ?? "";
-                int bi;
-                if (id.Length > 0 && baseById.TryGetValue(id, out bi) && !matchedBase[bi]) {
                     matchedBase[bi] = true;
                     matchedCur[j] = true;
                     CollectModIfChanged(baseList[bi], curList[j], diff);
@@ -192,6 +194,7 @@ namespace TianGongCadSuite {
 
         static void CollectModIfChanged(LineupRecord before, LineupRecord after, LineupBomDiff diff) {
             var changes = new List<LineupBomFieldChange>();
+            CheckField(changes, "类别", LineupTableData.Category(before.Category), LineupTableData.Category(after.Category));
             CheckField(changes, "编号", before.Number, after.Number);
             CheckField(changes, "地址", before.Address, after.Address);
             CheckField(changes, "功能参数", before.Parameters, after.Parameters);
@@ -257,7 +260,7 @@ namespace TianGongCadSuite {
             return (r.Model ?? "").Trim();
         }
 
-        // 将导入的 Excel 单元格值转换为简洁日期字符串（支持 Excel 序列号与文本日期）
+        // 将导入的 Excel 单元格值转换为简洁日期字符串（支持 Excel 序列号、COM DateTime 残留及常见文本日期）
         public static string NormalizeDateString(string raw) {
             string s = (raw ?? "").Trim();
             if (s.Length == 0) return "";
@@ -266,6 +269,16 @@ namespace TianGongCadSuite {
                 try {
                     return new DateTime(1899, 12, 30).AddDays(Math.Floor(serial)).ToString("yyyy/M/d", CultureInfo.InvariantCulture);
                 } catch { }
+            }
+            // 兼容部分 WPS COM / 历史导入残留的完整日期时间字符串（如 "2026/5/25 0:00:00" 或美式 "05/25/2026 00:00:00"）
+            DateTime dt;
+            string[] dtFmts = {
+                "yyyy/M/d H:mm:ss", "yyyy/MM/dd HH:mm:ss", "yyyy-M-d H:mm:ss", "yyyy-MM-dd HH:mm:ss",
+                "yyyy/M/d HH:mm:ss", "yyyy-M-d HH:mm:ss",
+                "MM/dd/yyyy HH:mm:ss", "M/d/yyyy H:mm:ss", "M/d/yyyy HH:mm:ss"
+            };
+            if (DateTime.TryParseExact(s, dtFmts, CultureInfo.InvariantCulture, DateTimeStyles.None, out dt)) {
+                return dt.ToString("yyyy/M/d", CultureInfo.InvariantCulture);
             }
             return s;
         }

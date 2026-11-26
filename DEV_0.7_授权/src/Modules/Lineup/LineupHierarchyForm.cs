@@ -135,6 +135,7 @@ namespace TianGongCadSuite {
             var selected = ids.ToList();
             var next = Snapshot();
             LineupHierarchy.AssignCylinders(next, selected, valveId);
+            LineupNumbering.SyncCadPageNumbers(next);
             Commit(next, selected.First(), "气缸与传感器归属已更新");
         }
 

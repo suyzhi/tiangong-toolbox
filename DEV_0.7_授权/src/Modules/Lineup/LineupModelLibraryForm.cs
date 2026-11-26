@@ -733,11 +733,23 @@ namespace TianGongCadSuite {
             DialogResult = DialogResult.OK;
         }
 
-        void PersistNow(string toastMsg, LineupModelEntry focusEntry) {
-            catalog.SortEntries();
-            catalog.SeedInitialized = true;
-            if (onPersistCatalog != null) onPersistCatalog(catalog);
+        static string EntryKeyOf(LineupModelEntry e) {
+            if (e == null) return "";
+            return LineupTableData.Category(e.Category) + "\u001F" + (e.Model ?? "").Trim() + "\u001F" + (e.Brand ?? "").Trim() + "\u001F" + (e.Connector ?? "").Trim();
+        }
+
+        // 先在副本 draft 上持久化成功，再回写本窗口持有的 catalog，确保落盘失败时内存自动回滚零脏写
+        void PersistDraft(LineupModelCatalog draft, string toastMsg, string focusKey) {
+            draft.Deduplicate();
+            draft.SortEntries();
+            draft.SeedInitialized = true;
+            if (onPersistCatalog != null) onPersistCatalog(draft);
+            catalog.Entries = new List<LineupModelEntry>(draft.Entries);
+            catalog.SeedInitialized = draft.SeedInitialized;
             CatalogChanged = true;
+            LineupModelEntry focusEntry = string.IsNullOrEmpty(focusKey)
+                ? null
+                : catalog.Entries.FirstOrDefault(e => string.Equals(EntryKeyOf(e), focusKey, StringComparison.OrdinalIgnoreCase));
             RebuildNavAndGrid(focusEntry);
             UpdateFooterStatus(toastMsg);
         }
@@ -828,7 +840,9 @@ namespace TianGongCadSuite {
                 d.AcceptButton = ok; d.CancelButton = cancel;
                 d.Controls.Add(body); d.Controls.Add(footer);
 
+                LineupModelCatalog validatedDraft = null;
                 LineupModelEntry resultEntry = null;
+                int editIdx = editing == null ? -1 : catalog.Entries.IndexOf(editing);
                 ok.Click += (s, e) => {
                     try {
                         var candidate = new LineupModelEntry {
@@ -839,8 +853,11 @@ namespace TianGongCadSuite {
                             Connector = cmbConn.Text.Trim(),
                             Notes = txtNotes.Text.Trim()
                         };
-                        catalog.AddOrUpdate(editing, candidate);
-                        resultEntry = editing ?? catalog.Entries[catalog.Entries.Count - 1];
+                        var draft = catalog.Clone();
+                        var draftEditing = (editIdx >= 0 && editIdx < draft.Entries.Count) ? draft.Entries[editIdx] : null;
+                        draft.AddOrUpdate(draftEditing, candidate);
+                        validatedDraft = draft;
+                        resultEntry = draftEditing ?? draft.Entries[draft.Entries.Count - 1];
                         d.DialogResult = DialogResult.OK;
                     } catch (Exception ex) {
                         MessageBox.Show(d, ex.Message, "型号库", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -848,12 +865,17 @@ namespace TianGongCadSuite {
                 };
                 d.Shown += (s, e) => { txtModel.Focus(); txtModel.SelectAll(); };
 
-                if (d.ShowDialog(this) != DialogResult.OK || resultEntry == null) return;
-                selectedCategory = resultEntry.Category;
-                expandedCategories.Add(resultEntry.Category);
-                if (selectedSubCategory.Length > 0 && !string.Equals(selectedSubCategory, resultEntry.EffectiveSubCategory, StringComparison.OrdinalIgnoreCase))
+                if (d.ShowDialog(this) != DialogResult.OK || validatedDraft == null || resultEntry == null) return;
+                string nextCat = resultEntry.Category;
+                string nextSub = resultEntry.EffectiveSubCategory;
+                string focusKey = EntryKeyOf(resultEntry);
+                string modelName = resultEntry.Model;
+                PersistDraft(validatedDraft, (isNew ? "已新增型号：" : "已更新型号：") + modelName, focusKey);
+                selectedCategory = nextCat;
+                expandedCategories.Add(nextCat);
+                if (selectedSubCategory.Length > 0 && !string.Equals(selectedSubCategory, nextSub, StringComparison.OrdinalIgnoreCase))
                     selectedSubCategory = "";
-                PersistNow((isNew ? "已新增型号：" : "已更新型号：") + resultEntry.Model, resultEntry);
+                RebuildNavAndGrid(catalog.Entries.FirstOrDefault(e => string.Equals(EntryKeyOf(e), focusKey, StringComparison.OrdinalIgnoreCase)));
             }
         }
 
@@ -917,12 +939,17 @@ namespace TianGongCadSuite {
                 string newCat = Convert.ToString(cmbCat.SelectedItem);
                 string rawSub = (cmbSub.Text ?? "").Trim();
                 bool autoSub = rawSub.Length == 0 || rawSub == "（按型号自动归类）";
-                var movedSet = new HashSet<LineupModelEntry>(sel);
+                var draft = catalog.Clone();
+                var draftSel = new List<LineupModelEntry>();
+                foreach (var orig in sel) {
+                    int idx = catalog.Entries.IndexOf(orig);
+                    if (idx >= 0 && idx < draft.Entries.Count) draftSel.Add(draft.Entries[idx]);
+                }
                 var toRemoveDup = new List<LineupModelEntry>();
-                foreach (var item in sel) {
+                foreach (var item in draftSel) {
                     string targetSub = autoSub ? LineupModelCatalog.InferSubCategory(newCat, item.Model, item.Brand) : rawSub;
                     string targetConn = (LineupModelCatalog.IsSensorCategory(newCat) && string.IsNullOrWhiteSpace(item.Connector)) ? "M8/3针" : (item.Connector ?? "");
-                    bool dupExists = catalog.Entries.Any(e => !ReferenceEquals(e, item) && !toRemoveDup.Contains(e)
+                    bool dupExists = draft.Entries.Any(e => !ReferenceEquals(e, item) && !toRemoveDup.Contains(e)
                         && string.Equals(e.Category, newCat, StringComparison.OrdinalIgnoreCase)
                         && string.Equals((e.Model ?? "").Trim(), (item.Model ?? "").Trim(), StringComparison.OrdinalIgnoreCase)
                         && string.Equals((e.Brand ?? "").Trim(), (item.Brand ?? "").Trim(), StringComparison.OrdinalIgnoreCase)
@@ -935,12 +962,14 @@ namespace TianGongCadSuite {
                     item.SubCategory = targetSub;
                     item.Connector = targetConn;
                 }
-                if (toRemoveDup.Count > 0) catalog.RemoveEntries(toRemoveDup);
-                var focus = sel.FirstOrDefault(x => !toRemoveDup.Contains(x));
+                if (toRemoveDup.Count > 0) draft.RemoveEntries(toRemoveDup);
+                var focusItem = draftSel.FirstOrDefault(x => !toRemoveDup.Contains(x));
+                string focusKey = EntryKeyOf(focusItem);
+                PersistDraft(draft, "已将 " + draftSel.Count + " 条型号移入「" + newCat + (autoSub ? "」" : " · " + rawSub + "」") + (toRemoveDup.Count > 0 ? "（自动合并重复 " + toRemoveDup.Count + " 条）" : ""), focusKey);
                 selectedCategory = newCat;
                 selectedSubCategory = autoSub ? "" : rawSub;
                 expandedCategories.Add(newCat);
-                PersistNow("已将 " + sel.Count + " 条型号移入「" + newCat + (autoSub ? "」" : " · " + rawSub + "」") + (toRemoveDup.Count > 0 ? "（自动合并重复 " + toRemoveDup.Count + " 条）" : ""), focus);
+                RebuildNavAndGrid(string.IsNullOrEmpty(focusKey) ? null : catalog.Entries.FirstOrDefault(e => string.Equals(EntryKeyOf(e), focusKey, StringComparison.OrdinalIgnoreCase)));
             }
         }
 
@@ -951,8 +980,14 @@ namespace TianGongCadSuite {
                 ? "确定从本机型号库中删除「" + sel[0].Model + "（" + sel[0].Brand + "）」吗？"
                 : "确定从本机型号库中删除选中的 " + sel.Count + " 条型号记录吗？";
             if (MessageBox.Show(this, prompt, "删除型号", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
-            int removed = catalog.RemoveEntries(sel);
-            PersistNow("已删除 " + removed + " 条型号记录。", null);
+            var draft = catalog.Clone();
+            var toRemove = new List<LineupModelEntry>();
+            foreach (var orig in sel) {
+                int idx = catalog.Entries.IndexOf(orig);
+                if (idx >= 0 && idx < draft.Entries.Count) toRemove.Add(draft.Entries[idx]);
+            }
+            int removed = draft.RemoveEntries(toRemove);
+            PersistDraft(draft, "已删除 " + removed + " 条型号记录。", null);
         }
 
         void ImportFromFile() {
@@ -960,21 +995,23 @@ namespace TianGongCadSuite {
                 if (dialog.ShowDialog(this) != DialogResult.OK) return;
                 string ext = Path.GetExtension(dialog.FileName).ToLowerInvariant();
                 string defCat = selectedCategory.Length > 0 ? selectedCategory : "气缸";
+                var draft = catalog.Clone();
                 int added;
                 if (ext == ".xlsx" || ext == ".xlsm" || ext == ".xls") {
                     var prev = Cursor;
                     Cursor = Cursors.WaitCursor;
                     try {
                         var imp = LineupXlsxReader.Read(dialog.FileName, true);
-                        added = catalog.Learn(imp.Records);
+                        added = draft.Learn(imp.Records);
                     } finally { Cursor = prev; }
                 } else {
                     var imported = ext == ".xml"
                         ? LineupModelCatalog.Load(dialog.FileName)
                         : LineupModelCatalog.Import(SettingsFile.ReadUserText(dialog.FileName), ext == ".csv" ? ',' : '\t', defCat);
-                    added = catalog.Merge(imported);
+                    added = draft.Merge(imported);
                 }
-                PersistNow("已导入新增 " + added + " 条，当前库内共 " + catalog.Entries.Count + " 条。", null);
+                PersistDraft(draft, "已导入新增 " + added + " 条，当前库内共 " + draft.Entries.Count + " 条。", null);
+                UpdateFooterStatus("已导入新增 " + added + " 条，当前库内共 " + catalog.Entries.Count + " 条。");
             }
         }
 
@@ -984,13 +1021,16 @@ namespace TianGongCadSuite {
             string defCat = selectedCategory.Length > 0 ? selectedCategory : "气缸";
             char delim = text.IndexOf('\t') >= 0 ? '\t' : ',';
             var imported = LineupModelCatalog.Import(text, delim, defCat);
-            int added = catalog.Merge(imported);
-            PersistNow("从剪贴板新增 " + added + " 条，当前库内共 " + catalog.Entries.Count + " 条。", null);
+            var draft = catalog.Clone();
+            int added = draft.Merge(imported);
+            PersistDraft(draft, "从剪贴板新增 " + added + " 条，当前库内共 " + draft.Entries.Count + " 条。", null);
+            UpdateFooterStatus("从剪贴板新增 " + added + " 条，当前库内共 " + catalog.Entries.Count + " 条。");
         }
 
         void LearnFromProject() {
             if (onLearnCurrentProject == null) return;
             int added = onLearnCurrentProject();
+            if (added > 0) CatalogChanged = true;
             RebuildNavAndGrid(CurrentEntry());
             UpdateFooterStatus("已从当前清单收录 " + added + " 条新型号，库内共 " + catalog.Entries.Count + " 条。");
         }
@@ -998,8 +1038,9 @@ namespace TianGongCadSuite {
         void MergeMissingSeed() {
             if (onLoadSeed == null) return;
             var seed = onLoadSeed();
-            int added = catalog.Merge(seed);
-            PersistNow(added > 0 ? "已补充 " + added + " 条内置默认型号。" : "内置默认型号已全部在库中，无新增。", null);
+            var draft = catalog.Clone();
+            int added = draft.Merge(seed);
+            PersistDraft(draft, added > 0 ? "已补充 " + added + " 条内置默认型号。" : "内置默认型号已全部在库中，无新增。", null);
         }
 
         void ExportCsv(bool currentCategoryOnly) {

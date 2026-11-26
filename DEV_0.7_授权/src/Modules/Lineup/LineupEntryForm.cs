@@ -243,12 +243,7 @@ namespace TianGongCadSuite {
             using (var dialog = new LineupModelLibraryForm(
                 catalog, catalogFile, true, entryKind, 1, "用于后续录入",
                 SaveCatalogDirect,
-                () => {
-                    SaveDraft(false);
-                    int n = catalog.Learn(project.Records);
-                    if (n > 0) SaveCatalogDirect(catalog);
-                    return n;
-                },
+                LearnCurrentProjectModels,
                 LoadBuiltInSeed)) {
                 if (dialog.ShowDialog(this) != DialogResult.OK || dialog.SelectedEntry == null) return;
                 var preset = ReadEntry();
@@ -486,6 +481,7 @@ namespace TianGongCadSuite {
             if (assembly == null) throw new InvalidOperationException("当前未连接天工 CAD 装配。");
             SaveDraft();
             if (mode != "add" && mode != "bind") throw new ArgumentException("Unknown continuous mode");
+            string startBindId = null;
             if (mode == "add") {
                 if (!ReadyNumbering(ActiveCategory)) return;
                 watchPreset = ReadEntry();
@@ -494,10 +490,14 @@ namespace TianGongCadSuite {
                 var current = CurrentId();
                 var r = project.Records.FirstOrDefault(x => x.Id == current);
                 if (r == null || !string.IsNullOrEmpty(r.ReferenceKey)) {
-                    current = VisibleEntryIds().FirstOrDefault(id => project.Records.Any(x => x.Id == id && string.IsNullOrEmpty(x.ReferenceKey)));
+                    var ordered = VisibleEntryIds();
+                    if (ordered.Count == 0) ordered = project.Records.Select(x => x.Id).ToList();
+                    current = ordered.FirstOrDefault(id => project.Records.Any(x => x.Id == id && string.IsNullOrEmpty(x.ReferenceKey)));
                     if (current == null) throw new InvalidOperationException("当前列表里没有尚未绑定模型的行。");
                     SelectId(current);
                 }
+                startBindId = current;
+                pickingId = startBindId;
             }
             bindQueue = null;
             bindQueueHistory.Clear();
@@ -508,13 +508,14 @@ namespace TianGongCadSuite {
             watchFingerprint = "";
             watchHandled = "";
             SetPickingMode(true);
+            if (mode == "bind" && !string.IsNullOrEmpty(startBindId)) pickingId = startBindId;
             watchStop.Visible = true;
             if (pickSkipBtn != null) pickSkipBtn.Visible = false;
             SetContinuousControls(true);
             if (pickingTitle != null) pickingTitle.Text = mode == "add" ? "● 连续新增中 · 在 CAD 里点一个就录一个" : "● 连续绑定中 · 逐个点选对应三维件";
             pickingLabel.Text = mode == "add"
                 ? "当前类目：" + watchPreset.Category + (string.IsNullOrWhiteSpace(watchPreset.Model) ? "（自动识件）" : " · " + watchPreset.Model) + "\n直接在 CAD 里点击零件，自动编号并保存。"
-                : "待绑定行：" + project.Records.First(r => r.Id == CurrentId()).Number + "\n每次点选一个零件，绑完自动跳下一行。";
+                : "待绑定行：" + project.Records.First(r => r.Id == startBindId).Number + "\n每次点选一个零件，绑完自动跳下一行。";
             entryWatcher.Start();
         }
 
@@ -628,7 +629,11 @@ namespace TianGongCadSuite {
                     record.ReferenceKey = incoming[0].ReferenceKey;
                     record.SourceFile = incoming[0].SourceFile;
                     record.InstancePath = incoming[0].InstancePath;
-                    string following = LineupEntry.NextUnbound(next, VisibleEntryIds(), id);
+                    var orderedIds = VisibleEntryIds();
+                    if (orderedIds.Count == 0) orderedIds = next.Records.Select(r => r.Id).ToList();
+                    string following = LineupEntry.NextUnbound(next, orderedIds, id);
+                    // 无论处于气动主视图（activeViewMode==0）还是总表视图，都显式推进 pickingId，防止第 2 件起卡死在已绑首条
+                    pickingId = following ?? id;
                     Commit(next, following ?? id, "已绑定 " + record.Number);
                     try { assembly.SelectSet.RemoveAll(); } catch { }
                     if (following == null) {

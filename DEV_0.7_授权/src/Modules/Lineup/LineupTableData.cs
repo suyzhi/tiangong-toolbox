@@ -45,22 +45,79 @@ namespace TianGongCadSuite {
             if(quoted)throw new InvalidDataException("粘贴内容存在未闭合引号。");
             if(cell.Length>0||row.Count>0||closed){row.Add(cell.ToString());rows.Add(row.ToArray());}return rows;
         }
+        // 统一识别 BOM 表头单元格对应的 LineupTableData.Headers 下标（0..10），
+        // 同时兼容公司 V3.0 中英双语表头（如「SK编号No.」「型号\nModel number」「传感器接口类型\nDetect interface type」）与旧版纯中文表头。
+        internal static int MatchBomHeaderField(string raw){
+            if(string.IsNullOrWhiteSpace(raw))return -1;
+            string s=raw.Replace("\r\n","\n").Trim();
+            int nl=s.IndexOf('\n');
+            string first=(nl>=0?s.Substring(0,nl):s).Trim();
+            string compact=Regex.Replace(first,@"\s+","");
+            if(compact=="编号"||compact.StartsWith("编号")||compact.Equals("SK编号",StringComparison.OrdinalIgnoreCase)||compact.StartsWith("SK编号",StringComparison.OrdinalIgnoreCase))return 0;
+            if(compact=="地址"||compact.StartsWith("地址")||compact.Equals("IO地址",StringComparison.OrdinalIgnoreCase)||compact.Equals("I/O地址",StringComparison.OrdinalIgnoreCase))return 1;
+            if(compact=="功能参数"||compact=="规格参数"||compact=="参数"||compact.StartsWith("功能参数"))return 2;
+            if(compact=="描述"||compact.StartsWith("描述"))return 3;
+            if(compact=="型号"||compact.StartsWith("型号"))return 4;
+            if(compact=="品牌"||compact.StartsWith("品牌"))return 5;
+            if(compact=="原位"||compact.StartsWith("原位"))return 6;
+            if(compact=="安装方式"||compact.StartsWith("安装方式"))return 7;
+            if(compact=="机构名称"||compact=="机构")return 8;
+            if(compact=="传感器接口类型"||compact=="接口类型"||compact.StartsWith("传感器接口"))return 9;
+            if(compact=="备注"||compact.StartsWith("备注"))return 10;
+            return -1;
+        }
+        static string[] TrimTrailingEmpty(string[] row){
+            int len=row.Length;
+            while(len>0&&string.IsNullOrWhiteSpace(row[len-1]))len--;
+            if(len==row.Length)return row;
+            var trimmed=new string[len];
+            Array.Copy(row,trimmed,len);
+            return trimmed;
+        }
+        static int[] TryMapDelimitedHeaderRow(string[] row){
+            bool hasNum=false,hasModel=false;
+            for(int i=0;i<row.Length;i++){
+                int fi=MatchBomHeaderField(row[i]);
+                if(fi==0)hasNum=true;
+                else if(fi==4)hasModel=true;
+            }
+            if(!hasNum||!hasModel)return null;
+            int[] map=new int[Headers.Length];
+            for(int i=0;i<map.Length;i++)map[i]=-1;
+            int matched=0;
+            for(int i=0;i<row.Length;i++){
+                if(string.IsNullOrWhiteSpace(row[i]))continue;
+                int fi=MatchBomHeaderField(row[i]);
+                if(fi<0||map[fi]>=0)throw new InvalidDataException("表头需要完整且不重复的 10 列参考BOM，或含机构名称的 11 列清单。");
+                map[fi]=i;
+                matched++;
+            }
+            // 要求完整 10 列参考 BOM（缺机构名称列 8）或完整 11 列标准清单
+            bool valid11=matched==11&&row.Length==11;
+            bool valid10=matched==10&&row.Length==10&&map[8]<0;
+            if(!valid11&&!valid10)throw new InvalidDataException("表头需要完整且不重复的 10 列参考BOM，或含机构名称的 11 列清单。");
+            return map;
+        }
         public static LineupImport Parse(string text,string defaultCategory,char separator){
+            return Parse(text,defaultCategory,separator,false);
+        }
+        public static LineupImport Parse(string text,string defaultCategory,char separator,bool allowDuplicates){
             var result=new LineupImport();string category=defaultCategory;int[] mapping=Enumerable.Range(0,11).ToArray();int line=0;
-            foreach(var row in ReadDelimited(text,separator)){
-                line++;if(row.All(string.IsNullOrWhiteSpace))continue;
-                int section=Array.FindIndex(Prefixes,p=>row[0].Trim().StartsWith(p,StringComparison.OrdinalIgnoreCase));
-                if(section>=0){category=Categories[section];var sectionCells=Pad(row,line);result.Sections.Add(new LineupSection{Category=category,Cells=mapping.Select(index=>index<0?"":sectionCells[index]).ToArray()});continue;}
-                if(row.Contains("编号")&&row.Contains("型号")){
-                    var expected=row.Length==10?ReferenceHeaders:Headers;
-                    if(row.Length!=expected.Length||expected.Any(h=>row.Count(x=>x.Trim()==h)!=1))throw new InvalidDataException("表头需要完整且不重复的 10 列参考BOM，或含机构名称的 11 列清单。");
-                    mapping=Headers.Select(h=>Array.FindIndex(row,x=>x.Trim()==h)).ToArray();continue;
-                }
+            foreach(var rawRow in ReadDelimited(text,separator)){
+                line++;if(rawRow.All(string.IsNullOrWhiteSpace))continue;
+                // 仅裁切 Excel 全选复制附带的尾部空白列；超过 11 个非空列仍按原规则严格拒绝
+                var row=TrimTrailingEmpty(rawRow);
+                string firstText=row.FirstOrDefault(c=>!string.IsNullOrWhiteSpace(c))??"";
+                int section=Array.FindIndex(Prefixes,p=>firstText.Trim().StartsWith(p,StringComparison.OrdinalIgnoreCase));
+                if(section>=0){category=Categories[section];var sectionCells=Pad(row,line);result.Sections.Add(new LineupSection{Category=category,Cells=mapping.Select(index=>index<0||index>=sectionCells.Length?"":sectionCells[index]).ToArray()});continue;}
+                var mappedHeader=TryMapDelimitedHeaderRow(row);
+                if(mappedHeader!=null){mapping=mappedHeader;continue;}
                 if(!Categories.Contains(category))throw new InvalidDataException("第 "+line+" 行没有五大类目，请选择类目或粘贴分类标题。");
                 var source=Pad(row,line);var record=new LineupRecord{Category=category};
-                SetCells(record,mapping.Select(index=>index<0?"":source[index]).ToArray());result.Records.Add(record);
+                SetCells(record,mapping.Select(index=>index<0||index>=source.Length?"":source[index]).ToArray());result.Records.Add(record);
             }
-            RejectDuplicates(result.Records);return result;
+            if(!allowDuplicates)RejectDuplicates(result.Records);
+            return result;
         }
         static string[] Pad(string[] row,int line){if(row.Length>11)throw new InvalidDataException("第 "+line+" 行超过 11 列，请只复制样表的业务列。");return Enumerable.Range(0,11).Select(i=>i<row.Length?row[i]:"").ToArray();}
         public static void RejectDuplicates(IEnumerable<LineupRecord> records){

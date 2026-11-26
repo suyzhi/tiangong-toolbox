@@ -48,8 +48,21 @@ namespace TianGongCadSuite {
         readonly CheckBox chk11 = new CheckBox { Text = "BOM 包含「机构名称」列（模板标准 11 列；不勾为精简 10 列）", AutoSize = true, Checked = true, BackColor = Color.Transparent };
         readonly CheckBox chkHighlight = new CheckBox { Text = "在导出的 BOM 中用淡黄色标出待完善行", AutoSize = true, BackColor = Color.Transparent };
         readonly CheckBox chkMarkChanges = new CheckBox { Text = "按规范标红新增项，并对取消项红底加删除线保留", AutoSize = true, Checked = true, BackColor = Color.Transparent };
+        readonly ToolTip tips = new ToolTip { AutoPopDelay = 10000, InitialDelay = 250 };
 
         bool loading, synced;
+
+        protected override void Dispose(bool disposing) {
+            if (disposing) tips.Dispose();
+            base.Dispose(disposing);
+        }
+
+        void TryUi(Action act, string title) {
+            try { act(); }
+            catch (Exception ex) {
+                MessageBox.Show(FindForm(), ex.Message, title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
 
         public LineupExportPanel(
             Func<LineupProject> getProjectFn,
@@ -123,19 +136,19 @@ namespace TianGongCadSuite {
             versionCard = Ui.Card("版本与更新日志", 184, "支持累加历次版本号与更新内容，导出自动写入「LineUP更新日志」");
             btnSetBase = Ui.Small("重设基准");
             ((FlatButton)btnSetBase).SetFore(Ui.Text2);
-            btnSetBase.Click += (s, e) => ResetBaselineToCurrent();
+            btnSetBase.Click += (s, e) => TryUi(ResetBaselineToCurrent, "重设基准");
 
             btnDelVer = Ui.Small("删除");
             ((FlatButton)btnDelVer).SetFore(Ui.Bad);
-            btnDelVer.Click += (s, e) => DeleteSelectedVersionLog();
+            btnDelVer.Click += (s, e) => TryUi(DeleteSelectedVersionLog, "删除版本记录");
 
             btnEditVer = Ui.Small("编辑");
             ((FlatButton)btnEditVer).SetFore(Ui.Text2);
-            btnEditVer.Click += (s, e) => EditSelectedVersionLog();
+            btnEditVer.Click += (s, e) => TryUi(EditSelectedVersionLog, "编辑版本记录");
 
             btnAddVer = Ui.Primary("+ 新增版本", 96, 26);
             btnAddVer.Font = Ui.F8;
-            btnAddVer.Click += (s, e) => AddNewVersionLog();
+            btnAddVer.Click += (s, e) => TryUi(AddNewVersionLog, "新增版本记录");
 
             // AddHeader 顺序从左到右排列，最右侧放主动作「+ 新增版本」
             versionCard.AddHeader(btnSetBase);
@@ -154,7 +167,7 @@ namespace TianGongCadSuite {
             Ui.FitGrid(logGrid);
             logGrid.SelectionChanged += (s, e) => UpdateVersionButtons();
             logGrid.CellDoubleClick += (s, e) => {
-                if (e.RowIndex >= 0) EditSelectedVersionLog();
+                if (e.RowIndex >= 0) TryUi(EditSelectedVersionLog, "编辑版本记录");
             };
 
             logEmptyLabel.Dock = DockStyle.Fill;
@@ -187,7 +200,7 @@ namespace TianGongCadSuite {
             Action<int, int, string, TextBox> addMeta = (r, c, label, box) => {
                 box.Dock = DockStyle.Fill;
                 box.Margin = Ui.SPad(0, 3, 16, 3);
-                box.Leave += (s, e) => CommitMetadataIfChanged();
+                box.Leave += (s, e) => TryUi(CommitMetadataIfChanged, "保存抬头设置");
                 metaGrid.Controls.Add(new Label {
                     Text = label, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft,
                     ForeColor = Ui.Text2, Font = Ui.F9B, BackColor = Color.White
@@ -213,8 +226,8 @@ namespace TianGongCadSuite {
             chk11.Margin = Ui.SPad(0, 2, 0, 0);
             chkHighlight.Margin = Ui.SPad(0, 2, 8, 0);
             chkMarkChanges.Margin = Ui.SPad(0, 2, 0, 0);
-            chk11.CheckedChanged += (s, e) => CommitMetadataIfChanged();
-            chkMarkChanges.CheckedChanged += (s, e) => CommitMetadataIfChanged();
+            chk11.CheckedChanged += (s, e) => TryUi(CommitMetadataIfChanged, "保存导出选项");
+            chkMarkChanges.CheckedChanged += (s, e) => TryUi(CommitMetadataIfChanged, "保存导出选项");
             optGrid.Controls.Add(chkCad, 0, 0);
             optGrid.Controls.Add(chk11, 1, 0);
             optGrid.Controls.Add(chkHighlight, 0, 1);
@@ -299,6 +312,13 @@ namespace TianGongCadSuite {
             tbStation.Text = !string.IsNullOrWhiteSpace(p.StationCode) ? p.StationCode : (p.NumberPrefix ?? "");
             tbLine.Text = string.IsNullOrWhiteSpace(p.LineCode) ? "L1" : p.LineCode;
             tbRevision.Text = LineupRevision.CurrentVersion(p);
+            // 已有版本更新日志时，LineupRevision.CurrentVersion 永远取日志末条版本；此时将抬头版本号框设为只读，避免用户手改后导出被静默覆回旧值
+            bool hasLogs = p.ChangeLogs != null && p.ChangeLogs.Count > 0;
+            tbRevision.ReadOnly = hasLogs;
+            tbRevision.BackColor = hasLogs ? Ui.Rail : Color.White;
+            tips.SetToolTip(tbRevision, hasLogs
+                ? "当前版本号由上方「版本与更新日志」最新一条记录决定；升版请点「+ 新增版本」，改当前号请双击末条日志编辑。"
+                : "首版初始版本号（例如 V1.0）。");
             tbDesigner.Text = p.Designer ?? "";
             tbEditor.Text = p.Editor ?? "";
             chk11.Checked = p.Export11Columns;
@@ -527,7 +547,10 @@ namespace TianGongCadSuite {
             string proj = tbProject.Text.Trim();
             string sta = tbStation.Text.Trim();
             string line = string.IsNullOrWhiteSpace(tbLine.Text) ? "L1" : tbLine.Text.Trim();
-            string rev = string.IsNullOrWhiteSpace(tbRevision.Text) ? "V1.0" : tbRevision.Text.Trim();
+            bool hasLogs = p.ChangeLogs != null && p.ChangeLogs.Count > 0;
+            string rev = hasLogs
+                ? LineupRevision.CurrentVersion(p)
+                : (string.IsNullOrWhiteSpace(tbRevision.Text) ? "V1.0" : tbRevision.Text.Trim());
             string des = tbDesigner.Text.Trim();
             string ed = tbEditor.Text.Trim();
             bool exp11 = chk11.Checked;

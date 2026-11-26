@@ -3,7 +3,9 @@ using System.IO;
 using System.Linq;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Text;
 using System.Text.RegularExpressions;
+using System.Xml;
 using System.Xml.Serialization;
 namespace TianGongCadSuite {
     public static class LineupPresets {
@@ -637,17 +639,83 @@ namespace TianGongCadSuite {
             var set=new HashSet<LineupModelEntry>(targets);
             return Entries.RemoveAll(e=>set.Contains(e));
         }
-        public static LineupModelCatalog Load(string file){if(!File.Exists(file))return new LineupModelCatalog();using(var s=File.OpenRead(file))return (LineupModelCatalog)CatalogSerializer.Deserialize(s);}
+        // 按 (大类, 型号, 品牌, 接口) 去重并合并非空细分类型/备注，消除内置种子或旧库重复条目导致的补全报错和无法编辑
+        public int Deduplicate(){
+            if(Entries==null||Entries.Count<=1)return 0;
+            var kept=new List<LineupModelEntry>(Entries.Count);
+            var map=new Dictionary<string,LineupModelEntry>(StringComparer.OrdinalIgnoreCase);
+            int removed=0;
+            foreach(var e in Entries){
+                if(e==null){removed++;continue;}
+                string cat=LineupTableData.Category(e.Category);
+                string key=cat+"\u001F"+(e.Model??"").Trim()+"\u001F"+(e.Brand??"").Trim()+"\u001F"+(e.Connector??"").Trim();
+                LineupModelEntry existing;
+                if(map.TryGetValue(key,out existing)){
+                    if(string.IsNullOrWhiteSpace(existing.SubCategory)&&!string.IsNullOrWhiteSpace(e.SubCategory))existing.SubCategory=e.SubCategory.Trim();
+                    if(string.IsNullOrWhiteSpace(existing.Notes)&&!string.IsNullOrWhiteSpace(e.Notes))existing.Notes=e.Notes.Trim();
+                    removed++;
+                    continue;
+                }
+                e.Category=cat;
+                map[key]=e;
+                kept.Add(e);
+            }
+            if(removed>0)Entries=kept;
+            return removed;
+        }
+        internal void SanitizeInPlace(){
+            if(Entries==null){Entries=new List<LineupModelEntry>();return;}
+            for(int i=0;i<Entries.Count;i++){
+                var e=Entries[i];
+                if(e==null)continue;
+                e.Category=LineupXmlSanitizer.Clean(e.Category);
+                e.SubCategory=LineupXmlSanitizer.Clean(e.SubCategory);
+                e.Model=LineupXmlSanitizer.Clean(e.Model);
+                e.Brand=LineupXmlSanitizer.Clean(e.Brand);
+                e.Connector=LineupXmlSanitizer.Clean(e.Connector);
+                e.Notes=LineupXmlSanitizer.Clean(e.Notes);
+            }
+        }
+        public static LineupModelCatalog Load(string file){
+            if(!File.Exists(file))return new LineupModelCatalog();
+            var rs=new XmlReaderSettings{CheckCharacters=false,DtdProcessing=DtdProcessing.Prohibit,XmlResolver=null};
+            LineupModelCatalog c;
+            using(var s=new FileStream(file,FileMode.Open,FileAccess.Read,FileShare.ReadWrite))
+            using(var r=XmlReader.Create(s,rs))c=(LineupModelCatalog)CatalogSerializer.Deserialize(r);
+            if(c==null)c=new LineupModelCatalog();
+            c.SanitizeInPlace();
+            c.Deduplicate();
+            return c;
+        }
         public static LineupModelCatalog LoadSeed(string diskPath){
             if(!string.IsNullOrEmpty(diskPath)&&File.Exists(diskPath))return Load(diskPath);
             using(var s=typeof(LineupModelCatalog).Assembly.GetManifestResourceStream(SeedResource)){
-                if(s!=null)return (LineupModelCatalog)CatalogSerializer.Deserialize(s);
+                if(s!=null){
+                    var rs=new XmlReaderSettings{CheckCharacters=false,DtdProcessing=DtdProcessing.Prohibit,XmlResolver=null};
+                    LineupModelCatalog c;
+                    using(var r=XmlReader.Create(s,rs))c=(LineupModelCatalog)CatalogSerializer.Deserialize(r);
+                    if(c!=null){c.SanitizeInPlace();c.Deduplicate();return c;}
+                }
             }
             return new LineupModelCatalog();
         }
         public void Save(string file){
-            Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(file)));string tmp=file+"."+Guid.NewGuid().ToString("N")+".tmp";
-            try{using(var s=File.Create(tmp))CatalogSerializer.Serialize(s,this);if(File.Exists(file))File.Replace(tmp,file,file+".bak");else File.Move(tmp,file);}finally{if(File.Exists(tmp))File.Delete(tmp);}
+            var clean=Clone();
+            clean.SanitizeInPlace();
+            clean.Deduplicate();
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(file)));
+            string tmp=file+"."+Guid.NewGuid().ToString("N")+".tmp";
+            var ws=new XmlWriterSettings{Encoding=new UTF8Encoding(false),Indent=true,CheckCharacters=true};
+            try{
+                using(var s=new FileStream(tmp,FileMode.CreateNew,FileAccess.Write,FileShare.None))
+                using(var w=XmlWriter.Create(s,ws))CatalogSerializer.Serialize(w,clean);
+                if(File.Exists(file)){
+                    try{File.Replace(tmp,file,file+".bak");}
+                    catch(IOException){File.Replace(tmp,file,null);}
+                }else{
+                    File.Move(tmp,file);
+                }
+            }finally{if(File.Exists(tmp)){try{File.Delete(tmp);}catch{}}}
         }
         static bool Same(string a,string b){return string.Equals((a??"").Trim(),(b??"").Trim(),StringComparison.OrdinalIgnoreCase);}
         static string Norm(string s){
@@ -655,9 +723,19 @@ namespace TianGongCadSuite {
             string t=Regex.Replace(s.Trim(),@"\(\s*0[_,]0\s*\)|_0$|-\s*副本.*$","",RegexOptions.IgnoreCase);
             return Regex.Replace(t,@"[\s_\-]+","").ToUpperInvariant();
         }
+        // 仅在看起来是真实文件路径或以已知 CAD 扩展名结尾时剥离目录与扩展名；
+        // 绝不对自由型号文本调用 Path.GetFileNameWithoutExtension，防止 "R-2000iC/210L" / "RH400.130.N30" 被截断，或含 '"' 时抛 ArgumentException。
+        static string StripCadFilePathAndExt(string raw){
+            if(string.IsNullOrWhiteSpace(raw))return "";
+            string s=raw.Trim();
+            int bs=s.LastIndexOf('\\');
+            if(bs>=0&&bs+1<s.Length)s=s.Substring(bs+1);
+            s=Regex.Replace(s,@"\.(par|psm|asm|pwd|dft|stp|step|igs|iges|x_t|x_b|prt|sldprt|sldasm)$","",RegexOptions.IgnoreCase);
+            return s.Trim();
+        }
         // 根据 CAD 零件文件名或属性名反查最匹配的型号库条目（忽略下划线/连字符/(0_0) 差异）
         public LineupModelEntry MatchByFileName(string fileNameOrTitle,string preferredCategory=null){
-            string stem=Norm(Path.GetFileNameWithoutExtension(fileNameOrTitle??""));
+            string stem=Norm(StripCadFilePathAndExt(fileNameOrTitle));
             if(stem.Length<4)return null;
             var candidates=Entries.Where(e=>e.Category!="阀岛"&&!string.IsNullOrWhiteSpace(e.Model)).ToList();
             if(!string.IsNullOrEmpty(preferredCategory)){
@@ -707,15 +785,31 @@ namespace TianGongCadSuite {
             }
             return added;
         }
+        static string CompactHeaderFirstLine(string raw){
+            if(string.IsNullOrWhiteSpace(raw))return "";
+            string s=raw.Replace("\r\n","\n").Trim();
+            int nl=s.IndexOf('\n');
+            string first=(nl>=0?s.Substring(0,nl):s).Trim();
+            return Regex.Replace(first,@"\s+","");
+        }
         public static LineupModelCatalog Import(string text,char delimiter,string defaultCategory){
             var catalog=new LineupModelCatalog();var rows=LineupTableData.ReadDelimited(text,delimiter).Where(r=>r.Any(c=>!string.IsNullOrWhiteSpace(c))).ToList();if(rows.Count==0)return catalog;
             var header=rows[0];
-            int model=Array.IndexOf(header,"型号"),brand=Array.IndexOf(header,"品牌"),connector=Array.IndexOf(header,"传感器接口类型");
-            if(connector<0)connector=Array.IndexOf(header,"接口类型");
-            int category=Array.IndexOf(header,"类别");if(category<0)category=Array.IndexOf(header,"大类");
-            int subCategory=Array.IndexOf(header,"细分类型");if(subCategory<0)subCategory=Array.IndexOf(header,"子分类");if(subCategory<0)subCategory=Array.IndexOf(header,"类型");
-            int notes=Array.IndexOf(header,"备注");
-            if(header.Contains("编号")){catalog.Learn(LineupTableData.Parse(text,defaultCategory,delimiter).Records);return catalog;}
+            int model=-1,brand=-1,connector=-1,category=-1,subCategory=-1,notes=-1;
+            bool hasBomNumber=false;
+            for(int i=0;i<header.Length;i++){
+                string h=CompactHeaderFirstLine(header[i]);
+                if(h.Length==0)continue;
+                if(h=="编号"||h.StartsWith("编号")||h.Equals("SK编号",StringComparison.OrdinalIgnoreCase)||h.StartsWith("SK编号",StringComparison.OrdinalIgnoreCase))hasBomNumber=true;
+                else if(model<0&&(h=="型号"||h.StartsWith("型号")))model=i;
+                else if(brand<0&&(h=="品牌"||h.StartsWith("品牌")))brand=i;
+                else if(connector<0&&(h=="传感器接口类型"||h=="接口类型"||h.StartsWith("传感器接口")))connector=i;
+                else if(category<0&&(h=="类别"||h=="大类"))category=i;
+                else if(subCategory<0&&(h=="细分类型"||h=="子分类"||h=="类型"))subCategory=i;
+                else if(notes<0&&(h=="备注"||h.StartsWith("备注")))notes=i;
+            }
+            // 从 BOM 清单提取型号允许草稿表中存在重复编号，与 Excel 提取通道保持一致
+            if(hasBomNumber){catalog.Learn(LineupTableData.Parse(text,defaultCategory,delimiter,true).Records);return catalog;}
             if(model<0||brand<0)throw new InvalidDataException("型号库表头至少包含：型号、品牌；传感器还需要接口类型。可加类别列。");
             for(int i=1;i<rows.Count;i++){
                 var row=rows[i];Func<int,string> at=index=>index>=0&&index<row.Length?row[index]:"";

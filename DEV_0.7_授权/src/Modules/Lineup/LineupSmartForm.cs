@@ -16,7 +16,7 @@ namespace TianGongCadSuite {
         Panel pickingPanel;
         Rectangle normalBounds;
         FormWindowState normalWindowState = FormWindowState.Normal;
-        bool pickingMode, fullFieldView;
+        bool pickingMode, fullFieldView, ioBusy;
         string catalogFile, catalogError = "";
         LineupModelCatalog catalog;
 
@@ -46,12 +46,15 @@ namespace TianGongCadSuite {
                 if (path != null) {
                     // 测试或隔离路径：绝不混入内置种子库
                     catalog = File.Exists(catalogFile) ? LineupModelCatalog.Load(catalogFile) : new LineupModelCatalog();
+                    catalog.Deduplicate();
                     catalog.EnsureSubCategories();
                     return;
                 }
                 var seed = LoadBuiltInSeed();
+                seed.Deduplicate();
                 if (File.Exists(catalogFile)) {
                     catalog = LineupModelCatalog.Load(catalogFile);
+                    catalog.Deduplicate();
                     if (!catalog.SeedInitialized) {
                         // 旧版无标记用户库：首次升级时一次性补齐内置种子并标记，之后用户的删除/修改永久保留、不再被覆盖
                         catalog.Merge(seed);
@@ -75,6 +78,11 @@ namespace TianGongCadSuite {
             RefreshEntryModelItems();
         }
 
+        static string CatalogEntryKey(LineupModelEntry e) {
+            if (e == null) return "";
+            return LineupTableData.Category(e.Category) + "\u001F" + (e.Model ?? "").Trim() + "\u001F" + (e.Brand ?? "").Trim() + "\u001F" + (e.Connector ?? "").Trim();
+        }
+
         void SaveCatalogDirect(LineupModelCatalog updated) {
             if (catalogError.Length > 0) throw new InvalidOperationException(catalogError);
             using (var mutex = new System.Threading.Mutex(false, "Local\\TianGongLineupModelLibrary")) {
@@ -82,9 +90,41 @@ namespace TianGongCadSuite {
                 try {
                     try { locked = mutex.WaitOne(2000); } catch (System.Threading.AbandonedMutexException) { locked = true; }
                     if (!locked) throw new IOException("型号库正被另一窗口更新，请稍后重试。");
-                    updated.EnsureSubCategories();
-                    updated.Save(catalogFile);
-                    catalog = updated;
+
+                    // 锁内三路合并：保留其他已打开 Lineup 窗口在本次编辑期间新增到磁盘的条目，同时不复活本窗口明确删除的条目
+                    var beforeKeys = new HashSet<string>(
+                        (catalog == null || catalog.Entries == null ? Enumerable.Empty<LineupModelEntry>() : catalog.Entries).Select(CatalogEntryKey),
+                        StringComparer.OrdinalIgnoreCase);
+                    var toSave = updated.Clone();
+                    toSave.Deduplicate();
+                    var updatedKeys = new HashSet<string>(toSave.Entries.Select(CatalogEntryKey), StringComparer.OrdinalIgnoreCase);
+
+                    if (File.Exists(catalogFile)) {
+                        try {
+                            var disk = LineupModelCatalog.Load(catalogFile);
+                            if (disk.SeedInitialized) toSave.SeedInitialized = true;
+                            foreach (var de in disk.Entries) {
+                                string dk = CatalogEntryKey(de);
+                                if (dk.Length > 0 && !beforeKeys.Contains(dk) && updatedKeys.Add(dk)) {
+                                    toSave.Entries.Add(de.Copy());
+                                }
+                            }
+                        } catch { }
+                    }
+
+                    toSave.Deduplicate();
+                    toSave.EnsureSubCategories();
+                    toSave.SortEntries();
+                    toSave.Save(catalogFile);
+
+                    // 同步回 updated 和本窗体 catalog 引用，避免已打开的型号库弹窗持有旧副本
+                    updated.Entries = new List<LineupModelEntry>(toSave.Entries.Select(e => e.Copy()));
+                    updated.SeedInitialized = toSave.SeedInitialized;
+                    if (catalog == null) catalog = toSave;
+                    else {
+                        catalog.Entries = new List<LineupModelEntry>(toSave.Entries);
+                        catalog.SeedInitialized = toSave.SeedInitialized;
+                    }
                     InvalidateModelAutoCompleteCaches();
                 } finally { if (locked) mutex.ReleaseMutex(); }
             }
@@ -138,7 +178,7 @@ namespace TianGongCadSuite {
 
             var ioSub = new ToolStripMenuItem("导入 / 导出");
             AddSubItem(ioSub, "导入已有 Excel (.xlsx / .xls)…", ImportXlsxDialog);
-            AddSubItem(ioSub, "从剪贴板粘贴整张清单", () => ImportText(Clipboard.GetText(), '\t'));
+            AddSubItem(ioSub, "从剪贴板粘贴整张清单", () => ImportText(ClipboardUtil.GetText(), '\t'));
             AddSubItem(ioSub, "导入 CSV / TSV 文本…", () => {
                 using (var d = new OpenFileDialog { Filter = "表格文本|*.tsv;*.txt;*.csv" })
                     if (d.ShowDialog(this) == DialogResult.OK)
@@ -333,7 +373,7 @@ namespace TianGongCadSuite {
             AddMenuItem(addMenu, "新建一条空白记录", AddEmpty);
             addMenu.Items.Add(new ToolStripSeparator());
             AddMenuItem(addMenu, "导入已有 Excel (.xlsx / .xls)…", ImportXlsxDialog);
-            AddMenuItem(addMenu, "从剪贴板粘贴整张清单", () => ImportText(Clipboard.GetText(), '\t'));
+            AddMenuItem(addMenu, "从剪贴板粘贴整张清单", () => ImportText(ClipboardUtil.GetText(), '\t'));
 
             kitMenu = Ui.Menu();
             AddMenuItem(kitMenu, "一键补齐配套阀片 + H/W 传感器（推荐）", AutoCompleteValvesAndSensors);
@@ -429,10 +469,11 @@ namespace TianGongCadSuite {
                 r.Number = newValue;
                 if (r.Category == "阀片" && oldNum != r.Number) {
                     try { LineupHierarchy.RenumberChildren(project, r); } catch { }
-                } else if (r.Category == "气缸" && oldNum != r.Number) {
+                } else if (r.Category == "气缸" && oldNum != r.Number && !string.IsNullOrWhiteSpace(r.Number)) {
                     foreach (var s in project.Records.Where(x => x.CylinderId == r.Id))
-                        if (!string.IsNullOrWhiteSpace(s.Position)) s.Number = r.Number + s.Position;
+                        if (!string.IsNullOrWhiteSpace(s.Position)) s.Number = r.Number.Trim() + s.Position;
                 }
+                if (oldNum != r.Number) LineupNumbering.SyncCadPageNumbers(project);
             } else if (field == "功能参数") r.Parameters = newValue;
             else if (field == "描述") r.Description = newValue;
             else if (field == "型号") {
@@ -745,13 +786,13 @@ namespace TianGongCadSuite {
 
         internal void AssignValvesToIsland(string key, IEnumerable<string> ids) {
             var next = Snapshot();
-            var target = next.Islands.FirstOrDefault(i => i.Key == key);
+            var target = next.Islands.FirstOrDefault(i => string.Equals(i.Key, key, StringComparison.OrdinalIgnoreCase));
             if (target == null) throw new InvalidOperationException("请先在「设置抬头 / 阀岛」中建立目标阀岛。");
             var selected = next.Records.Where(r => ids.Contains(r.Id)).ToArray();
             if (selected.Length == 0 || selected.Any(r => r.Category != "阀片")) throw new InvalidOperationException("请只选择需要分配的阀片行。");
-            var match = System.Text.RegularExpressions.Regex.Match(key, @"^(.+)-Y([0-9]+)$");
+            var match = System.Text.RegularExpressions.Regex.Match(key, @"^(.+)-Y([0-9]+)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             if (!match.Success) throw new InvalidOperationException("阀岛编号无效。");
-            var owner = next.Records.FirstOrDefault(x => x.Category == "阀岛" && x.Number == key);
+            var owner = next.Records.FirstOrDefault(x => x.Category == "阀岛" && string.Equals(x.Number, key, StringComparison.OrdinalIgnoreCase));
             if (owner == null) { owner = new LineupRecord { Category = "阀岛", Number = key, Model = target.Model }; next.Records.Add(owner); }
             string prefix = next.NumberPrefix;
             int active = next.ActiveIsland;
@@ -765,6 +806,7 @@ namespace TianGongCadSuite {
             }
             next.NumberPrefix = prefix;
             next.ActiveIsland = active;
+            LineupNumbering.SyncCadPageNumbers(next);
             Commit(next, CurrentId(), "已将选中阀片分配到 " + key);
         }
 
@@ -976,12 +1018,20 @@ namespace TianGongCadSuite {
         }
 
         void ScanAssemblyDialog() {
+            if (ioBusy) return;
             Ensure();
             if (assembly == null) throw new InvalidOperationException("当前未连接天工 CAD 装配。");
             SaveDraft(false);
-            status.Text = "正在扫描当前装配中的气缸、阀岛与传感器…";
-            Application.DoEvents();
-            var found = LineupCad.ScanAssembly(assembly, project, catalog);
+            ioBusy = true;
+            List<LineupCadScanItem> found;
+            try {
+                status.Text = "正在扫描当前装配中的气缸、阀岛与传感器…";
+                // 仅重绘状态栏，绝不调 Application.DoEvents() 泵送窗口关闭或重入消息
+                status.Refresh();
+                found = LineupCad.ScanAssembly(assembly, project, catalog);
+            } finally {
+                ioBusy = false;
+            }
             var candidates = found.Where(x => !x.AlreadyBound).ToList();
             if (candidates.Count == 0) {
                 string msg = found.Count == 0
@@ -1039,19 +1089,34 @@ namespace TianGongCadSuite {
         }
 
         void ImportXlsxDialog() {
+            if (ioBusy) return;
             using (var d = new OpenFileDialog { Filter = "Excel Lineup 工作簿|*.xlsx;*.xlsm;*.xls", Title = "选择 Lineup Excel 文件（支持明文与加密表格）" }) {
                 if (d.ShowDialog(this) == DialogResult.OK) {
+                    ioBusy = true;
                     status.Text = "正在读取 Excel 工作簿（加密表格将通过本机 Excel / WPS 只读加载）…";
-                    Application.DoEvents();
+                    status.Refresh();
                     var prevCursor = Cursor;
                     Cursor = Cursors.WaitCursor;
                     try {
                         ImportXlsx(d.FileName);
                     } finally {
                         Cursor = prevCursor;
+                        ioBusy = false;
                     }
                 }
             }
+        }
+
+        static string SanitizeFileName(string name) {
+            if (string.IsNullOrWhiteSpace(name)) return "Lineup.xlsx";
+            var invalid = new HashSet<char>(Path.GetInvalidFileNameChars());
+            foreach (char c in new[] { '/', '\\', ':', '*', '?', '"', '<', '>', '|' }) invalid.Add(c);
+            var sb = new System.Text.StringBuilder(name.Length);
+            for (int i = 0; i < name.Length; i++) {
+                char ch = name[i];
+                sb.Append(invalid.Contains(ch) ? '_' : ch);
+            }
+            return sb.ToString().Trim();
         }
 
         // 无多余中间弹窗的直接导出（从步骤③或底部快捷按钮直接弹出文件保存框）
@@ -1065,7 +1130,7 @@ namespace TianGongCadSuite {
             string proj = string.IsNullOrWhiteSpace(p.ProjectCode) ? "" : p.ProjectCode.Trim();
             string sta = !string.IsNullOrWhiteSpace(p.StationCode) ? p.StationCode.Trim() : (p.NumberPrefix ?? "").Trim();
             string rev = LineupRevision.CurrentVersion(p);
-            string defName = (proj.Length > 0 ? proj + "-" : "") + (sta.Length > 0 ? sta + "-" : Path.GetFileNameWithoutExtension(file) + "-") + "line up-" + rev + "-" + DateTime.Now.ToString("yyyyMMdd") + ".xlsx";
+            string defName = SanitizeFileName((proj.Length > 0 ? proj + "-" : "") + (sta.Length > 0 ? sta + "-" : Path.GetFileNameWithoutExtension(file) + "-") + "line up-" + rev + "-" + DateTime.Now.ToString("yyyyMMdd") + ".xlsx");
             using (var sfd = new SaveFileDialog { Filter = "Excel 工作簿|*.xlsx", FileName = defName, InitialDirectory = Path.GetDirectoryName(file) }) {
                 if (sfd.ShowDialog(owner) != DialogResult.OK) return;
                 var sum = ExportXlsx(sfd.FileName, opts);
@@ -1188,7 +1253,7 @@ namespace TianGongCadSuite {
             if (value == pickingMode) return;
             if (pneumaticPanel != null) pneumaticPanel.EndEdit();
             grid.EndEdit();
-            if (value && watchMode != "bind-queue" && watchMode != "bind-island") pickingId = CurrentId();
+            if (value && watchMode != "bind-queue" && watchMode != "bind-island" && watchMode != "bind") pickingId = CurrentId();
             string returnFocusId = pickingId;
             pickingMode = value;
             if (value) {
@@ -1396,6 +1461,11 @@ namespace TianGongCadSuite {
             ShowToast("已重新顺排 " + renamed + " 条记录编号（支持撤销）。", Ui.Ok, "撤销", (s, e) => Try(Undo));
         }
 
+        int LearnCurrentProjectModels() {
+            SaveDraft(false);
+            return LearnModels(project.Records);
+        }
+
         internal void OpenModelLibraryManager() {
             if (catalogError.Length > 0) throw new InvalidOperationException(catalogError);
             string initCat = activeViewMode == 1 ? "普通传感器"
@@ -1404,12 +1474,7 @@ namespace TianGongCadSuite {
             using (var dialog = new LineupModelLibraryForm(
                 catalog, catalogFile, false, initCat, 0, null,
                 SaveCatalogDirect,
-                () => {
-                    SaveDraft(false);
-                    int n = catalog.Learn(project.Records);
-                    if (n > 0) SaveCatalogDirect(catalog);
-                    return n;
-                },
+                LearnCurrentProjectModels,
                 LoadBuiltInSeed)) {
                 dialog.ShowDialog(this);
                 if (dialog.CatalogChanged) ShowToast("型号库已更新（现有 " + catalog.Entries.Count + " 条）。", Ui.Ok);
@@ -1423,12 +1488,7 @@ namespace TianGongCadSuite {
             using (var dialog = new LineupModelLibraryForm(
                 catalog, catalogFile, true, kind, ids.Count, null,
                 SaveCatalogDirect,
-                () => {
-                    SaveDraft(false);
-                    int n = catalog.Learn(project.Records);
-                    if (n > 0) SaveCatalogDirect(catalog);
-                    return n;
-                },
+                LearnCurrentProjectModels,
                 LoadBuiltInSeed)) {
                 if (dialog.ShowDialog(this) != DialogResult.OK || dialog.SelectedEntry == null) return;
                 ApplyModel(dialog.SelectedEntry, ids);
@@ -1451,9 +1511,15 @@ namespace TianGongCadSuite {
                         latest = catalog.Clone();
                     }
                     int count = latest.Learn(records);
+                    latest.Deduplicate();
                     latest.EnsureSubCategories();
                     if (count > 0 || (!existed && latest.Entries.Count > 0)) latest.Save(catalogFile);
-                    catalog = latest;
+                    // 原地更新 catalog.Entries，确保已打开的型号库窗口与主窗体共享同一份最新列表
+                    if (catalog == null) catalog = latest;
+                    else {
+                        catalog.Entries = new List<LineupModelEntry>(latest.Entries);
+                        catalog.SeedInitialized = latest.SeedInitialized;
+                    }
                     InvalidateModelAutoCompleteCaches();
                     return count;
                 } finally { if (locked) mutex.ReleaseMutex(); }
@@ -1466,13 +1532,15 @@ namespace TianGongCadSuite {
         }
 
         void ImportLibrary() {
+            if (ioBusy) return;
             using (var dialog = new OpenFileDialog { Filter = "型号库 / 清单|*.xlsx;*.xlsm;*.xls;*.csv;*.tsv;*.txt;*.xml" }) {
                 if (dialog.ShowDialog(this) == DialogResult.OK) {
                     string ext = Path.GetExtension(dialog.FileName).ToLowerInvariant();
                     int count;
                     if (ext == ".xlsx" || ext == ".xlsm" || ext == ".xls") {
+                        ioBusy = true;
                         status.Text = "正在从 Excel 清单提取型号…";
-                        Application.DoEvents();
+                        status.Refresh();
                         var prevCursor = Cursor;
                         Cursor = Cursors.WaitCursor;
                         try {
@@ -1480,11 +1548,13 @@ namespace TianGongCadSuite {
                             count = LearnModels(imp.Records);
                         } finally {
                             Cursor = prevCursor;
+                            ioBusy = false;
                         }
                     } else {
                         var imported = ext == ".xml" ? LineupModelCatalog.Load(dialog.FileName) : LineupModelCatalog.Import(SettingsFile.ReadUserText(dialog.FileName), ext == ".csv" ? ',' : '\t', ActiveCategory);
-                        count = catalog.Merge(imported);
-                        if (count > 0 || !File.Exists(catalogFile)) SaveCatalogDirect(catalog);
+                        var draft = catalog.Clone();
+                        count = draft.Merge(imported);
+                        if (count > 0 || !File.Exists(catalogFile)) SaveCatalogDirect(draft);
                     }
                     ShowToast("型号库新增 " + count + " 条，现有 " + catalog.Entries.Count + " 条。", Ui.Ok);
                 }
