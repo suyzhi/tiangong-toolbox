@@ -8,7 +8,7 @@
 # 也可以不用脚本：浏览器打开 https://license.suyzhi.icu/admin/ →「版本发布」上传 zip。
 # 口令：不给 -PasswordFile 就当场问（输入不显示）。
 param(
-    [string]$Zip,                 # 安装包 zip；不给就用仓库根目录里最新的 天工工具箱_DEV*_安装包_*.zip
+    [string]$Zip,                 # 安装包 zip；不给就用仓库根目录或 releases 里最新的 天工工具箱_DEV*_安装包_*.zip
     [switch]$Build,               # 先跑 make-installer.ps1 打一个新包
     [string]$Notes = '',          # 更新说明（用户在更新提示里看到），一行一条
     [string]$NotesFile,
@@ -24,8 +24,12 @@ if ($Build) {
     if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw '打包失败' }
 }
 if (-not $Zip) {
-    $Zip = (Get-ChildItem $repo -Filter '天工工具箱_DEV*_安装包_*.zip' | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
-    if (-not $Zip) { throw '仓库根目录里找不到安装包 zip，请用 -Zip 指定或加 -Build' }
+    $searchDirs = @($repo, (Join-Path $repo 'releases')) | Where-Object { Test-Path -LiteralPath $_ }
+    $latestZip = $searchDirs | ForEach-Object {
+        Get-ChildItem -LiteralPath $_ -Filter '天工工具箱_DEV*_安装包_*.zip' -File -ErrorAction SilentlyContinue
+    } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $latestZip) { throw '仓库根目录和 releases 里都找不到安装包 zip，请用 -Zip 指定或加 -Build' }
+    $Zip = $latestZip.FullName
 }
 $Zip = (Resolve-Path -LiteralPath $Zip).Path
 $name = [IO.Path]::GetFileName($Zip)
@@ -42,10 +46,15 @@ Write-Output ('发布 ' + $Version + '：' + $name + '（' + [Math]::Round((Get-
 $s = New-Object Microsoft.PowerShell.Commands.WebRequestSession
 $login = Invoke-RestMethod -Method Post -Uri "$Server/admin/api/login" -WebSession $s -ContentType 'application/json; charset=utf-8' `
     -Body ([Text.Encoding]::UTF8.GetBytes((@{ password = $pw } | ConvertTo-Json)))
-# 更新说明走 X-TG-Notes 头（UTF-8 Base64），避免长中文说明超出 URL 长度上限或写进反代日志
+# 更新说明走 X-TG-Notes 头（UTF-8 Base64），避免长中文说明超出 URL 长度上限或写进反代日志；
+# 若 URL 编码后不超过 4000 字符则同时附带 &notes= 查询参数，兼容尚未部署 X-TG-Notes 支持的旧版服务端
 $q = '?name=' + [Uri]::EscapeDataString($name) + '&version=' + [Uri]::EscapeDataString($Version)
 $headers = @{ 'X-TG-CSRF' = $login.csrf }
-if ($Notes) { $headers['X-TG-Notes'] = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Notes)) }
+if ($Notes) {
+    $headers['X-TG-Notes'] = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Notes))
+    $escapedNotes = [Uri]::EscapeDataString($Notes)
+    if ($escapedNotes.Length -le 4000) { $q += '&notes=' + $escapedNotes }
+}
 try {
     $r = Invoke-RestMethod -Method Post -Uri ("$Server/admin/api/updates" + $q) -WebSession $s -Headers $headers `
         -ContentType 'application/zip' -InFile $Zip
