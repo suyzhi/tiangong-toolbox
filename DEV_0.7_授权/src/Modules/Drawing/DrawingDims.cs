@@ -19,7 +19,10 @@ namespace TianGongCadSuite {
         public readonly List<string> Notes = new List<string>();
         public DwgSpace Space;   // 建好的尺寸占的地方登记进去，后面的引线文字避开
         public string StyleName = "";
+        public bool UnbrokenTempMode;   // 断裂视图临时展开标注期间放宽 X 向纸边判定，恢复断裂后由 AuditBrokenSheetBounds 复核全图框
+        readonly List<S.Dimension> tempLinearDims = new List<S.Dimension>(); // 断裂展开期间新建的线性/直径尺寸，恢复断裂后逐条复核边界（绝不误删坐标尺寸链）
         readonly List<double[]> calloutBoxes = new List<double[]>();   // 已放置的引线标注文字框（实测碰撞兜底防重叠）
+        readonly List<double[]> hardBoxes = new List<double[]>();      // 坐标尺寸带 / 角度尺寸框等硬障碍（引线标注微调时同样严禁压入）
 
         public DwgWriter(D.Sheet s){ sheet = s; dims = (S.Dimensions)s.Dimensions; }
         public DwgWriter(D.Sheet s, D.DraftDocument doc, string styleName) : this(s){
@@ -165,13 +168,34 @@ namespace TianGongCadSuite {
             var op = ToSheet(v, o.X, o.Y);
             // 文字线：Horizontal 时是一条水平线（y = run.Line），文字竖排；否则是竖线（x = run.Line）
             Func<double, double[]> textAt = c => run.Horizontal ? ToSheet(v, c, run.Line) : ToSheet(v, run.Line, c);
+            double uX0 = double.MaxValue, uY0 = double.MaxValue, uX1 = double.MinValue, uY1 = double.MinValue;
+            Action<S.Dimension> trackBounds = dim => {
+                if (dim == null) return;
+                try {
+                    double a, b, c, e; dim.Range(out a, out b, out c, out e);
+                    if (c > a + 1e-6 || e > b + 1e-6) {
+                        if (a < uX0) uX0 = a; if (b < uY0) uY0 = b;
+                        if (c > uX1) uX1 = c; if (e > uY1) uY1 = e;
+                    }
+                    int kc = dim.KeyPointCount;
+                    int idx = kc > 5 ? 5 : (kc >= 3 ? 2 : kc - 1);
+                    if (idx >= 0) {
+                        double tx, ty, kz; F.KeyPointType kt; int hh;
+                        dim.GetKeyPoint(idx, out tx, out ty, out kz, out kt, out hh);
+                        if (Math.Abs(tx) > 1e-9 || Math.Abs(ty) > 1e-9) {
+                            if (tx - 0.003 < uX0) uX0 = tx - 0.003; if (tx + 0.003 > uX1) uX1 = tx + 0.003;
+                            if (ty - 0.003 < uY0) uY0 = ty - 0.003; if (ty + 0.003 > uY1) uY1 = ty + 0.003;
+                        }
+                    }
+                } catch { }
+            };
             try {
                 // 基准固定落在自身真实坐标上（AddCoordinateOriginEx 无法被折走）
                 var tp = textAt(o.Coord);
                 origin = dims.AddCoordinateOriginEx(Ref(v, o.Edge.Tag), op[0], op[1], 0, o.KeyPoint, tp[0], tp[1], 0);
                 EnsureStyle(origin, StyleName);
                 try { if (Math.Abs(origin.TrackDistance) > 1e-6) origin.TrackDistance = 0; } catch { }
-                Created++; Occupy(origin); RecordCoordText(origin);
+                Created++; Occupy(origin); RecordCoordText(origin); trackBounds(origin);
             } catch (Exception e) { Failed++; Notes.Add("坐标尺寸基准建不出来：" + e.Message); return 0; }
             int n = 1;
             // 按到基准的距离由近及远依次添加，交给天工原生坐标串自动避让折线（2026-11-23 DrawJogProbe 实测：
@@ -185,8 +209,37 @@ namespace TianGongCadSuite {
                     EnsureStyle(d, StyleName);
                     // 落点在零件深处时天工新建的坐标尺寸会带负的 TrackDistance，归零即与基准齐平
                     try { if (Math.Abs(d.TrackDistance) > 1e-6) d.TrackDistance = 0; } catch { }
-                    Created++; n++; Occupy(d); RecordCoordText(d);
+                    Created++; n++; Occupy(d); RecordCoordText(d); trackBounds(d);
                 } catch (Exception e) { Failed++; Log.Write("DrawingOrdinate", e); }
+            }
+            // 将整条坐标串位于视图轮廓外侧的文字带合并登记为连续整体禁区（防止倒角/孔引线钻进 1342/1392/1422/1482 数字间隙）
+            if (!UnbrokenTempMode && uX1 > uX0 + 1e-4 && uY1 > uY0 + 1e-4 && cbox != null && cbox.Length >= 4) {
+                double[] band = null;
+                if (run.Horizontal) {
+                    if (run.LowSide) {
+                        double by1 = Math.Min(uY1, cbox[1] - 0.001);
+                        double by0 = Math.Min(uY0, cbox[1] - 0.015);
+                        if (by1 > by0 + 0.002) band = new[] { uX0 - 0.0025, by0 - 0.0015, uX1 + 0.0025, by1 + 0.001 };
+                    } else {
+                        double by0 = Math.Max(uY0, cbox[3] + 0.001);
+                        double by1 = Math.Max(uY1, cbox[3] + 0.015);
+                        if (by1 > by0 + 0.002) band = new[] { uX0 - 0.0025, by0 - 0.001, uX1 + 0.0025, by1 + 0.0015 };
+                    }
+                } else {
+                    if (run.LowSide) {
+                        double bx1 = Math.Min(uX1, cbox[0] - 0.001);
+                        double bx0 = Math.Min(uX0, cbox[0] - 0.015);
+                        if (bx1 > bx0 + 0.002) band = new[] { bx0 - 0.0015, uY0 - 0.0025, bx1 + 0.001, uY1 + 0.0025 };
+                    } else {
+                        double bx0 = Math.Max(uX0, cbox[2] + 0.001);
+                        double bx1 = Math.Max(uX1, cbox[2] + 0.015);
+                        if (bx1 > bx0 + 0.002) band = new[] { bx0 - 0.001, uY0 - 0.0025, bx1 + 0.0015, uY1 + 0.0025 };
+                    }
+                }
+                if (band != null) {
+                    if (Space != null) Space.Add(band);
+                    hardBoxes.Add(band);
+                }
             }
             return n;
         }
@@ -230,16 +283,9 @@ namespace TianGongCadSuite {
                 if (run.Horizontal) want = run.LowSide ? Math.Min(pa[1], pb[1]) - targetCoord : targetCoord - Math.Max(pa[1], pb[1]);
                 else want = run.LowSide ? Math.Min(pa[0], pb[0]) - targetCoord : targetCoord - Math.Max(pa[0], pb[0]);
                 if (want < 0.005) want = 0.0075;
-                d.TrackDistance = want;
-                double x0, y0, x1, y1; d.Range(out x0, out y0, out x1, out y1);
-                double err1 = LinearSideError(x0, y0, x1, y1, cbox, targetCoord, run.Horizontal, run.LowSide);
-                if (err1 > 0.001) {
-                    d.TrackDistance = -want;
-                    double ax0, ay0, ax1, ay1; d.Range(out ax0, out ay0, out ax1, out ay1);
-                    double err2 = LinearSideError(ax0, ay0, ax1, ay1, cbox, targetCoord, run.Horizontal, run.LowSide);
-                    if (err2 > err1) d.TrackDistance = want;
-                }
+                PlaceLinearOutside(d, want, cbox, targetCoord, run.Horizontal, run.LowSide);
                 ApplyLinearTerminator(d, scale);
+                if (UnbrokenTempMode) tempLinearDims.Add(d);
                 Created++; Occupy(d);
                 return true;
             } catch (Exception e) {
@@ -267,14 +313,108 @@ namespace TianGongCadSuite {
         }
 
         static double LinearSideError(double x0, double y0, double x1, double y1, double[] cbox, double targetCoord, bool horizontal, bool lowSide){
-            // 优先确保尺寸不在视图轮廓反侧，再尽量靠近 targetCoord
+            // 只校验尺寸线所在外延端（忽略拉回零件内部的延伸线另一端，否则合法外置尺寸的中心 cx/cy 会被误罚导致缩回零件内）
             double pen = 0;
             if (horizontal) {
-                if (lowSide) { if (y0 > cbox[1] + 0.001) pen += 1.0; return pen + Math.Abs(y0 - targetCoord); }
-                if (y1 < cbox[3] - 0.001) pen += 1.0; return pen + Math.Abs(y1 - targetCoord);
+                if (lowSide) {
+                    if (y0 >= cbox[1] - 0.0020) pen += 1.0;
+                    return pen + Math.Abs(y0 - targetCoord);
+                }
+                if (y1 <= cbox[3] + 0.0020) pen += 1.0;
+                return pen + Math.Abs(y1 - targetCoord);
             }
-            if (lowSide) { if (x0 > cbox[0] + 0.001) pen += 1.0; return pen + Math.Abs(x0 - targetCoord); }
-            if (x1 < cbox[2] - 0.001) pen += 1.0; return pen + Math.Abs(x1 - targetCoord);
+            if (lowSide) {
+                if (x0 >= cbox[0] - 0.0020) pen += 1.0;
+                return pen + Math.Abs(x0 - targetCoord);
+            }
+            if (x1 <= cbox[2] + 0.0020) pen += 1.0;
+            return pen + Math.Abs(x1 - targetCoord);
+        }
+
+        // 闭环校准线性/直径尺寸的 TrackDistance，确保尺寸线与数字严格落在视图轮廓外侧 targetCoord 处且严守图框边界：
+        // 限制最大 TrackDistance 并对越出图框或垂直/水平方向异常飘飞的尺寸施加重罚，彻底杜绝尺寸线冲出 A3/A4 图框。
+        void PlaceLinearOutside(S.Dimension d, double want, double[] cbox, double targetCoord, bool horizontal, bool lowSide, double maxTrackLimit = 0.048){
+            if (d == null) return;
+            double sw = Space != null ? Space.SheetW : 0.420;
+            double sh = Space != null ? Space.SheetH : 0.297;
+            double viewH = Math.Max(0.010, cbox[3] - cbox[1]);
+            double viewW = Math.Max(0.010, cbox[2] - cbox[0]);
+            double trackCap = Math.Max(0.048, maxTrackLimit);
+            Func<double, double> evalTrack = tr => {
+                d.TrackDistance = tr;
+                double x0, y0, x1, y1; d.Range(out x0, out y0, out x1, out y1);
+                double err = LinearSideError(x0, y0, x1, y1, cbox, targetCoord, horizontal, lowSide);
+                // 严禁尺寸范围越出图纸边界或冲进底栏标题栏（断裂视图临时展开标注时仅放宽 X 边界，Y 边界与高度爆炸仍严守）
+                bool oobY = y0 < 0.044 || y1 > sh - 0.006;
+                bool oobX = !UnbrokenTempMode && (x0 < 0.006 || x1 > sw - 0.006);
+                if (oobX || oobY) err += 100.0;
+                // 防止垂直直径/水平长度尺寸在旋转/断裂视图上发生垂直方向异常飘飞（如传动轴01 y1 冲到 333mm）
+                if (!horizontal && (y1 - y0) > viewH + 0.042) err += 50.0 + (y1 - y0);
+                if (horizontal && (x1 - x0) > viewW + 0.042) err += 50.0 + (x1 - x0);
+                try {
+                    int kc = d.KeyPointCount;
+                    if (kc > 0) {
+                        double tx, ty, tz; F.KeyPointType kt; int hh;
+                        d.GetKeyPoint(kc - 1, out tx, out ty, out tz, out kt, out hh);
+                        if (DrawingStyleRules.IsTextInsideView(tx, ty, cbox, horizontal, lowSide, 0.0012)) err += 2.0;
+                    }
+                } catch { }
+                return err;
+            };
+            Func<double> readActual = () => {
+                double x0, y0, x1, y1; d.Range(out x0, out y0, out x1, out y1);
+                return horizontal ? (lowSide ? y0 : y1) : (lowSide ? x0 : x1);
+            };
+            double span = horizontal ? (cbox[3] - cbox[1]) : (cbox[2] - cbox[0]);
+            double clampedWant = Math.Min(trackCap, Math.Max(0.005, want));
+            double halfSpan = Math.Min(trackCap * 0.70, span * 0.55);
+            double fullSpan = Math.Min(trackCap, span);
+            double bestTrack = clampedWant, bestErr = double.MaxValue;
+            foreach (double tr in new[] { clampedWant, -clampedWant, clampedWant + halfSpan, -(clampedWant + halfSpan), clampedWant + fullSpan, -(clampedWant + fullSpan) }) {
+                try {
+                    double err = evalTrack(tr);
+                    if (err < bestErr) { bestErr = err; bestTrack = tr; }
+                    if (err < 0.0025) break;
+                } catch { }
+            }
+            if (bestErr > 0.0025 && bestErr < 40.0) {
+                try {
+                    d.TrackDistance = bestTrack;
+                    double c1 = readActual();
+                    double probe = bestTrack + (bestTrack >= 0 ? 0.008 : -0.008);
+                    d.TrackDistance = probe;
+                    double c2 = readActual();
+                    double slope = (c2 - c1) / (probe - bestTrack);
+                    if (Math.Abs(slope) > 0.2) {
+                        double exact = bestTrack + (targetCoord - c1) / slope;
+                        if (Math.Abs(exact) <= trackCap + 0.006) {
+                            foreach (double cand in new[] { exact, exact + (lowSide ? -0.003 : 0.003) / slope }) {
+                                if (Math.Abs(cand) > trackCap + 0.006) continue;
+                                double err = evalTrack(cand);
+                                if (err < bestErr) { bestErr = err; bestTrack = cand; }
+                            }
+                        }
+                    }
+                } catch { }
+            }
+            try { d.TrackDistance = bestTrack; } catch { }
+        }
+
+        // 校验新建尺寸是否合法落在图框内部（未冲出纸张边界、未发生异常跨页飞线）
+        bool IsDimensionWithinSheet(S.Dimension d, double[] cbox, bool horizontal){
+            if (d == null) return false;
+            try {
+                double sw = Space != null ? Space.SheetW : 0.420;
+                double sh = Space != null ? Space.SheetH : 0.297;
+                double x0, y0, x1, y1; d.Range(out x0, out y0, out x1, out y1);
+                if (y0 < 0.040 || y1 > sh - 0.005) return false;
+                if (!UnbrokenTempMode && (x0 < 0.005 || x1 > sw - 0.005)) return false;
+                if (cbox != null && cbox.Length >= 4) {
+                    if (!horizontal && (y1 - y0) > Math.Max(0.055, (cbox[3] - cbox[1]) * 2.2 + 0.025)) return false;
+                    if (horizontal && (x1 - x0) > Math.Max(0.065, (cbox[2] - cbox[0]) * 1.6 + 0.030)) return false;
+                }
+                return true;
+            } catch { return true; }
         }
 
         // 孔：引线式直径，文字按 DrawingText.Hole 拼好的四段写（"4×" + 值/螺纹 + 贯通/深度 + 沉孔）。
@@ -336,6 +476,12 @@ namespace TianGongCadSuite {
         // 位置度框：不带引线，紧贴在孔标注文字正下方居中（人图就这么放，普查 76% 的 H7 孔都有）。
         // 实测（DrawApiProbe2）：AddRadialDiameter 的 KP[3] 是文字中心、KP[4] 是横线最外端，以前拿 KP[4] 对齐会把框甩到文字最右端撞轴测图。
         public bool Position(S.Dimension d){
+            return Position(d, DrawingTolerance.PositionFrame, null);
+        }
+        public bool Position(S.Dimension d, string frameCode){
+            return Position(d, frameCode, null);
+        }
+        public bool Position(S.Dimension d, string frameCode, double[] placedBox){
             if (d == null) return false;
             try {
                 int kc = d.KeyPointCount;
@@ -344,16 +490,24 @@ namespace TianGongCadSuite {
                     double k3x, k3y, k4x, k4y, kz; F.KeyPointType kt; int hh;
                     d.GetKeyPoint(3, out k3x, out k3y, out kz, out kt, out hh);
                     d.GetKeyPoint(4, out k4x, out k4y, out kz, out kt, out hh);
-                    cx = k3x; cy = k4y - 0.0036;
+                    cx = k3x; cy = Math.Min(k3y, k4y) - 0.0036;
                 } else {
                     double kx, ky, kz; F.KeyPointType kt; int hh; d.GetKeyPoint(kc - 1, out kx, out ky, out kz, out kt, out hh);
                     double a, b, c, e; d.Range(out a, out b, out c, out e);
                     cx = (a + c) / 2; cy = ky - 0.0040;
                 }
-                const double fw = 0.014, fh = 0.0045;
+                // 防护：向下引出的孔标注在写入 H7 公差带后 KP[3]/KP[4] 偶发回跳至视图内部（如 02-007 16×Ø6 H7），
+                // 校验其必须紧贴 placedBox 下沿，偏离超 12mm 时直接对齐 placedBox 正下方居中。
+                if (placedBox != null && placedBox.Length >= 4) {
+                    if (Math.Abs(cy - placedBox[1]) > 0.012 || cx < placedBox[0] - 0.015 || cx > placedBox[2] + 0.015) {
+                        cx = (placedBox[0] + placedBox[2]) * 0.5;
+                        cy = placedBox[1] + 0.0028;
+                    }
+                }
+                const double fw = 0.016, fh = 0.0045;
                 var f = ((S.FeatureControlFrames)sheet.FeatureControlFrames).Add(cx, cy, 0);
                 EnsureStyle(f, StyleName);
-                f.PrimaryFrame = DrawingTolerance.PositionFrame;
+                f.PrimaryFrame = string.IsNullOrEmpty(frameCode) ? DrawingTolerance.PositionFrame : frameCode;
                 Created++;
                 var fb = new[] { cx - fw / 2, cy - fh / 2, cx + fw / 2, cy + fh / 2 };
                 if (Space != null) Space.Add(fb[0] - 0.001, fb[1] - 0.001, fb[2] + 0.001, fb[3] + 0.001);
@@ -414,16 +568,19 @@ namespace TianGongCadSuite {
         void PlaceAndGuardCallout(S.Dimension d, double[] textPos, Action fixTerminator){
             MoveText(d, textPos);
             if (fixTerminator != null) fixTerminator();
-            if (textPos != null && calloutBoxes.Count > 0) {
+            var guardBoxes = new List<double[]>(calloutBoxes.Count + hardBoxes.Count);
+            guardBoxes.AddRange(calloutBoxes);
+            guardBoxes.AddRange(hardBoxes);
+            if (textPos != null && guardBoxes.Count > 0) {
                 var origPos = new[] { textPos[0], textPos[1] };
                 var tb0 = ReadCalloutShelfBox(d);
-                double[] hit0 = tb0 == null ? null : FindOverlap(tb0, calloutBoxes);
+                double[] hit0 = tb0 == null ? null : FindOverlap(tb0, guardBoxes);
                 if (tb0 != null && hit0 != null) {
                     double sd0 = hit0[1] - tb0[3] - 0.0018;
                     double su0 = hit0[3] - tb0[1] + 0.0018;
                     int firstDir = Math.Abs(sd0) <= Math.Abs(su0) ? -1 : 1;
                     double[] bestPos = origPos;
-                    int bestOverlaps = CountOverlaps(tb0, calloutBoxes);
+                    int bestOverlaps = CountOverlaps(tb0, guardBoxes);
                     bool solved = false;
                     foreach (int dir in new[] { firstDir, -firstDir }) {
                         if (dir != firstDir) {
@@ -435,7 +592,7 @@ namespace TianGongCadSuite {
                             var tb = ReadCalloutShelfBox(d);
                             if (tb == null) break;
                             double minY, maxY;
-                            int ov = OverlapYUnion(tb, calloutBoxes, out minY, out maxY);
+                            int ov = OverlapYUnion(tb, guardBoxes, out minY, out maxY);
                             if (ov == 0) { bestPos = curPos; bestOverlaps = 0; solved = true; break; }
                             double dy = dir < 0 ? (minY - tb[3] - 0.0018) : (maxY - tb[1] + 0.0018);
                             if (Math.Abs(dy) < 1e-6) break;
@@ -448,11 +605,41 @@ namespace TianGongCadSuite {
                             if (nextTb == null) break;
                             if (Space != null && !Space.InsideAndClearOfViews(nextTb)) break;
                             curPos = nextPos;
-                            int nextOv = CountOverlaps(nextTb, calloutBoxes);
+                            int nextOv = CountOverlaps(nextTb, guardBoxes);
                             if (nextOv < bestOverlaps) { bestOverlaps = nextOv; bestPos = curPos; }
                             if (nextOv == 0) { solved = true; break; }
                         }
                         if (solved) break;
+                    }
+                    if (!solved) {
+                        // 垂直微调仍未脱困（例如倒角文字落在竖向坐标数字带内）：沿水平方向推出重叠框外侧
+                        foreach (int hdir in new[] { 1, -1 }) {
+                            MoveText(d, origPos);
+                            if (fixTerminator != null) fixTerminator();
+                            var curPos = new[] { origPos[0], origPos[1] };
+                            for (int attempt = 0; attempt < 4; attempt++) {
+                                var tb = ReadCalloutShelfBox(d);
+                                if (tb == null) break;
+                                double minX, maxX;
+                                int ov = OverlapXUnion(tb, guardBoxes, out minX, out maxX);
+                                if (ov == 0) { bestPos = curPos; bestOverlaps = 0; solved = true; break; }
+                                double dx = hdir > 0 ? (maxX - tb[0] + 0.0022) : (minX - tb[2] - 0.0022);
+                                if (Math.Abs(dx) < 1e-6) break;
+                                var pred = new[] { tb[0] + dx, tb[1], tb[2] + dx, tb[3] };
+                                if (Space != null && !Space.InsideAndClearOfViews(pred)) break;
+                                var nextPos = new[] { curPos[0] + dx, curPos[1] };
+                                MoveText(d, nextPos);
+                                if (fixTerminator != null) fixTerminator();
+                                var nextTb = ReadCalloutShelfBox(d);
+                                if (nextTb == null) break;
+                                if (Space != null && !Space.InsideAndClearOfViews(nextTb)) break;
+                                curPos = nextPos;
+                                int nextOv = CountOverlaps(nextTb, guardBoxes);
+                                if (nextOv < bestOverlaps) { bestOverlaps = nextOv; bestPos = curPos; }
+                                if (nextOv == 0) { solved = true; break; }
+                            }
+                            if (solved) break;
+                        }
                     }
                     if (!solved) {
                         MoveText(d, bestPos);
@@ -461,6 +648,19 @@ namespace TianGongCadSuite {
                 }
             }
             RecordCalloutShelf(d);
+        }
+
+        static int OverlapXUnion(double[] r, List<double[]> boxes, out double minX, out double maxX){
+            minX = double.MaxValue; maxX = double.MinValue;
+            int n = 0;
+            foreach (var u in boxes) {
+                if (r[0] < u[2] && u[0] < r[2] && r[1] < u[3] && u[1] < r[3]) {
+                    if (u[0] < minX) minX = u[0];
+                    if (u[2] > maxX) maxX = u[2];
+                    n++;
+                }
+            }
+            return n;
         }
 
         static int CountOverlaps(double[] r, List<double[]> boxes){
@@ -563,9 +763,9 @@ namespace TianGongCadSuite {
 
         // 引线文字（倒角回退、刻字）：箭头挂在图元上 (px,py 视图坐标)，文字放在 textPos（图纸坐标）。
         // 引线的折点用 AddVertex 加（文字跟着最后一个点走）—— 出图训练数据那套夹具里基准 / 形位公差 / 粗糙度都是这么挂的，真机验证过
-        public S.Balloon Note(D.DrawingView v, DwgEdge e, double px, double py, string text, double[] textPos){
+        public S.Balloon Note(D.DrawingView v, DwgEdge e, double px, double py, string text, double[] textPos, double[] anchorSheet = null){
             try {
-                var p = ToSheet(v, px, py);
+                var p = (anchorSheet != null && anchorSheet.Length >= 2) ? anchorSheet : ToSheet(v, px, py);
                 var b = ((S.Balloons)sheet.Balloons).AddByTerminator(Ref(v, e.Tag), p[0], p[1], 0, false);
                 EnsureStyle(b, StyleName);
                 try { b.Callout = 1; } catch { }
@@ -595,6 +795,494 @@ namespace TianGongCadSuite {
                 ApplyLinearTerminator(d, sc);
                 Created++; Occupy(d); return true;
             } catch (Exception e) { Failed++; Log.Write("DrawingDistance", e); return false; }
+        }
+
+        // ---- Wave 1 新增原语：角度尺寸 / PCD 分度圆 / 车床线性直径 Ø / 阶梯式轴向线性尺寸 ----
+
+        // 斜面 / 锥尖角度标注（原生 AddAngleBetweenObjects）：
+        // 优先取远离交点 72% 处的点让天工直接落在张角扇区；若读到补角先切 d.AngleCompliment，若仍未变则临时切 dims.AngleCompliment 重建。
+        public bool Angle(D.DrawingView v, AngleFeature af, double[] cbox){
+            if (af == null || af.Edge1 == null || af.Edge2 == null || af.Edge1.Tag == null || af.Edge2.Tag == null) return false;
+            S.Dimension d = null;
+            bool oldCompl = false, flippedColl = false;
+            try {
+                var e1p = FarFromVertex(af.Edge1, af.VertexX, af.VertexY, 0.72);
+                var e2p = FarFromVertex(af.Edge2, af.VertexX, af.VertexY, 0.72);
+                var p1 = ToSheet(v, e1p[0], e1p[1]);
+                var p2 = ToSheet(v, e2p[0], e2p[1]);
+                d = dims.AddAngleBetweenObjects(Ref(v, af.Edge1.Tag), p1[0], p1[1], 0, false, Ref(v, af.Edge2.Tag), p2[0], p2[1], 0, false);
+                EnsureStyle(d, StyleName);
+                double gotDeg = d.Value * 180.0 / Math.PI;
+                if (Math.Abs(gotDeg - af.AngleDeg) > 1.5 && Math.Abs((180.0 - gotDeg) - af.AngleDeg) <= 1.5) {
+                    try { d.AngleCompliment = !d.AngleCompliment; } catch { }
+                    gotDeg = d.Value * 180.0 / Math.PI;
+                    if (Math.Abs(gotDeg - af.AngleDeg) > 1.5) {
+                        try { d.Delete(); } catch { }
+                        d = null;
+                        try { oldCompl = dims.AngleCompliment; dims.AngleCompliment = !oldCompl; flippedColl = true; } catch { }
+                        d = dims.AddAngleBetweenObjects(Ref(v, af.Edge1.Tag), p1[0], p1[1], 0, false, Ref(v, af.Edge2.Tag), p2[0], p2[1], 0, false);
+                        EnsureStyle(d, StyleName);
+                        gotDeg = d.Value * 180.0 / Math.PI;
+                    }
+                }
+                if (Math.Abs(gotDeg - af.AngleDeg) > 1.5 && Math.Abs((360.0 - gotDeg) - af.AngleDeg) <= 1.5) {
+                    try { d.AngleClockwise = !d.AngleClockwise; } catch { }
+                    gotDeg = d.Value * 180.0 / Math.PI;
+                }
+                if (Math.Abs(gotDeg - af.AngleDeg) > 2.0) {
+                    try { d.Delete(); } catch { }
+                    return false;
+                }
+                try { if (Math.Abs(d.TrackDistance) < 0.005) d.TrackDistance = 0.009; } catch { }
+                Created++; Occupy(d);
+                if (!UnbrokenTempMode) {
+                    try {
+                        double ax0, ay0, ax1, ay1; d.Range(out ax0, out ay0, out ax1, out ay1);
+                        if (ax1 > ax0 + 1e-4 && ay1 > ay0 + 1e-4) {
+                            var ab = new[] { ax0 - 0.002, ay0 - 0.002, ax1 + 0.002, ay1 + 0.002 };
+                            if (Space != null) Space.Add(ab);
+                            hardBoxes.Add(ab);
+                        }
+                        int kc = d.KeyPointCount;
+                        if (kc > 0) {
+                            double tx, ty, tz; F.KeyPointType kt; int hh;
+                            d.GetKeyPoint(kc - 1, out tx, out ty, out tz, out kt, out hh);
+                            if (Math.Abs(tx) > 1e-6 || Math.Abs(ty) > 1e-6) {
+                                var tb = new[] { tx - 0.009, ty - 0.006, tx + 0.009, ty + 0.006 };
+                                if (Space != null) Space.Add(tb);
+                                hardBoxes.Add(tb);
+                            }
+                        }
+                    } catch { }
+                }
+                return true;
+            } catch (Exception e) {
+                if (d != null) try { d.Delete(); } catch { }
+                Log.Write("DrawingAngle", e);
+                return false;
+            } finally {
+                if (flippedColl) { try { dims.AngleCompliment = oldCompl; } catch { } }
+            }
+        }
+
+        static double[] FarFromVertex(DwgEdge e, double vx, double vy, double frac){
+            double d1 = (e.X1 - vx) * (e.X1 - vx) + (e.Y1 - vy) * (e.Y1 - vy);
+            double d2 = (e.X2 - vx) * (e.X2 - vx) + (e.Y2 - vy) * (e.Y2 - vy);
+            double nx = d1 >= d2 ? e.X2 : e.X1, ny = d1 >= d2 ? e.Y2 : e.Y1;
+            double fx = d1 >= d2 ? e.X1 : e.X2, fy = d1 >= d2 ? e.Y1 : e.Y2;
+            return new[] { nx + (fx - nx) * frac, ny + (fy - ny) * frac };
+        }
+
+        // 圆周均布孔的分度圆（PCD）中心线圆 + ØPCD 直径标注：
+        // 优先走天工原生 BoltHoleCircles；失败时平滑回退在图纸层按中心线样式画分度圆并标直径。
+        public bool PitchCircle(D.DraftDocument dft, D.DrawingView v, PcdPattern pcd, string centerStyle, double[] textPos){
+            if (pcd == null || pcd.Holes.Count < 3) return false;
+            object pcdCircleObj = null;
+            bool nativeBhc = false;
+            string prevStyle = GetActiveStyle(dft);
+            try {
+                if (!string.IsNullOrEmpty(centerStyle)) SetActiveStyle(dft, centerStyle);
+                try {
+                    var bhcs = (S.BoltHoleCircles)sheet.BoltHoleCircles;
+                    if (pcd.CenterCircle != null && pcd.CenterCircle.Tag != null && pcd.Holes[0].Tag != null) {
+                        var bhc = bhcs.AddBoltHoleCircleByCenterAndRadius(Ref(v, pcd.CenterCircle.Tag), 0, Ref(v, pcd.Holes[0].Tag), 0);
+                        for (int i = 1; i < pcd.Holes.Count; i++) {
+                            if (pcd.Holes[i].Tag != null) try { bhc.AddMember(Ref(v, pcd.Holes[i].Tag), 0); } catch { }
+                        }
+                        pcdCircleObj = bhc;
+                        nativeBhc = true;
+                    } else if (pcd.Holes[0].Tag != null && pcd.Holes[1].Tag != null && pcd.Holes[2].Tag != null) {
+                        var bhc = bhcs.AddBoltHoleCircleBy3Points(Ref(v, pcd.Holes[0].Tag), 0, Ref(v, pcd.Holes[1].Tag), 0, Ref(v, pcd.Holes[2].Tag), 0);
+                        for (int i = 3; i < pcd.Holes.Count; i++) {
+                            if (pcd.Holes[i].Tag != null) try { bhc.AddMember(Ref(v, pcd.Holes[i].Tag), 0); } catch { }
+                        }
+                        pcdCircleObj = bhc;
+                        nativeBhc = true;
+                    }
+                } catch (Exception ex) { Log.Write("DrawingBoltHoleCircle", ex); }
+
+                if (pcdCircleObj == null) {
+                    // 回退：在图纸 2D 层按细点画线画分度圆（坐标已按 ViewToSheet 换算，直径用视图比例换算）
+                    var sc = ToSheet(v, pcd.Cx, pcd.Cy);
+                    var sp = ToSheet(v, pcd.Cx + pcd.Radius, pcd.Cy);
+                    double rSheet = Math.Abs(sp[0] - sc[0]);
+                    if (rSheet > 1e-4) {
+                        var c2 = sheet.Circles2d.AddByCenterRadius(sc[0], sc[1], rSheet);
+                        try { c2.Style.LinearColor = 0x0000FF; c2.Style.Width = 0.00018; } catch { }
+                        pcdCircleObj = c2;
+                    }
+                }
+            } finally {
+                if (!string.IsNullOrEmpty(StyleName)) ApplySheetStyle(dft, sheet, StyleName);
+                else if (!string.IsNullOrEmpty(prevStyle)) SetActiveStyle(dft, prevStyle);
+            }
+            if (pcdCircleObj == null) return false;
+
+            // 标出分度圆直径（如 Ø80）
+            S.Dimension dim = null;
+            try {
+                if (nativeBhc) {
+                    dim = dims.AddRadialDiameter(pcdCircleObj);
+                } else {
+                    dim = dims.AddRadialDiameter(pcdCircleObj);
+                    // 2D 纸面圆按 1:1 读数，非 1:1 视图必须覆写为真实模型分度圆直径
+                    double vScale = 1.0; try { vScale = v.ScaleFactor; } catch { }
+                    if (Math.Abs(vScale - 1.0) > 1e-4) {
+                        dim.PrefixString = "%DI" + pcd.DiameterMm.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+                        dim.DisplayType = S.DimDispTypeConstants.igDimDisplayTypeBlank;
+                    }
+                }
+                EnsureStyle(dim, StyleName);
+                PlaceAndGuardCallout(dim, textPos, () => { try { dim.TerminatorPosition = true; } catch { } });
+                Created++;
+                return true;
+            } catch (Exception ex) {
+                if (dim != null) try { dim.Delete(); } catch { }
+                Log.Write("DrawingPcdDim", ex);
+                // 兜底用引线标注写 ØPCD
+                if (pcd.Holes[0].Tag != null) {
+                    return Note(v, pcd.Holes[0], pcd.Holes[0].Cx, pcd.Holes[0].Cy,
+                        "分度圆 %DI" + pcd.DiameterMm.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture), textPos) != null;
+                }
+                return false;
+            }
+        }
+
+        // 车床件在水平主视图/剖视图上直接标某段外径 / 内径（两条对称水平线间距离 + %DI 前缀），按层向外排开不重叠。
+        // 含断裂/旋转视图防越界护栏：若线性尺寸因视图断裂/旋转飞出图框或高度爆炸，自动删掉并平滑回退为干净引线标注。
+        public bool DiameterSpan(D.DrawingView v, DwgEdge top, DwgEdge bot, bool rightSide, double gapPaper, double scale, double[] cbox, string fitClass){
+            if (top == null || bot == null || top.Tag == null || bot.Tag == null) return false;
+            S.Dimension d = null;
+            bool isBroken = false;
+            try { isBroken = v.DisplayBreakLinesInBrokenState && v.BreakLinePairs.Count > 0; } catch { }
+            try {
+                double pickX = rightSide ? Math.Max(Math.Max(top.X1, top.X2), Math.Max(bot.X1, bot.X2))
+                                         : Math.Min(Math.Min(top.X1, top.X2), Math.Min(bot.X1, bot.X2));
+                var pt = ToSheet(v, pickX, top.Y1);
+                var pb = ToSheet(v, pickX, bot.Y1);
+                d = dims.AddDistanceBetweenObjects(Ref(v, top.Tag), pt[0], pt[1], 0, false, Ref(v, bot.Tag), pb[0], pb[1], 0, false);
+                EnsureStyle(d, StyleName);
+                d.SetOrientation(S.DimensionOrientationConstants.igOrientationVertical);
+                d.PrefixString = "%DI";
+                double targetX = rightSide ? (cbox[2] + gapPaper) : (cbox[0] - gapPaper);
+                double edgeDist = rightSide ? (targetX - Math.Max(pt[0], pb[0])) : (Math.Min(pt[0], pb[0]) - targetX);
+                double want = isBroken ? gapPaper : edgeDist;
+                if (want < 0.005) want = 0.0065;
+                double maxTrack = Math.Min(0.085, Math.Max(0.048, Math.Abs(edgeDist) + 0.018));
+                PlaceLinearOutside(d, want, cbox, targetX, false, !rightSide, maxTrack);
+                if (!IsDimensionWithinSheet(d, cbox, false)) {
+                    // 断裂/旋转视图上天工线性垂直尺寸偶尔会把延伸线甩出图框（如传动轴01 y1=333mm）：立刻删掉改用引线标注
+                    double diaMm = Math.Round(Math.Abs(top.Y1 - bot.Y1) * 1000.0, 2);
+                    try { d.Delete(); } catch { }
+                    d = null;
+                    double midX = (Math.Min(bot.X1, bot.X2) + Math.Max(bot.X1, bot.X2)) * 0.5;
+                    var mp = ToSheet(v, midX, bot.Y1);
+                    double ax = Math.Max(cbox[0] + 0.004, Math.Min(cbox[2] - 0.004, mp[0]));
+                    double[] tp = new[] { rightSide ? (cbox[2] + 0.008) : Math.Max(0.016, ax - 0.010), Math.Max(0.055, cbox[1] - 0.010 - gapPaper * 0.5) };
+                    string label = "%DI" + diaMm.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) + (string.IsNullOrEmpty(fitClass) ? "" : " " + fitClass);
+                    return Note(v, bot, midX, bot.Y1, label, tp) != null;
+                }
+                if (!string.IsNullOrEmpty(fitClass)) ApplyFitClass(d, fitClass, d.Value * 1000.0);
+                ApplyLinearTerminator(d, scale);
+                LastCallout = d;
+                if (UnbrokenTempMode) tempLinearDims.Add(d);
+                Created++; Occupy(d);
+                return true;
+            } catch (Exception e) {
+                if (d != null) try { d.Delete(); } catch { }
+                Log.Write("DrawingDiameterSpan", e);
+                return false;
+            }
+        }
+
+        // 车床轴中部的窄卡簧槽/退刀槽直径引线标注（如 2×Ø38）：从槽底水平边向下引出至视图下方空白区，
+        // 避免长延伸线横穿整根轴身或将槽径尺寸困在轴体内部；支持传入已换算到断裂后纸面坐标的箭头点 anchorSheet。
+        public bool UndercutDiameterCallout(D.DrawingView v, DwgEdge botEdge, double diaMm, int count, double[] textPos, double[] anchorSheet = null){
+            if (botEdge == null || botEdge.Tag == null) return false;
+            string pre = count > 1 ? (count + "×") : "";
+            string label = pre + "%DI" + diaMm.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+            if (anchorSheet != null && anchorSheet.Length >= 2) {
+                try {
+                    var b = ((S.Balloons)sheet.Balloons).AddByTerminator(Ref(v, botEdge.Tag), anchorSheet[0], anchorSheet[1], 0, false);
+                    EnsureStyle(b, StyleName);
+                    try { b.Callout = 1; } catch { }
+                    b.BalloonText = label;
+                    if (textPos != null) try { b.AddVertex(textPos[0], textPos[1], 0); } catch { }
+                    Created++; Occupy(b);
+                    return true;
+                } catch (Exception e) { Log.Write("DrawingUndercutCallout", e); }
+            }
+            double midX = (Math.Min(botEdge.X1, botEdge.X2) + Math.Max(botEdge.X1, botEdge.X2)) * 0.5;
+            return Note(v, botEdge, midX, botEdge.Y1, label, textPos) != null;
+        }
+
+        // 断裂视图恢复断裂态后仅复核展开期新建的线性/直径尺寸是否严守图框边界（绝不误删坐标基准 0 导致整条坐标链级联消失）
+        public int AuditBrokenSheetBounds(){
+            int removed = 0;
+            try {
+                double sw = Space != null ? Space.SheetW : 0.420;
+                double sh = Space != null ? Space.SheetH : 0.297;
+                for (int i = tempLinearDims.Count - 1; i >= 0; i--) {
+                    var d = tempLinearDims[i];
+                    try {
+                        double x0, y0, x1, y1; d.Range(out x0, out y0, out x1, out y1);
+                        if (Math.Abs(x1 - x0) < 1e-6 && Math.Abs(y1 - y0) < 1e-6) continue;
+                        if (x0 < 0.002 || y0 < 0.036 || x1 > sw - 0.002 || y1 > sh - 0.002) {
+                            d.Delete();
+                            removed++;
+                            if (Created > 0) Created--;
+                        }
+                    } catch { }
+                }
+                tempLinearDims.Clear();
+            } catch { }
+            return removed;
+        }
+
+        // 车床件轴向阶梯式线性尺寸（支持多层级联外推，Layer 0 贴近轮廓、Layer 1 标总长）
+        public bool LinearBetween(D.DrawingView v, DwgTarget a, DwgTarget b, bool horizontal, bool lowSide, double gapPaper, double scale, double[] cbox){
+            if (a == null || b == null || a.Edge == null || b.Edge == null || a.Edge.Tag == null || b.Edge.Tag == null) return false;
+            S.Dimension d = null;
+            try {
+                var pa = ToSheet(v, a.X, a.Y);
+                var pb = ToSheet(v, b.X, b.Y);
+                d = dims.AddDistanceBetweenObjects(
+                    Ref(v, a.Edge.Tag), pa[0], pa[1], 0, a.KeyPoint,
+                    Ref(v, b.Edge.Tag), pb[0], pb[1], 0, b.KeyPoint);
+                EnsureStyle(d, StyleName);
+                d.SetOrientation(horizontal ? S.DimensionOrientationConstants.igOrientationHorizontal : S.DimensionOrientationConstants.igOrientationVertical);
+                double expected = Math.Abs(b.Coord - a.Coord);
+                if (expected > 1e-6 && Math.Abs(d.Value - expected) > Math.Max(1e-4, expected * 0.02)) {
+                    try { d.Delete(); } catch { }
+                    return false;
+                }
+                double targetCoord = horizontal
+                    ? (lowSide ? cbox[1] - gapPaper : cbox[3] + gapPaper)
+                    : (lowSide ? cbox[0] - gapPaper : cbox[2] + gapPaper);
+                double want;
+                if (horizontal) want = lowSide ? Math.Min(pa[1], pb[1]) - targetCoord : targetCoord - Math.Max(pa[1], pb[1]);
+                else want = lowSide ? Math.Min(pa[0], pb[0]) - targetCoord : targetCoord - Math.Max(pa[0], pb[0]);
+                if (want < 0.005) want = 0.007;
+                PlaceLinearOutside(d, want, cbox, targetCoord, horizontal, lowSide);
+                if (!IsDimensionWithinSheet(d, cbox, horizontal)) {
+                    try { d.Delete(); } catch { }
+                    return false;
+                }
+                ApplyLinearTerminator(d, scale);
+                if (UnbrokenTempMode) tempLinearDims.Add(d);
+                Created++; Occupy(d);
+                return true;
+            } catch (Exception e) {
+                if (d != null) try { d.Delete(); } catch { }
+                Log.Write("DrawingLinearBetween", e);
+                return false;
+            }
+        }
+
+        // ---- Wave 2 新增原语：孔表孔号气泡（A1/A2...）与规范孔表（Tables.Add） ----
+
+        // 在多孔视图的每个孔旁挂紧贴的短引线孔号（如 A1 / B2），按 8 方向避让已放孔号防止叠字
+        public bool HoleTag(D.DrawingView v, DwgEdge circle, string tag, double[] viewCenterSheet, List<double[]> usedTagPts){
+            if (circle == null || circle.Tag == null || string.IsNullOrEmpty(tag)) return false;
+            try {
+                var cs = ToSheet(v, circle.Cx, circle.Cy);
+                var rs = ToSheet(v, circle.Cx + circle.R, circle.Cy);
+                double rPaper = Math.Abs(rs[0] - cs[0]);
+                double dist = Math.Max(0.0046, rPaper + 0.0032);
+                double prefX = (viewCenterSheet != null && cs[0] < viewCenterSheet[0]) ? -1.0 : 1.0;
+                double prefY = (viewCenterSheet != null && cs[1] < viewCenterSheet[1]) ? -1.0 : 1.0;
+                double[,] dirs = {
+                    { prefX, prefY }, { prefX, -prefY }, { -prefX, prefY }, { -prefX, -prefY },
+                    { prefX, 0 }, { 0, prefY }, { -prefX, 0 }, { 0, -prefY }
+                };
+                double bestX = cs[0] + prefX * dist * 0.707, bestY = cs[1] + prefY * dist * 0.707;
+                double bestAng = Math.Atan2(prefY, prefX);
+                double bestScore = double.MaxValue;
+                for (int k = 0; k < 8; k++) {
+                    double dx = dirs[k, 0], dy = dirs[k, 1];
+                    double norm = Math.Sqrt(dx * dx + dy * dy);
+                    double ux = dx / norm, uy = dy / norm;
+                    double tx = cs[0] + ux * dist, ty = cs[1] + uy * dist;
+                    double score = k * 0.0004;
+                    if (usedTagPts != null) {
+                        foreach (var u in usedTagPts) {
+                            double d2 = Math.Sqrt((tx - u[0]) * (tx - u[0]) + (ty - u[1]) * (ty - u[1]));
+                            if (d2 < 0.0055) score += (0.0055 - d2) * 20.0;
+                        }
+                    }
+                    if (score < bestScore) { bestScore = score; bestX = tx; bestY = ty; bestAng = Math.Atan2(uy, ux); }
+                }
+                double ax = circle.Cx + circle.R * Math.Cos(bestAng);
+                double ay = circle.Cy + circle.R * Math.Sin(bestAng);
+                var p = ToSheet(v, ax, ay);
+                var b = ((S.Balloons)sheet.Balloons).AddByTerminator(Ref(v, circle.Tag), p[0], p[1], 0, false);
+                EnsureStyle(b, StyleName);
+                try { b.Callout = 1; } catch { }
+                b.BalloonText = tag;
+                try { b.AddVertex(bestX, bestY, 0); } catch { }
+                if (usedTagPts != null) usedTagPts.Add(new[] { bestX, bestY });
+                Created++;
+                return true;
+            } catch (Exception e) {
+                Failed++;
+                Log.Write("DrawingHoleTag", e);
+                return false;
+            }
+        }
+
+        // 用天工原生 Tables.Add 在指定页生成紧凑规范孔表（列：编号 | X(mm) | Y(mm) | 规格 [| 形位公差]）；
+        // 若分栏内含定位销孔（IsPinHole=true），自动扩展第 5 列「形位公差」并在对应销孔行规格旁居中写入原生同轴度形位公差框（◎|Ø0.03|A）。
+        public bool HoleTable(D.DraftDocument dft, D.Sheet targetSheet, double originX, double originY, IList<HoleTableRow> rows, double maxHeightM){
+            if (dft == null || targetSheet == null || rows == null || rows.Count == 0) return false;
+            try {
+                try { targetSheet.Activate(); } catch { }
+                double totalW, maxH;
+                var chunks = DrawingWave2Rules.PlanHoleTableChunks(rows, maxHeightM, out totalW, out maxH);
+                if (chunks.Count == 0) return false;
+
+                double xPos = originX;
+                const double chunkGap = 0.005;
+                foreach (var ch in chunks) {
+                    int numCols = ch.HasPinHole ? 5 : 4;
+                    string[] headers = ch.HasPinHole
+                        ? new[] { "编号", "X(mm)", "Y(mm)", "规格", "形位公差" }
+                        : new[] { "编号", "X(mm)", "Y(mm)", "规格" };
+                    var tbl = dft.Tables.Add();
+                    try { tbl.ShowColumnHeader = false; } catch { }
+                    try { tbl.HeaderFixedRowHeight = ch.HeaderH; } catch { }
+                    try { tbl.DataFixedRowHeight = ch.RowH; } catch { }
+
+                    var cols = tbl.Columns;
+                    while (cols.Count < numCols) cols.Add(cols.Count, true);
+                    for (int c = 1; c <= numCols; c++) {
+                        try { cols.Item(c).Width = ch.ColWidths[c - 1]; } catch { }
+                    }
+                    var tRows = tbl.Rows;
+                    while (tRows.Count < ch.Count + 1) tRows.Add(tRows.Count, true);
+                    for (int c = 1; c <= numCols; c++) {
+                        try { tbl.Cell[1, c].value = headers[c - 1]; } catch { }
+                    }
+                    for (int i = 0; i < ch.Count; i++) {
+                        var hr = rows[ch.Offset + i];
+                        int rr = i + 2;
+                        try { tbl.Cell[rr, 1].value = hr.Tag; } catch { }
+                        try { tbl.Cell[rr, 2].value = hr.Xmm.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture); } catch { }
+                        try { tbl.Cell[rr, 3].value = hr.Ymm.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture); } catch { }
+                        try { tbl.Cell[rr, 4].value = hr.SpecText; } catch { }
+                        if (numCols >= 5) {
+                            try { tbl.Cell[rr, 5].value = ""; } catch { }
+                        }
+                    }
+                    tbl.SetOrigin(xPos, originY);
+                    tbl.Update();
+                    Created++;
+
+                    // 在第 5 列「形位公差」单元格正中心写入销孔同轴度形位公差框（实测 FCF.Add(cx,cy,0) 严格居中锚定）
+                    if (ch.HasPinHole && numCols >= 5) {
+                        var actW = new double[numCols];
+                        for (int c = 1; c <= numCols; c++) {
+                            double cw = ch.ColWidths[c - 1];
+                            try { double r = cols.Item(c).Width; if (r > 1e-4) cw = r; } catch { }
+                            actW[c - 1] = cw;
+                        }
+                        var actH = new double[ch.Count + 1];
+                        for (int r = 1; r <= ch.Count + 1; r++) {
+                            double rh = r == 1 ? ch.HeaderH : ch.RowH;
+                            try { double rv = tRows.Item(r).RowHeight; if (rv > 1e-4) rh = rv; } catch { }
+                            actH[r - 1] = rh;
+                        }
+                        double gdtCenterX = xPos + actW[0] + actW[1] + actW[2] + actW[3] + actW[4] * 0.5;
+                        double yCursor = originY - actH[0];
+                        var fcfs = (S.FeatureControlFrames)targetSheet.FeatureControlFrames;
+                        for (int i = 0; i < ch.Count; i++) {
+                            double rh = actH[i + 1];
+                            double rowCy = yCursor - rh * 0.5;
+                            var hr = rows[ch.Offset + i];
+                            if (hr.IsPinHole && !string.IsNullOrEmpty(hr.GdtFrame)) {
+                                try {
+                                    var f = fcfs.Add(gdtCenterX, rowCy, 0);
+                                    EnsureStyle(f, StyleName);
+                                    f.PrimaryFrame = hr.GdtFrame;
+                                    Created++;
+                                } catch (Exception fx) { Log.Write("DrawingHoleTableGdt", fx); }
+                            }
+                            yCursor -= rh;
+                        }
+                    }
+
+                    xPos += ch.Width + chunkGap;
+                }
+                return true;
+            } catch (Exception e) {
+                Failed++;
+                Notes.Add("多孔表生成失败：" + e.Message);
+                Log.Write("DrawingHoleTable", e);
+                return false;
+            }
+        }
+
+        // 通用公差带写入（支持孔 H7 / H8 / J7 及轴 g6 / k6 / h6 / f7 等）
+        public bool ApplyFitClass(S.Dimension d, string fitClass, double diameterMm){
+            if (d == null || string.IsNullOrEmpty(fitClass)) return false;
+            try {
+                bool isHole = char.IsUpper(fitClass[0]);
+                d.UseStandardLimitAndFitTolerance = true;
+                if (isHole) d.HoleClassString = fitClass; else d.ShaftClassString = fitClass;
+                d.PrimaryToleranceSymbol = fitClass;
+                d.DisplayType = S.DimDispTypeConstants.igDimDisplayTypeClassPlusMinus;
+                string up = ""; try { up = d.PrimaryUpperTolerance ?? ""; } catch { }
+                if (up.Length == 0) {
+                    if (fitClass == "H7") {
+                        d.UseStandardLimitAndFitTolerance = false;
+                        d.PrimaryUpperTolerance = "+" + DrawingTolerance.H7Upper(diameterMm).ToString("0.000", System.Globalization.CultureInfo.InvariantCulture);
+                        d.PrimaryLowerTolerance = "0";
+                    } else {
+                        double u, l;
+                        if (DrawingTolerance.ShaftFitDeviation(fitClass, diameterMm, out u, out l)) {
+                            d.UseStandardLimitAndFitTolerance = false;
+                            d.PrimaryUpperTolerance = (u > 0 ? "+" : "") + u.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture);
+                            d.PrimaryLowerTolerance = (l > 0 ? "+" : "") + l.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture);
+                        }
+                    }
+                }
+                return true;
+            } catch (Exception e) { Log.Write("DrawingApplyFitClass", e); return false; }
+        }
+
+        // 挂基准符号（如 A / B）到视图某条边线上
+        public bool Datum(D.DrawingView v, DwgEdge edge, double px, double py, double[] textPos, string letter){
+            if (edge == null || edge.Tag == null || string.IsNullOrEmpty(letter)) return false;
+            try {
+                var p = ToSheet(v, px, py);
+                var df = ((S.DatumFrames)sheet.DatumFrames).AddByTerminator(Ref(v, edge.Tag), p[0], p[1], 0, false);
+                EnsureStyle(df, StyleName);
+                df.Datum = letter;
+                if (textPos != null) try { df.AddVertex(textPos[0], textPos[1], 0); } catch { }
+                Created++; Occupy(df);
+                return true;
+            } catch (Exception e) { Log.Write("DrawingDatum", e); return false; }
+        }
+
+        public static void EnsureStyle(S.DatumFrame df, string styleName){
+            if (df == null || string.IsNullOrEmpty(styleName)) return;
+            try {
+                var st = df.Style;
+                if (st != null && !string.Equals(st.Name, styleName, StringComparison.Ordinal)) st.Name = styleName;
+            } catch { }
+        }
+
+        // 挂带引线的形位公差框（如平行度 %PR%VB0.03%VBA、垂直度 %PP%VB0.03%VBA、平面度 %FL%VB0.02、同轴度 %CO%VB%DI0.02%VBA）
+        public bool FcfOnEdge(D.DrawingView v, DwgEdge edge, double px, double py, double[] textPos, string frameCode){
+            if (edge == null || edge.Tag == null || string.IsNullOrEmpty(frameCode)) return false;
+            try {
+                var p = ToSheet(v, px, py);
+                var f = ((S.FeatureControlFrames)sheet.FeatureControlFrames).AddByTerminator(Ref(v, edge.Tag), p[0], p[1], 0, false);
+                EnsureStyle(f, StyleName);
+                f.PrimaryFrame = frameCode;
+                if (textPos != null) try { f.AddVertex(textPos[0], textPos[1], 0); } catch { }
+                Created++; Occupy(f);
+                return true;
+            } catch (Exception e) { Log.Write("DrawingFcfOnEdge", e); return false; }
         }
     }
 }

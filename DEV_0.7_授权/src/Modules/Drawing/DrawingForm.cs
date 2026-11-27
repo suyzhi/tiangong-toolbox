@@ -25,7 +25,10 @@ namespace TianGongCadSuite {
         readonly TextBox searchBox = new TextBox { BorderStyle = BorderStyle.FixedSingle, Font = Ui.F9 };
         readonly Button searchClearBtn = Ui.Small("×");
         readonly CheckBox overwrite = new CheckBox(), openAfter = new CheckBox();
+        readonly CheckBox autoBreak = new CheckBox(), autoHoleTable = new CheckBox();
+        readonly Button btnTolRules = Ui.Small("公差规则…");
         readonly ComboBox dimStyleBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Font = Ui.F9 };
+        bool tolPinHoles = true, tolBearings = true, tolGuideRails = true, tolDatumsAndGdt = true, tolRoughness = true, autoMultiSheet = true;
         readonly SlimProgress bar = new SlimProgress { Visible = false };
         readonly FlatButton run = (FlatButton)Ui.Primary("出图", 128, 40);
         readonly Button close = Ui.Secondary("关闭", 90, 36);
@@ -164,12 +167,36 @@ namespace TianGongCadSuite {
             dimStyleBox.SelectionChangeCommitted += (s, e) => Choices.Set("drawing.dimstyle", SelectedDimensionStyle());
             tips.SetToolTip(dimStyleBox, "新建工程图统一使用的尺寸样式（默认 A3-国标-水平，也可切为 A3-国标，不再沿用模板默认的 A3-孔 / A4-水平2）。");
             // 覆盖开关默认每次打开窗口均不勾选（不持久化到 choices.tsv），防止上次勾过覆盖导致跨会话误覆写已有人工图纸
-            overwrite.Text = "已有同名工程图时覆盖（不勾：另存为「名字(自动).dft」）"; overwrite.AutoSize = true; overwrite.Checked = false; overwrite.Font = Ui.F9; overwrite.Margin = Ui.SPad(0, 5, 18, 0);
-            openAfter.Text = "出完打开工程图（批量 > 3 张时仅打开最后一张）"; openAfter.AutoSize = true; openAfter.Checked = true; openAfter.Font = Ui.F9; openAfter.Margin = Ui.SPad(0, 5, 0, 0);
+            overwrite.Text = "覆盖已有图"; overwrite.AutoSize = true; overwrite.Checked = false; overwrite.Font = Ui.F9; overwrite.Margin = Ui.SPad(0, 5, 14, 0);
+            tips.SetToolTip(overwrite, "已有同名工程图时覆盖原文件；不勾选则另存为「名字(自动).dft」。");
+            openAfter.Text = "出完打开"; openAfter.AutoSize = true; openAfter.Checked = true; openAfter.Font = Ui.F9; openAfter.Margin = Ui.SPad(0, 5, 14, 0);
+            tips.SetToolTip(openAfter, "出图完成后在天工打开工程图（批量 > 3 张时仅打开最后一张）。");
+            autoBreak.Text = "细长件断裂"; autoBreak.AutoSize = true; autoBreak.Checked = LoadFlag("drawing.autobreak", true); autoBreak.Font = Ui.F9; autoBreak.Margin = Ui.SPad(0, 5, 14, 0);
+            autoBreak.CheckedChanged += (s, e) => SaveFlag("drawing.autobreak", autoBreak.Checked);
+            tips.SetToolTip(autoBreak, "长宽比 ≥5 且比例 <1:2 的细长件自动扫描中间均匀空段插入断裂视图并放大比例。");
+            autoHoleTable.Text = "多孔孔表"; autoHoleTable.AutoSize = true; autoHoleTable.Checked = LoadFlag("drawing.autoholetable", true); autoHoleTable.Font = Ui.F9; autoHoleTable.Margin = Ui.SPad(0, 5, 12, 0);
+            autoHoleTable.CheckedChanged += (s, e) => SaveFlag("drawing.autoholetable", autoHoleTable.Checked);
+            tips.SetToolTip(autoHoleTable, "主视图含 ≥16 个孔的大板自动切换规范孔表（相对统一 3D 基准 0,0），保持主视图清爽。");
+
+            tolPinHoles = LoadFlag("drawing.tol.pin", true);
+            tolBearings = LoadFlag("drawing.tol.bearing", true);
+            tolGuideRails = LoadFlag("drawing.tol.rail", true);
+            tolDatumsAndGdt = LoadFlag("drawing.tol.gdt", true);
+            tolRoughness = LoadFlag("drawing.tol.rough", true);
+            autoMultiSheet = LoadFlag("drawing.automultisheet", true);
+            ((FlatButton)btnTolRules).SetFore(Ui.Text2);
+            btnTolRules.Margin = Ui.SPad(0, 2, 0, 0);
+            btnTolRules.Click += (s, e) => EditToleranceRules();
+            tips.SetToolTip(btnTolRules, "配置单零件智能公差（定位销孔/轴承位/导轨面/基准与形位公差/粗糙度）及多页补图规则。");
+
             busyLockControls.Add(dimStyleBox);
             busyLockControls.Add(overwrite);
             busyLockControls.Add(openAfter);
+            busyLockControls.Add(autoBreak);
+            busyLockControls.Add(autoHoleTable);
+            busyLockControls.Add(btnTolRules);
             opts.Controls.Add(lblStyle); opts.Controls.Add(dimStyleBox); opts.Controls.Add(overwrite); opts.Controls.Add(openAfter);
+            opts.Controls.Add(autoBreak); opts.Controls.Add(autoHoleTable); opts.Controls.Add(btnTolRules);
             body.Add(opts);
 
             bar.Height = Ui.S(8); body.Add(bar);
@@ -825,6 +852,10 @@ namespace TianGongCadSuite {
             // 在进入批量循环前快照选项并做覆盖二次确认，防止中途误改选项或误覆写已有人工工程图
             bool optOverwrite = overwrite.Checked;
             bool optOpenAfter = openAfter.Checked;
+            bool optAutoBreak = autoBreak.Checked;
+            bool optAutoHoleTable = autoHoleTable.Checked;
+            bool optAutoMultiSheet = autoMultiSheet;
+            bool optTolPin = tolPinHoles, optTolBearing = tolBearings, optTolRail = tolGuideRails, optTolGdt = tolDatumsAndGdt, optTolRough = tolRoughness;
             string optStyle = SelectedDimensionStyle();
             if (optOverwrite) {
                 int existingDft = 0;
@@ -879,7 +910,16 @@ namespace TianGongCadSuite {
                         Overwrite = optOverwrite,
                         Close = !keep,
                         DimensionStyle = optStyle,
-                        OutputName = hasStemCollision ? (Path.GetFileNameWithoutExtension(j.File) + "(" + j.Kind + ")") : null
+                        OutputName = hasStemCollision ? (Path.GetFileNameWithoutExtension(j.File) + "(" + j.Kind + ")") : null,
+                        AutoBreakView = optAutoBreak,
+                        AutoHoleTable = optAutoHoleTable,
+                        AutoDetailView = optAutoMultiSheet,
+                        AutoMultiSheet = optAutoMultiSheet,
+                        TolPinHoles = optTolPin,
+                        TolBearings = optTolBearing,
+                        TolGuideRails = optTolRail,
+                        TolDatumsAndGdt = optTolGdt,
+                        TolRoughness = optTolRough
                     };
                     var o = j.Kind == "装配" ? DrawingMaker.Assembly(app, j.File, opt) : DrawingMaker.Part(app, j.File, opt);
                     j.Result = o;
@@ -945,6 +985,68 @@ namespace TianGongCadSuite {
             }
         }
 
+        static bool LoadFlag(string key, bool defVal) {
+            string s = Choices.Get(key, defVal ? "1" : "0");
+            return !string.Equals(s, "0", StringComparison.Ordinal);
+        }
+
+        static void SaveFlag(string key, bool val) {
+            Choices.Set(key, val ? "1" : "0");
+        }
+
+        // 精简公差与多页规则弹窗（保持主窗口清爽，零新增列）
+        void EditToleranceRules() {
+            if (busy) return;
+            using (var dlg = new Form()) {
+                Ui.Shell(dlg, "智能公差与出图规则", 420, 340, 380, 300);
+                dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
+                dlg.MaximizeBox = false;
+                dlg.MinimizeBox = false;
+                dlg.StartPosition = FormStartPosition.CenterParent;
+
+                var stack = new VerticalStack { Dock = DockStyle.Fill, Padding = Ui.SPad(18, 14, 18, 10), Gap = Ui.S(8), AutoScroll = false };
+                var note = new Label {
+                    AutoSize = false, Height = Ui.S(34), Font = Ui.F8, ForeColor = Ui.Muted, BackColor = Ui.Bg,
+                    Text = "仅基于单零件自身几何与孔特征自动补充公差及第 2 页详图/盲孔视图，取消勾选即跳过对应规则："
+                };
+                stack.Add(note);
+
+                Func<string, bool, CheckBox> mk = (txt, on) => new CheckBox {
+                    Text = txt, Checked = on, AutoSize = false, Height = Ui.S(24), Font = Ui.F9, ForeColor = Ui.Text, BackColor = Ui.Bg
+                };
+                var cPin = mk("定位销孔自动加 H7 + 位置度 Ø0.03（含成对 Ø10 销孔）", tolPinHoles);
+                var cBear = mk("轴承座孔 H7 / 轴承轴颈 k6 / 定位销外径 g6", tolBearings);
+                var cRail = mk("导轨安装面平面度 0.02 + 靠山垂直度 0.02 A", tolGuideRails);
+                var cGdt = mk("自动标注基准 A 与平行度 / 垂直度 / 同轴度", tolDatumsAndGdt);
+                var cRough = mk("配合面自动标注粗糙度（Ra3.2 / 轴承位 Ra1.6）", tolRoughness);
+                var cMulti = mk("底面/背面/斜孔溢出与密孔详图自动建第 2 页", autoMultiSheet);
+                foreach (var c in new[] { cPin, cBear, cRail, cGdt, cRough, cMulti }) stack.Add(c);
+
+                var barBtns = new ActionBar { Dock = DockStyle.Bottom, Height = Ui.S(54), Padding = Ui.SPad(18, 0, 18, 0) };
+                var bReset = Ui.Secondary("全部默认", 88, 32);
+                var bCancel = Ui.Secondary("取消", 76, 32);
+                var bOk = Ui.Primary("确定", 84, 34);
+                bReset.Click += (s, e) => { cPin.Checked = cBear.Checked = cRail.Checked = cGdt.Checked = cRough.Checked = cMulti.Checked = true; };
+                bCancel.Click += (s, e) => { dlg.DialogResult = DialogResult.Cancel; dlg.Close(); };
+                bOk.Click += (s, e) => { dlg.DialogResult = DialogResult.OK; dlg.Close(); };
+                barBtns.AddLeft(bReset);
+                barBtns.AddRight(bCancel);
+                barBtns.AddRight(bOk);
+                dlg.AcceptButton = bOk;
+                dlg.CancelButton = bCancel;
+                dlg.Controls.Add(stack);
+                dlg.Controls.Add(barBtns);
+
+                if (dlg.ShowDialog(this) != DialogResult.OK) return;
+                tolPinHoles = cPin.Checked; SaveFlag("drawing.tol.pin", tolPinHoles);
+                tolBearings = cBear.Checked; SaveFlag("drawing.tol.bearing", tolBearings);
+                tolGuideRails = cRail.Checked; SaveFlag("drawing.tol.rail", tolGuideRails);
+                tolDatumsAndGdt = cGdt.Checked; SaveFlag("drawing.tol.gdt", tolDatumsAndGdt);
+                tolRoughness = cRough.Checked; SaveFlag("drawing.tol.rough", tolRoughness);
+                autoMultiSheet = cMulti.Checked; SaveFlag("drawing.automultisheet", autoMultiSheet);
+            }
+        }
+
 #if TG_DEV_BUILD
         internal int TestAddFiles(IEnumerable<string> files, bool explicitSelect) { return AppendModelFiles(files, explicitSelect); }
         internal void TestSetSearch(string text) { searchBox.Text = text ?? ""; RebuildList(); }
@@ -952,6 +1054,8 @@ namespace TianGongCadSuite {
         internal int TestVisibleCount { get { return list.Items.Count; } }
         internal int TestCheckedCount { get { return jobs.Count(j => j.Selected); } }
         internal string TestDimensionStyle { get { return SelectedDimensionStyle(); } }
+        internal bool TestAutoBreak { get { return autoBreak.Checked; } set { autoBreak.Checked = value; } }
+        internal bool TestAutoHoleTable { get { return autoHoleTable.Checked; } set { autoHoleTable.Checked = value; } }
         internal void TestSetDimensionStyle(string style) {
             int idx = dimStyleBox.Items.IndexOf(DrawingStyleRules.NormalizePreferredStyle(style));
             if (idx >= 0) dimStyleBox.SelectedIndex = idx;

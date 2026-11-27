@@ -16,6 +16,19 @@ namespace TianGongCadSuite {
         public bool Save = true;
         public string PdfDir;                   // 非空：顺便导出一份 PDF（测试 / 交付用）
         public bool Close;                      // 批量出图：存完就关（单张出图留着给用户看）
+
+        // Wave 2 / Wave 3 智能出图规则开关（默认开启，DrawingForm 底部快捷开关可随时切换并持久化）
+        public bool AutoBreakView = true;       // 细长件自动断裂视图
+        public bool AutoHoleTable = true;       // 多孔大板（≥16 孔）自动切换规范孔表
+        public bool AutoDetailView = true;      // 大件/框架局部密集区自动拉详图放大
+        public bool AutoMultiSheet = true;      // 底面/背面/右端面盲孔与斜孔溢出自动建第 2 页
+
+        // Wave 3 单零件智能公差子开关（可在「公差规则…」小弹窗里逐项开关）
+        public bool TolPinHoles = true;         // 定位销孔 H7 + ⌖Ø0.03
+        public bool TolBearings = true;         // 轴承孔 H7 / 轴承轴颈 k6 + 同轴度 + Ra1.6
+        public bool TolGuideRails = true;       // 导轨安装面基准 A + 平面度 + 靠山垂直度 + Ra3.2
+        public bool TolDatumsAndGdt = true;     // 基准 A/B 与关联平行度 / 垂直度 / 同轴度
+        public bool TolRoughness = true;        // 配合面粗糙度 Ra3.2 / Ra1.6
     }
 
     public sealed class DrawingOutcome {

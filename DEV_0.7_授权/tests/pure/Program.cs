@@ -20,6 +20,9 @@ static class PureProgram {
         failed += Run("HoleCheckSpeed", TianGongCadSuite.HoleCheckSpeedPureTests.Run);
         failed += Run("DrawingPlan", TianGongCadSuite.DrawingPlanPureTests.Run);
         failed += Run("DrawingTolerance", TianGongCadSuite.DrawingTolerancePureTests.Run);
+        failed += Run("DrawingWave1", TianGongCadSuite.DrawingWave1PureTests.Run);
+        failed += Run("DrawingWave2", TianGongCadSuite.DrawingWave2PureTests.Run);
+        failed += Run("DrawingWave3", TianGongCadSuite.DrawingWave3PureTests.Run);
         failed += Run("QuickBom", TianGongCadSuite.QuickBomPureTests.Run);
         failed += Run("LineupXlsx", TianGongCadSuite.LineupXlsxPureTests.Run);
         Console.WriteLine(failed == 0 ? "ALL PURE SUITES PASSED" : failed + " SUITE(S) FAILED");

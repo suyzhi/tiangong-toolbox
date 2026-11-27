@@ -20,9 +20,31 @@ namespace TianGongCadSuite {
         public int[] BlindPlus = new int[3], BlindMinus = new int[3];   // 只朝 +轴 / -轴 一头开口的盲孔：从另一头看不到圆
         public int BottomBlind;                                         // 开在底面（俯视图看不到那面）的盲孔个数：只提示人工补
         public bool[] Stepped = new bool[3];   // 沿该轴有台阶孔 / 槽（不只是孔口一段沉孔）：主视图下面换成剖视
-        public static bool IsStepped(ModelHole h){ return h.Segments.Count >= 3 || (h.Segments.Count == 2 && h.CbRadius <= 0); }   // 孔口朝 +轴 / -轴 的个数（盲孔只有一头开口）
+        public static bool IsStepped(ModelHole h){
+            if (h.Segments.Count >= 3) return true;
+            if (h.Segments.Count == 2 && h.CbRadius <= 0) return true;
+            // 大径深台阶轴承位（如衬套块 02-003 的 Ø22 + Ø28 深台阶）：不是普通螺钉沉孔，必须切全剖 A-A 表达内孔与台阶深
+            if (h.Segments.Count == 2 && h.Radius * 2000.0 >= 14.0 && h.CbRadius * 2000.0 >= 16.0 && h.CbDepth * 1000.0 >= 10.0) return true;
+            return false;
+        }
         public readonly List<double> Chamfers = new List<double>();   // 倒角边长（毫米），每个倒角面一个
         public readonly List<double> Rounds = new List<double>();     // 外棱倒圆半径（毫米）
+        // 每个模型轴上的去重平面位置（米，供全局 3D XYZ 基准对称性判定）
+        public readonly List<double>[] PlaneOffsets = new[] { new List<double>(), new List<double>(), new List<double>() };
+        // 型材 / 框架 / 车床回转件自动形态判别指标（由 DrawingModelRead.Facts 填充）
+        public int BodyCount;
+        public double FillRatio;                      // 实心体积 / 包围盒体积（框架通常 < 0.28）
+        public int[] FullSpanParallelPlanes = new int[3]; // 沿某轴贯穿 ≥70% 全长的平行窄平面数（铝型材 T 槽核心指纹）
+        public int TotalTslotPlanes;
+        public int RevAxis = -1;                      // 回转件主轴向（0/1/2；-1 表示非回转主导）
+        public V3 RevCenter;                          // 回转主轴线上一点（模型坐标）
+        public double RevMaxOuterDiameter;            // 主回转轴最大外圆柱直径（米）
+        public double RevSurfaceArea;                 // 主回转轴同轴圆柱/圆锥面积和
+        public double TotalSurfaceArea;               // 全零件表面积和
+        public bool RevSteppedBore;                   // 回转轴存在台阶/盲内孔（需剖视表达）
+        public bool RevHasNonCircularEnd;             // 端面存在键槽 / 扁位 / 非圆轮廓（需补端面视图）
+        public DrawingPartKind PartKind = DrawingPartKind.Standard;
+        public int ProfileExtrusionAxis = -1;         // 单根型材拉伸轴（0/1/2）
         // 每个模型轴上"外形边里侧多近的线算倒角 / 倒圆分界线"（米）：倒角 / 倒圆只把线往它切掉的那两个轴的方向挪
         public double[] EdgeTol = new double[3];
         // 每个模型轴上真实记录到的倒角边长 / 非钣金外倒圆半径集合（米），用于精确匹配分界线，避免按最大容差一刀切抹掉薄壁或台阶
@@ -44,6 +66,7 @@ namespace TianGongCadSuite {
         public DwgViewRole Role;
         public int Axis, Horizontal, Vertical;
         public int Sign = 1;
+        public int HorzSign = 1;            // 视图屏幕 X 轴沿模型 Horizontal 轴的正负（车床件有单头盲孔时翻转使孔口朝向标准左视图）
         public double W, H;                 // 视图里的宽高（模型米，未乘比例）
         public double X, Y;                 // 视图中心放在图纸哪（纸面米）
         public double Scale;
@@ -102,6 +125,12 @@ namespace TianGongCadSuite {
         }
 
         public static List<DwgViewSpec> Choose(ModelFacts f){
+            if (f != null && f.PartKind == DrawingPartKind.Lathe && f.RevAxis >= 0 && f.RevAxis <= 2) {
+                return DrawingLatheRules.ChooseViews(f);
+            }
+            if (f != null && f.PartKind == DrawingPartKind.ProfileSingle && f.ProfileExtrusionAxis >= 0 && f.ProfileExtrusionAxis <= 2) {
+                return ChooseSingleProfile(f);
+            }
             int axis = 0;
             for (int a = 1; a < 3; a++) {
                 if (f.Holes[a] > f.Holes[axis]) axis = a;
@@ -130,6 +159,27 @@ namespace TianGongCadSuite {
             if (right) r.Add(new DwgViewSpec { Role = DwgViewRole.Right, Axis = horiz, Horizontal = axis, Vertical = vert, W = f.Size[axis], H = f.Size[vert] });
             Facing(f, r, axis, sign, horiz, vert);
             r.Add(new DwgViewSpec { Role = DwgViewRole.Iso, Axis = axis, Horizontal = horiz, Vertical = vert });
+            return r;
+        }
+
+        // 单根铝型材选视图：拉伸轴强制水平放主视图（看加工孔最多 / 截面更宽的侧面），右方补端面图表达截面外形（40×40/40×80），
+        // 仅当另一侧面也有加工孔时才补俯视图。
+        static List<DwgViewSpec> ChooseSingleProfile(ModelFacts f){
+            int ext = f.ProfileExtrusionAxis;
+            int u = (ext + 1) % 3, v = (ext + 2) % 3;
+            int axis = f.Holes[u] > f.Holes[v] ? u : (f.Holes[v] > f.Holes[u] ? v : (f.Size[u] <= f.Size[v] ? u : v));
+            int vert = axis == u ? v : u;
+            int sign = axis == 1 ? -1 : 1;
+            if (f.MouthPlus[axis] > f.MouthMinus[axis]) sign = 1;
+            else if (f.MouthMinus[axis] > f.MouthPlus[axis]) sign = -1;
+            var r = new List<DwgViewSpec>();
+            r.Add(new DwgViewSpec { Role = DwgViewRole.Main, Axis = axis, Sign = sign, Horizontal = ext, Vertical = vert, W = f.Size[ext], H = f.Size[vert] });
+            r.Add(new DwgViewSpec { Role = DwgViewRole.Right, Axis = ext, Horizontal = axis, Vertical = vert, W = f.Size[axis], H = f.Size[vert] });
+            if (f.Holes[vert] > 0) {
+                r.Add(new DwgViewSpec { Role = DwgViewRole.Below, Axis = vert, Horizontal = ext, Vertical = axis, W = f.Size[ext], H = f.Size[axis] });
+            }
+            Facing(f, r, axis, sign, ext, vert);
+            r.Add(new DwgViewSpec { Role = DwgViewRole.Iso, Axis = axis, Horizontal = ext, Vertical = vert });
             return r;
         }
 
@@ -304,6 +354,7 @@ namespace TianGongCadSuite {
 
     // 图纸上已经占用的地方（视图、尺寸、标注文字），给引线文字找空地。全部图纸坐标（米），矩形 {x0,y0,x1,y1}。
     public sealed class DwgSpace {
+        public readonly double SheetW, SheetH;
         readonly List<double[]> used = new List<double[]>();
         readonly List<double[]> viewBoxes = new List<double[]>();
         readonly List<double[]> leaders = new List<double[]>();
@@ -311,6 +362,7 @@ namespace TianGongCadSuite {
         readonly List<double[]> dimTexts = new List<double[]>();
         readonly List<double[]> allowed = new List<double[]>();
         public DwgSpace(SheetZones z){
+            SheetW = z.Width; SheetH = z.Height;
             allowed.Add(z.Main); allowed.Add(z.Iso);
             // 主区与轴测区之间连成一整块（不要切成 5mm 孤立窄条，否则宽 20mm 的孔标注跨过 Main[2] 接缝被判越界、全部退化叠在一起）
             allowed.Add(new[] { z.Main[0], z.Iso[1], z.Iso[0], z.Main[3] });
@@ -435,6 +487,19 @@ namespace TianGongCadSuite {
                     double frac = InteriorFraction(fx, fy, ex, ey, vx0, vy0, vx1, vy1);
                     if (frac > 0.35 && len * frac > 0.015) cost += 0.035 * frac + 0.35 * len * frac;
                 }
+                // 避免挤进两个相邻视图之间过窄的缝隙（如型材 02-0516 主视与左视之间 16mm 缝隙）
+                if (!isVoid) {
+                    foreach (var vb in viewBoxes) {
+                        if (ownObstacle != null && SameBox(vb, ownObstacle)) continue;
+                        bool yOverlap = r[1] < vb[3] + 0.008 && r[3] > vb[1] - 0.008;
+                        if (yOverlap) {
+                            double gapRight = vb[0] - r[2];
+                            double gapLeft = r[0] - vb[2];
+                            if (gapRight >= -0.001 && gapRight < 0.006) cost += 0.022;
+                            if (gapLeft >= -0.001 && gapLeft < 0.006) cost += 0.022;
+                        }
+                    }
+                }
                 // 优先让斜引线角度自然（约 15°~65°），稍微避开过长的纯水平长线
                 if (Math.Abs(dy) < 0.0015 && len > 0.025) cost += 0.004;
                 if (cost < bestCost) { bestCost = cost; bestRect = r; bestElbow = new[] { ex, ey }; }
@@ -457,8 +522,8 @@ namespace TianGongCadSuite {
                 }
             }
 
-            // 2. 右侧外沿候选（紧凑距轮廓 6 / 10 / 15mm，Y 沿特征上下密集扫）
-            foreach (double gap in new[] { 0.006, 0.010, 0.015 }) {
+            // 2. 右侧外沿候选（紧凑距轮廓 6 / 10 / 15 / 22 / 30mm，Y 沿特征上下密集扫）
+            foreach (double gap in new[] { 0.006, 0.010, 0.015, 0.022, 0.030 }) {
                 double x0 = vx1 + gap;
                 double bonus = preferRight ? -0.003 : 0.0;
                 for (int i = 0; i < 32; i++) {
@@ -467,8 +532,8 @@ namespace TianGongCadSuite {
                     eval(new[] { x0, baseY + dy, x0 + w, baseY + dy + h }, false, bonus);
                 }
             }
-            // 3. 左侧外沿候选（近边 6mm、越过左侧坐标尺寸 14 / 22mm）
-            foreach (double gap in new[] { 0.006, 0.014, 0.022 }) {
+            // 3. 左侧外沿候选（近边 6mm、越过左侧坐标尺寸 14 / 22 / 30mm）
+            foreach (double gap in new[] { 0.006, 0.014, 0.022, 0.030 }) {
                 double x0 = vx0 - gap - w;
                 for (int i = 0; i < 28; i++) {
                     double dy = (i % 2 == 0 ? 1 : -1) * ((i + 1) / 2) * 0.0038;
@@ -476,18 +541,52 @@ namespace TianGongCadSuite {
                     eval(new[] { x0, baseY + dy, x0 + w, baseY + dy + h }, false, 0.0);
                 }
             }
-            // 4. 上方与下方外沿候选（近边 6mm、越过上方/下方坐标尺寸 16 / 24mm）
-            foreach (double gap in new[] { 0.006, 0.016, 0.024 }) {
+            // 4. 上方与下方外沿候选（近边 6mm、越过上方/下方坐标尺寸 14 / 24 / 34 / 44mm，含正对特征 dx=0）
+            foreach (double gap in new[] { 0.006, 0.014, 0.024, 0.034, 0.044 }) {
                 double yTop = vy1 + gap;
                 double yBot = vy0 - gap - h;
-                foreach (double dx in new[] { 0.004, 0.010, 0.018, 0.028, 0.042 }) {
+                foreach (double dx in new[] { 0.0, 0.006, 0.014, 0.024, 0.036, 0.050 }) {
                     eval(new[] { fx + dx, yTop, fx + dx + w, yTop + h }, false, 0.001);
-                    eval(new[] { fx - dx - w, yTop, fx - dx, yTop + h }, false, 0.001);
+                    if (dx > 0) eval(new[] { fx - dx - w, yTop, fx - dx, yTop + h }, false, 0.001);
                     eval(new[] { fx + dx, yBot, fx + dx + w, yBot + h }, false, 0.001);
-                    eval(new[] { fx - dx - w, yBot, fx - dx, yBot + h }, false, 0.001);
+                    if (dx > 0) eval(new[] { fx - dx - w, yBot, fx - dx, yBot + h }, false, 0.001);
                 }
             }
 
+            if (bestRect == null) return false;
+            Add(bestRect[0] - 0.001, bestRect[1] - 0.0012, bestRect[2] + 0.001, bestRect[3] + 0.0012);
+            calloutTexts.Add(bestRect);
+            AddLeader(fx, fy, bestElbow[0], bestElbow[1]);
+            placedBox = bestRect;
+            elbowPos = bestElbow;
+            return true;
+        }
+
+        // 无重叠兜底网格搜索（当紧贴轮廓四侧均被占满时，扩大至 65mm 内按离特征最近且 Free() 的真实空位落位，绝不盲目堆叠或冲出右侧图框）
+        public bool FindFallbackSlot(double fx, double fy, double[] cbox, double w, double h, double belowH, out double[] placedBox, out double[] elbowPos){
+            placedBox = null; elbowPos = null;
+            double bestDist = double.MaxValue;
+            double[] bestRect = null, bestElbow = null;
+            double vx0 = cbox[0], vy0 = cbox[1], vx1 = cbox[2], vy1 = cbox[3];
+            Action<double, double> tryAt = (x0, y0) => {
+                var r = new[] { x0, y0, x0 + w, y0 + h };
+                if (!Free(r)) return;
+                double ey = DrawingStyleRules.CalloutShelfY(y0, belowH);
+                double ex = x0 >= fx ? x0 : (x0 + w <= fx ? x0 + w : ((x0 + x0 + w) * 0.5));
+                double d = Math.Sqrt((ex - fx) * (ex - fx) + (ey - fy) * (ey - fy));
+                if (d < bestDist) { bestDist = d; bestRect = r; bestElbow = new[] { ex, ey }; }
+            };
+            // 下方、上方、左侧、右侧宽范围扫描
+            for (double gap = 0.008; gap <= 0.068; gap += 0.008) {
+                for (double x = Math.Max(0.012, vx0 - 0.030); x <= Math.Min(SheetW - w - 0.010, vx1 + 0.030); x += 0.014) {
+                    tryAt(x, vy0 - gap - h);
+                    tryAt(x, vy1 + gap);
+                }
+                for (double y = Math.Max(0.052, vy0 - 0.030); y <= Math.Min(SheetH - h - 0.012, vy1 + 0.030); y += 0.008) {
+                    tryAt(vx0 - gap - w, y);
+                    tryAt(vx1 + gap, y);
+                }
+            }
             if (bestRect == null) return false;
             Add(bestRect[0] - 0.001, bestRect[1] - 0.0012, bestRect[2] + 0.001, bestRect[3] + 0.0012);
             calloutTexts.Add(bestRect);

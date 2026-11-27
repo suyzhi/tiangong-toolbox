@@ -13,6 +13,7 @@ class DrawE2E {
         string outDir = args[0];
         var app = (F.Application)Marshal.GetActiveObject("SolidEdge.Application");
         try { app.DisplayAlerts = false; } catch { }
+        using (new OleFilter()) {
         var files = new System.Collections.Generic.List<string>();
         for (int i = 1; i < args.Length; i++) { if (args[i].EndsWith(".txt", StringComparison.OrdinalIgnoreCase)) files.AddRange(File.ReadAllLines(args[i], Encoding.UTF8)); else files.Add(args[i]); }
         int ok = 0;
@@ -26,6 +27,7 @@ class DrawE2E {
             foreach (var n in o.Notes) Console.WriteLine("     " + n);
         }
         Console.WriteLine("RESULT " + ok + "/" + files.Count);
+        }
         return 0;
     }
 }

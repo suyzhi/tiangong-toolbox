@@ -41,7 +41,10 @@ namespace TianGongCadSuite {
                 DrawingLayout.Mouths(facts, holes);
                 int oblique = holes.Count(h => Math.Abs(h.Axis.X) < 0.9998 && Math.Abs(h.Axis.Y) < 0.9998 && Math.Abs(h.Axis.Z) < 0.9998);
                 if (oblique > 0) o.Notes.Add("有 " + oblique + " 个斜孔（轴线不沿 X/Y/Z），位置没标，请人工补");
-                o.Notes.Add("视图 模型：孔 X/Y/Z=" + string.Join("/", facts.Holes) + " 台阶=" + string.Join("/", facts.Steps) + " 倒角=" + facts.Chamfers.Count + "(最大 C" + facts.ChamferMax + ") 三维孔=" + holes.Count);
+                string kindTag = facts.PartKind == DrawingPartKind.ProfileSingle ? "铝型材"
+                    : facts.PartKind == DrawingPartKind.ProfileFrame ? "型材框架"
+                    : facts.PartKind == DrawingPartKind.Lathe ? "车床回转件" : "机加件";
+                o.Notes.Add("视图 模型[" + kindTag + "]：孔 X/Y/Z=" + string.Join("/", facts.Holes) + " 台阶=" + string.Join("/", facts.Steps) + " 倒角=" + facts.Chamfers.Count + "(最大 C" + facts.ChamferMax + ") 三维孔=" + holes.Count);
                 // 2. 选视图、排版：双模板都有时按 A4/A3 择优；仅有一种模板时直接按该图幅排版，杜绝 A4 布局塞进 A3 图框或重复开关文档
                 var specs = DrawingLayout.Choose(facts);
                 double iw, ih; DrawingLayout.IsoBox(facts.Size, out iw, out ih);
@@ -77,20 +80,75 @@ namespace TianGongCadSuite {
                 var views = new Dictionary<DwgViewRole, D.DrawingView>();
                 var mainSpec = lay.Get(DwgViewRole.Main);
                 var main = sheet.DrawingViews.AddPartView(link, D.ViewOrientationConstants.igTopView, lay.Scale, mainSpec.X, mainSpec.Y, D.PartDrawingViewTypeConstants.sePartDesignedView);
-                var dMain = Unit(mainSpec.Axis, mainSpec.Sign); var xMain = Unit(mainSpec.Horizontal, 1);
+                var dMain = Unit(mainSpec.Axis, mainSpec.Sign); var xMain = Unit(mainSpec.Horizontal, mainSpec.HorzSign);
                 main.SetViewOrientation(dMain.X, dMain.Y, dMain.Z, xMain.X, xMain.Y, xMain.Z);
                 SetViewScaleText(main, lay.Scale);
                 // 改朝向后必须 Update：不然视图里的图元还是原来俯视的样子，折叠出的投影却按新朝向（探针 4，015 主视图"转了 90°"就是这个）
                 try { main.Update(); } catch { }
                 Idle(app);
+                // 自动可见性自检（实测 1.5kw电机法兰-1 与 SK26.01-W1197 传动轴01）：
+                //   · 机加件/板件：若当前主视图把另一侧法兰上的孔遮挡，试翻反面比较可见圆数；仅当翻转后仍有真实三维孔被遮挡时才补第 2 页背面视图（不因外凸台圆 Ø110 误补空白页）；
+                //   · 车床回转件：若键槽/径向孔圆弧被遮挡在背面（HiddenArcCount + HiddenCircleCount > 0），仅翻转视线 dMain（保持水平朝向 xMain 不变，确保右端左视图仍正对端面孔）。
+                if (facts.PartKind == DrawingPartKind.Lathe) {
+                    int hidL0 = DrawingViewRead.HiddenCircleCount(main) + DrawingViewRead.HiddenArcCount(main);
+                    if (hidL0 > 0) {
+                        var eL0 = DrawingViewRead.Edges(main);
+                        int visL0 = eL0.Count(ed => ed.Kind == DwgKind.Circle || ed.Kind == DwgKind.Arc);
+                        try {
+                            main.SetViewOrientation(-dMain.X, -dMain.Y, -dMain.Z, xMain.X, xMain.Y, xMain.Z);
+                            main.Update(); Idle(app);
+                            int hidL1 = DrawingViewRead.HiddenCircleCount(main) + DrawingViewRead.HiddenArcCount(main);
+                            int visL1 = DrawingViewRead.Edges(main).Count(ed => ed.Kind == DwgKind.Circle || ed.Kind == DwgKind.Arc);
+                            if (visL1 > visL0 || (visL1 == visL0 && hidL1 < hidL0)) {
+                                mainSpec.Sign = -mainSpec.Sign;
+                                dMain = Unit(mainSpec.Axis, mainSpec.Sign);
+                                o.Notes.Add("视图 车床主视图已自动翻转至键槽/径向特征可见一侧（可见弧圆 " + visL0 + " → " + visL1 + "）");
+                            } else {
+                                main.SetViewOrientation(dMain.X, dMain.Y, dMain.Z, xMain.X, xMain.Y, xMain.Z);
+                                main.Update(); Idle(app);
+                            }
+                        } catch {
+                            try { main.SetViewOrientation(dMain.X, dMain.Y, dMain.Z, xMain.X, xMain.Y, xMain.Z); main.Update(); Idle(app); } catch { }
+                        }
+                    }
+                } else if (facts.PartKind != DrawingPartKind.ProfileFrame) {
+                    int hid0 = DrawingViewRead.HiddenCircleCount(main);
+                    if (hid0 > 0) {
+                        int vis0 = DrawingViewRead.Edges(main).Count(ed => ed.Kind == DwgKind.Circle);
+                        try {
+                            main.SetViewOrientation(-dMain.X, -dMain.Y, -dMain.Z, -xMain.X, -xMain.Y, -xMain.Z);
+                            main.Update(); Idle(app);
+                            int hid1 = DrawingViewRead.HiddenCircleCount(main);
+                            int vis1 = DrawingViewRead.Edges(main).Count(ed => ed.Kind == DwgKind.Circle);
+                            if (vis1 > vis0 || (vis1 == vis0 && hid1 < hid0)) {
+                                mainSpec.Sign = -mainSpec.Sign;
+                                mainSpec.HorzSign = -mainSpec.HorzSign;
+                                dMain = Unit(mainSpec.Axis, mainSpec.Sign);
+                                xMain = Unit(mainSpec.Horizontal, mainSpec.HorzSign);
+                                o.Notes.Add("视图 主视图已自动翻转至孔口完全可见一侧（可见圆 " + vis0 + " → " + vis1 + "）");
+                            } else {
+                                main.SetViewOrientation(dMain.X, dMain.Y, dMain.Z, xMain.X, xMain.Y, xMain.Z);
+                                main.Update(); Idle(app);
+                            }
+                        } catch {
+                            try { main.SetViewOrientation(dMain.X, dMain.Y, dMain.Z, xMain.X, xMain.Y, xMain.Z); main.Update(); Idle(app); } catch { }
+                        }
+                        // 仅当仍有真实三维孔（非实体外凸台圆）被遮挡在背面时，才补第 2 页背面视图
+                        int occThrough;
+                        int occAny = CountOccludedModelHoles(main, holes, range, out occThrough);
+                        if (occAny > 0 && lay.Get(DwgViewRole.Back) == null && !lay.Dropped.Contains(DwgViewRole.Back)) {
+                            lay.Dropped.Add(DwgViewRole.Back);
+                        }
+                    }
+                }
                 if (DrawingViewRead.Edges(main).Count == 0)
                     throw new InvalidOperationException("主视图未投影出任何有效模型边线（空模型或不可见实体），已中止保存。");
                 Center(main, mainSpec.X, mainSpec.Y, true, true);
                 views[DwgViewRole.Main] = main;
                 var below = lay.Get(DwgViewRole.Below);
                 if (below != null && below.Section) {
-                    var sec = Section(main, holes, range, app);
-                    if (sec != null) { SetViewScaleText(sec, lay.Scale); Center(sec, below.X, below.Y, true, true); views[DwgViewRole.Below] = sec; o.Notes.Add("视图 加了剖视 A-A（台阶孔）"); }
+                    var sec = Section(main, holes, range, facts, app);
+                    if (sec != null) { SetViewScaleText(sec, lay.Scale); Center(sec, below.X, below.Y, true, true); views[DwgViewRole.Below] = sec; o.Notes.Add("视图 加了剖视 A-A（" + (facts.PartKind == DrawingPartKind.Lathe ? "回转内孔" : "台阶孔") + "）"); }
                     else below.Section = false;
                 }
                 if (below != null && !below.Section) {
@@ -99,9 +157,28 @@ namespace TianGongCadSuite {
                 }
                 var right = lay.Get(DwgViewRole.Right);
                 if (right != null) {
-                    try { var v = sheet.DrawingViews.AddByFold(main, D.FoldTypeConstants.igFoldRight, right.X, right.Y); Idle(app); SetViewScaleText(v, lay.Scale); Center(v, right.X, right.Y, true, false); views[DwgViewRole.Right] = v; }
-                    catch (Exception e) { o.Notes.Add("左视图建不出来：" + e.Message); }
+                    try {
+                        var v = sheet.DrawingViews.AddByFold(main, D.FoldTypeConstants.igFoldRight, right.X, right.Y);
+                        Idle(app); SetViewScaleText(v, lay.Scale); Center(v, right.X, right.Y, true, false);
+                        // 车床端面图可见性自检：若左视图正对的是无孔盲端（孔被遮挡在另一头，HiddenCircleCount > 0），
+                        // 翻转主视图水平朝向（保持主视线不变）并重折左视图，确保端面孔 100% 可见、绝不出现虚空孔标注。
+                        if (facts.PartKind == DrawingPartKind.Lathe && DrawingViewRead.HiddenCircleCount(v) > 0) {
+                            try {
+                                v.Delete();
+                                mainSpec.HorzSign = -mainSpec.HorzSign;
+                                xMain = Unit(mainSpec.Horizontal, mainSpec.HorzSign);
+                                main.SetViewOrientation(dMain.X, dMain.Y, dMain.Z, xMain.X, xMain.Y, xMain.Z);
+                                main.Update(); Idle(app); Center(main, mainSpec.X, mainSpec.Y, true, true);
+                                v = sheet.DrawingViews.AddByFold(main, D.FoldTypeConstants.igFoldRight, right.X, right.Y);
+                                Idle(app); SetViewScaleText(v, lay.Scale); Center(v, right.X, right.Y, true, false);
+                                o.Notes.Add("视图 车床主视图已自动左右翻转，使端面盲孔正对左视图完全可见");
+                            } catch { }
+                        }
+                        views[DwgViewRole.Right] = v;
+                    } catch (Exception e) { o.Notes.Add("左视图建不出来：" + e.Message); }
                 }
+                // Wave 2：细长件先准备断裂比例（暂不插断口线），待 Phase 1 坐标/主尺寸建完后再插入 BreakLinePairs 精确收拢
+                var pendingBreak = PrepareBreakViewScale(dft, sheet, views, lay, facts, opt, app, o);
                 // 左视图 / 主视图看不到的那面有盲孔口：补右视图 / 后视图（DrawingLayout.Facing；补了比例会缩小就不补，提示人工）；底面的只提示
                 foreach (var dr in lay.Dropped) o.Notes.Add("视图 " + (dr == DwgViewRole.Left ? "右端面" : "背面") + "有盲孔，补视图图纸放不下（比例要缩小），没补，这些孔请人工补标");
                 if (facts.BottomBlind > 0 && (below == null || !below.Section)) o.Notes.Add("视图 底面有 " + facts.BottomBlind + " 个盲孔，俯视图里看不到，请人工补仰视图或局部视图标注");
@@ -146,7 +223,9 @@ namespace TianGongCadSuite {
                 // 刻字引线的文字最后才挂，位置照模板那条：先把那块占上，孔标注别压在它上面（视图多了整组右移时 02-007 压上过）
                 var eb = EngraveBox(sheet, Path.GetFileNameWithoutExtension(modelPath));
                 if (eb != null) w.Space.Add(eb);
-                Annotate(w, views, lay, holes, range, facts, o);
+                var datum3D = ModelDatum3D.Compute(range, facts, holes, mainSpec);
+                Wave2Carry wave2;
+                Annotate(dft, sheet, w, views, lay, holes, range, facts, datum3D, opt, centerStyle, pendingBreak, app, o, out wave2);
                 foreach (var kv in views) o.Notes.Add("视图 " + kv.Key + " " + Describe(kv.Value));
                 // 检索圆孔十字中心标记与圆柱中心线（以前只传一个 true，其余参数默认全 false 导致一张图一个中心标记都没出）
                 if (centerStyle.Length > 0) DwgWriter.SetActiveStyle(dft, centerStyle);
@@ -162,6 +241,8 @@ namespace TianGongCadSuite {
                 else if (restoreStyle.Length > 0) DwgWriter.SetActiveStyle(dft, restoreStyle);
                 DwgWriter.ClearCollectionStyles(sheet);
                 o.Dimensions = w.Created; o.Failed = w.Failed; o.Notes.AddRange(w.Notes);
+                // 5.5 Wave 2：补画底面/背面/右端面盲孔视图、斜孔向视图、局部放大详图与多孔表（第 1 页空位优先，放不下自动建第 2 页）
+                BuildSheet2AndDetails(dft, sheet, link, w, views, lay, holes, range, facts, datum3D, opt, wave2, dimStyle, centerStyle, restoreStyle, app, o);
                 // 6. 存
                 if (opt.Save) o.Output = SaveAs(app, dft, modelPath, opt, o);
                 o.Ok = true;
@@ -397,28 +478,34 @@ namespace TianGongCadSuite {
             return best.O;
         }
 
-        // 全剖：优先通过三维孔映射锁定真正的台阶孔（IsStepped）圆心，避免误切更大直径的普通沉孔或凸台；
+        // 全剖：车床回转件沿水平旋转中心线直接切开露出台阶内孔；常规件优先通过三维孔映射锁定真正的台阶孔圆心。
         // 若 CreateView 失败则清理已建剖切平面/剖切线，避免在主视图残留孤立的 A-A 剖切线。
-        static D.DrawingView Section(D.DrawingView main, List<ModelHole> holes, double[] range, F.Application app){
+        static D.DrawingView Section(D.DrawingView main, List<ModelHole> holes, double[] range, ModelFacts facts, F.Application app){
             D.CuttingPlane cut = null;
             S.Line2d cutLine = null;
             try {
                 var edges = DrawingViewRead.Edges(main);
-                var circles = edges.Where(e => e.Kind == DwgKind.Circle).ToList();
-                var map = (holes != null && range != null) ? HoleMap(main, edges, holes, range) : new Dictionary<DwgEdge, ModelHole>();
-                var steppedCircles = circles.Where(c => {
-                    ModelHole mh;
-                    return map.TryGetValue(c, out mh) && mh != null && ModelFacts.IsStepped(mh);
-                }).ToList();
-                var pool = steppedCircles.Count > 0 ? steppedCircles : circles;
-                DwgEdge best = null; int bestN = 0;
-                foreach (var c in pool) {
-                    int n = circles.Count(d => Math.Abs(d.Cx - c.Cx) < 1e-5 && Math.Abs(d.Cy - c.Cy) < 1e-5);
-                    if (n > bestN || (n == bestN && best != null && c.R > best.R)) { bestN = n; best = c; }
-                }
-                if (best == null || (steppedCircles.Count == 0 && bestN < 2)) return null;
                 var box = DrawingPlan.Box(edges);
-                var a = DwgWriter.ToSheet(main, box[0], best.Cy); var b = DwgWriter.ToSheet(main, box[2], best.Cy);
+                double cutY;
+                if (facts != null && facts.PartKind == DrawingPartKind.Lathe) {
+                    cutY = (box[1] + box[3]) / 2.0;
+                } else {
+                    var circles = edges.Where(e => e.Kind == DwgKind.Circle).ToList();
+                    var map = (holes != null && range != null) ? HoleMap(main, edges, holes, range) : new Dictionary<DwgEdge, ModelHole>();
+                    var steppedCircles = circles.Where(c => {
+                        ModelHole mh;
+                        return map.TryGetValue(c, out mh) && mh != null && ModelFacts.IsStepped(mh);
+                    }).ToList();
+                    var pool = steppedCircles.Count > 0 ? steppedCircles : circles;
+                    DwgEdge best = null; int bestN = 0;
+                    foreach (var c in pool) {
+                        int n = circles.Count(d => Math.Abs(d.Cx - c.Cx) < 1e-5 && Math.Abs(d.Cy - c.Cy) < 1e-5);
+                        if (n > bestN || (n == bestN && best != null && c.R > best.R)) { bestN = n; best = c; }
+                    }
+                    if (best == null || (steppedCircles.Count == 0 && bestN < 2)) return null;
+                    cutY = best.Cy;
+                }
+                var a = DwgWriter.ToSheet(main, box[0], cutY); var b = DwgWriter.ToSheet(main, box[2], cutY);
                 cut = main.CuttingPlanes.Add();
                 // 剖切线两端出头收紧到 3.5mm，避免左侧箭头 A 压到主视图左侧的竖直坐标尺寸基线（7.5mm）
                 cutLine = cut.Profile.Lines2d.AddBy2Points(a[0] - 0.0035, a[1], b[0] + 0.0035, b[1]);
@@ -451,6 +538,35 @@ namespace TianGongCadSuite {
         }
 
         static V3 Unit(int axis, int sign){ return new V3(axis == 0 ? sign : 0, axis == 1 ? sign : 0, axis == 2 ? sign : 0); }
+
+        // 统计沿当前视图视线轴被实体完全遮挡的真实三维孔数量（仅检查隐藏圆且该圆心处无可见孔圆）：
+        // 严格排除外凸台圆（如 1.5kw电机法兰-1 的 Ø110）与背面沉孔外口（如 02-031 的 Ø15 与可见 Ø9 同心），
+        // 既避免误补冗余背面页，又避免把大板背面视图的 BlindOnly 错翻成重标全部通孔。
+        static int CountOccludedModelHoles(D.DrawingView view, List<ModelHole> holes, double[] range, out int occludedThrough){
+            occludedThrough = 0;
+            if (view == null || holes == null || holes.Count == 0 || range == null) return 0;
+            try {
+                var hidCircles = DrawingViewRead.HiddenCircles(view);
+                if (hidCircles.Count == 0) return 0;
+                var visEdges = DrawingViewRead.Edges(view);
+                var visCircles = visEdges.Where(e => e.Kind == DwgKind.Circle).ToList();
+                // 只保留圆心处完全没有可见圆的隐藏圆（真正整孔被遮挡，而非背面沉孔口）
+                var pureHid = hidCircles.Where(hc => !visCircles.Any(vc => Math.Abs(vc.Cx - hc.Cx) < 2e-4 && Math.Abs(vc.Cy - hc.Cy) < 2e-4)).ToList();
+                if (pureHid.Count == 0) return 0;
+                var allForFrame = new List<DwgEdge>(visEdges.Count + pureHid.Count);
+                allForFrame.AddRange(visEdges);
+                allForFrame.AddRange(pureHid);
+                var map = HoleMap(view, allForFrame, holes, range);
+                var matched = new HashSet<ModelHole>();
+                foreach (var hc in pureHid) {
+                    ModelHole mh;
+                    if (map.TryGetValue(hc, out mh) && mh != null && matched.Add(mh)) {
+                        if (mh.Through) occludedThrough++;
+                    }
+                }
+                return matched.Count;
+            } catch { return 0; }
+        }
 
         static void SetViewScaleText(D.DrawingView v, double scale){
             if (v == null || scale <= 0) return;

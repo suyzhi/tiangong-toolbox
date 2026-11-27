@@ -405,8 +405,28 @@ namespace TianGongCadSuite {
         // 默认最小坐标那条边当 0（人画的图大多从左 / 下边起标）；
         // 坐标串关于中间对称、而且正中间有个孔心时，用中间当 0（YF25.07-L1-M70-02-310 的 110-0-110）。
         public static DwgTarget PickOrigin(List<DwgTarget> targets, out bool symmetric){
+            return PickOrigin(targets, out symmetric, null);
+        }
+
+        // 支持全视图统一 3D XYZ 基准投影坐标 forcedOriginCoord：
+        // 若传入 forcedOriginCoord，则强制在 targets 里锁定该物理基准面对应的落点作 0（镜像视图 0 在右侧也绝不换边）。
+        public static DwgTarget PickOrigin(List<DwgTarget> targets, out bool symmetric, double? forcedOriginCoord){
             symmetric = false;
-            if (targets.Count == 0) return null;
+            if (targets == null || targets.Count == 0) return null;
+            if (forcedOriginCoord.HasValue) {
+                double targetC = forcedOriginCoord.Value;
+                const double matchTol = 2e-4; // 0.2mm 投影对齐容差
+                var hits = targets.Where(t => Math.Abs(t.Coord - targetC) <= matchTol)
+                    .OrderBy(t => Math.Abs(t.Coord - targetC))
+                    .ThenBy(t => t.KeyPoint ? 1 : 0)
+                    .ToList();
+                if (hits.Count > 0) {
+                    var sortedAll = targets.OrderBy(t => t.Coord).ToList();
+                    double midAll = (sortedAll[0].Coord + sortedAll[sortedAll.Count - 1].Coord) / 2.0;
+                    symmetric = Math.Abs(hits[0].Coord - midAll) <= SameCoord * 4 && sortedAll.Count >= 3;
+                    return hits[0];
+                }
+            }
             var sorted = targets.OrderBy(t => t.Coord).ToList();
             double lo = sorted[0].Coord, hi = sorted[sorted.Count - 1].Coord, mid = (lo + hi) / 2;
             var center = sorted.FirstOrDefault(t => t.KeyPoint && Math.Abs(t.Coord - mid) <= SameCoord);
@@ -417,6 +437,13 @@ namespace TianGongCadSuite {
             // 最小坐标处挑线（线做基准比圆心直观）
             var atLo = targets.Where(t => t.Coord - lo <= SameCoord).OrderBy(t => t.KeyPoint ? 1 : 0).First();
             return atLo;
+        }
+
+        // 检查目标集合中在给定视图坐标处是否存在可挂 0 的真实几何落点（供全局 3D 对称基准跨视图一致性校验）
+        public static bool HasTargetNear(IList<DwgTarget> targets, double coord, double tol){
+            if (targets == null) return false;
+            foreach (var t in targets) if (Math.Abs(t.Coord - coord) <= tol) return true;
+            return false;
         }
 
         // ---- 文字排开（一维标签布局） ----
@@ -451,14 +478,20 @@ namespace TianGongCadSuite {
             return Ordinate(edges, horizontal, scale, box, lowSide, offsetPaper, chamferTol, null, false);
         }
         public static OrdinateRun Ordinate(IList<DwgEdge> edges, bool horizontal, double scale, double[] box, bool lowSide, double offsetPaper, double chamferTol, IList<double> exactOffsets, bool sheetMetal){
+            return Ordinate(edges, horizontal, scale, box, lowSide, offsetPaper, chamferTol, exactOffsets, sheetMetal, null, false);
+        }
+        public static OrdinateRun Ordinate(IList<DwgEdge> edges, bool horizontal, double scale, double[] box, bool lowSide, double offsetPaper, double chamferTol, IList<double> exactOffsets, bool sheetMetal, double? forcedOriginCoord, bool frameSimplify){
             var ts = Targets(edges, horizontal, lowSide);
             ts = DropNearOutline(ts, edges, horizontal, box, chamferTol, exactOffsets, sheetMetal);
+            if (frameSimplify) {
+                ts = DrawingProfileRules.SimplifyFrameTargets(ts, edges, horizontal, box, forcedOriginCoord, 16);
+            }
             int beforeSig = ts.Count;
             ts = Significant(ts, horizontal ? box[3] - box[1] : box[2] - box[0]);
             bool truncated = beforeSig > MaxRun && ts.Count < beforeSig;
             if (ts.Count < 2) return null;
             bool sym;
-            var origin = PickOrigin(ts, out sym);
+            var origin = PickOrigin(ts, out sym, forcedOriginCoord);
             var run = new OrdinateRun { Horizontal = horizontal, Origin = origin, LowSide = lowSide, Truncated = truncated };
             foreach (var t in ts) if (!ReferenceEquals(t, origin)) run.Targets.Add(t);
             var all = new List<DwgTarget>(run.Targets); all.Add(origin);
@@ -469,14 +502,31 @@ namespace TianGongCadSuite {
         }
 
         // 投影/补充视图去重：将 Origin 与 Targets 一并纳入已标集合比对；
-        // 当原对称中心 Origin 未在主视图标过时，改以已定位的外形最小边作新基准并将该中心孔降入 Targets，
-        // 避免居中单孔整串被删空或对称多孔脱锚浮空（20-0-20 却不交代 0 到外边的距离）。
+        // 当提供全局 3D 基准 forcedOriginCoord 时严格保持 0 落在同一物理面上（绝不在镜像/补视图里偷偷换到对侧边）。
         public static OrdinateRun FilterNewTargets(OrdinateRun r, Func<DwgTarget, bool> isAlreadyDone, double scale){
+            return FilterNewTargets(r, isAlreadyDone, scale, null);
+        }
+        public static OrdinateRun FilterNewTargets(OrdinateRun r, Func<DwgTarget, bool> isAlreadyDone, double scale, double? forcedOriginCoord){
             if (r == null || r.Origin == null) return null;
             var all = new List<DwgTarget>(r.Targets.Count + 1) { r.Origin };
             all.AddRange(r.Targets);
             var novel = all.Where(t => !isAlreadyDone(t)).ToList();
             if (novel.Count == 0) return null;
+            if (forcedOriginCoord.HasValue) {
+                var forced = all.Where(t => Math.Abs(t.Coord - forcedOriginCoord.Value) <= 2e-4)
+                    .OrderBy(t => Math.Abs(t.Coord - forcedOriginCoord.Value))
+                    .ThenBy(t => t.KeyPoint ? 1 : 0)
+                    .FirstOrDefault();
+                if (forced != null) {
+                    r.Origin = forced;
+                    r.Targets.Clear();
+                    foreach (var t in novel) if (!ReferenceEquals(t, forced)) r.Targets.Add(t);
+                    if (r.Targets.Count == 0) return null;
+                    var spreadForced = new List<DwgTarget>(r.Targets) { r.Origin };
+                    Spread(spreadForced, TextPitch / Math.Max(scale, 1e-9));
+                    return r;
+                }
+            }
             if (isAlreadyDone(r.Origin)) {
                 r.Targets.Clear();
                 r.Targets.AddRange(novel);
@@ -798,7 +848,7 @@ namespace TianGongCadSuite {
             else if (spec != null && spec.Kind == HoleKind.Countersink && spec.CountersinkDiameter > 0) subfix = "%CS%DI" + N(spec.CountersinkDiameter) + "×" + N(spec.CountersinkAngle > 0 ? spec.CountersinkAngle : 90) + "°";
             else if (h != null && h.CsRadius > 0) subfix = "%CS%DI" + N(h.CsRadius * 2000) + "×" + N(h.CsAngle > 0 ? h.CsAngle : 90) + "°";
             if (through) suffix = " 贯通";
-            else if (h != null && holeDepthMm > 0) suffix = "%DP" + N(holeDepthMm);
+            else if (h != null && holeDepthMm > 0.05) suffix = "%DP" + N(holeDepthMm);
         }
     }
 }

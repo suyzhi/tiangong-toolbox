@@ -16,10 +16,21 @@ namespace TianGongCadSuite {
             f.SheetMetal = document is P.SheetMetalDocument;
             var offsets = new List<double>[] { new List<double>(), new List<double>(), new List<double>() };
             var holeAxes = new List<double[]>[] { new List<double[]>(), new List<double[]>(), new List<double[]>() };
-            foreach (var body in Bodies(document)) {
+            var bodies = new List<G.Body>(Bodies(document));
+            f.BodyCount = bodies.Count;
+
+            // 同轴回转面聚合：key = "axis|u|v"，记录外圆最大径、回转总面积、内孔半径集合（判车床件 + 台阶内孔）
+            var revGroups = new List<RevGroup>();
+            double solidVol = 0;
+            bool hasNonAxisPlaneOnEnd = false;
+
+            foreach (var body in bodies) {
+                try { double vol = Math.Abs(body.Volume); if (!double.IsNaN(vol) && !double.IsInfinity(vol)) solidVol += vol; } catch { }
                 G.Faces faces;
                 try { faces = (G.Faces)body.get_Faces(G.FeatureTopologyQueryTypeConstants.igQueryAll); } catch { continue; }
                 foreach (G.Face face in faces) {
+                    double area = 0; try { area = Math.Abs(face.Area); } catch { }
+                    if (!double.IsNaN(area) && !double.IsInfinity(area)) f.TotalSurfaceArea += area;
                     object geom; try { geom = face.Geometry; } catch { continue; }
                     var plane = geom as G.Plane;
                     if (plane != null) {
@@ -27,34 +38,158 @@ namespace TianGongCadSuite {
                         try { plane.GetPlaneData(ref p, ref n); } catch { continue; }
                         int a = AxisOf(n);
                         if (a < 0) { Chamfer(face, n, f); continue; }
-                        double area = 0; try { area = face.Area; } catch { }
                         f.FaceArea[a] += area;
-                        offsets[a].Add(Convert.ToDouble(p.GetValue(a)));
+                        double pos = Convert.ToDouble(p.GetValue(a));
+                        offsets[a].Add(pos);
+                        // 统计沿另外两个方向贯穿 ≥70% 实体总长的窄平行平面（铝型材 T 型槽槽壁/槽底/内腔壁指纹）
+                        try {
+                            Array lo = new double[3], hi = new double[3];
+                            face.GetExactRange(ref lo, ref hi);
+                            for (int ext = 0; ext < 3; ext++) {
+                                if (ext == a || f.Size[ext] < 0.02) continue;
+                                double span = Math.Abs(Convert.ToDouble(hi.GetValue(ext)) - Convert.ToDouble(lo.GetValue(ext)));
+                                if (span >= f.Size[ext] * 0.70) {
+                                    f.FullSpanParallelPlanes[ext]++;
+                                    // 严格落在截面内部的平行长条平面计入 T 型槽/内腔面
+                                    double loA = Math.Min(range[a], range[a + 3]), hiA = Math.Max(range[a], range[a + 3]);
+                                    if (pos > loA + 2e-4 && pos < hiA - 2e-4) f.TotalTslotPlanes++;
+                                }
+                            }
+                        } catch { }
                         continue;
                     }
                     var cyl = geom as G.Cylinder;
                     if (cyl != null) {
                         bool hole; try { hole = face.IsParamReversed; } catch { continue; }
-                        if (!hole) { EdgeRound(face, cyl, f); continue; }
                         Array bp = new double[3], ax = new double[3]; double r = 0;
                         try { cyl.GetCylinderData(ref bp, ref ax, out r); } catch { continue; }
-                        int a = AxisOf(ax); if (a < 0) continue;
-                        // 轴线位置（垂直于轴的两个坐标）；同轴的算一个
-                        double u = Convert.ToDouble(bp.GetValue((a + 1) % 3)), v = Convert.ToDouble(bp.GetValue((a + 2) % 3));
-                        bool seen = false;
-                        foreach (var h in holeAxes[a]) if (Math.Abs(h[0] - u) < 1e-5 && Math.Abs(h[1] - v) < 1e-5) { seen = true; break; }
-                        if (!seen) holeAxes[a].Add(new[] { u, v });
+                        int a = AxisOf(ax);
+                        if (a >= 0) {
+                            double u = Convert.ToDouble(bp.GetValue((a + 1) % 3)), v = Convert.ToDouble(bp.GetValue((a + 2) % 3));
+                            AccumulateRev(revGroups, a, V3.From(bp), u, v, r, area, hole);
+                            if (hole) {
+                                bool seen = false;
+                                foreach (var h in holeAxes[a]) if (Math.Abs(h[0] - u) < 1e-5 && Math.Abs(h[1] - v) < 1e-5) { seen = true; break; }
+                                if (!seen) holeAxes[a].Add(new[] { u, v });
+                            } else {
+                                EdgeRound(face, cyl, f);
+                            }
+                        } else if (!hole) {
+                            EdgeRound(face, cyl, f);
+                        }
                         continue;
                     }
                     var cone = geom as G.Cone;
                     if (cone != null) {
                         bool hole; try { hole = face.IsParamReversed; } catch { continue; }
+                        try {
+                            Array bp = new double[3], ax = new double[3]; double rr, ang; bool exp;
+                            cone.GetConeData(ref bp, ref ax, out rr, out ang, out exp);
+                            int a = AxisOf(ax);
+                            if (a >= 0) {
+                                double u = Convert.ToDouble(bp.GetValue((a + 1) % 3)), v = Convert.ToDouble(bp.GetValue((a + 2) % 3));
+                                double maxR = rr;
+                                try {
+                                    Array lo = new double[3], hi = new double[3]; face.GetExactRange(ref lo, ref hi);
+                                    double du = Math.Abs(Convert.ToDouble(hi.GetValue((a + 1) % 3)) - Convert.ToDouble(lo.GetValue((a + 1) % 3))) * 0.5;
+                                    double dv = Math.Abs(Convert.ToDouble(hi.GetValue((a + 2) % 3)) - Convert.ToDouble(lo.GetValue((a + 2) % 3))) * 0.5;
+                                    maxR = Math.Max(maxR, Math.Max(du, dv));
+                                } catch { }
+                                AccumulateRev(revGroups, a, V3.From(bp), u, v, maxR, area, hole);
+                            }
+                        } catch { }
                         if (!hole) ConeChamfer(face, cone, f);
                     }
                 }
             }
-            for (int a = 0; a < 3; a++) { f.Holes[a] = holeAxes[a].Count; f.Steps[a] = DrawingPlan.Distinct(offsets[a], 1e-5).Count; }
+            for (int a = 0; a < 3; a++) {
+                var distinct = DrawingPlan.Distinct(offsets[a], 1e-5);
+                f.PlaneOffsets[a].AddRange(distinct);
+                f.Holes[a] = holeAxes[a].Count;
+                f.Steps[a] = distinct.Count;
+            }
+            double bboxVol = f.Size[0] * f.Size[1] * f.Size[2];
+            if (bboxVol > 1e-9 && solidVol > 0) f.FillRatio = solidVol / bboxVol;
+
+            // 选出面积最大的同轴回转组，填充车床回转件特征
+            RevGroup bestRev = null;
+            foreach (var rg in revGroups) {
+                if (rg.MaxOuterR <= 0) continue;
+                if (bestRev == null || rg.Area > bestRev.Area) bestRev = rg;
+            }
+            if (bestRev != null) {
+                f.RevAxis = bestRev.Axis;
+                f.RevCenter = bestRev.Point;
+                f.RevMaxOuterDiameter = bestRev.MaxOuterR * 2.0;
+                f.RevSurfaceArea = bestRev.Area;
+                f.RevSteppedBore = bestRev.InnerRadii.Count >= 2;
+                // 若端面存在平行于主轴的平面且不在主轴外径边缘外（如键槽壁/扳手扁位），或存在偏心端面孔，记为需补端面图
+                int u = (bestRev.Axis + 1) % 3, v = (bestRev.Axis + 2) % 3;
+                if (f.PlaneOffsets[u].Count > 0 || f.PlaneOffsets[v].Count > 0) hasNonAxisPlaneOnEnd = true;
+                f.RevHasNonCircularEnd = hasNonAxisPlaneOnEnd;
+            }
+
+            // 读取模型文件名与材料用于型材辅助判定，自动分流最终出图形态
+            string docName = "", matName = "";
+            try { docName = Convert.ToString(((dynamic)document).Name) ?? ""; } catch { }
+            try { matName = ReadMaterialName(document); } catch { }
+            int extAxis;
+            var pk = DrawingProfileRules.ClassifyProfileOrFrame(f, docName, matName, out extAxis);
+            if (pk != DrawingPartKind.Standard) {
+                f.PartKind = pk;
+                f.ProfileExtrusionAxis = extAxis;
+            } else if (DrawingLatheRules.IsLathePart(f)) {
+                f.PartKind = DrawingPartKind.Lathe;
+            }
             return f;
+        }
+
+        sealed class RevGroup {
+            public int Axis;
+            public V3 Point;
+            public double U, V;
+            public double MaxOuterR;
+            public double Area;
+            public readonly List<double> InnerRadii = new List<double>();
+        }
+
+        static void AccumulateRev(List<RevGroup> groups, int axis, V3 pt, double u, double v, double r, double area, bool isHole){
+            RevGroup hit = null;
+            foreach (var g in groups) {
+                if (g.Axis == axis && Math.Abs(g.U - u) < 5e-5 && Math.Abs(g.V - v) < 5e-5) { hit = g; break; }
+            }
+            if (hit == null) {
+                hit = new RevGroup { Axis = axis, Point = pt, U = u, V = v };
+                groups.Add(hit);
+            }
+            hit.Area += area;
+            if (isHole) {
+                bool seen = false;
+                foreach (double ir in hit.InnerRadii) if (Math.Abs(ir - r) < 5e-5) { seen = true; break; }
+                if (!seen) hit.InnerRadii.Add(r);
+            } else if (r > hit.MaxOuterR) {
+                hit.MaxOuterR = r;
+            }
+        }
+
+        static string ReadMaterialName(object document){
+            try {
+                dynamic props = ((dynamic)document).Properties;
+                if (props == null) return "";
+                for (int i = 1; i <= (int)props.Count; i++) {
+                    dynamic set = props.Item(i);
+                    string sn = ""; try { sn = Convert.ToString(set.Name) ?? ""; } catch { }
+                    if (!sn.Equals("MechanicalModeling", StringComparison.OrdinalIgnoreCase) && !sn.Equals("Custom", StringComparison.OrdinalIgnoreCase)) continue;
+                    for (int j = 1; j <= (int)set.Count; j++) {
+                        dynamic p = set.Item(j);
+                        string pn = ""; try { pn = Convert.ToString(p.Name) ?? ""; } catch { }
+                        if (pn.Equals("Material", StringComparison.OrdinalIgnoreCase) || pn == "材料") {
+                            return Convert.ToString(p.Value) ?? "";
+                        }
+                    }
+                }
+            } catch { }
+            return "";
         }
 
         // 回转体 / 销子端部的 45° 锥面外倒角（如 02-029 销底 C1）：记录精确倒角边长供 DropNearOutline 过滤掉紧贴 0 的 1mm 坐标线
